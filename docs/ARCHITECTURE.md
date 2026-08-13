@@ -1,0 +1,169 @@
+# Architecture
+
+## Purpose and constraints
+
+`hl-client-engine` is a standalone, independently authored client whose first
+compatibility target is the original GoldSrc Half-Life network ecosystem. The
+same core should later support an in-process `hl.exe` injection bridge without
+turning the renderer, simulation, or asset code into two separate engines.
+
+The reference ABI remains Windows x86. Platform size assumptions must be made
+explicit at serialization and ABI boundaries; wire data must never be decoded
+by casting packet bytes to host structs.
+
+## Non-negotiable data flow
+
+```text
+GoldSrc packets -> ClientWorldState -> RenderScene -> Renderer
+```
+
+Each arrow is a translation boundary:
+
+1. `hlclient_network` receives bytes without interpreting GoldSrc semantics.
+2. `hlclient_goldsrc` bounds-checks and decodes those bytes into protocol values.
+3. `hlclient_client` applies accepted messages to `ClientWorldState`, an
+   engine-owned representation of client-visible state.
+4. Client presentation code derives an immutable or frame-local `RenderScene`.
+5. A renderer consumes only `RenderScene` and renderer resources.
+
+This is an invariant, not a suggested layering style. In particular:
+
+- renderer targets must not include GoldSrc packet or network headers;
+- render code must not open sockets or drive connection state;
+- network and GoldSrc code must not issue OpenGL calls;
+- SDK structs must not leak across public module APIs;
+- test providers, replay readers, standalone networking, and the future bridge
+  must feed the same neutral world-state path;
+- protocol decoding must be length-bounded and explicit about endianness.
+
+## Providers and consumers
+
+The target design allows several state providers without contaminating the
+consumer side:
+
+```text
+Standalone UDP/GoldSrc ----\
+Replay or test provider ----> ClientWorldState -> RenderScene -> Renderer
+hl.exe bridge -------------/
+```
+
+The standalone provider owns connectionless queries, challenge/response,
+sign-on, resource state, snapshots, commands, and channel sequencing. The
+future bridge adapts observed or exported in-process state to the same project
+types. It must not make renderer behavior depend on injected addresses or Valve
+private layouts.
+
+## Target responsibilities
+
+| Target | Responsibility | Must not own |
+| --- | --- | --- |
+| `hlclient_core` | logging, command-line parsing, fundamental utilities, version | SDL, sockets, protocol parsing |
+| `hlclient_platform` | SDL lifetime, windows, events/input, GL context, clocks | game protocol or world state |
+| `hlclient_filesystem` | safe base/game path discovery and asset-facing I/O foundations | Steam discovery policy embedded in render code |
+| `hlclient_network` | address values, Winsock lifetime, UDP transport | GoldSrc message meaning |
+| `hlclient_goldsrc` | byte readers/writers, compatibility constants, protocol/session work | OpenGL, UI, OS windowing |
+| `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
+| `hlclient_renderer_api` | neutral render scene and renderer contract | SDL or GoldSrc headers in its public API |
+| `hlclient_renderer_opengl` | OpenGL 3.3 Core implementation using GLAD | packet parsing or client connection state |
+| `hlclient` | composition root and frame loop | reusable subsystem implementation |
+| `hlclient_tests` | deterministic unit/integration tests with local resources | public Internet or installed-game requirements |
+
+Public dependencies should point inward toward stable project-owned contracts.
+Private implementation dependencies may point outward to SDL, GLAD, OpenGL,
+Winsock, or SDK headers without exposing them to unrelated consumers.
+
+## Platform boundary
+
+SDL3 is the owner of:
+
+- process-level SDL initialization and shutdown;
+- window creation and destruction;
+- event polling and input normalization;
+- OpenGL context creation, swap interval, and buffer presentation;
+- portable timing needed by the client loop.
+
+Native APIs are allowed only where SDL does not provide the required contract
+or interoperability demands it. Current examples are Winsock2 behind
+`hlclient_network` and, later, module loading/injection primitives behind a
+dedicated Windows bridge target. Include Windows headers in implementation
+files or narrowly scoped private headers, with `WIN32_LEAN_AND_MEAN` and
+`NOMINMAX` where appropriate.
+
+## Renderer boundary
+
+`hlclient_renderer_api` owns the backend-neutral `RenderScene` and `Renderer`
+contract. `hlclient_renderer_opengl` implements that contract with OpenGL 3.3
+Core and the committed GLAD2 loader. Another renderer backend should be able to
+consume the same scene without changing GoldSrc decoding.
+
+Resource handles crossing this boundary must be project-owned opaque values,
+not raw OpenGL names. Asset decoding should produce CPU-side formats before a
+renderer-specific upload step. Destruction order must preserve the GL context
+until all GL resources and the renderer are released.
+
+## Protocol and safety boundary
+
+Network input is untrusted. Parsers must:
+
+- consume a bounded byte span through checked readers;
+- reject truncated, oversized, inconsistent, or unsupported messages cleanly;
+- use fixed-width integer types for wire fields;
+- decode byte order explicitly;
+- cap strings, resource counts, fragment sizes, decompression output, and
+  allocation sizes before allocating;
+- keep connectionless and sequenced-channel parsing separate;
+- make malformed-packet tests local and deterministic.
+
+Compatibility constants may be checked against official SDK declarations, but
+the runtime implementation remains project-owned.
+
+## Filesystem and asset boundary
+
+The repository contains no game data. A user explicitly supplies `--basedir`
+and optionally `--game` (default `valve`). Path resolution must prevent a game
+or server-supplied relative path from escaping its approved roots. Downloaded
+content, when implemented, will be validated before becoming visible to asset
+loaders.
+
+Asset formats (BSP, WAD, MDL, sprites, sounds) should have parser libraries that
+do not depend on SDL, the renderer, or a live network session. This makes them
+fuzzable and reusable by tests and tools.
+
+## Clean-room and SDK boundary
+
+No runtime target may depend on `Pvitaly91/hl-engine`, its server code, or any
+other private server implementation. Compatibility work is based on observable
+behavior, public protocol information, and an explicitly isolated official
+Valve SDK reference.
+
+Implementation code must not be copied from ReHLDS, Xash3D,
+reverse-engineered/proprietary GoldSrc source dumps, or original Valve binaries
+such as `hl.exe`, `hw.dll`, or `sw.dll`. External implementations may be treated
+only as separately recorded behavioral/reference material where legally and
+technically permissible. Repository code must remain independently authored.
+
+The Half-Life SDK submodule is pinned. Its include directories are exposed by a
+`SYSTEM` interface target so SDK warnings do not weaken or pollute warning
+policy for project code. Do not compile SDK game/server programs, link its
+prebuilt libraries, use its bundled SDL2, or copy SDK implementation files into
+project modules. Any future use beyond reference headers requires an explicit
+architecture and license review.
+
+## Composition and lifetime
+
+`hlclient` is the composition root. A normal standalone frame follows this
+order:
+
+1. parse command-line inputs and validate paths/endpoints;
+2. initialize SDL and native network runtime as required;
+3. create the SDL window and OpenGL context;
+4. create the renderer while that context is current;
+5. poll events and ingest provider state;
+6. advance `ClientWorldState` using a monotonic time step;
+7. derive `RenderScene`, render, and present;
+8. destroy renderer resources before destroying the GL context;
+9. release network and SDL runtimes.
+
+Partially initialized states must unwind safely through RAII. Logging and error
+messages should identify the failed boundary without exposing secrets or
+turning malformed remote data into a process crash.

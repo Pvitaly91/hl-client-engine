@@ -1,0 +1,3 @@
+[submodule "third_party/halflife-sdk"]
+	path = third_party/halflife-sdk
+	url = https://github.com/ValveSoftware/halflife.git

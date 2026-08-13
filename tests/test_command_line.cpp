@@ -1,0 +1,107 @@
+#include <hlclient/core/command_line.hpp>
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <array>
+#include <string>
+#include <string_view>
+
+namespace {
+
+using hlclient::core::parse_command_line;
+
+TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
+{
+    const std::array<std::string_view, 0> arguments{};
+
+    const auto result = parse_command_line(arguments);
+
+    REQUIRE(result);
+    CHECK_FALSE(result.options->show_help);
+    CHECK_FALSE(result.options->show_version);
+    CHECK_FALSE(result.options->base_directory.has_value());
+    CHECK(result.options->game_directory == "valve");
+    CHECK_FALSE(result.options->connect_endpoint.has_value());
+    CHECK(result.error.empty());
+}
+
+TEST_CASE("Command line parser accepts supported options", "[core][command-line]")
+{
+    const std::array arguments{
+        std::string_view{"--help"},
+        std::string_view{"--version"},
+        std::string_view{"--basedir"},
+        std::string_view{"C:/Games/Half-Life"},
+        std::string_view{"--game"},
+        std::string_view{"cstrike"},
+        std::string_view{"+connect"},
+        std::string_view{"127.0.0.1:27015"},
+    };
+
+    const auto result = parse_command_line(arguments);
+
+    REQUIRE(result);
+    CHECK(result.options->show_help);
+    CHECK(result.options->show_version);
+    REQUIRE(result.options->base_directory.has_value());
+    CHECK(*result.options->base_directory == "C:/Games/Half-Life");
+    CHECK(result.options->game_directory == "cstrike");
+    REQUIRE(result.options->connect_endpoint.has_value());
+    CHECK(*result.options->connect_endpoint == "127.0.0.1:27015");
+}
+
+TEST_CASE("Command line parser accepts the long connect spelling", "[core][command-line]")
+{
+    const std::array arguments{
+        std::string_view{"--connect"},
+        std::string_view{"192.0.2.10:27016"},
+    };
+
+    const auto result = parse_command_line(arguments);
+
+    REQUIRE(result);
+    REQUIRE(result.options->connect_endpoint.has_value());
+    CHECK(*result.options->connect_endpoint == "192.0.2.10:27016");
+}
+
+TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
+{
+    SECTION("unknown option")
+    {
+        const std::array arguments{std::string_view{"--unknown"}};
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("Unknown command-line argument") != std::string::npos);
+    }
+
+    SECTION("missing value")
+    {
+        const std::array arguments{std::string_view{"--game"}};
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("Missing value") != std::string::npos);
+    }
+
+    SECTION("empty value")
+    {
+        const std::array arguments{std::string_view{"--basedir"}, std::string_view{}};
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("Empty value") != std::string::npos);
+    }
+}
+
+TEST_CASE("Command line help documents user-facing options", "[core][command-line]")
+{
+    const auto help = hlclient::core::command_line_help();
+
+    CHECK(help.find("--basedir") != std::string_view::npos);
+    CHECK(help.find("--game") != std::string_view::npos);
+    CHECK(help.find("--connect") != std::string_view::npos);
+    CHECK(help.find("+connect") != std::string_view::npos);
+}
+
+} // namespace

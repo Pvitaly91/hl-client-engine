@@ -1,0 +1,33 @@
+# CMake build trees and generated project files
+/build/
+/build-*/
+/out/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/*.sln
+/*.vcxproj
+/*.vcxproj.filters
+
+# User-local CMake and Visual Studio state
+/CMakeUserPresets.json
+/.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# Test and coverage output
+/Testing/
+*.coverage
+*.coveragexml
+
+# Local dependency-generation scratch directories
+/.codex-glad-*/
+
+# Common editor and operating-system files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp

@@ -1,0 +1,131 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vs2022-win32",
+      "displayName": "Visual Studio 2022 - Win32",
+      "description": "Generate the multi-config Visual Studio 2022 Win32 solution.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "Win32",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "HLCLIENT_WARNINGS_AS_ERRORS": "OFF"
+      }
+    },
+    {
+      "name": "win32-debug",
+      "displayName": "Win32 Debug - configure",
+      "description": "Convenience configure name; Debug is selected by its build and test presets.",
+      "inherits": "vs2022-win32"
+    },
+    {
+      "name": "win32-release",
+      "displayName": "Win32 Release - configure",
+      "description": "Convenience configure name; Release is selected by its build and test presets.",
+      "inherits": "vs2022-win32"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "vs2022-win32-debug",
+      "displayName": "Build VS2022 Win32 Debug",
+      "configurePreset": "vs2022-win32",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vs2022-win32-release",
+      "displayName": "Build VS2022 Win32 Release",
+      "configurePreset": "vs2022-win32",
+      "configuration": "Release"
+    },
+    {
+      "name": "vs2022-win32-relwithdebinfo",
+      "displayName": "Build VS2022 Win32 RelWithDebInfo",
+      "configurePreset": "vs2022-win32",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "win32-debug",
+      "displayName": "Build Win32 Debug",
+      "configurePreset": "win32-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win32-release",
+      "displayName": "Build Win32 Release",
+      "configurePreset": "win32-release",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "vs2022-win32-debug",
+      "displayName": "Test VS2022 Win32 Debug",
+      "configurePreset": "vs2022-win32",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "vs2022-win32-release",
+      "displayName": "Test VS2022 Win32 Release",
+      "configurePreset": "vs2022-win32",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "vs2022-win32-relwithdebinfo",
+      "displayName": "Test VS2022 Win32 RelWithDebInfo",
+      "configurePreset": "vs2022-win32",
+      "configuration": "RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "win32-debug",
+      "displayName": "Test Win32 Debug",
+      "configurePreset": "win32-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "win32-release",
+      "displayName": "Test Win32 Release",
+      "configurePreset": "win32-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    }
+  ]
+}

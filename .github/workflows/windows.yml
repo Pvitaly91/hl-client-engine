@@ -1,0 +1,36 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  win32-debug:
+    name: Visual Studio 2022 / Win32 / Debug
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out sources and SDK reference
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: recursive
+
+      - name: Configure Visual Studio solution
+        run: cmake --preset vs2022-win32
+
+      - name: Build Debug
+        run: cmake --build --preset vs2022-win32-debug
+
+      - name: Run tests
+        run: ctest --preset vs2022-win32-debug
+
+      - name: Verify command-line startup and SDL runtime deployment
+        shell: pwsh
+        run: |
+          & .\build\bin\Debug\hlclient.exe --version
+          & .\build\bin\Debug\hlclient.exe --help
