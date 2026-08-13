@@ -3,9 +3,11 @@
 ## M2.1 scope
 
 M2.1 builds the exact captured stock Half-Life `connect` datagram from the M1
-challenge and sends it once on the same UDP transport. It stops immediately
-after that send. It does not generate Steam authentication, interpret the
-server's answer, create a netchan, send sequenced traffic, or enter sign-on.
+challenge and sends it once on the same UDP transport. Its own stop point still
+ends immediately after that send. M2.2 optionally keeps the same transport open
+for one bounded connectionless `ACCEPT` or `REJECT`; see
+[Connect response](GOLDSRC_CONNECT_RESPONSE.md). Neither mode generates Steam
+authentication, creates a netchan, sends sequenced traffic, or enters sign-on.
 
 The compatibility reference is a signed Valve `hl.exe` 1.1.1.1 (Steam App 70,
 build ID 15961492) communicating through a transparent loopback relay with a
@@ -134,13 +136,25 @@ codec performs no escaping, locale conversion, normalization, or repair.
 - the immediately appended raw binary suffix, observed as 213 bytes.
 
 The type is move-only, exposes sizes and boolean comparison only, has no
-string/stream conversion, and is readable only by the connect codec. M2.1 does
-not implement `IAuthenticationProvider`, Steamworks, ticket generation,
-SteamID construction, reuse, or bypass. The future boundary is:
+string/stream conversion, and is readable only by the connect codec. M2.2 adds
+the provider boundary around acquisition:
 
 ```text
-IAuthenticationProvider -> AuthenticationMaterial -> ConnectRequestBuilder
+IAuthenticationProvider
+    -> IAuthenticationOperation
+    -> AuthenticationSession
+    -> AuthenticationMaterial
+    -> ConnectRequestBuilder
 ```
+
+The only concrete implementation is an explicit user-file provider for
+development/manual runs. It is not Steamworks: there is no ticket generation,
+SteamID construction, discovery, cache, reuse policy, or bypass. The move-only
+session can retain a provider-specific lifetime guard after material is
+transferred into request preparation; the application keeps that guard through
+the configured terminal handshake state. See
+[Authentication provider](AUTHENTICATION_PROVIDER.md) for the async contract,
+lifetime requirements, and sensitive-data limitations.
 
 For explicit development runs, `--auth-material-file` reads one local 245-byte
 file: the first 32 bytes feed the protected slot and the remaining 213 bytes
@@ -171,17 +185,22 @@ endpoint, and remote endpoint:
 ```text
 idle -> waiting_for_challenge -> challenge_received
        -> building_request -> request_ready -> sending_request -> request_sent
+       -> waiting_for_connect_response -> accepted | rejected | timeout | error
 ```
 
 Timeout, cancellation, configuration, network, and protocol errors are
 terminal. Static user/auth configuration is prepared before any network send.
-The stage makes exactly one connect `send_to` call; success or error is
-terminal, with no retry and no receive/parser after it. Later updates cannot
-send a duplicate, netchan, sign-on, disconnect, or resource packet.
+The request stage makes exactly one connect `send_to` call, with no retry.
+At the M2.1 stop point, send success or error is terminal. At the explicit M2.2
+stop point, send success starts the separate receive-only response stage. Later
+updates cannot send a duplicate, netchan, sign-on, disconnect, or resource
+packet.
 
 `--stop-after challenge` is the default and preserves M1. Explicit
 `--stop-after connect-request` requires `--auth-material-file`, sends once, and
-reports only transmission—not acceptance or connection.
+reports only transmission—not acceptance or connection. Explicit
+`--stop-after connect-response` uses the same provider and request path, then
+waits for the immediate bounded result; it still does not enter netchan/sign-on.
 
 `--net-trace` for connect is metadata-only: endpoint, size, protocol,
 challenge, field counts, info lengths, and redacted authentication length. It
@@ -197,21 +216,22 @@ one strict connect request from the same source address/port, and proves that
 no third datagram follows. Deterministic fake-transport tests cover terminal
 states and one-shot behavior without sleeping.
 
-During clean-room discovery the unmodified stock `hl.exe` transmitted the
-captured connect request through the relay and stock HLDS returned a
-connectionless class `B` datagram. An earlier bounded observation then saw
-sequenced traffic, but M2.1 does not interpret or reproduce either response.
-That discovery exchange establishes the stock-client request layout; it is not
-a transmission proof for this project's `hlclient` executable. Therefore:
+During clean-room discovery unmodified stock clients transmitted the captured
+connect request through the relay and stock HLDS returned connectionless class
+`B` datagrams. Separate bounded rejection probes recorded class `9` responses.
+M2.2 now interprets those immediate layouts, while any following sequenced
+traffic remains the explicit M2.3 boundary. These observations establish stock
+wire behavior; they are not a stock-server transmission or acceptance proof for
+this project's `hlclient` executable. Therefore:
 
 - stock `hl.exe` -> stock HLDS capture transmission: observed;
 - project `hlclient` -> fake HLDS transmission: passed deterministically;
-- project `hlclient` -> stock HLDS transmission: pending because no production
-  authentication provider or explicitly supplied legitimate material was used;
-- stock-server rejection: not determined;
-- stock-server acceptance: not determined;
-- stock-server response interpretation: not implemented.
+- stock-HLDS immediate accept/reject layouts: observed and sanitized;
+- project `hlclient` -> fake HLDS accept/reject handling: passed
+  deterministically;
+- project `hlclient` -> stock HLDS transmission or acceptance: not performed or
+  claimed.
 
-M2.2 owns connectionless accept/reject and the authentication-provider
-boundary. M2.3 owns netchan sequencing/acknowledgements. M2.4 owns initial
+M2.2 connectionless accept/reject and the authentication-provider boundary are
+complete. M2.3 owns netchan sequencing/acknowledgements. M2.4 owns initial
 sign-on.

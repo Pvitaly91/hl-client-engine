@@ -71,9 +71,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::challenge;
             } else if (value == "connect-request") {
                 options.stop_after = ConnectionStopPoint::connect_request;
+            } else if (value == "connect-response") {
+                options.stop_after = ConnectionStopPoint::connect_response;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
-                               " (expected challenge or connect-request)");
+                               " (expected challenge, connect-request, or connect-response)");
             }
         } else if (argument == "--auth-material-file") {
             connect_request_setting_seen = true;
@@ -95,11 +97,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     if (options.stop_after == ConnectionStopPoint::challenge &&
         connect_request_setting_seen) {
         return failure("--auth-material-file, --name, and --model require "
-                       "--stop-after connect-request");
+                       "--stop-after connect-request or connect-response");
     }
-    if (options.stop_after == ConnectionStopPoint::connect_request &&
+    if (options.stop_after != ConnectionStopPoint::challenge &&
         !options.authentication_material_file) {
-        return failure("--stop-after connect-request requires --auth-material-file");
+        return failure("Connect request/response modes require --auth-material-file");
     }
 
     return CommandLineParseResult{std::move(options), {}};
@@ -116,16 +118,18 @@ Options:
   --game <directory>  Game directory below basedir (default: valve)
   --connect <ip:port> Start a GoldSrc handshake (challenge-only by default)
   +connect <ip:port>  GoldSrc-style alias for --connect
-  --stop-after <stage> Stop after challenge or connect-request (default: challenge)
+  --stop-after <stage> Stop after challenge, connect-request, or connect-response
+                       (default: challenge)
   --auth-material-file <path>
-                      Local 245-byte auth input for connect-request mode; never logged
+                      Local 245-byte auth input for request/response modes; never logged
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
 
-Connect-request mode sends one request and exits without determining server
-acceptance. It does not implement authentication generation, netchan, or sign-on.
+Connect-request mode sends once without waiting. Connect-response mode waits
+boundedly for the immediate connectionless accept/reject only. Neither mode
+implements authentication generation, netchan, or sign-on.
 )";
 }
 

@@ -1,5 +1,6 @@
 add_executable(hlclient_tests
     test_auth_material_file.cpp
+    test_authentication_provider.cpp
     test_asset_manager.cpp
     test_asset_registry.cpp
     test_byte_io.cpp
@@ -8,10 +9,14 @@ add_executable(hlclient_tests
     test_challenge_udp_integration.cpp
     test_connect_request.cpp
     test_connect_request_stage.cpp
+    test_connect_response.cpp
+    test_connect_response_wait.cpp
+    test_connect_response_udp_integration.cpp
     test_connect_udp_integration.cpp
     test_command_line.cpp
     test_connectionless_packet.cpp
     test_game_paths.cpp
+    test_handshake_connect_response.cpp
     test_info_string.cpp
     test_network_address.cpp
     test_scene_source.cpp
@@ -22,6 +27,7 @@ target_link_libraries(hlclient_tests
     PRIVATE
         Catch2::Catch2WithMain
         hlclient_app_support
+        hlclient_auth
         hlclient_asset_api
         hlclient_asset_manager
         hlclient_core

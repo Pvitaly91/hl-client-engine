@@ -4,7 +4,10 @@ option(HLCLIENT_WARNINGS_AS_ERRORS "Treat warnings in hl-client-engine code as e
 
 function(hlclient_enable_warnings target)
     if(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /permissive- /Zc:__cplusplus)
+        # Visual Studio/MSBuild may compile several translation units in one
+        # target concurrently. Serialize access to the compiler PDB so the
+        # documented plain `cmake --build` command is reliable.
+        target_compile_options(${target} PRIVATE /W4 /permissive- /Zc:__cplusplus /FS)
         if(HLCLIENT_WARNINGS_AS_ERRORS)
             target_compile_options(${target} PRIVATE /WX)
         endif()

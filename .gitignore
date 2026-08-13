@@ -22,6 +22,7 @@
 /Testing/
 /manual-artifacts/
 /manual-artifacts/connect-captures/
+/manual-artifacts/connect-responses/
 *.coverage
 *.coveragexml
 

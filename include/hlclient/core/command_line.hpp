@@ -15,6 +15,7 @@ enum class RendererBackend {
 enum class ConnectionStopPoint {
     challenge,
     connect_request,
+    connect_response,
 };
 
 struct CommandLineOptions {

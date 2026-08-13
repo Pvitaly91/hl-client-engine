@@ -26,6 +26,7 @@ struct AuthenticationMaterialFileError {
     AuthenticationMaterialFileErrorCode code{
         AuthenticationMaterialFileErrorCode::read_failed};
     std::string context;
+    bool exceeds_maximum_size{false};
 };
 
 struct AuthenticationMaterialFileLoadResult {

@@ -22,11 +22,12 @@ namespace {
 
 [[nodiscard]] AuthenticationMaterialFileLoadResult failure(
     const AuthenticationMaterialFileErrorCode code,
-    std::string context)
+    std::string context,
+    const bool exceeds_maximum_size = false)
 {
     return AuthenticationMaterialFileLoadResult{
         std::nullopt,
-        AuthenticationMaterialFileError{code, std::move(context)},
+        AuthenticationMaterialFileError{code, std::move(context), exceeds_maximum_size},
     };
 }
 
@@ -109,7 +110,8 @@ private:
     if (bytes_read != static_cast<DWORD>(kAuthenticationMaterialFileSize)) {
         return failure(
             AuthenticationMaterialFileErrorCode::invalid_size,
-            "Authentication material input must contain exactly 245 bytes");
+            "Authentication material input must contain exactly 245 bytes",
+            bytes_read > static_cast<DWORD>(kAuthenticationMaterialFileSize));
     }
 
     return AuthenticationMaterialFileLoadResult{};
@@ -164,7 +166,8 @@ AuthenticationMaterialFileLoadResult load_authentication_material_file(
     if (bytes_read != static_cast<std::streamsize>(kAuthenticationMaterialFileSize)) {
         return failure(
             AuthenticationMaterialFileErrorCode::invalid_size,
-            "Authentication material input must contain exactly 245 bytes");
+            "Authentication material input must contain exactly 245 bytes",
+            bytes_read > static_cast<std::streamsize>(kAuthenticationMaterialFileSize));
     }
     if (!stream.eof()) {
         return failure(

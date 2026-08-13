@@ -82,6 +82,29 @@ namespace {
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_response_state(
+    const ConnectResponseWaitState state) noexcept
+{
+    switch (state) {
+    case ConnectResponseWaitState::idle:
+    case ConnectResponseWaitState::waiting:
+        return GoldSrcHandshakeState::waiting_for_connect_response;
+    case ConnectResponseWaitState::accepted:
+        return GoldSrcHandshakeState::accepted;
+    case ConnectResponseWaitState::rejected:
+        return GoldSrcHandshakeState::rejected;
+    case ConnectResponseWaitState::timed_out:
+        return GoldSrcHandshakeState::connect_response_timed_out;
+    case ConnectResponseWaitState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case ConnectResponseWaitState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case ConnectResponseWaitState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 } // namespace
 
 ConnectRequestStage::ConnectRequestStage(
@@ -255,17 +278,22 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     std::optional<PreparedConnectRequest> prepared_request,
     ChallengeExchangeConfig challenge_config,
     ChallengeTraceCallback challenge_trace_callback,
-    ConnectRequestTraceCallback connect_trace_callback)
+    ConnectRequestTraceCallback connect_trace_callback,
+    ConnectResponseWaitConfig response_config,
+    ConnectResponseTraceCallback response_trace_callback,
+    std::optional<auth::AuthenticationSession> authentication_session)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
           remote_endpoint,
           challenge_config,
-          std::move(challenge_trace_callback)}
+          std::move(challenge_trace_callback)},
+      authentication_session_{std::move(authentication_session)}
 {
-    if (stop_point_ == HandshakeStopPoint::connect_request) {
+    if (stop_point_ != HandshakeStopPoint::challenge) {
         if (!prepared_request) {
-            configuration_error_ = "Connect-request mode requires prepared authentication and user info";
+            configuration_error_ =
+                "Connect request/response mode requires prepared authentication and user info";
             state_ = GoldSrcHandshakeState::configuration_error;
         } else {
             connect_stage_.emplace(
@@ -273,8 +301,20 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 remote_endpoint,
                 std::move(*prepared_request),
                 std::move(connect_trace_callback));
+            if (stop_point_ == HandshakeStopPoint::connect_response) {
+                response_stage_.emplace(
+                    transport,
+                    remote_endpoint,
+                    response_config,
+                    std::move(response_trace_callback));
+            }
         }
+    } else if (authentication_session_) {
+        configuration_error_ =
+            "Challenge-only mode does not accept an authentication session";
+        state_ = GoldSrcHandshakeState::configuration_error;
     }
+    release_authentication_session_if_terminal();
 }
 
 bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
@@ -283,7 +323,8 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
         return false;
     }
     const auto started = challenge_exchange_.start(now);
-    synchronize_from_challenge();
+    synchronize_from_challenge(now);
+    release_authentication_session_if_terminal();
     return started;
 }
 
@@ -292,8 +333,16 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
     if (terminal()) {
         return;
     }
+    if (response_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_connect_response) {
+        response_stage_->update(now);
+        synchronize_from_response();
+        release_authentication_session_if_terminal();
+        return;
+    }
     challenge_exchange_.update(now);
-    synchronize_from_challenge();
+    synchronize_from_challenge(now);
+    release_authentication_session_if_terminal();
 }
 
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
@@ -301,13 +350,22 @@ void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
     if (terminal()) {
         return;
     }
+    if (response_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_connect_response) {
+        response_stage_->cancel(now);
+        synchronize_from_response();
+        release_authentication_session_if_terminal();
+        return;
+    }
     if (connect_stage_ && connect_stage_->state() != ConnectRequestStageState::idle) {
         connect_stage_->cancel();
         state_ = map_connect_state(connect_stage_->state());
+        release_authentication_session_if_terminal();
         return;
     }
     challenge_exchange_.cancel(now);
-    synchronize_from_challenge();
+    synchronize_from_challenge(now);
+    release_authentication_session_if_terminal();
 }
 
 GoldSrcHandshakeState GoldSrcHandshakeCoordinator::state() const noexcept { return state_; }
@@ -318,6 +376,10 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::challenge_received:
         return stop_point_ == HandshakeStopPoint::challenge;
     case GoldSrcHandshakeState::request_sent:
+        return stop_point_ == HandshakeStopPoint::connect_request;
+    case GoldSrcHandshakeState::accepted:
+    case GoldSrcHandshakeState::rejected:
+    case GoldSrcHandshakeState::connect_response_timed_out:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -329,6 +391,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::building_request:
     case GoldSrcHandshakeState::request_ready:
     case GoldSrcHandshakeState::sending_request:
+    case GoldSrcHandshakeState::waiting_for_connect_response:
         return false;
     }
     return true;
@@ -338,6 +401,12 @@ HandshakeStopPoint GoldSrcHandshakeCoordinator::stop_point() const noexcept { re
 const std::optional<ChallengeResponse>& GoldSrcHandshakeCoordinator::challenge() const noexcept
 {
     return challenge_exchange_.challenge();
+}
+const std::optional<ConnectResponse>&
+GoldSrcHandshakeCoordinator::connect_response() const noexcept
+{
+    static const std::optional<ConnectResponse> empty;
+    return response_stage_ ? response_stage_->response() : empty;
 }
 const std::optional<network::NetworkAddress>& GoldSrcHandshakeCoordinator::local_endpoint() const noexcept
 {
@@ -355,13 +424,17 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (connect_stage_ && connect_stage_->error()) {
         return connect_stage_->error()->context;
     }
+    if (response_stage_ && response_stage_->error()) {
+        return response_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
     return {};
 }
 
-void GoldSrcHandshakeCoordinator::synchronize_from_challenge()
+void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
+    const ChallengeExchangeTimePoint now)
 {
     state_ = map_challenge_state(challenge_exchange_.state());
     if (state_ != GoldSrcHandshakeState::challenge_received ||
@@ -378,6 +451,39 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge()
         *challenge_exchange_.challenge(),
         *challenge_exchange_.local_endpoint()));
     state_ = map_connect_state(connect_stage_->state());
+    if (state_ != GoldSrcHandshakeState::request_sent ||
+        stop_point_ != HandshakeStopPoint::connect_response) {
+        return;
+    }
+    if (!response_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ = "Connect-response mode has no response wait stage";
+        return;
+    }
+    static_cast<void>(response_stage_->start(now, *challenge_exchange_.local_endpoint()));
+    synchronize_from_response();
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_response()
+{
+    if (!response_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ = "Connect-response mode has no response wait stage";
+        return;
+    }
+    state_ = map_response_state(response_stage_->state());
+    if (response_stage_->error() &&
+        response_stage_->error()->code ==
+            ConnectResponseWaitErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::release_authentication_session_if_terminal()
+{
+    if (terminal()) {
+        authentication_session_.reset();
+    }
 }
 
 } // namespace hlclient::goldsrc

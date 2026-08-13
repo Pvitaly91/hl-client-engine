@@ -138,28 +138,47 @@ The project now has strict ordered info strings, typed protocol/user info,
 move-only opaque authentication material, an independent synthetic byte
 fixture, a request parser, and a challenge-to-connect coordinator. A fake HLDS
 proves that `getchallenge` and exactly one connect request use the same source
-endpoint and that no later packet is sent. During discovery, the relayed stock
-`hl.exe` request elicited a connectionless response from stock HLDS, but that
-response's acceptance/rejection semantics were deliberately not interpreted.
-A separate project `hlclient` -> stock HLDS transmission proof remains pending
-until a legitimate authentication provider or explicit user-supplied material
-is available; this is not required for completing the deterministic M2.1 codec
+endpoint and that no later packet is sent. During M2.1 discovery, the relayed
+stock `hl.exe` request elicited a connectionless response from stock HLDS, but
+that milestone deliberately did not interpret it. M2.2 now owns that
+interpretation. A project `hlclient` -> stock HLDS transmission or acceptance
+proof remains unperformed and is not required for the deterministic M2.1 codec
 and one-shot fake-HLDS milestone.
 
-Explicitly absent: authentication generation, connect response semantics,
-connect retry, netchan, sequencing, acknowledgements, fragmentation, sign-on,
-resources, and gameplay.
+At the M2.1 boundary, response semantics were still absent. Authentication
+generation, connect retry, netchan, sequencing, acknowledgements,
+fragmentation, sign-on, resources, and gameplay remain absent after M2.2.
 
 ### M2.2 — Connectionless accept/reject and authentication-provider boundary
 
-**Status: next.**
+**Status: completed.**
 
-Define a legitimate `IAuthenticationProvider` boundary outside the codec and
-interpret only the immediate bounded connectionless accept/reject outcome.
-Provider implementation, platform/legal constraints, lifetime, secure storage,
-and redaction require a dedicated review. Do not create a netchan in M2.2.
+M2.2 adds:
+
+- strict owning `ConnectAccepted | ConnectRejected` parsing for the confirmed
+  stock connectionless classes `B` and `9`;
+- sanitized clean-room evidence for six accepts and four rejection conditions,
+  with exact separators/terminators and no captured authentication committed;
+- project hard bounds of 1,024 response bytes, 512 rejection-message bytes, and
+  256 escaped presentation bytes;
+- a receive-only `ConnectResponseWaitStage` on the existing socket, exact remote
+  and unchanged local endpoint checks, a five-second default timeout, a
+  thirty-second hard timeout, bounded polling, and typed terminal outcomes;
+- `IAuthenticationProvider` / polling operation / move-only session lifetime
+  contracts outside the codec;
+- one explicit user-file provider for manual/development input, with no
+  discovery, caching, Steam provider, ticket generation, or bypass;
+- coordinator and loopback fake-HLDS tests for accept/reject, lifetime,
+  redaction, endpoint filtering, malformed/truncated input, and no extra send.
+
+The stock observations establish wire layouts. The project path is proven
+against deterministic local fakes; project `hlclient` -> stock HLDS acceptance
+has not been performed or claimed. M2.2 creates no netchan and treats sequenced
+traffic as a typed terminal boundary reserved for M2.3.
 
 ### M2.3 — Netchan bootstrap, sequencing, and acknowledgements
+
+**Status: next.**
 
 Implement the first sequenced-channel boundary, sequence/acknowledgement state,
 reliable state, fragmentation rules, and bounded timeout/disconnect behavior.

@@ -6,14 +6,15 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository is currently at **M2.1: connect request codec and one-shot TX**. In
-addition to the M0 SDL3/OpenGL bootstrap and M0.1 modular asset/scene
-boundaries, it implements the bounded GoldSrc connectionless envelope, the
-Protocol 48 challenge profile, strict ordered info strings, and the captured
-one-shot `connect` request. It does **not** implement authentication generation,
-connect response semantics, a netchan, sign-on, resources, snapshots, or
-gameplay. `--connect` remains challenge-only by default; explicit
-`--stop-after connect-request` sends one request and exits.
+The repository is currently at **M2.2: connectionless accept/reject and the
+authentication-provider boundary**. In addition to the M0 SDL3/OpenGL bootstrap
+and M0.1 modular asset/scene boundaries, it implements the bounded GoldSrc
+connectionless envelope, the Protocol 48 challenge profile, strict ordered info
+strings, the captured one-shot `connect` request, and a bounded wait for its
+immediate connectionless result. It does **not** implement a Steam
+authentication provider, authentication generation or bypass, a netchan,
+sign-on, resources, snapshots, or gameplay. `--connect` remains challenge-only
+by default; the two later stop points are explicit.
 
 ## Reference platform
 
@@ -141,14 +142,30 @@ boundary. Its contents are never logged and must not be committed:
   --auth-material-file C:\private\hl-auth-material.bin --net-trace
 ```
 
-A successful exit proves transmission only, not server acceptance. M2.1 does
-not generate auth material or start netchan/sign-on.
+A successful exit at this stop point proves transmission only, not server
+acceptance. The explicit file provider does not generate auth material, and
+M2.1 does not start netchan/sign-on.
 
-The captured stock layout was discovered with unmodified stock `hl.exe` and
-stock HLDS. The project client has transmitted its request to the deterministic
-fake HLDS; a separate `hlclient` -> stock HLDS proof remains pending until a
-legitimate authentication provider or explicit user-supplied material is
-available.
+To wait for and strictly decode the immediate M2.2 connectionless `ACCEPT` or
+`REJECT`, select the response stop point:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27015 --stop-after connect-response `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+The wait reuses the same UDP transport, accepts a result only from the exact
+server endpoint, defaults to a five-second deadline, and exits after the typed
+response. Acceptance exits successfully but does not create a netchan or enter
+sign-on; rejection, timeout, malformed response, and network failure exit
+nonzero. Rejection text is escaped and presentation-capped before logging.
+
+The captured stock request and response layouts were discovered with
+unmodified stock components and bounded, sanitized relay observations. The
+project client exercises request plus accept/reject behavior against
+deterministic local fake HLDS tests. A separate `hlclient` -> stock HLDS
+acceptance proof has not been performed and is not claimed.
 
 For an explicit manual check against a user-run original HLDS:
 
@@ -190,7 +207,7 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
 - `hlclient`;
 - `hlclient_core`, `hlclient_platform`, `hlclient_filesystem`;
 - `hlclient_network`, `hlclient_goldsrc`, `hlclient_goldsrc_client`,
-  `hlclient_client`;
+  `hlclient_auth`, `hlclient_app_support`, `hlclient_client`;
 - `hlclient_asset_api`, `hlclient_asset_manager`, `hlclient_scene_api`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
@@ -202,6 +219,8 @@ See [Architecture](docs/ARCHITECTURE.md),
 [Asset pipeline](docs/ASSET_PIPELINE.md), [Building](docs/BUILDING.md),
 [GoldSrc connectionless protocol](docs/GOLDSRC_CONNECTIONLESS.md),
 [GoldSrc connect request](docs/GOLDSRC_CONNECT_REQUEST.md),
+[GoldSrc connect response](docs/GOLDSRC_CONNECT_RESPONSE.md),
+[Authentication provider](docs/AUTHENTICATION_PROVIDER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
 
@@ -245,8 +264,9 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DHLCLIENT_WARNINGS_AS_E
 
 This option is deliberately not applied globally to third-party code. Tests use
 Catch2, avoid Internet and external game/server dependencies, and run through
-CTest. M1/M2.1 protocol and state-machine coverage uses synthetic fixtures and local
-fake-HLDS UDP test; the original-HLDS script remains an opt-in manual check.
+CTest. M1/M2.1/M2.2 protocol and state-machine coverage uses synthetic fixtures
+and local fake-HLDS UDP tests; original-HLDS checks remain opt-in and do not
+turn stock-server acceptance into an automated-suite claim.
 
 ## License
 

@@ -1,4 +1,4 @@
-#include <hlclient/app/authentication_material_file.hpp>
+#include <hlclient/app/explicit_file_authentication_provider.hpp>
 #include <hlclient/assets/asset_importer_registry.hpp>
 #include <hlclient/assets/asset_manager.hpp>
 #include <hlclient/client/client_scene_source.hpp>
@@ -34,6 +34,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #ifdef _WIN32
@@ -337,6 +338,59 @@ void log_connect_trace(const hlclient::goldsrc::ConnectRequestTraceEvent& event)
             hlclient::goldsrc::format_authentication_redaction(event.authentication_size));
 }
 
+void log_connect_response_trace(const hlclient::goldsrc::ConnectResponseTraceEvent& event)
+{
+    using Classification = hlclient::goldsrc::ConnectResponseTraceClassification;
+    if (event.classification == Classification::wait_started ||
+        event.classification == Classification::receive_would_block) {
+        return;
+    }
+
+    std::string classification;
+    switch (event.classification) {
+    case Classification::wrong_endpoint_ignored:
+        classification = "wrong endpoint ignored";
+        break;
+    case Classification::unrelated_connectionless_ignored:
+        classification = "unrelated connectionless packet ignored";
+        break;
+    case Classification::connect_accepted:
+        classification = "connectionless connect-accepted";
+        break;
+    case Classification::connect_rejected:
+        classification = "connectionless connect-rejected";
+        break;
+    case Classification::response_truncated:
+        classification = "truncated connect response";
+        break;
+    case Classification::unexpected_sequenced_packet_pending_m2_3:
+        classification = "unexpected sequenced packet pending M2.3";
+        break;
+    case Classification::wait_timed_out:
+        classification = "connect-response wait timed out";
+        break;
+    case Classification::wait_cancelled:
+        classification = "connect-response wait cancelled";
+        break;
+    case Classification::network_failure:
+        classification = "connect-response network failure";
+        break;
+    case Classification::protocol_failure:
+        classification = "connect-response protocol failure";
+        break;
+    case Classification::wait_started:
+    case Classification::receive_would_block:
+        return;
+    }
+
+    std::string message = "[net] RX " + event.endpoint.to_string() + ' ' + classification;
+    if (event.datagram_size != 0U) {
+        message += ", " + std::to_string(event.datagram_size) + " bytes";
+    }
+    message += ", elapsed " + std::to_string(event.elapsed.count()) + " ms";
+    hlclient::core::log(LogLevel::info, message);
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -363,6 +417,51 @@ void log_connect_trace(const hlclient::goldsrc::ConnectRequestTraceEvent& event)
             LogLevel::info,
             "Server acceptance was not determined; netchan and sign-on were not started");
         return 0;
+    case State::accepted: {
+        if (!handshake.connect_response() ||
+            !std::holds_alternative<hlclient::goldsrc::ConnectAccepted>(
+                *handshake.connect_response())) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Connect response completed without an accepted result");
+            return 1;
+        }
+        const auto& accepted =
+            std::get<hlclient::goldsrc::ConnectAccepted>(*handshake.connect_response());
+        hlclient::core::log(LogLevel::info, "GoldSrc connect response accepted");
+        hlclient::core::log(LogLevel::info, "User ID: " + std::to_string(accepted.user_id));
+        hlclient::core::log(
+            LogLevel::info,
+            "Server build: " + std::to_string(accepted.server_build));
+        hlclient::core::log(
+            LogLevel::info,
+            std::string{"Secure: "} + (accepted.secure ? "yes" : "no"));
+        hlclient::core::log(
+            LogLevel::info,
+            "Immediate acceptance parsed; netchan and sign-on were not started");
+        return 0;
+    }
+    case State::rejected: {
+        if (!handshake.connect_response() ||
+            !std::holds_alternative<hlclient::goldsrc::ConnectRejected>(
+                *handshake.connect_response())) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Connect response completed without a rejection result");
+            return 1;
+        }
+        const auto& rejected =
+            std::get<hlclient::goldsrc::ConnectRejected>(*handshake.connect_response());
+        hlclient::core::log(LogLevel::error, "GoldSrc connection rejected");
+        hlclient::core::log(
+            LogLevel::error,
+            "Reason: " + hlclient::goldsrc::sanitize_connect_rejection_for_presentation(
+                              rejected.message));
+        return 1;
+    }
+    case State::connect_response_timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc connect-response wait timed out");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -383,6 +482,7 @@ void log_connect_trace(const hlclient::goldsrc::ConnectRequestTraceEvent& event)
     case State::building_request:
     case State::request_ready:
     case State::sending_request:
+    case State::waiting_for_connect_response:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -423,6 +523,7 @@ public:
         const hlclient::network::NetworkAddress remote_endpoint,
         const hlclient::goldsrc::HandshakeStopPoint stop_point,
         std::optional<hlclient::goldsrc::PreparedConnectRequest> prepared_request,
+        std::optional<hlclient::auth::AuthenticationSession> authentication_session,
         const bool net_trace)
         : network_runtime_{},
           transport_{open_challenge_socket(network_runtime_, remote_endpoint)},
@@ -435,7 +536,12 @@ public:
               net_trace ? hlclient::goldsrc::ChallengeTraceCallback{&log_challenge_trace}
                         : hlclient::goldsrc::ChallengeTraceCallback{},
               net_trace ? hlclient::goldsrc::ConnectRequestTraceCallback{&log_connect_trace}
-                        : hlclient::goldsrc::ConnectRequestTraceCallback{}}
+                        : hlclient::goldsrc::ConnectRequestTraceCallback{},
+              {},
+              net_trace
+                  ? hlclient::goldsrc::ConnectResponseTraceCallback{&log_connect_response_trace}
+                  : hlclient::goldsrc::ConnectResponseTraceCallback{},
+              std::move(authentication_session)}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -474,44 +580,88 @@ private:
     hlclient::goldsrc::GoldSrcHandshakeCoordinator handshake_;
 };
 
-[[nodiscard]] std::optional<hlclient::goldsrc::PreparedConnectRequest>
-prepare_runtime_connect_request(const hlclient::core::CommandLineOptions& options)
+struct RuntimeConnectPreparation {
+    std::optional<hlclient::goldsrc::PreparedConnectRequest> request;
+    std::optional<hlclient::auth::AuthenticationSession> authentication_session;
+};
+
+[[noreturn]] void throw_authentication_error(const hlclient::auth::AuthenticationError& error)
 {
-    if (options.stop_after != hlclient::core::ConnectionStopPoint::connect_request) {
-        return std::nullopt;
+    const auto context = error.context.empty()
+                             ? "Explicit authentication provider failed"
+                             : error.context;
+    switch (error.code) {
+    case hlclient::auth::AuthenticationErrorCode::unavailable:
+    case hlclient::auth::AuthenticationErrorCode::provider_error:
+        throw std::runtime_error{context};
+    case hlclient::auth::AuthenticationErrorCode::configuration_error:
+    case hlclient::auth::AuthenticationErrorCode::invalid_material:
+    case hlclient::auth::AuthenticationErrorCode::material_too_large:
+    case hlclient::auth::AuthenticationErrorCode::cancelled:
+        throw std::invalid_argument{context};
+    }
+    throw std::runtime_error{"Explicit authentication provider failed"};
+}
+
+[[nodiscard]] RuntimeConnectPreparation prepare_runtime_connect_request(
+    const hlclient::core::CommandLineOptions& options,
+    const hlclient::network::NetworkAddress& remote_endpoint)
+{
+    if (options.stop_after == hlclient::core::ConnectionStopPoint::challenge) {
+        return {};
     }
     if (!options.authentication_material_file) {
         throw std::invalid_argument{
-            "Connect-request mode requires a local authentication material file"};
+            "Connect request/response mode requires a local authentication material file"};
     }
 
     const auto path = path_from_utf8(*options.authentication_material_file);
-    auto authentication = hlclient::app::load_authentication_material_file(path);
+    hlclient::app::ExplicitFileAuthenticationProvider provider{path};
+    hlclient::auth::AuthenticationRequestContext context;
+    context.remote_endpoint = remote_endpoint;
+    auto begun = provider.begin(context);
+    if (!begun || !begun.operation) {
+        throw_authentication_error(
+            begun.error.value_or(hlclient::auth::AuthenticationError{
+                hlclient::auth::AuthenticationErrorCode::provider_error,
+                "Explicit authentication provider could not start",
+            }));
+    }
+    auto update = begun.operation->update();
+    if (update.state == hlclient::auth::AuthenticationUpdateState::pending) {
+        throw std::runtime_error{
+            "Explicit file authentication provider did not complete synchronously"};
+    }
+    if (update.state != hlclient::auth::AuthenticationUpdateState::succeeded ||
+        !update.session) {
+        throw_authentication_error(
+            update.error.value_or(hlclient::auth::AuthenticationError{
+                hlclient::auth::AuthenticationErrorCode::provider_error,
+                "Explicit authentication provider returned no session",
+            }));
+    }
+
+    auto authentication_session = std::move(*update.session);
+    auto authentication = authentication_session.take_material();
     if (!authentication) {
-        const auto context = authentication.error
-                                 ? authentication.error->context
-                                 : "Unable to load authentication material input";
-        if (authentication.error &&
-            (authentication.error->code ==
-                 hlclient::app::AuthenticationMaterialFileErrorCode::open_failed ||
-             authentication.error->code ==
-                 hlclient::app::AuthenticationMaterialFileErrorCode::read_failed)) {
-            throw std::runtime_error{context};
-        }
-        throw std::invalid_argument{context};
+        throw std::runtime_error{
+            "Explicit authentication session returned no material"};
     }
     hlclient::goldsrc::ClientConnectionSettings settings;
     settings.display_name = options.player_name;
     settings.model = options.player_model;
     auto prepared = hlclient::goldsrc::prepare_connect_request(
         settings,
-        std::move(*authentication.material));
+        std::move(*authentication));
     if (!prepared) {
         throw std::invalid_argument{
             prepared.error ? prepared.error->context
                            : "Unable to prepare the bounded connect request"};
     }
-    return std::move(*prepared.value);
+    return RuntimeConnectPreparation{
+        std::move(*prepared.value),
+        std::move(authentication_session),
+    };
 }
 
 int run_null_renderer(
@@ -677,15 +827,24 @@ int run(const hlclient::core::CommandLineOptions& options)
         }
 
         scene_source.mutable_world_state().set_connection_requested(true);
-        auto prepared_request = prepare_runtime_connect_request(options);
-        const auto stop_point =
-            options.stop_after == hlclient::core::ConnectionStopPoint::connect_request
-                ? hlclient::goldsrc::HandshakeStopPoint::connect_request
-                : hlclient::goldsrc::HandshakeStopPoint::challenge;
+        auto preparation = prepare_runtime_connect_request(options, *address);
+        hlclient::goldsrc::HandshakeStopPoint stop_point =
+            hlclient::goldsrc::HandshakeStopPoint::challenge;
+        switch (options.stop_after) {
+        case hlclient::core::ConnectionStopPoint::challenge:
+            break;
+        case hlclient::core::ConnectionStopPoint::connect_request:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::connect_request;
+            break;
+        case hlclient::core::ConnectionStopPoint::connect_response:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::connect_response;
+            break;
+        }
         challenge_session = std::make_unique<HandshakeSession>(
             *address,
             stop_point,
-            std::move(prepared_request),
+            std::move(preparation.request),
+            std::move(preparation.authentication_session),
             options.net_trace);
     }
 

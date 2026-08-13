@@ -132,30 +132,43 @@ hlclient_add_library(
     include/hlclient/goldsrc/byte_writer.hpp
     include/hlclient/goldsrc/challenge_protocol.hpp
     include/hlclient/goldsrc/connect_request.hpp
+    include/hlclient/goldsrc/connect_response.hpp
     include/hlclient/goldsrc/connectionless_packet.hpp
     include/hlclient/goldsrc/info_string.hpp
     src/goldsrc/byte_reader.cpp
     src/goldsrc/byte_writer.cpp
     src/goldsrc/challenge_protocol.cpp
     src/goldsrc/connect_request.cpp
+    src/goldsrc/connect_response.cpp
     src/goldsrc/connectionless_packet.cpp
     src/goldsrc/info_string.cpp
 )
 add_library(hlclient::goldsrc ALIAS hlclient_goldsrc)
-target_link_libraries(hlclient_goldsrc PRIVATE hlclient::core)
+target_link_libraries(hlclient_goldsrc PUBLIC hlclient::network PRIVATE hlclient::core)
 set_property(TARGET hlclient_goldsrc PROPERTY FOLDER "Engine/Network/GoldSrc")
+
+hlclient_add_library(
+    hlclient_auth
+    include/hlclient/auth/authentication_provider.hpp
+    src/auth/authentication_provider.cpp
+)
+add_library(hlclient::auth ALIAS hlclient_auth)
+target_link_libraries(hlclient_auth PUBLIC hlclient::goldsrc hlclient::network)
+set_property(TARGET hlclient_auth PROPERTY FOLDER "Engine/Authentication")
 
 hlclient_add_library(
     hlclient_goldsrc_client
     include/hlclient/goldsrc/challenge_exchange.hpp
     include/hlclient/goldsrc/connect_request_stage.hpp
+    include/hlclient/goldsrc/connect_response_wait.hpp
     src/goldsrc/challenge_exchange.cpp
     src/goldsrc/connect_request_stage.cpp
+    src/goldsrc/connect_response_wait.cpp
 )
 add_library(hlclient::goldsrc_client ALIAS hlclient_goldsrc_client)
 target_link_libraries(
     hlclient_goldsrc_client
-    PUBLIC hlclient::goldsrc hlclient::network
+    PUBLIC hlclient::auth hlclient::goldsrc hlclient::network
     PRIVATE hlclient::core
 )
 set_property(TARGET hlclient_goldsrc_client PROPERTY FOLDER "Engine/Network/GoldSrc")
@@ -163,10 +176,12 @@ set_property(TARGET hlclient_goldsrc_client PROPERTY FOLDER "Engine/Network/Gold
 hlclient_add_library(
     hlclient_app_support
     include/hlclient/app/authentication_material_file.hpp
+    include/hlclient/app/explicit_file_authentication_provider.hpp
     src/app/authentication_material_file.cpp
+    src/app/explicit_file_authentication_provider.cpp
 )
 add_library(hlclient::app_support ALIAS hlclient_app_support)
-target_link_libraries(hlclient_app_support PUBLIC hlclient::goldsrc)
+target_link_libraries(hlclient_app_support PUBLIC hlclient::auth)
 set_property(TARGET hlclient_app_support PROPERTY FOLDER "Apps")
 
 hlclient_add_library(

@@ -130,6 +130,21 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         CHECK(result.options->player_model == "ivan");
     }
 
+    SECTION("accepted connect response configuration")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"connect-response"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::connect_response);
+        REQUIRE(result.options->authentication_material_file);
+        CHECK(*result.options->authentication_material_file == "auth.bin");
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -144,6 +159,15 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         const std::array arguments{
             std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
             std::string_view{"--stop-after"}, std::string_view{"connect-request"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("connect response requires local auth file")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"connect-response"},
         };
         CHECK_FALSE(parse_command_line(arguments));
     }
@@ -215,6 +239,7 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("+connect") != std::string_view::npos);
     CHECK(help.find("--net-trace") != std::string_view::npos);
     CHECK(help.find("--stop-after") != std::string_view::npos);
+    CHECK(help.find("connect-response") != std::string_view::npos);
     CHECK(help.find("--auth-material-file") != std::string_view::npos);
     CHECK(help.find("--name") != std::string_view::npos);
     CHECK(help.find("--model") != std::string_view::npos);

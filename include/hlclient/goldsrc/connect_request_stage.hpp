@@ -1,7 +1,9 @@
 #pragma once
 
+#include <hlclient/auth/authentication_provider.hpp>
 #include <hlclient/goldsrc/challenge_exchange.hpp>
 #include <hlclient/goldsrc/connect_request.hpp>
+#include <hlclient/goldsrc/connect_response_wait.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
 
@@ -19,6 +21,7 @@ namespace hlclient::goldsrc {
 enum class HandshakeStopPoint {
     challenge,
     connect_request,
+    connect_response,
 };
 
 enum class ConnectRequestStageState {
@@ -117,6 +120,10 @@ enum class GoldSrcHandshakeState {
     request_ready,
     sending_request,
     request_sent,
+    waiting_for_connect_response,
+    accepted,
+    rejected,
+    connect_response_timed_out,
     timed_out,
     cancelled,
     configuration_error,
@@ -133,7 +140,10 @@ public:
         std::optional<PreparedConnectRequest> prepared_request,
         ChallengeExchangeConfig challenge_config = {},
         ChallengeTraceCallback challenge_trace_callback = {},
-        ConnectRequestTraceCallback connect_trace_callback = {});
+        ConnectRequestTraceCallback connect_trace_callback = {},
+        ConnectResponseWaitConfig response_config = {},
+        ConnectResponseTraceCallback response_trace_callback = {},
+        std::optional<auth::AuthenticationSession> authentication_session = std::nullopt);
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -148,16 +158,21 @@ public:
     [[nodiscard]] bool terminal() const noexcept;
     [[nodiscard]] HandshakeStopPoint stop_point() const noexcept;
     [[nodiscard]] const std::optional<ChallengeResponse>& challenge() const noexcept;
+    [[nodiscard]] const std::optional<ConnectResponse>& connect_response() const noexcept;
     [[nodiscard]] const std::optional<network::NetworkAddress>& local_endpoint() const noexcept;
     [[nodiscard]] std::size_t connect_send_attempts() const noexcept;
     [[nodiscard]] std::string_view error_context() const noexcept;
 
 private:
-    void synchronize_from_challenge();
+    void synchronize_from_challenge(ChallengeExchangeTimePoint now);
+    void synchronize_from_response();
+    void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
     ChallengeExchange challenge_exchange_;
     std::optional<ConnectRequestStage> connect_stage_;
+    std::optional<ConnectResponseWaitStage> response_stage_;
+    std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;
 };
