@@ -91,26 +91,79 @@ Exit criteria:
 
 ## M1 — Connectionless protocol
 
-**Status: next.**
+**Status: completed.**
 
 **Goal:** interoperate with the connectionless discovery/challenge surface of an
 original HLDS without entering the stateful sign-on channel.
 
-Planned work:
+Deliverables:
 
-- encode and decode the `0xFFFFFFFF` connectionless packet envelope;
-- bounded parsing for challenge and informational responses needed by the
-  client path;
-- UDP send/receive polling, timeouts, retries, cancellation, and endpoint
-  validation;
-- explicit connection state and diagnostic logging;
-- capture-derived or synthetic fixtures with no dependency on a live server;
-- optional manual interoperability test against a user-run original HLDS.
+- explicit encoding and decoding of the four-byte `0xFF` connectionless packet
+  envelope without host-struct casts;
+- the exact 23-byte `getchallenge steam` request and strict bounded parsing of
+  the supported Protocol 48 challenge response profile;
+- nonblocking UDP send/receive polling, bounded retries, overall timeout,
+  cancellation, exact-source endpoint validation, and typed terminal errors;
+- `--connect <IPv4:port>` / `+connect <IPv4:port>` as a challenge-only
+  application flow that exits without sending a GoldSrc `connect` request;
+- opt-in `--net-trace` diagnostics with bounded escaped previews;
+- deterministic envelope/parser/state-machine tests and a loopback fake-HLDS
+  test with no Steam, Internet, game-data, display, or GPU requirement;
+- an opt-in PowerShell verifier for a user-supplied original HLDS;
+- live clean-room interoperability evidence: the exact request transmission was
+  captured from original signed Valve `hl.exe`, and the exact response was
+  observed from original signed Valve HLDS, Protocol 48, executable version
+  1.1.2.2, build 10210.
+
+Only the first response decimal is independently proven to be the dynamic
+challenge. The three following decimal fields remain opaque profile parameters;
+M1 does not assign speculative authentication or session semantics to them.
+
+Explicitly not included: a GoldSrc `connect` request, authentication, netchan,
+sequencing, fragmentation, sign-on, resources, snapshots, or gameplay.
 
 Exit criteria: a malformed datagram cannot overrun or allocate without bounds,
 and a valid original HLDS challenge exchange is reproducible and observable.
+Both criteria are satisfied by the deterministic suite and the recorded live
+stock-Valve verification.
 
 ## M2 — Challenge, connect, and sign-on
+
+**Status: next; begin with M2.1 only.**
+
+### M2.1 — Challenge-bound connect request
+
+**Recommended next increment.**
+
+**Goal:** use the owned M1 challenge to construct and transmit the exact
+Protocol 48 client `connect` request, then report the immediate original-HLDS
+outcome without implementing a sequenced channel or sign-on.
+
+Planned work:
+
+- establish the required connect-request profile through clean-room observable
+  behavior and separately recorded public/reference evidence;
+- define bounded project-owned inputs for the M1 challenge and all other
+  request fields, leaving unknown semantics explicitly named and constrained;
+- encode the request without host-struct casts, hidden terminators, or
+  unbounded formatting;
+- extend the controller with the minimum challenge-to-connect transition,
+  endpoint validation, timeout/retry policy, and bounded trace classification;
+- parse only the immediate connectionless acceptance/rejection needed to prove
+  the request, with deterministic synthetic fixtures and an opt-in original
+  HLDS manual check.
+
+Explicitly not included in M2.1: netchan creation, sequence numbers,
+acknowledgements, reliable payloads, fragmentation, authentication completion,
+serverdata, resource negotiation, or sign-on. A successful M2.1 result is not a
+playable or fully connected client.
+
+Exit criteria: using a challenge obtained by the M1 exchange, the client emits
+the independently established connect-request profile and reproducibly observes
+the expected immediate response from an original compatible HLDS, while
+malformed and spoofed responses fail closed.
+
+### Later M2 increments — Netchan and initial sign-on
 
 **Goal:** enter and maintain the sequenced GoldSrc client channel through the
 initial sign-on stages.

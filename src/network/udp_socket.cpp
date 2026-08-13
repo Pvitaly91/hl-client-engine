@@ -229,10 +229,18 @@ ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
             ReceiveStatus::error,
             std::nullopt,
             "Cannot receive with a moved-from UDP socket",
+            std::nullopt,
+            0U,
         };
     }
     if (maximum_size == 0 || maximum_size > 65'507) {
-        return ReceiveResult{ReceiveStatus::error, std::nullopt, "Invalid UDP receive buffer size"};
+        return ReceiveResult{
+            ReceiveStatus::error,
+            std::nullopt,
+            "Invalid UDP receive buffer size",
+            std::nullopt,
+            0U,
+        };
     }
 
     Datagram datagram;
@@ -253,6 +261,8 @@ ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
                 ReceiveStatus::truncated,
                 std::nullopt,
                 "Received datagram exceeds the configured size limit",
+                from_native(source),
+                maximum_size + 1U,
             };
         }
 #else
@@ -267,12 +277,30 @@ ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
     if (received < 0) {
 #endif
         if (is_would_block()) {
-            return ReceiveResult{ReceiveStatus::would_block, std::nullopt, {}};
+            return ReceiveResult{
+                ReceiveStatus::would_block,
+                std::nullopt,
+                {},
+                std::nullopt,
+                0U,
+            };
         }
 #ifdef _WIN32
-        return ReceiveResult{ReceiveStatus::error, std::nullopt, socket_error("recvfrom")};
+        return ReceiveResult{
+            ReceiveStatus::error,
+            std::nullopt,
+            socket_error("recvfrom"),
+            std::nullopt,
+            0U,
+        };
 #else
-        return ReceiveResult{ReceiveStatus::error, std::nullopt, socket_error("recvmsg")};
+        return ReceiveResult{
+            ReceiveStatus::error,
+            std::nullopt,
+            socket_error("recvmsg"),
+            std::nullopt,
+            0U,
+        };
 #endif
     }
 
@@ -282,13 +310,23 @@ ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
             ReceiveStatus::truncated,
             std::nullopt,
             "Received datagram exceeds the configured size limit",
+            from_native(source),
+            maximum_size + 1U,
         };
     }
 #endif
 
     datagram.source = from_native(source);
     datagram.payload.resize(static_cast<std::size_t>(received));
-    return ReceiveResult{ReceiveStatus::received, std::move(datagram), {}};
+    const auto received_size = datagram.payload.size();
+    const auto received_source = datagram.source;
+    return ReceiveResult{
+        ReceiveStatus::received,
+        std::move(datagram),
+        {},
+        received_source,
+        received_size,
+    };
 }
 
 } // namespace hlclient::network

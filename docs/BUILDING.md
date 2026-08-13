@@ -169,9 +169,10 @@ also done for Release and RelWithDebInfo. GLAD2 is a static project target and
 has no runtime DLL. Windows supplies `opengl32.dll`; the installed graphics
 driver must provide an OpenGL 3.3 Core-capable implementation.
 
-No project resources need to be copied for the M0.1 bootstrap. Half-Life assets
-are optional unless `--basedir` is supplied, and are never copied into the build
-tree automatically.
+No project resources need to be copied for the current M1 client. Half-Life
+assets are optional unless `--basedir` is supplied, and are never copied into
+the build tree automatically. The challenge-only network path also does not
+require local game assets.
 
 ## Run from PowerShell
 
@@ -192,18 +193,72 @@ The application can start with no game installation. To validate an installation
 .\build\bin\Debug\hlclient.exe --basedir "C:\Games\Half-Life" --game valve
 ```
 
-To exercise endpoint parsing for future networking:
+To perform the M1 connectionless challenge exchange without opening a window:
 
 ```powershell
-.\build\bin\Debug\hlclient.exe --connect 127.0.0.1:27015
+.\build\bin\Debug\hlclient.exe --renderer null --connect 127.0.0.1:27015
 ```
 
-That option does not contact a server in M0.1. Both spellings are accepted:
+Both spellings are accepted:
 
 ```text
 --connect <IPv4:port>
 +connect <IPv4:port>
 ```
+
+`--connect` is deliberately challenge-only in M1. It sends the bounded
+connectionless `getchallenge steam` request, waits with bounded retries and an
+overall timeout, accepts a response only from the exact requested endpoint,
+reports the challenge, and exits. It does not construct or send the subsequent
+GoldSrc `connect` request, create a netchan, authenticate, or enter sign-on.
+
+Add `--net-trace` when diagnosing the exchange:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null --connect 127.0.0.1:27015 --net-trace
+```
+
+Trace previews are size-capped and escaped. They include direction, endpoint,
+classification, attempt, elapsed time, and datagram size without printing raw
+untrusted control bytes.
+
+### Manual original-HLDS verification
+
+With a user-run original HLDS already listening on loopback, run exactly:
+
+```powershell
+.\scripts\verify_original_hlds_challenge.ps1 `
+  -ClientPath .\build\bin\Debug\hlclient.exe `
+  -Endpoint 127.0.0.1:27015
+```
+
+The script requires an explicit client path and endpoint; it does not discover
+or download Steam or game binaries. To let it start a user-supplied server for
+the duration of the check, pass matching endpoint/port values and an explicit
+path:
+
+```powershell
+.\scripts\verify_original_hlds_challenge.ps1 `
+  -ClientPath .\build\bin\Debug\hlclient.exe `
+  -Endpoint 127.0.0.1:27015 `
+  -HldsPath "D:\Steam\steamapps\common\Half-Life\hlds.exe" `
+  -Game valve `
+  -Map boot_camp `
+  -Port 27015
+```
+
+Logs are written below ignored
+`manual-artifacts\original-hlds-challenge\<timestamp>`. The `finally` block
+stops only the HLDS process that this script started; an already running server
+is never stopped by the script.
+
+The M1 compatibility profile has live stock-Valve evidence on both sides: the
+exact request transmission was captured from original signed `hl.exe`, and the
+exact response was observed from original signed HLDS (Protocol 48, executable
+version 1.1.2.2, build 10210). Only the first response decimal is proven to be
+the dynamic challenge; the following three decimal fields remain intentionally
+opaque. This manual evidence complements deterministic synthetic and loopback
+tests and is not required by CTest.
 
 For a bounded window/render-loop smoke run, set a positive frame count:
 
@@ -272,6 +327,6 @@ DLL from another architecture or configuration.
 ### OpenGL context creation fails
 
 Update the native GPU driver and avoid Remote Desktop/software-display setups
-that expose only a legacy OpenGL implementation. M0 requests an OpenGL 3.3 Core
-context. GLAD loads function pointers after the SDL context exists; it does not
-provide the driver itself.
+that expose only a legacy OpenGL implementation. The project requests an
+OpenGL 3.3 Core context. GLAD loads function pointers after the SDL context
+exists; it does not provide the driver itself.

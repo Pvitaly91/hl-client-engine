@@ -20,6 +20,7 @@
 
 # Test and coverage output
 /Testing/
+/manual-artifacts/
 *.coverage
 *.coveragexml
 

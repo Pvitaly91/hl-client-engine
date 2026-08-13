@@ -20,6 +20,7 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     REQUIRE(result);
     CHECK_FALSE(result.options->show_help);
     CHECK_FALSE(result.options->show_version);
+    CHECK_FALSE(result.options->net_trace);
     CHECK_FALSE(result.options->base_directory.has_value());
     CHECK(result.options->game_directory == "valve");
     CHECK_FALSE(result.options->connect_endpoint.has_value());
@@ -32,6 +33,7 @@ TEST_CASE("Command line parser accepts supported options", "[core][command-line]
     const std::array arguments{
         std::string_view{"--help"},
         std::string_view{"--version"},
+        std::string_view{"--net-trace"},
         std::string_view{"--basedir"},
         std::string_view{"C:/Games/Half-Life"},
         std::string_view{"--game"},
@@ -45,6 +47,7 @@ TEST_CASE("Command line parser accepts supported options", "[core][command-line]
     REQUIRE(result);
     CHECK(result.options->show_help);
     CHECK(result.options->show_version);
+    CHECK(result.options->net_trace);
     REQUIRE(result.options->base_directory.has_value());
     CHECK(*result.options->base_directory == "C:/Games/Half-Life");
     CHECK(result.options->game_directory == "cstrike");
@@ -140,6 +143,7 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("--game") != std::string_view::npos);
     CHECK(help.find("--connect") != std::string_view::npos);
     CHECK(help.find("+connect") != std::string_view::npos);
+    CHECK(help.find("--net-trace") != std::string_view::npos);
     CHECK(help.find("--renderer") != std::string_view::npos);
 }
 

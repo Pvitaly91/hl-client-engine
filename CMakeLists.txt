@@ -110,9 +110,11 @@ set_property(TARGET hlclient_asset_manager PROPERTY FOLDER "Engine/Assets")
 
 hlclient_add_library(
     hlclient_network
+    include/hlclient/network/datagram_transport.hpp
     include/hlclient/network/network_address.hpp
     include/hlclient/network/network_runtime.hpp
     include/hlclient/network/udp_socket.hpp
+    src/network/udp_datagram_transport.cpp
     src/network/network_address.cpp
     src/network/network_runtime.cpp
     src/network/udp_socket.cpp
@@ -128,17 +130,29 @@ hlclient_add_library(
     hlclient_goldsrc
     include/hlclient/goldsrc/byte_reader.hpp
     include/hlclient/goldsrc/byte_writer.hpp
-    include/hlclient/goldsrc/compatibility.hpp
+    include/hlclient/goldsrc/challenge_protocol.hpp
+    include/hlclient/goldsrc/connectionless_packet.hpp
     src/goldsrc/byte_reader.cpp
     src/goldsrc/byte_writer.cpp
-    src/goldsrc/compatibility.cpp
+    src/goldsrc/challenge_protocol.cpp
+    src/goldsrc/connectionless_packet.cpp
 )
 add_library(hlclient::goldsrc ALIAS hlclient_goldsrc)
-target_link_libraries(
-    hlclient_goldsrc
-    PUBLIC hlclient::network
-    PRIVATE hlclient::core hlclient::hlsdk_headers
+target_link_libraries(hlclient_goldsrc PRIVATE hlclient::core)
+set_property(TARGET hlclient_goldsrc PROPERTY FOLDER "Engine/Network/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_client
+    include/hlclient/goldsrc/challenge_exchange.hpp
+    src/goldsrc/challenge_exchange.cpp
 )
+add_library(hlclient::goldsrc_client ALIAS hlclient_goldsrc_client)
+target_link_libraries(
+    hlclient_goldsrc_client
+    PUBLIC hlclient::goldsrc hlclient::network
+    PRIVATE hlclient::core
+)
+set_property(TARGET hlclient_goldsrc_client PROPERTY FOLDER "Engine/Network/GoldSrc")
 
 hlclient_add_library(
     hlclient_client
@@ -210,6 +224,7 @@ target_link_libraries(
         hlclient::asset_manager
         hlclient::network
         hlclient::goldsrc
+        hlclient::goldsrc_client
         hlclient::client
         hlclient::scene_api
         hlclient::renderer_api

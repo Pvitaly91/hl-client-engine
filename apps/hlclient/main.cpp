@@ -7,8 +7,11 @@
 #include <hlclient/core/version.hpp>
 #include <hlclient/filesystem/game_paths.hpp>
 #include <hlclient/filesystem/rooted_file_system.hpp>
-#include <hlclient/goldsrc/compatibility.hpp>
+#include <hlclient/goldsrc/challenge_exchange.hpp>
+#include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
+#include <hlclient/network/network_runtime.hpp>
+#include <hlclient/network/udp_socket.hpp>
 #include <hlclient/platform/sdl_runtime.hpp>
 #include <hlclient/platform/sdl_window.hpp>
 #include <hlclient/renderer/null/null_renderer.hpp>
@@ -29,6 +32,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -238,9 +242,221 @@ void log_renderer_information(const hlclient::renderer::IRenderer& renderer)
     hlclient::core::log(LogLevel::info, "Renderer version: " + renderer_info.version);
 }
 
+[[nodiscard]] bool challenge_exchange_is_terminal(
+    const hlclient::goldsrc::ChallengeExchangeState state) noexcept
+{
+    using State = hlclient::goldsrc::ChallengeExchangeState;
+    switch (state) {
+    case State::challenge_received:
+    case State::timed_out:
+    case State::cancelled:
+    case State::network_error:
+    case State::protocol_error:
+        return true;
+    case State::idle:
+    case State::sending_request:
+    case State::waiting_for_response:
+        return false;
+    }
+    return true;
+}
+
+void log_challenge_trace(const hlclient::goldsrc::ChallengeTraceEvent& event)
+{
+    using Classification = hlclient::goldsrc::ChallengeTraceClassification;
+    if (event.classification == Classification::exchange_started ||
+        event.classification == Classification::request_send_started ||
+        event.classification == Classification::receive_would_block) {
+        return;
+    }
+
+    std::string direction;
+    std::string classification;
+    switch (event.classification) {
+    case Classification::request_sent:
+        direction = "TX";
+        classification = "connectionless getchallenge";
+        break;
+    case Classification::wrong_endpoint_ignored:
+        direction = "RX";
+        classification = "wrong endpoint ignored";
+        break;
+    case Classification::response_truncated:
+        direction = "RX";
+        classification = "truncated connectionless response";
+        break;
+    case Classification::response_rejected:
+        direction = "RX";
+        classification = "rejected connectionless response";
+        break;
+    case Classification::challenge_accepted:
+        direction = "RX";
+        classification = "connectionless challenge";
+        break;
+    case Classification::exchange_timed_out:
+        classification = "challenge exchange timed out";
+        break;
+    case Classification::exchange_cancelled:
+        classification = "challenge exchange cancelled";
+        break;
+    case Classification::network_failure:
+        classification = "network failure";
+        break;
+    case Classification::protocol_failure:
+        classification = "protocol failure";
+        break;
+    case Classification::exchange_started:
+    case Classification::request_send_started:
+    case Classification::receive_would_block:
+        return;
+    }
+
+    std::string message{"[net] "};
+    if (!direction.empty()) {
+        message += direction + ' ';
+    }
+    message += event.endpoint.to_string() + ' ' + classification;
+    if (event.datagram_size != 0U) {
+        message += ", " + std::to_string(event.datagram_size) + " bytes";
+    }
+    if (event.attempt != 0U) {
+        message += ", attempt " + std::to_string(event.attempt);
+    }
+    message += ", elapsed " + std::to_string(event.elapsed.count()) + " ms";
+    if (!event.escaped_preview.empty()) {
+        message += ", preview=" + event.escaped_preview;
+    }
+    if (!event.context.empty()) {
+        message += ", " + event.context;
+    }
+    hlclient::core::log(LogLevel::info, message);
+}
+
+[[nodiscard]] int report_challenge_result(
+    const hlclient::goldsrc::ChallengeExchange& exchange)
+{
+    using State = hlclient::goldsrc::ChallengeExchangeState;
+    switch (exchange.state()) {
+    case State::challenge_received:
+        if (!exchange.challenge()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Challenge exchange completed without an owned challenge result");
+            return 1;
+        }
+        hlclient::core::log(
+            LogLevel::info,
+            "Challenge received: " + std::to_string(exchange.challenge()->challenge));
+        hlclient::core::log(LogLevel::info, "M1 challenge exchange completed");
+        hlclient::core::log(
+            LogLevel::info,
+            "Connect and sign-on are not implemented yet");
+        return 0;
+    case State::timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
+        return 1;
+    case State::cancelled:
+        hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange was cancelled");
+        return 1;
+    case State::network_error:
+    case State::protocol_error:
+        hlclient::core::log(
+            LogLevel::error,
+            exchange.error() ? exchange.error()->context
+                             : "GoldSrc challenge exchange failed without diagnostic context");
+        return 1;
+    case State::idle:
+    case State::sending_request:
+    case State::waiting_for_response:
+        hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange is not terminal");
+        return 1;
+    }
+    return 1;
+}
+
+[[nodiscard]] hlclient::network::UdpSocket open_challenge_socket(
+    const hlclient::network::NetworkRuntime& runtime,
+    const hlclient::network::NetworkAddress& remote_endpoint)
+{
+    if (!runtime.valid()) {
+        throw std::runtime_error{
+            "Network runtime initialization failed: " + runtime.error_message()};
+    }
+
+    std::string error;
+    auto socket = hlclient::network::UdpSocket::open_ipv4(runtime, error);
+    if (!socket) {
+        throw std::runtime_error{
+            error.empty() ? "Unable to open a nonblocking IPv4 UDP socket" : error};
+    }
+
+    const auto loopback_address = hlclient::network::NetworkAddress::loopback(0);
+    const auto local_address =
+        remote_endpoint.ipv4_host_order() == loopback_address.ipv4_host_order()
+            ? loopback_address
+            : hlclient::network::NetworkAddress{0U, 0U};
+    if (!socket->bind(local_address, error)) {
+        throw std::runtime_error{
+            error.empty() ? "Unable to bind the challenge UDP socket" : error};
+    }
+    return std::move(*socket);
+}
+
+class ChallengeSession final {
+public:
+    ChallengeSession(
+        const hlclient::network::NetworkAddress remote_endpoint,
+        const bool net_trace)
+        : network_runtime_{},
+          transport_{open_challenge_socket(network_runtime_, remote_endpoint)},
+          exchange_{
+              transport_,
+              remote_endpoint,
+              {},
+              net_trace ? hlclient::goldsrc::ChallengeTraceCallback{&log_challenge_trace}
+                        : hlclient::goldsrc::ChallengeTraceCallback{}}
+    {
+        hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
+        hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
+
+        static_cast<void>(exchange_.start(hlclient::goldsrc::ChallengeExchangeClock::now()));
+        if (exchange_.local_endpoint()) {
+            hlclient::core::log(
+                LogLevel::info,
+                "Local endpoint: " + exchange_.local_endpoint()->to_string());
+        }
+    }
+
+    void update(const hlclient::goldsrc::ChallengeExchangeTimePoint now)
+    {
+        exchange_.update(now);
+    }
+
+    void cancel(const hlclient::goldsrc::ChallengeExchangeTimePoint now)
+    {
+        exchange_.cancel(now);
+    }
+
+    [[nodiscard]] bool terminal() const noexcept
+    {
+        return challenge_exchange_is_terminal(exchange_.state());
+    }
+
+    [[nodiscard]] int report_result() const
+    {
+        return report_challenge_result(exchange_);
+    }
+
+private:
+    hlclient::network::NetworkRuntime network_runtime_;
+    hlclient::network::UdpDatagramTransport transport_;
+    hlclient::goldsrc::ChallengeExchange exchange_;
+};
+
 int run_null_renderer(
     hlclient::client::IClientSceneSource& scene_source,
-    const std::optional<std::uint64_t> configured_frame_limit)
+    const std::optional<std::uint64_t> configured_frame_limit,
+    ChallengeSession* const challenge_session)
 {
     hlclient::renderer::null::NullRenderer renderer;
     renderer.initialize();
@@ -249,14 +465,24 @@ int run_null_renderer(
 
     const std::uint64_t frame_limit = configured_frame_limit.value_or(1);
     auto previous_time = std::chrono::steady_clock::now();
-    for (std::uint64_t frame = 0; frame < frame_limit; ++frame) {
+    std::uint64_t rendered_frames = 0;
+    while ((challenge_session == nullptr && rendered_frames < frame_limit) ||
+           (challenge_session != nullptr && !challenge_session->terminal())) {
         const auto current_time = std::chrono::steady_clock::now();
+        if (challenge_session != nullptr) {
+            challenge_session->update(current_time);
+        }
         const auto update = scene_source.update(current_time - previous_time);
         if (!update) {
             throw std::runtime_error{"Scene update failed: " + update.error};
         }
         previous_time = current_time;
         renderer.render(hlclient::client::build_render_scene(scene_source.world_state()), {});
+        ++rendered_frames;
+
+        if (challenge_session != nullptr && !challenge_session->terminal()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
     }
 
     hlclient::core::log(
@@ -267,12 +493,13 @@ int run_null_renderer(
     if (!renderer.statistics().shutdown) {
         throw std::logic_error{"Null renderer failed to shut down"};
     }
-    return 0;
+    return challenge_session != nullptr ? challenge_session->report_result() : 0;
 }
 
 int run_opengl_renderer(
     hlclient::client::IClientSceneSource& scene_source,
-    const std::optional<std::uint64_t> frame_limit)
+    const std::optional<std::uint64_t> frame_limit,
+    ChallengeSession* const challenge_session)
 {
     [[maybe_unused]] hlclient::platform::SdlRuntime sdl_runtime;
     hlclient::core::log(LogLevel::info, "SDL initialized");
@@ -304,6 +531,9 @@ int run_opengl_renderer(
         }
 
         const auto current_time = std::chrono::steady_clock::now();
+        if (challenge_session != nullptr) {
+            challenge_session->update(current_time);
+        }
         const auto update = scene_source.update(current_time - previous_time);
         if (!update) {
             throw std::runtime_error{"Scene update failed: " + update.error};
@@ -317,11 +547,18 @@ int run_opengl_renderer(
         window.swap_buffers();
 
         ++rendered_frames;
-        if (frame_limit && rendered_frames >= *frame_limit) {
+        if ((challenge_session != nullptr && challenge_session->terminal()) ||
+            (frame_limit && rendered_frames >= *frame_limit && challenge_session == nullptr)) {
             running = false;
         }
     }
 
+    if (challenge_session != nullptr) {
+        if (!challenge_session->terminal()) {
+            challenge_session->cancel(hlclient::goldsrc::ChallengeExchangeClock::now());
+        }
+        return challenge_session->report_result();
+    }
     return 0;
 }
 
@@ -368,6 +605,7 @@ int run(const hlclient::core::CommandLineOptions& options)
     }
 
     BootstrapSceneSource scene_source;
+    std::unique_ptr<ChallengeSession> challenge_session;
     if (options.connect_endpoint) {
         const auto address = hlclient::network::NetworkAddress::parse(*options.connect_endpoint);
         if (!address || address->port() == 0) {
@@ -377,19 +615,15 @@ int run(const hlclient::core::CommandLineOptions& options)
             return 1;
         }
 
-        const hlclient::goldsrc::ConnectionIntent connection{*address};
         scene_source.mutable_world_state().set_connection_requested(true);
-        hlclient::core::log(
-            LogLevel::info,
-            "Requested GoldSrc server: " + connection.server().to_string());
-        hlclient::core::log(LogLevel::warning, hlclient::goldsrc::ConnectionIntent::status());
+        challenge_session = std::make_unique<ChallengeSession>(*address, options.net_trace);
     }
 
     const auto frame_limit = smoke_test_frame_limit();
     if (options.renderer == hlclient::core::RendererBackend::null) {
-        return run_null_renderer(scene_source, frame_limit);
+        return run_null_renderer(scene_source, frame_limit, challenge_session.get());
     }
-    return run_opengl_renderer(scene_source, frame_limit);
+    return run_opengl_renderer(scene_source, frame_limit, challenge_session.get());
 }
 
 int application_main(const int argument_count,

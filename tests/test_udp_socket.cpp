@@ -101,18 +101,20 @@ TEST_CASE("Nonblocking UDP sockets exchange a loopback datagram", "[network][udp
     };
     REQUIRE(sender->send_to(*receiver_address, oversized_payload, error));
 
-    ReceiveStatus oversized_status = ReceiveStatus::would_block;
+    hlclient::network::ReceiveResult oversized_result;
     const auto oversized_deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{2};
     while (std::chrono::steady_clock::now() < oversized_deadline) {
-        const auto received = receiver->receive(oversized_payload.size() - 1);
-        oversized_status = received.status;
-        if (oversized_status != ReceiveStatus::would_block) {
+        oversized_result = receiver->receive(oversized_payload.size() - 1);
+        if (oversized_result.status != ReceiveStatus::would_block) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
-    CHECK(oversized_status == ReceiveStatus::truncated);
+    CHECK(oversized_result.status == ReceiveStatus::truncated);
+    REQUIRE(oversized_result.source);
+    CHECK(*oversized_result.source == *sender_address);
+    CHECK(oversized_result.payload_size_lower_bound >= oversized_payload.size());
 }
 
 TEST_CASE("UDP sockets retain the network runtime they need", "[network][udp]")

@@ -29,6 +29,8 @@ struct ReceiveResult {
     ReceiveStatus status{ReceiveStatus::would_block};
     std::optional<Datagram> datagram;
     std::string error;
+    std::optional<NetworkAddress> source;
+    std::size_t payload_size_lower_bound{0};
 };
 
 class UdpSocket final {

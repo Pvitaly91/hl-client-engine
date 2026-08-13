@@ -38,9 +38,10 @@ std::optional<std::uint16_t> ByteReader::read_uint16_le() noexcept
     if (!bytes) {
         return std::nullopt;
     }
-    return static_cast<std::uint16_t>(std::to_integer<std::uint8_t>((*bytes)[0])) |
-           static_cast<std::uint16_t>(
-               static_cast<std::uint16_t>(std::to_integer<std::uint8_t>((*bytes)[1])) << 8U);
+    return static_cast<std::uint16_t>(
+        static_cast<std::uint16_t>(std::to_integer<std::uint8_t>((*bytes)[0])) |
+        static_cast<std::uint16_t>(
+            static_cast<std::uint16_t>(std::to_integer<std::uint8_t>((*bytes)[1])) << 8U));
 }
 
 std::optional<std::int16_t> ByteReader::read_int16_le() noexcept

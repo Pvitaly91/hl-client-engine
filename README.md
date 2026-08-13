@@ -6,13 +6,15 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository is currently at **M0.1: modular assets, formats, and scene
-sources**. In addition to the M0 SDL3/OpenGL bootstrap, it provides a virtual
-filesystem boundary, typed asset importer registries, neutral CPU assets, an
-asset manager, a scene-source contract, and a headless null renderer. It does
-**not** yet implement a real GoldSrc asset parser, send `getchallenge`, perform
-`connect` or sign-on, download resources, decode entity snapshots, or implement
-gameplay. `--connect` currently validates and records an IPv4 endpoint only.
+The repository is currently at **M1: connectionless challenge protocol**. In
+addition to the M0 SDL3/OpenGL bootstrap and M0.1 modular asset/scene
+boundaries, it implements the bounded GoldSrc connectionless envelope, the
+Protocol 48 `getchallenge steam` request and response profile, nonblocking UDP
+retry/timeout handling, endpoint validation, and opt-in bounded network traces.
+It does **not** yet implement a real GoldSrc asset parser, construct or send a
+`connect` request, create a netchan, enter sign-on, download resources, decode
+entity snapshots, or implement gameplay. `--connect` intentionally performs
+only the M1 challenge exchange and then exits.
 
 ## Reference platform
 
@@ -113,11 +115,34 @@ The bootstrap can also run without Half-Life assets:
 an OpenGL context, or a GPU resource. `HLCLIENT_SMOKE_TEST_FRAMES` can set an
 explicit bounded frame count for either backend during smoke testing.
 
-To validate a user-owned Half-Life installation and a future connection target:
+To validate a user-owned Half-Life installation:
 
 ```powershell
-.\build\bin\Debug\hlclient.exe --basedir "C:\Games\Half-Life" --game valve --connect 127.0.0.1:27015
+.\build\bin\Debug\hlclient.exe --basedir "C:\Games\Half-Life" --game valve
 ```
+
+To perform the M1 challenge-only exchange and print bounded, escaped packet
+diagnostics:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null --connect 127.0.0.1:27015 --net-trace
+```
+
+This sends `getchallenge steam`, accepts a valid response only from the exact
+requested IPv4 endpoint, reports the owned challenge, and stops. It never sends
+the subsequent GoldSrc `connect` request and does not create a netchan or enter
+sign-on. The GoldSrc-style spelling `+connect <IPv4:port>` is also accepted.
+
+For an explicit manual check against a user-run original HLDS:
+
+```powershell
+.\scripts\verify_original_hlds_challenge.ps1 `
+  -ClientPath .\build\bin\Debug\hlclient.exe `
+  -Endpoint 127.0.0.1:27015
+```
+
+The verifier can optionally start an explicitly supplied `hlds.exe`; see
+[Building](docs/BUILDING.md) for the exact form and cleanup behavior.
 
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
@@ -147,7 +172,8 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
 
 - `hlclient`;
 - `hlclient_core`, `hlclient_platform`, `hlclient_filesystem`;
-- `hlclient_network`, `hlclient_goldsrc`, `hlclient_client`;
+- `hlclient_network`, `hlclient_goldsrc`, `hlclient_goldsrc_client`,
+  `hlclient_client`;
 - `hlclient_asset_api`, `hlclient_asset_manager`, `hlclient_scene_api`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
@@ -157,6 +183,7 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
 
 See [Architecture](docs/ARCHITECTURE.md),
 [Asset pipeline](docs/ASSET_PIPELINE.md), [Building](docs/BUILDING.md),
+[GoldSrc connectionless protocol](docs/GOLDSRC_CONNECTIONLESS.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
 
@@ -169,6 +196,14 @@ protocol behavior and publicly available documentation. The official Valve
 Half-Life SDK submodule is pinned and exposed only as a `SYSTEM` header/reference
 boundary; its programs, bundled libraries, and bundled SDL2 are not part of the
 client build.
+
+For the M1 profile, the exact request transmission was captured from an
+original signed Valve `hl.exe`, and the exact response was observed live from
+an original signed Valve HLDS. This black-box interoperability evidence proves
+the request bytes, response layout, and the first decimal field's role as the
+dynamic challenge. It does not prove the meaning of the response's other three
+decimal fields, which remain deliberately opaque in project APIs and
+documentation.
 
 Do not copy implementation code from ReHLDS, Xash3D, reverse-engineered
 proprietary GoldSrc code dumps, or original `hl.exe`, `hw.dll`, `sw.dll`, and
@@ -192,7 +227,8 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DHLCLIENT_WARNINGS_AS_E
 
 This option is deliberately not applied globally to third-party code. Tests use
 Catch2, avoid Internet and external game/server dependencies, and run through
-CTest.
+CTest. M1 protocol/state-machine coverage uses synthetic fixtures and a local
+fake-HLDS UDP test; the original-HLDS script remains an opt-in manual check.
 
 ## License
 

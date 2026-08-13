@@ -32,6 +32,10 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             options.show_version = true;
             continue;
         }
+        if (argument == "--net-trace") {
+            options.net_trace = true;
+            continue;
+        }
         if (!needs_value(argument)) {
             return failure("Unknown command-line argument: " + std::string{argument});
         }
@@ -74,8 +78,9 @@ Options:
   --version           Show version information and exit
   --basedir <path>    Half-Life installation directory
   --game <directory>  Game directory below basedir (default: valve)
-  --connect <ip:port> Parse a future GoldSrc server endpoint
+  --connect <ip:port> Perform the M1 GoldSrc challenge-only exchange
   +connect <ip:port>  GoldSrc-style alias for --connect
+  --net-trace         Log bounded, escaped network packet diagnostics
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
 )";
 }
