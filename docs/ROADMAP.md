@@ -129,57 +129,47 @@ stock-Valve verification.
 
 ## M2 — Challenge, connect, and sign-on
 
-**Status: next; begin with M2.1 only.**
+### M2.1 — Connect request discovery, codec, and one-shot TX
 
-### M2.1 — Challenge-bound connect request
+**Status: completed.**
 
-**Recommended next increment.**
+The exact stock layout was established through a same-socket loopback relay.
+The project now has strict ordered info strings, typed protocol/user info,
+move-only opaque authentication material, an independent synthetic byte
+fixture, a request parser, and a challenge-to-connect coordinator. A fake HLDS
+proves that `getchallenge` and exactly one connect request use the same source
+endpoint and that no later packet is sent. During discovery, the relayed stock
+`hl.exe` request elicited a connectionless response from stock HLDS, but that
+response's acceptance/rejection semantics were deliberately not interpreted.
+A separate project `hlclient` -> stock HLDS transmission proof remains pending
+until a legitimate authentication provider or explicit user-supplied material
+is available; this is not required for completing the deterministic M2.1 codec
+and one-shot fake-HLDS milestone.
 
-**Goal:** use the owned M1 challenge to construct and transmit the exact
-Protocol 48 client `connect` request, then report the immediate original-HLDS
-outcome without implementing a sequenced channel or sign-on.
+Explicitly absent: authentication generation, connect response semantics,
+connect retry, netchan, sequencing, acknowledgements, fragmentation, sign-on,
+resources, and gameplay.
 
-Planned work:
+### M2.2 — Connectionless accept/reject and authentication-provider boundary
 
-- establish the required connect-request profile through clean-room observable
-  behavior and separately recorded public/reference evidence;
-- define bounded project-owned inputs for the M1 challenge and all other
-  request fields, leaving unknown semantics explicitly named and constrained;
-- encode the request without host-struct casts, hidden terminators, or
-  unbounded formatting;
-- extend the controller with the minimum challenge-to-connect transition,
-  endpoint validation, timeout/retry policy, and bounded trace classification;
-- parse only the immediate connectionless acceptance/rejection needed to prove
-  the request, with deterministic synthetic fixtures and an opt-in original
-  HLDS manual check.
+**Status: next.**
 
-Explicitly not included in M2.1: netchan creation, sequence numbers,
-acknowledgements, reliable payloads, fragmentation, authentication completion,
-serverdata, resource negotiation, or sign-on. A successful M2.1 result is not a
-playable or fully connected client.
+Define a legitimate `IAuthenticationProvider` boundary outside the codec and
+interpret only the immediate bounded connectionless accept/reject outcome.
+Provider implementation, platform/legal constraints, lifetime, secure storage,
+and redaction require a dedicated review. Do not create a netchan in M2.2.
 
-Exit criteria: using a challenge obtained by the M1 exchange, the client emits
-the independently established connect-request profile and reproducibly observes
-the expected immediate response from an original compatible HLDS, while
-malformed and spoofed responses fail closed.
+### M2.3 — Netchan bootstrap, sequencing, and acknowledgements
 
-### Later M2 increments — Netchan and initial sign-on
+Implement the first sequenced-channel boundary, sequence/acknowledgement state,
+reliable state, fragmentation rules, and bounded timeout/disconnect behavior.
+Keep it separate from connectionless codecs and world/render state.
 
-**Goal:** enter and maintain the sequenced GoldSrc client channel through the
-initial sign-on stages.
+### M2.4 — Initial sign-on state machine
 
-Planned work:
-
-- construct the client connect request from challenge/session parameters;
-- implement sequence numbers, acknowledgements, reliable state, fragmentation,
-  timeout, and disconnect handling required by the target protocol;
-- parse serverdata and sign-on messages into project-owned session state;
-- expose transitions to `ClientWorldState` without leaking packet structs;
-- redact sensitive connection values from logs where appropriate;
-- state-machine tests for loss, duplicate, reordering, truncation, and timeout.
-
-Exit criteria: the client reaches the defined pre-resource sign-on state against
-an original compatible HLDS and fails closed on malformed streams.
+Parse the minimum serverdata/signon messages into project-owned session state
+and reach a defined pre-resource sign-on point. Resource negotiation, snapshots,
+gameplay, and renderer concerns remain later milestones.
 
 ## M3 — Resource and precache pipeline
 

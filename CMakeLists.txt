@@ -131,11 +131,15 @@ hlclient_add_library(
     include/hlclient/goldsrc/byte_reader.hpp
     include/hlclient/goldsrc/byte_writer.hpp
     include/hlclient/goldsrc/challenge_protocol.hpp
+    include/hlclient/goldsrc/connect_request.hpp
     include/hlclient/goldsrc/connectionless_packet.hpp
+    include/hlclient/goldsrc/info_string.hpp
     src/goldsrc/byte_reader.cpp
     src/goldsrc/byte_writer.cpp
     src/goldsrc/challenge_protocol.cpp
+    src/goldsrc/connect_request.cpp
     src/goldsrc/connectionless_packet.cpp
+    src/goldsrc/info_string.cpp
 )
 add_library(hlclient::goldsrc ALIAS hlclient_goldsrc)
 target_link_libraries(hlclient_goldsrc PRIVATE hlclient::core)
@@ -144,7 +148,9 @@ set_property(TARGET hlclient_goldsrc PROPERTY FOLDER "Engine/Network/GoldSrc")
 hlclient_add_library(
     hlclient_goldsrc_client
     include/hlclient/goldsrc/challenge_exchange.hpp
+    include/hlclient/goldsrc/connect_request_stage.hpp
     src/goldsrc/challenge_exchange.cpp
+    src/goldsrc/connect_request_stage.cpp
 )
 add_library(hlclient::goldsrc_client ALIAS hlclient_goldsrc_client)
 target_link_libraries(
@@ -153,6 +159,15 @@ target_link_libraries(
     PRIVATE hlclient::core
 )
 set_property(TARGET hlclient_goldsrc_client PROPERTY FOLDER "Engine/Network/GoldSrc")
+
+hlclient_add_library(
+    hlclient_app_support
+    include/hlclient/app/authentication_material_file.hpp
+    src/app/authentication_material_file.cpp
+)
+add_library(hlclient::app_support ALIAS hlclient_app_support)
+target_link_libraries(hlclient_app_support PUBLIC hlclient::goldsrc)
+set_property(TARGET hlclient_app_support PROPERTY FOLDER "Apps")
 
 hlclient_add_library(
     hlclient_client
@@ -218,6 +233,7 @@ target_link_libraries(
     hlclient
     PRIVATE
         hlclient::core
+        hlclient::app_support
         hlclient::platform
         hlclient::filesystem
         hlclient::asset_api

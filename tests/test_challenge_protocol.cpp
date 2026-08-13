@@ -76,17 +76,17 @@ TEST_CASE("Parser accepts the exact captured original HLDS response", "[goldsrc]
     CHECK(result.response->profile_parameter_3 == 0U);
 }
 
-TEST_CASE("Challenge parser accepts non-negative int32 boundaries", "[goldsrc][challenge]")
+TEST_CASE("Challenge parser preserves the full unsigned 32-bit token", "[goldsrc][challenge]")
 {
     const auto minimum = goldsrc::parse_challenge_response(
         make_response("A00000000 0 3 72057594037927936 0"));
     const auto maximum = goldsrc::parse_challenge_response(
-        make_response("A00000000 2147483647 3 72057594037927936 0"));
+        make_response("A00000000 4294967295 3 72057594037927936 0"));
 
     REQUIRE(minimum);
     CHECK(minimum.response->challenge == 0);
     REQUIRE(maximum);
-    CHECK(maximum.response->challenge == std::numeric_limits<std::int32_t>::max());
+    CHECK(maximum.response->challenge == std::numeric_limits<std::uint32_t>::max());
     CHECK(maximum.response->profile_parameter_2 == 72'057'594'037'927'936ULL);
     CHECK(maximum.response->profile_parameter_3 == 0U);
 }
@@ -141,7 +141,7 @@ TEST_CASE("Challenge parser rejects missing invalid overflow and negative tokens
     CHECK(invalid.error->code == goldsrc::ChallengeProtocolErrorCode::invalid_challenge);
 
     const auto overflow = goldsrc::parse_challenge_response(
-        make_response("A00000000 2147483648 3 0 0"));
+        make_response("A00000000 4294967296 3 72057594037927936 0"));
     REQUIRE_FALSE(overflow);
     CHECK(overflow.error->code == goldsrc::ChallengeProtocolErrorCode::challenge_overflow);
 

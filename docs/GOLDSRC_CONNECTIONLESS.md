@@ -2,9 +2,9 @@
 
 ## M1 scope and interoperability reference
 
-M1 implements only the initial IPv4 connectionless challenge exchange. It does
-not build or send `connect`, create a netchan, authenticate a client, or enter
-sign-on.
+M1 implements only the initial IPv4 connectionless challenge exchange. M2.1
+uses its result in a separate one-shot connect stage; M1 itself still does not
+create a netchan, authenticate a client, or enter sign-on.
 
 The supported compatibility profile is:
 
@@ -64,8 +64,9 @@ A00000000 <challenge> <profile-parameter-1> <profile-parameter-2> <profile-param
 
 Fields use canonical unsigned decimal ASCII separated by exactly one space:
 
-- `challenge`: project-owned signed 32-bit type, restricted by this profile to
-  `0..2147483647`; negative and overflowing inputs are rejected;
+- `challenge`: project-owned unsigned 32-bit bit pattern received as canonical
+  decimal `0..4294967295`; M2.1 formats the same bits as signed decimal in the
+  connect request, matching captured stock behavior;
 - `profile-parameter-1`: unsigned 32-bit and exactly `3` for this profile;
 - `profile-parameter-2`: unsigned 64-bit and exactly
   `72057594037927936` for this captured profile;
@@ -163,7 +164,7 @@ does not search for or download binaries. It stores logs below ignored
 
 ## Deferred work
 
-M2.1 may construct a `connect` request from the received challenge. Steam
-authentication, the protocol-48 connect payload, netchan, sequencing,
-fragmentation, sign-on, resources, and gameplay remain intentionally absent
-from M1.
+M2.1 now constructs and sends the independently captured Protocol 48 `connect`
+request once from the same transport. See [GoldSrc connect request](GOLDSRC_CONNECT_REQUEST.md).
+Steam authentication generation, response semantics, netchan, sequencing,
+fragmentation, sign-on, resources, and gameplay remain intentionally absent.

@@ -35,11 +35,21 @@ namespace {
 ConnectionlessPacketParseResult parse_connectionless_packet(
     const std::span<const std::byte> datagram)
 {
-    if (datagram.size() > kMaximumConnectionlessChallengeDatagramSize) {
+    return parse_connectionless_packet(
+        datagram,
+        kMaximumConnectionlessChallengeDatagramSize);
+}
+
+ConnectionlessPacketParseResult parse_connectionless_packet(
+    const std::span<const std::byte> datagram,
+    const std::size_t maximum_datagram_size)
+{
+    if (maximum_datagram_size < kConnectionlessPacketHeaderSize + 1U ||
+        datagram.size() > maximum_datagram_size) {
         return parse_failure(
             ConnectionlessPacketErrorCode::datagram_too_large,
-            kMaximumConnectionlessChallengeDatagramSize,
-            "Datagram exceeds the bounded M1 connectionless challenge size");
+            maximum_datagram_size,
+            "Datagram exceeds the configured connectionless packet size");
     }
     if (datagram.size() < kConnectionlessPacketHeaderSize) {
         return parse_failure(
@@ -80,15 +90,25 @@ ConnectionlessPacketParseResult parse_connectionless_packet(
 ConnectionlessPacketEncodeResult encode_connectionless_packet(
     const std::span<const std::byte> payload)
 {
+    return encode_connectionless_packet(
+        payload,
+        kMaximumConnectionlessChallengeDatagramSize);
+}
+
+ConnectionlessPacketEncodeResult encode_connectionless_packet(
+    const std::span<const std::byte> payload,
+    const std::size_t maximum_datagram_size)
+{
     if (payload.empty()) {
         return encode_failure(
             ConnectionlessPacketErrorCode::empty_payload,
             "Connectionless packet payload must not be empty");
     }
-    if (payload.size() > kMaximumConnectionlessChallengePayloadSize) {
+    if (maximum_datagram_size < kConnectionlessPacketHeaderSize + 1U ||
+        payload.size() > maximum_datagram_size - kConnectionlessPacketHeaderSize) {
         return encode_failure(
             ConnectionlessPacketErrorCode::payload_too_large,
-            "Connectionless payload exceeds the bounded M1 challenge size");
+            "Connectionless payload exceeds the configured packet size");
     }
 
     std::vector<std::byte> datagram(kConnectionlessPacketHeaderSize + payload.size());

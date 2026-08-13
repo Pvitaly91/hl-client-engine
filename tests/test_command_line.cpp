@@ -24,6 +24,10 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     CHECK_FALSE(result.options->base_directory.has_value());
     CHECK(result.options->game_directory == "valve");
     CHECK_FALSE(result.options->connect_endpoint.has_value());
+    CHECK(result.options->stop_after == hlclient::core::ConnectionStopPoint::challenge);
+    CHECK_FALSE(result.options->authentication_material_file.has_value());
+    CHECK(result.options->player_name == "Player");
+    CHECK(result.options->player_model == "ivan");
     CHECK(result.options->renderer == RendererBackend::opengl);
     CHECK(result.error.empty());
 }
@@ -105,6 +109,72 @@ TEST_CASE("Command line parser selects a renderer backend", "[core][command-line
     }
 }
 
+TEST_CASE("Command line parser validates explicit connect request mode", "[core][command-line]")
+{
+    SECTION("accepted explicit configuration")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"connect-request"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--name"}, std::string_view{"Test Player"},
+            std::string_view{"--model"}, std::string_view{"ivan"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::connect_request);
+        REQUIRE(result.options->authentication_material_file);
+        CHECK(*result.options->authentication_material_file == "auth.bin");
+        CHECK(result.options->player_name == "Test Player");
+        CHECK(result.options->player_model == "ivan");
+    }
+
+    SECTION("invalid stop point")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"signon"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("connect request requires local auth file")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"connect-request"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("connect-only settings require connect")
+    {
+        const std::array arguments{
+            std::string_view{"--name"}, std::string_view{"Player"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("auth file cannot alter challenge-only mode")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("identity settings cannot be silently ignored in challenge-only mode")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--name"}, std::string_view{"Test Player"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+}
+
 TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
 {
     SECTION("unknown option")
@@ -144,6 +214,10 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("--connect") != std::string_view::npos);
     CHECK(help.find("+connect") != std::string_view::npos);
     CHECK(help.find("--net-trace") != std::string_view::npos);
+    CHECK(help.find("--stop-after") != std::string_view::npos);
+    CHECK(help.find("--auth-material-file") != std::string_view::npos);
+    CHECK(help.find("--name") != std::string_view::npos);
+    CHECK(help.find("--model") != std::string_view::npos);
     CHECK(help.find("--renderer") != std::string_view::npos);
 }
 

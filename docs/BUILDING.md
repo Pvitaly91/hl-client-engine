@@ -169,7 +169,7 @@ also done for Release and RelWithDebInfo. GLAD2 is a static project target and
 has no runtime DLL. Windows supplies `opengl32.dll`; the installed graphics
 driver must provide an OpenGL 3.3 Core-capable implementation.
 
-No project resources need to be copied for the current M1 client. Half-Life
+No project resources need to be copied for the current M2.1 client. Half-Life
 assets are optional unless `--basedir` is supplied, and are never copied into
 the build tree automatically. The challenge-only network path also does not
 require local game assets.
@@ -206,11 +206,23 @@ Both spellings are accepted:
 +connect <IPv4:port>
 ```
 
-`--connect` is deliberately challenge-only in M1. It sends the bounded
+`--connect` remains challenge-only by default. It sends the bounded
 connectionless `getchallenge steam` request, waits with bounded retries and an
 overall timeout, accepts a response only from the exact requested endpoint,
-reports the challenge, and exits. It does not construct or send the subsequent
-GoldSrc `connect` request, create a netchan, authenticate, or enter sign-on.
+reports the challenge, and exits. This exact behavior is also selected by
+`--stop-after challenge`.
+
+The explicit M2.1 development path validates a local 245-byte authentication
+input, sends one connect request on the same socket, and exits:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27015 --stop-after connect-request `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+The file is not copied or logged. Success means only that one datagram was sent;
+server acceptance, auth generation, netchan, and sign-on are not implemented.
 
 Add `--net-trace` when diagnosing the exchange:
 
@@ -218,7 +230,8 @@ Add `--net-trace` when diagnosing the exchange:
 .\build\bin\Debug\hlclient.exe --renderer null --connect 127.0.0.1:27015 --net-trace
 ```
 
-Trace previews are size-capped and escaped. They include direction, endpoint,
+Challenge trace previews are size-capped and escaped. Connect traces are
+metadata-only and redact authentication. Diagnostics include direction, endpoint,
 classification, attempt, elapsed time, and datagram size without printing raw
 untrusted control bytes.
 

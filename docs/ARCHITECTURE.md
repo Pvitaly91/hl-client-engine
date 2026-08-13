@@ -51,8 +51,8 @@ TestSceneSource -------------+
 HlInjectionSceneSource -----/
 ```
 
-The current standalone provider owns only the M1 IPv4 connectionless challenge
-exchange. Future increments may add a challenge-bound connect request, channel
+The current standalone provider owns the M1 challenge and M2.1 one-shot connect
+request stages. Future increments may add response semantics, channel
 sequencing, sign-on, resource state, snapshots, and commands behind the same
 provider boundary. The future bridge adapts observed or exported in-process
 state to the same project types. It must not make renderer behavior depend on
@@ -66,8 +66,8 @@ injected addresses or Valve private layouts.
 | `hlclient_platform` | SDL lifetime, windows, events/input, GL context, clocks | game protocol or world state |
 | `hlclient_filesystem` | safe base/game path discovery and asset-facing I/O foundations | Steam discovery policy embedded in render code |
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
-| `hlclient_goldsrc` | byte readers/writers, connectionless envelope, stateless challenge codec | sockets, retries, OpenGL, UI, OS windowing |
-| `hlclient_goldsrc_client` | stateful challenge exchange, retry/timeout policy, endpoint validation | OpenGL, SDL windowing, world/render state |
+| `hlclient_goldsrc` | byte readers/writers, connectionless envelope, strict info strings, stateless challenge/connect codecs and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
+| `hlclient_goldsrc_client` | challenge exchange, one-shot connect stage/coordinator, retry/timeout and endpoint policy | auth generation, response semantics, OpenGL, SDL, world/render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_asset_api` | owning asset sources, neutral CPU assets, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
@@ -129,21 +129,22 @@ Network input is untrusted. Parsers must:
 Compatibility constants may be checked against official SDK declarations, but
 the runtime implementation remains project-owned.
 
-The current M1 path is intentionally smaller than a connection:
+The current path remains intentionally smaller than a connection:
 
 ```text
 --connect IPv4:port
     -> UdpDatagramTransport
     -> ChallengeExchange
     -> getchallenge request / strict challenge response
-    -> terminal success or typed timeout/network/protocol failure
+    -> default terminal M1 success
+    -> optional ConnectRequestStage on the same transport/socket
+    -> one connect send -> terminal M2.1 success/error
 ```
 
-It does not construct a GoldSrc `connect` request, allocate a netchan, sequence
-packets, authenticate a client, or update sign-on/world state. Only the exact
-requested source address and port can complete the exchange. `--net-trace`
-reports direction, endpoint, classification, attempt, elapsed time, size, and a
-bounded escaped preview; it never writes raw untrusted bytes to the terminal.
+The explicit M2.1 path constructs the captured request but does not generate
+authentication, interpret acceptance/rejection, allocate a netchan, sequence
+packets, or update sign-on/world state. Challenge traces use bounded previews;
+connect traces are metadata-only and never contain the raw packet or auth data.
 
 ## Filesystem and asset boundary
 
@@ -212,15 +213,15 @@ order:
    game root is available;
 3. explicitly register compiled-in format implementations (none exist in
    M0.1);
-4. when `--connect` is present, create the nonblocking UDP transport and M1
-   challenge exchange for the validated endpoint;
+4. validate optional M2.1 settings/auth locally, then create one nonblocking UDP
+   transport and the M1/M2.1 coordinator for the validated endpoint;
 5. select the built-in OpenGL or null renderer;
 6. for OpenGL only, initialize SDL and create the window/context before the
    renderer;
-7. poll events where applicable, advance the challenge exchange, and update a
+7. poll events where applicable, advance the handshake coordinator, and update a
    scene source;
 8. derive `RenderScene` from its `ClientWorldState`, render, and present;
-9. stop after terminal challenge success/failure when requested, then shut down
+9. stop after the configured terminal challenge/connect-request outcome, then shut down
    renderer resources before their platform dependencies.
 
 Partially initialized states must unwind safely through RAII. Logging and error

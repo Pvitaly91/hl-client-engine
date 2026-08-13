@@ -21,6 +21,7 @@
 # Test and coverage output
 /Testing/
 /manual-artifacts/
+/manual-artifacts/connect-captures/
 *.coverage
 *.coveragexml
 

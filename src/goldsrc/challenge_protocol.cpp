@@ -158,19 +158,19 @@ ChallengeResponseParseResult parse_challenge_response(
         return failure(
             ChallengeProtocolErrorCode::invalid_challenge,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge token is not a canonical unsigned decimal int32");
+            "Challenge token is not a canonical unsigned decimal uint32");
     }
     if (challenge.overflow) {
         return failure(
             ChallengeProtocolErrorCode::challenge_overflow,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge token exceeds the non-negative int32 range");
+            "Challenge token exceeds the uint32 range");
     }
     if (!challenge.valid) {
         return failure(
             ChallengeProtocolErrorCode::invalid_challenge,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge token is not a canonical unsigned decimal int32");
+            "Challenge token is not a canonical unsigned decimal uint32");
     }
     offset = challenge.next;
     if (offset >= payload.size() || payload[offset] != ' ') {

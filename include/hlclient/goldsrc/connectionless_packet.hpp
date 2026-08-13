@@ -55,8 +55,14 @@ struct ConnectionlessPacketEncodeResult {
 
 [[nodiscard]] ConnectionlessPacketParseResult parse_connectionless_packet(
     std::span<const std::byte> datagram);
+[[nodiscard]] ConnectionlessPacketParseResult parse_connectionless_packet(
+    std::span<const std::byte> datagram,
+    std::size_t maximum_datagram_size);
 
 [[nodiscard]] ConnectionlessPacketEncodeResult encode_connectionless_packet(
     std::span<const std::byte> payload);
+[[nodiscard]] ConnectionlessPacketEncodeResult encode_connectionless_packet(
+    std::span<const std::byte> payload,
+    std::size_t maximum_datagram_size);
 
 } // namespace hlclient::goldsrc

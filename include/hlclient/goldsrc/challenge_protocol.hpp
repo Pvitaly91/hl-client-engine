@@ -12,7 +12,10 @@
 
 namespace hlclient::goldsrc {
 
-using ChallengeToken = std::int32_t;
+// The stock Protocol 48 server transmits a canonical unsigned decimal value.
+// Preserve all 32 bits; the connect request formats the same bit pattern as a
+// signed decimal integer, matching the observed stock client behavior.
+using ChallengeToken = std::uint32_t;
 
 struct ChallengeResponse {
     ChallengeToken challenge{0};

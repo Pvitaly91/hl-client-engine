@@ -1,3 +1,4 @@
+#include <hlclient/app/authentication_material_file.hpp>
 #include <hlclient/assets/asset_importer_registry.hpp>
 #include <hlclient/assets/asset_manager.hpp>
 #include <hlclient/client/client_scene_source.hpp>
@@ -7,7 +8,7 @@
 #include <hlclient/core/version.hpp>
 #include <hlclient/filesystem/game_paths.hpp>
 #include <hlclient/filesystem/rooted_file_system.hpp>
-#include <hlclient/goldsrc/challenge_exchange.hpp>
+#include <hlclient/goldsrc/connect_request_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
 #include <hlclient/network/network_runtime.hpp>
@@ -242,25 +243,6 @@ void log_renderer_information(const hlclient::renderer::IRenderer& renderer)
     hlclient::core::log(LogLevel::info, "Renderer version: " + renderer_info.version);
 }
 
-[[nodiscard]] bool challenge_exchange_is_terminal(
-    const hlclient::goldsrc::ChallengeExchangeState state) noexcept
-{
-    using State = hlclient::goldsrc::ChallengeExchangeState;
-    switch (state) {
-    case State::challenge_received:
-    case State::timed_out:
-    case State::cancelled:
-    case State::network_error:
-    case State::protocol_error:
-        return true;
-    case State::idle:
-    case State::sending_request:
-    case State::waiting_for_response:
-        return false;
-    }
-    return true;
-}
-
 void log_challenge_trace(const hlclient::goldsrc::ChallengeTraceEvent& event)
 {
     using Classification = hlclient::goldsrc::ChallengeTraceClassification;
@@ -332,13 +314,36 @@ void log_challenge_trace(const hlclient::goldsrc::ChallengeTraceEvent& event)
     hlclient::core::log(LogLevel::info, message);
 }
 
-[[nodiscard]] int report_challenge_result(
-    const hlclient::goldsrc::ChallengeExchange& exchange)
+void log_connect_trace(const hlclient::goldsrc::ConnectRequestTraceEvent& event)
 {
-    using State = hlclient::goldsrc::ChallengeExchangeState;
-    switch (exchange.state()) {
+    if (event.state != hlclient::goldsrc::ConnectRequestStageState::request_sent) {
+        return;
+    }
+
+    std::string message = "[net] TX " + event.endpoint.to_string() +
+                          " connectionless connect request, " +
+                          std::to_string(event.datagram_size) + " bytes";
+    hlclient::core::log(LogLevel::info, message);
+    hlclient::core::log(
+        LogLevel::info,
+        "[net] protocol=" + std::to_string(event.protocol) +
+            " challenge=" + std::to_string(event.challenge) +
+            " protocol-info fields=" +
+            std::to_string(event.protocol_info_field_names.size()) +
+            " bytes=" + std::to_string(event.protocol_info_size) +
+            " user-info fields=" + std::to_string(event.user_info_field_names.size()) +
+            " bytes=" + std::to_string(event.user_info_size) +
+            " authentication=" +
+            hlclient::goldsrc::format_authentication_redaction(event.authentication_size));
+}
+
+[[nodiscard]] int report_handshake_result(
+    const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
+{
+    using State = hlclient::goldsrc::GoldSrcHandshakeState;
+    switch (handshake.state()) {
     case State::challenge_received:
-        if (!exchange.challenge()) {
+        if (!handshake.challenge()) {
             hlclient::core::log(
                 LogLevel::error,
                 "Challenge exchange completed without an owned challenge result");
@@ -346,11 +351,17 @@ void log_challenge_trace(const hlclient::goldsrc::ChallengeTraceEvent& event)
         }
         hlclient::core::log(
             LogLevel::info,
-            "Challenge received: " + std::to_string(exchange.challenge()->challenge));
+            "Challenge received: " + std::to_string(handshake.challenge()->challenge));
         hlclient::core::log(LogLevel::info, "M1 challenge exchange completed");
         hlclient::core::log(
             LogLevel::info,
-            "Connect and sign-on are not implemented yet");
+            "Connect and sign-on are not implemented yet in challenge-only mode");
+        return 0;
+    case State::request_sent:
+        hlclient::core::log(LogLevel::info, "M2.1 connect request sent exactly once");
+        hlclient::core::log(
+            LogLevel::info,
+            "Server acceptance was not determined; netchan and sign-on were not started");
         return 0;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
@@ -358,17 +369,21 @@ void log_challenge_trace(const hlclient::goldsrc::ChallengeTraceEvent& event)
     case State::cancelled:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange was cancelled");
         return 1;
+    case State::configuration_error:
     case State::network_error:
     case State::protocol_error:
         hlclient::core::log(
             LogLevel::error,
-            exchange.error() ? exchange.error()->context
-                             : "GoldSrc challenge exchange failed without diagnostic context");
+            handshake.error_context().empty()
+                ? "GoldSrc handshake failed without diagnostic context"
+                : std::string{handshake.error_context()});
         return 1;
     case State::idle:
+    case State::waiting_for_challenge:
+    case State::building_request:
+    case State::request_ready:
     case State::sending_request:
-    case State::waiting_for_response:
-        hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange is not terminal");
+        hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
     return 1;
@@ -402,61 +417,107 @@ void log_challenge_trace(const hlclient::goldsrc::ChallengeTraceEvent& event)
     return std::move(*socket);
 }
 
-class ChallengeSession final {
+class HandshakeSession final {
 public:
-    ChallengeSession(
+    HandshakeSession(
         const hlclient::network::NetworkAddress remote_endpoint,
+        const hlclient::goldsrc::HandshakeStopPoint stop_point,
+        std::optional<hlclient::goldsrc::PreparedConnectRequest> prepared_request,
         const bool net_trace)
         : network_runtime_{},
           transport_{open_challenge_socket(network_runtime_, remote_endpoint)},
-          exchange_{
+          handshake_{
               transport_,
               remote_endpoint,
+              stop_point,
+              std::move(prepared_request),
               {},
               net_trace ? hlclient::goldsrc::ChallengeTraceCallback{&log_challenge_trace}
-                        : hlclient::goldsrc::ChallengeTraceCallback{}}
+                        : hlclient::goldsrc::ChallengeTraceCallback{},
+              net_trace ? hlclient::goldsrc::ConnectRequestTraceCallback{&log_connect_trace}
+                        : hlclient::goldsrc::ConnectRequestTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
 
-        static_cast<void>(exchange_.start(hlclient::goldsrc::ChallengeExchangeClock::now()));
-        if (exchange_.local_endpoint()) {
+        static_cast<void>(handshake_.start(hlclient::goldsrc::ChallengeExchangeClock::now()));
+        if (handshake_.local_endpoint()) {
             hlclient::core::log(
                 LogLevel::info,
-                "Local endpoint: " + exchange_.local_endpoint()->to_string());
+                "Local endpoint: " + handshake_.local_endpoint()->to_string());
         }
     }
 
     void update(const hlclient::goldsrc::ChallengeExchangeTimePoint now)
     {
-        exchange_.update(now);
+        handshake_.update(now);
     }
 
     void cancel(const hlclient::goldsrc::ChallengeExchangeTimePoint now)
     {
-        exchange_.cancel(now);
+        handshake_.cancel(now);
     }
 
     [[nodiscard]] bool terminal() const noexcept
     {
-        return challenge_exchange_is_terminal(exchange_.state());
+        return handshake_.terminal();
     }
 
     [[nodiscard]] int report_result() const
     {
-        return report_challenge_result(exchange_);
+        return report_handshake_result(handshake_);
     }
 
 private:
     hlclient::network::NetworkRuntime network_runtime_;
     hlclient::network::UdpDatagramTransport transport_;
-    hlclient::goldsrc::ChallengeExchange exchange_;
+    hlclient::goldsrc::GoldSrcHandshakeCoordinator handshake_;
 };
+
+[[nodiscard]] std::optional<hlclient::goldsrc::PreparedConnectRequest>
+prepare_runtime_connect_request(const hlclient::core::CommandLineOptions& options)
+{
+    if (options.stop_after != hlclient::core::ConnectionStopPoint::connect_request) {
+        return std::nullopt;
+    }
+    if (!options.authentication_material_file) {
+        throw std::invalid_argument{
+            "Connect-request mode requires a local authentication material file"};
+    }
+
+    const auto path = path_from_utf8(*options.authentication_material_file);
+    auto authentication = hlclient::app::load_authentication_material_file(path);
+    if (!authentication) {
+        const auto context = authentication.error
+                                 ? authentication.error->context
+                                 : "Unable to load authentication material input";
+        if (authentication.error &&
+            (authentication.error->code ==
+                 hlclient::app::AuthenticationMaterialFileErrorCode::open_failed ||
+             authentication.error->code ==
+                 hlclient::app::AuthenticationMaterialFileErrorCode::read_failed)) {
+            throw std::runtime_error{context};
+        }
+        throw std::invalid_argument{context};
+    }
+    hlclient::goldsrc::ClientConnectionSettings settings;
+    settings.display_name = options.player_name;
+    settings.model = options.player_model;
+    auto prepared = hlclient::goldsrc::prepare_connect_request(
+        settings,
+        std::move(*authentication.material));
+    if (!prepared) {
+        throw std::invalid_argument{
+            prepared.error ? prepared.error->context
+                           : "Unable to prepare the bounded connect request"};
+    }
+    return std::move(*prepared.value);
+}
 
 int run_null_renderer(
     hlclient::client::IClientSceneSource& scene_source,
     const std::optional<std::uint64_t> configured_frame_limit,
-    ChallengeSession* const challenge_session)
+    HandshakeSession* const challenge_session)
 {
     hlclient::renderer::null::NullRenderer renderer;
     renderer.initialize();
@@ -499,7 +560,7 @@ int run_null_renderer(
 int run_opengl_renderer(
     hlclient::client::IClientSceneSource& scene_source,
     const std::optional<std::uint64_t> frame_limit,
-    ChallengeSession* const challenge_session)
+    HandshakeSession* const challenge_session)
 {
     [[maybe_unused]] hlclient::platform::SdlRuntime sdl_runtime;
     hlclient::core::log(LogLevel::info, "SDL initialized");
@@ -605,7 +666,7 @@ int run(const hlclient::core::CommandLineOptions& options)
     }
 
     BootstrapSceneSource scene_source;
-    std::unique_ptr<ChallengeSession> challenge_session;
+    std::unique_ptr<HandshakeSession> challenge_session;
     if (options.connect_endpoint) {
         const auto address = hlclient::network::NetworkAddress::parse(*options.connect_endpoint);
         if (!address || address->port() == 0) {
@@ -616,7 +677,16 @@ int run(const hlclient::core::CommandLineOptions& options)
         }
 
         scene_source.mutable_world_state().set_connection_requested(true);
-        challenge_session = std::make_unique<ChallengeSession>(*address, options.net_trace);
+        auto prepared_request = prepare_runtime_connect_request(options);
+        const auto stop_point =
+            options.stop_after == hlclient::core::ConnectionStopPoint::connect_request
+                ? hlclient::goldsrc::HandshakeStopPoint::connect_request
+                : hlclient::goldsrc::HandshakeStopPoint::challenge;
+        challenge_session = std::make_unique<HandshakeSession>(
+            *address,
+            stop_point,
+            std::move(prepared_request),
+            options.net_trace);
     }
 
     const auto frame_limit = smoke_test_frame_limit();

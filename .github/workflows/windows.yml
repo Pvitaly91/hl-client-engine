@@ -21,7 +21,7 @@ jobs:
           submodules: recursive
 
       - name: Configure Visual Studio solution
-        run: cmake --preset vs2022-win32
+        run: cmake --preset vs2022-win32 -DHLCLIENT_WARNINGS_AS_ERRORS=ON
 
       - name: Build Debug
         run: cmake --build --preset vs2022-win32-debug
@@ -33,5 +33,8 @@ jobs:
         shell: pwsh
         run: |
           & .\build\bin\Debug\hlclient.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\build\bin\Debug\hlclient.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\build\bin\Debug\hlclient.exe --renderer null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

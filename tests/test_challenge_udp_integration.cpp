@@ -37,7 +37,7 @@ using hlclient::network::UdpSocket;
     return result;
 }
 
-[[nodiscard]] std::vector<std::byte> fake_hlds_response(const std::int32_t challenge)
+[[nodiscard]] std::vector<std::byte> fake_hlds_response(const std::uint32_t challenge)
 {
     std::string packet{"\xFF\xFF\xFF\xFF", 4U};
     packet += "A00000000 ";

@@ -18,7 +18,7 @@
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "BUILD_TESTING": "ON",
-        "HLCLIENT_WARNINGS_AS_ERRORS": "OFF"
+        "HLCLIENT_WARNINGS_AS_ERRORS": "ON"
       }
     },
     {

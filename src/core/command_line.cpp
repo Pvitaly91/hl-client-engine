@@ -13,7 +13,9 @@ namespace {
 [[nodiscard]] bool needs_value(const std::string_view argument) noexcept
 {
     return argument == "--basedir" || argument == "--game" || argument == "--connect" ||
-           argument == "+connect" || argument == "--renderer";
+           argument == "+connect" || argument == "--renderer" ||
+           argument == "--stop-after" || argument == "--auth-material-file" ||
+           argument == "--name" || argument == "--model";
 }
 
 } // namespace
@@ -21,6 +23,8 @@ namespace {
 CommandLineParseResult parse_command_line(const std::span<const std::string_view> arguments)
 {
     CommandLineOptions options;
+    bool stop_after_seen = false;
+    bool connect_request_setting_seen = false;
 
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
@@ -61,9 +65,41 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 return failure("Unsupported renderer: " + std::string{value} +
                                " (expected opengl or null)");
             }
+        } else if (argument == "--stop-after") {
+            stop_after_seen = true;
+            if (value == "challenge") {
+                options.stop_after = ConnectionStopPoint::challenge;
+            } else if (value == "connect-request") {
+                options.stop_after = ConnectionStopPoint::connect_request;
+            } else {
+                return failure("Unsupported --stop-after value: " + std::string{value} +
+                               " (expected challenge or connect-request)");
+            }
+        } else if (argument == "--auth-material-file") {
+            connect_request_setting_seen = true;
+            options.authentication_material_file = std::string{value};
+        } else if (argument == "--name") {
+            connect_request_setting_seen = true;
+            options.player_name = std::string{value};
+        } else if (argument == "--model") {
+            connect_request_setting_seen = true;
+            options.player_model = std::string{value};
         } else {
             options.connect_endpoint = std::string{value};
         }
+    }
+
+    if ((stop_after_seen || connect_request_setting_seen) && !options.connect_endpoint) {
+        return failure("Connect-request options require --connect <ip:port>");
+    }
+    if (options.stop_after == ConnectionStopPoint::challenge &&
+        connect_request_setting_seen) {
+        return failure("--auth-material-file, --name, and --model require "
+                       "--stop-after connect-request");
+    }
+    if (options.stop_after == ConnectionStopPoint::connect_request &&
+        !options.authentication_material_file) {
+        return failure("--stop-after connect-request requires --auth-material-file");
     }
 
     return CommandLineParseResult{std::move(options), {}};
@@ -78,10 +114,18 @@ Options:
   --version           Show version information and exit
   --basedir <path>    Half-Life installation directory
   --game <directory>  Game directory below basedir (default: valve)
-  --connect <ip:port> Perform the M1 GoldSrc challenge-only exchange
+  --connect <ip:port> Start a GoldSrc handshake (challenge-only by default)
   +connect <ip:port>  GoldSrc-style alias for --connect
-  --net-trace         Log bounded, escaped network packet diagnostics
+  --stop-after <stage> Stop after challenge or connect-request (default: challenge)
+  --auth-material-file <path>
+                      Local 245-byte auth input for connect-request mode; never logged
+  --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
+  --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
+  --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
+
+Connect-request mode sends one request and exits without determining server
+acceptance. It does not implement authentication generation, netchan, or sign-on.
 )";
 }
 

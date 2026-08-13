@@ -136,7 +136,7 @@ public:
     return result;
 }
 
-[[nodiscard]] std::vector<std::byte> live_shape_challenge(const std::int32_t challenge)
+[[nodiscard]] std::vector<std::byte> live_shape_challenge(const std::uint32_t challenge)
 {
     std::string packet{"\xFF\xFF\xFF\xFF", 4U};
     packet += "A00000000 ";

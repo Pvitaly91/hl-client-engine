@@ -12,6 +12,11 @@ enum class RendererBackend {
     null,
 };
 
+enum class ConnectionStopPoint {
+    challenge,
+    connect_request,
+};
+
 struct CommandLineOptions {
     bool show_help{false};
     bool show_version{false};
@@ -19,6 +24,10 @@ struct CommandLineOptions {
     std::optional<std::string> base_directory;
     std::string game_directory{"valve"};
     std::optional<std::string> connect_endpoint;
+    ConnectionStopPoint stop_after{ConnectionStopPoint::challenge};
+    std::optional<std::string> authentication_material_file;
+    std::string player_name{"Player"};
+    std::string player_model{"ivan"};
     RendererBackend renderer{RendererBackend::opengl};
 };
 
