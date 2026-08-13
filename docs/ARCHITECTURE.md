@@ -14,17 +14,20 @@ by casting packet bytes to host structs.
 ## Non-negotiable data flow
 
 ```text
-GoldSrc packets -> ClientWorldState -> RenderScene -> Renderer
+GoldSrc network source --\
+                         +-> ClientWorldState -> RenderScene -> IRenderer
+hl.exe bridge source ----/                         |           |
+                                               OpenGL       Null
 ```
 
 Each arrow is a translation boundary:
 
 1. `hlclient_network` receives bytes without interpreting GoldSrc semantics.
 2. `hlclient_goldsrc` bounds-checks and decodes those bytes into protocol values.
-3. `hlclient_client` applies accepted messages to `ClientWorldState`, an
-   engine-owned representation of client-visible state.
-4. Client presentation code derives an immutable or frame-local `RenderScene`.
-5. A renderer consumes only `RenderScene` and renderer resources.
+3. A concrete `IClientSceneSource` applies accepted input to
+   `ClientWorldState`, an engine-owned representation of client-visible state.
+4. `hlclient_scene_api` derives an immutable or frame-local `RenderScene`.
+5. An `IRenderer` backend consumes only `RenderScene` and renderer resources.
 
 This is an invariant, not a suggested layering style. In particular:
 
@@ -42,9 +45,10 @@ The target design allows several state providers without contaminating the
 consumer side:
 
 ```text
-Standalone UDP/GoldSrc ----\
-Replay or test provider ----> ClientWorldState -> RenderScene -> Renderer
-hl.exe bridge -------------/
+GoldSrcNetworkSceneSource --\
+ReplaySceneSource -----------+-> ClientWorldState -> RenderScene -> IRenderer
+TestSceneSource -------------+
+HlInjectionSceneSource -----/
 ```
 
 The standalone provider owns connectionless queries, challenge/response,
@@ -63,8 +67,12 @@ private layouts.
 | `hlclient_network` | address values, Winsock lifetime, UDP transport | GoldSrc message meaning |
 | `hlclient_goldsrc` | byte readers/writers, compatibility constants, protocol/session work | OpenGL, UI, OS windowing |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
+| `hlclient_asset_api` | owning asset sources, neutral CPU assets, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
+| `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
+| `hlclient_scene_api` | scene-source contract and world-state-to-render-scene conversion | concrete network/injection providers, graphics calls |
 | `hlclient_renderer_api` | neutral render scene and renderer contract | SDL or GoldSrc headers in its public API |
 | `hlclient_renderer_opengl` | OpenGL 3.3 Core implementation using GLAD | packet parsing or client connection state |
+| `hlclient_renderer_null` | headless renderer lifecycle and frame statistics | SDL, OpenGL, GLAD, Winsock, SDK types |
 | `hlclient` | composition root and frame loop | reusable subsystem implementation |
 | `hlclient_tests` | deterministic unit/integration tests with local resources | public Internet or installed-game requirements |
 
@@ -93,8 +101,10 @@ files or narrowly scoped private headers, with `WIN32_LEAN_AND_MEAN` and
 
 `hlclient_renderer_api` owns the backend-neutral `RenderScene` and `Renderer`
 contract. `hlclient_renderer_opengl` implements that contract with OpenGL 3.3
-Core and the committed GLAD2 loader. Another renderer backend should be able to
-consume the same scene without changing GoldSrc decoding.
+Core and the committed GLAD2 loader. `hlclient_renderer_null` implements the
+same contract without SDL, a window, a graphics context, or a GPU. Another
+renderer backend must be able to consume the same scene without changing
+GoldSrc decoding.
 
 Resource handles crossing this boundary must be project-owned opaque values,
 not raw OpenGL names. Asset decoding should produce CPU-side formats before a
@@ -129,6 +139,23 @@ Asset formats (BSP, WAD, MDL, sprites, sounds) should have parser libraries that
 do not depend on SDL, the renderer, or a live network session. This makes them
 fuzzable and reusable by tests and tools.
 
+The M0.1 asset path is:
+
+```text
+IFileSystem -> AssetSource -> typed importer -> neutral CPU asset -> AssetManager
+```
+
+`AssetSource` owns its path and input bytes. Typed registries own importers and
+select them by signature/version/structure confidence followed by explicit
+priority; an unresolved tie is an error rather than a registration-order
+choice. Format modules are statically linked and registered explicitly by the
+composition root. See [Asset pipeline](ASSET_PIPELINE.md) for the complete
+selection and extension contract.
+
+There is no global registry, global constructor registration, renderer-side
+file parsing, or GPU handle in a neutral asset. Real GoldSrc format targets are
+deferred until their parsers are implemented.
+
 ## Clean-room and SDK boundary
 
 No runtime target may depend on `Pvitaly91/hl-engine`, its server code, or any
@@ -155,15 +182,30 @@ architecture and license review.
 order:
 
 1. parse command-line inputs and validate paths/endpoints;
-2. initialize SDL and native network runtime as required;
-3. create the SDL window and OpenGL context;
-4. create the renderer while that context is current;
-5. poll events and ingest provider state;
-6. advance `ClientWorldState` using a monotonic time step;
-7. derive `RenderScene`, render, and present;
-8. destroy renderer resources before destroying the GL context;
-9. release network and SDL runtimes.
+2. create the filesystem, `AssetImporterRegistries`, and `AssetManager` when a
+   game root is available;
+3. explicitly register compiled-in format implementations (none exist in
+   M0.1);
+4. select the built-in OpenGL or null renderer;
+5. for OpenGL only, initialize SDL and create the window/context before the
+   renderer;
+6. poll events where applicable and update a scene source;
+7. derive `RenderScene` from its `ClientWorldState`, render, and present;
+8. shut down renderer resources before their platform dependencies.
 
 Partially initialized states must unwind safely through RAII. Logging and error
 messages should identify the failed boundary without exposing secrets or
 turning malformed remote data into a process crash.
+
+## Module and plugin policy
+
+The current product is a modular monolith: one executable, separate static
+CMake targets, narrow public contracts, and explicit construction and
+registration in `apps/hlclient`. This avoids committing to a C++ DLL ABI while
+the APIs are still changing.
+
+After stabilization, optional runtime plugins may use a versioned C ABI. That
+future ABI must not pass STL containers, `std::string`, iterators, C++
+exceptions, C++ virtual objects across different toolsets, or memory without an
+explicit allocator and ownership contract. M0.1 does not implement a loader or
+that ABI.

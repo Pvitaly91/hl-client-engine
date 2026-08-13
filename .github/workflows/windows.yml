@@ -29,8 +29,9 @@ jobs:
       - name: Run tests
         run: ctest --preset vs2022-win32-debug
 
-      - name: Verify command-line startup and SDL runtime deployment
+      - name: Verify command-line and headless startup
         shell: pwsh
         run: |
           & .\build\bin\Debug\hlclient.exe --version
           & .\build\bin\Debug\hlclient.exe --help
+          & .\build\bin\Debug\hlclient.exe --renderer null

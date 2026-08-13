@@ -5,13 +5,15 @@ its behavior is covered by deterministic tests and still preserves the
 architecture invariant:
 
 ```text
-GoldSrc packets -> ClientWorldState -> RenderScene -> Renderer
+IClientSceneSource -> ClientWorldState -> RenderScene -> IRenderer
 ```
 
 The Windows x86 Visual Studio 2022 acceptance build remains required throughout
 the roadmap. Later platform support may be additive.
 
 ## M0 — Project/bootstrap
+
+**Status: completed.**
 
 **Goal:** establish a debuggable Win32 foundation without pretending that a
 network protocol client already exists.
@@ -44,7 +46,52 @@ Exit criteria:
 - CTest passes in Win32 Debug;
 - command-line help/version paths run without an installed Half-Life copy.
 
+## M0.1 — Modular assets, formats, and scene sources
+
+**Status: completed.**
+
+**Goal:** establish replaceable asset-format, filesystem, scene-source, and
+renderer-backend contracts before implementing any real GoldSrc parser or
+connection state machine.
+
+Deliverables:
+
+- owning `AssetSource` values and neutral `ModelAsset`, `WorldAsset`,
+  `SpriteAsset`, `ImageAsset`, and `AudioAsset` CPU representations;
+- typed importer interfaces and owned model/world/sprite/image/audio
+  registries;
+- deterministic signature/version/structure probing, confidence and explicit
+  priority selection, and distinct unsupported/ambiguous errors;
+- virtual filesystem read boundary and an `AssetManager` with typed load
+  operations;
+- `IClientSceneSource` and the existing
+  `ClientWorldState -> RenderScene` conversion as a reusable component;
+- a headless `NullRenderer` implementing the existing `IRenderer` boundary;
+- explicit `--renderer opengl|null` selection in the application composition
+  root;
+- synthetic importer, in-memory filesystem, scene-source, null-renderer, and
+  CLI tests that need no game assets, display, or GPU;
+- static CMake modules grouped under Assets, Client, and Renderer in the
+  Visual Studio solution;
+- documented extension rules and a future versioned C ABI plugin direction.
+
+Explicitly not included: GoldSrc BSP/MDL/SPR/WAD/WAV implementations, GPU
+asset upload, caching or streaming, runtime DLL plugins, connectionless
+protocol, sign-on, resource download, injection, or gameplay.
+
+Exit criteria:
+
+- a synthetic format can be registered and loaded without changing renderer,
+  networking, or client-world types;
+- equal confidence and priority fail as ambiguous instead of depending on
+  registration order;
+- `hlclient --renderer null` completes headlessly while the OpenGL path still
+  renders normally;
+- Visual Studio 2022 / Win32 / Debug and all deterministic CTest tests pass.
+
 ## M1 — Connectionless protocol
+
+**Status: next.**
 
 **Goal:** interoperate with the connectionless discovery/challenge surface of an
 original HLDS without entering the stateful sign-on channel.

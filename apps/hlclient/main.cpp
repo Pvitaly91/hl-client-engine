@@ -1,14 +1,18 @@
+#include <hlclient/assets/asset_importer_registry.hpp>
+#include <hlclient/assets/asset_manager.hpp>
+#include <hlclient/client/client_scene_source.hpp>
 #include <hlclient/client/client_world_state.hpp>
 #include <hlclient/core/command_line.hpp>
 #include <hlclient/core/log.hpp>
 #include <hlclient/core/version.hpp>
 #include <hlclient/filesystem/game_paths.hpp>
+#include <hlclient/filesystem/rooted_file_system.hpp>
 #include <hlclient/goldsrc/compatibility.hpp>
 #include <hlclient/network/network_address.hpp>
 #include <hlclient/platform/sdl_runtime.hpp>
 #include <hlclient/platform/sdl_window.hpp>
+#include <hlclient/renderer/null/null_renderer.hpp>
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
-#include <hlclient/renderer/render_scene.hpp>
 
 #include <charconv>
 #include <chrono>
@@ -40,6 +44,29 @@
 namespace {
 
 using hlclient::core::LogLevel;
+
+class BootstrapSceneSource final : public hlclient::client::IClientSceneSource {
+public:
+    [[nodiscard]] hlclient::client::SceneUpdateResult update(
+        const hlclient::client::FrameTime elapsed) override
+    {
+        world_state_.advance(elapsed);
+        return {};
+    }
+
+    [[nodiscard]] const hlclient::client::ClientWorldState& world_state() const noexcept override
+    {
+        return world_state_;
+    }
+
+    [[nodiscard]] hlclient::client::ClientWorldState& mutable_world_state() noexcept
+    {
+        return world_state_;
+    }
+
+private:
+    hlclient::client::ClientWorldState world_state_;
+};
 
 [[nodiscard]] std::vector<std::string> command_line_arguments(
     const int argument_count,
@@ -203,57 +230,50 @@ void print_version()
     return frames;
 }
 
-[[nodiscard]] hlclient::renderer::RenderScene build_render_scene(
-    const hlclient::client::ClientWorldState& world_state) noexcept
+void log_renderer_information(const hlclient::renderer::IRenderer& renderer)
 {
-    hlclient::renderer::RenderScene scene;
-    if (world_state.connection_requested()) {
-        scene.clear_color.blue = 0.14F;
-    }
-    return scene;
+    const auto& renderer_info = renderer.information();
+    hlclient::core::log(LogLevel::info, "Renderer vendor: " + renderer_info.vendor);
+    hlclient::core::log(LogLevel::info, "Renderer: " + renderer_info.device);
+    hlclient::core::log(LogLevel::info, "Renderer version: " + renderer_info.version);
 }
 
-int run(const hlclient::core::CommandLineOptions& options)
+int run_null_renderer(
+    hlclient::client::IClientSceneSource& scene_source,
+    const std::optional<std::uint64_t> configured_frame_limit)
 {
-    print_version();
-    std::cout << '\n' << std::flush;
+    hlclient::renderer::null::NullRenderer renderer;
+    renderer.initialize();
+    log_renderer_information(renderer);
+    hlclient::core::log(LogLevel::info, "Client bootstrap complete");
 
-    if (options.base_directory) {
-        const auto paths = hlclient::filesystem::validate_game_paths(
-            path_from_utf8(*options.base_directory),
-            path_from_utf8(options.game_directory));
-        if (!paths) {
-            hlclient::core::log(LogLevel::error, paths.error);
-            return 1;
+    const std::uint64_t frame_limit = configured_frame_limit.value_or(1);
+    auto previous_time = std::chrono::steady_clock::now();
+    for (std::uint64_t frame = 0; frame < frame_limit; ++frame) {
+        const auto current_time = std::chrono::steady_clock::now();
+        const auto update = scene_source.update(current_time - previous_time);
+        if (!update) {
+            throw std::runtime_error{"Scene update failed: " + update.error};
         }
-        hlclient::core::log(
-            LogLevel::info,
-            "Half-Life game directory: " + path_as_utf8(paths.paths->game_directory));
-    } else {
-        hlclient::core::log(
-            LogLevel::info,
-            "No Half-Life basedir selected; starting without game assets");
+        previous_time = current_time;
+        renderer.render(hlclient::client::build_render_scene(scene_source.world_state()), {});
     }
 
-    hlclient::client::ClientWorldState world_state;
-    if (options.connect_endpoint) {
-        const auto address = hlclient::network::NetworkAddress::parse(*options.connect_endpoint);
-        if (!address || address->port() == 0) {
-            hlclient::core::log(
-                LogLevel::error,
-                "Invalid IPv4 endpoint for --connect: " + *options.connect_endpoint);
-            return 1;
-        }
-
-        const hlclient::goldsrc::ConnectionIntent connection{*address};
-        world_state.set_connection_requested(true);
-        hlclient::core::log(
-            LogLevel::info,
-            "Requested GoldSrc server: " + connection.server().to_string());
-        hlclient::core::log(LogLevel::warning, hlclient::goldsrc::ConnectionIntent::status());
+    hlclient::core::log(
+        LogLevel::info,
+        "Null renderer completed " +
+            std::to_string(renderer.statistics().rendered_frames) + " frame(s)");
+    renderer.shutdown();
+    if (!renderer.statistics().shutdown) {
+        throw std::logic_error{"Null renderer failed to shut down"};
     }
+    return 0;
+}
 
-    const auto frame_limit = smoke_test_frame_limit();
+int run_opengl_renderer(
+    hlclient::client::IClientSceneSource& scene_source,
+    const std::optional<std::uint64_t> frame_limit)
+{
     [[maybe_unused]] hlclient::platform::SdlRuntime sdl_runtime;
     hlclient::core::log(LogLevel::info, "SDL initialized");
 
@@ -266,10 +286,7 @@ int run(const hlclient::core::CommandLineOptions& options)
 
     // Declared after the window so its glad loader is released before the GL context is destroyed.
     hlclient::renderer::opengl::OpenGlRenderer renderer;
-    const auto& renderer_info = renderer.information();
-    hlclient::core::log(LogLevel::info, "Renderer vendor: " + renderer_info.vendor);
-    hlclient::core::log(LogLevel::info, "Renderer: " + renderer_info.device);
-    hlclient::core::log(LogLevel::info, "OpenGL: " + renderer_info.version);
+    log_renderer_information(renderer);
     hlclient::core::log(LogLevel::info, "Client bootstrap complete");
 
     auto previous_time = std::chrono::steady_clock::now();
@@ -287,12 +304,16 @@ int run(const hlclient::core::CommandLineOptions& options)
         }
 
         const auto current_time = std::chrono::steady_clock::now();
-        world_state.advance(current_time - previous_time);
+        const auto update = scene_source.update(current_time - previous_time);
+        if (!update) {
+            throw std::runtime_error{"Scene update failed: " + update.error};
+        }
         previous_time = current_time;
 
         const auto extent = window.pixel_extent();
-        const auto scene = build_render_scene(world_state);
-        renderer.render(scene, hlclient::renderer::RenderExtent{extent.width, extent.height});
+        renderer.render(
+            hlclient::client::build_render_scene(scene_source.world_state()),
+            hlclient::renderer::RenderExtent{extent.width, extent.height});
         window.swap_buffers();
 
         ++rendered_frames;
@@ -302,6 +323,73 @@ int run(const hlclient::core::CommandLineOptions& options)
     }
 
     return 0;
+}
+
+int run(const hlclient::core::CommandLineOptions& options)
+{
+    print_version();
+    std::cout << '\n' << std::flush;
+
+    hlclient::assets::AssetImporterRegistries asset_importers;
+    std::unique_ptr<hlclient::filesystem::RootedFileSystem> asset_file_system;
+    [[maybe_unused]] std::unique_ptr<hlclient::assets::AssetManager> asset_manager;
+    if (options.base_directory) {
+        const auto paths = hlclient::filesystem::validate_game_paths(
+            path_from_utf8(*options.base_directory),
+            path_from_utf8(options.game_directory));
+        if (!paths) {
+            hlclient::core::log(LogLevel::error, paths.error);
+            return 1;
+        }
+        hlclient::core::log(
+            LogLevel::info,
+            "Half-Life game directory: " + path_as_utf8(paths.paths->game_directory));
+
+        auto file_system_result =
+            hlclient::filesystem::RootedFileSystem::create(paths.paths->game_directory);
+        if (!file_system_result) {
+            hlclient::core::log(
+                LogLevel::error,
+                file_system_result.error ? file_system_result.error->context
+                                         : "Unable to create the asset filesystem");
+            return 1;
+        }
+        asset_file_system = std::move(file_system_result.file_system);
+        asset_manager = std::make_unique<hlclient::assets::AssetManager>(
+            *asset_file_system,
+            asset_importers);
+        hlclient::core::log(
+            LogLevel::info,
+            "Asset pipeline initialized; no production format importers are registered in M0.1");
+    } else {
+        hlclient::core::log(
+            LogLevel::info,
+            "No Half-Life basedir selected; starting without game assets");
+    }
+
+    BootstrapSceneSource scene_source;
+    if (options.connect_endpoint) {
+        const auto address = hlclient::network::NetworkAddress::parse(*options.connect_endpoint);
+        if (!address || address->port() == 0) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Invalid IPv4 endpoint for --connect: " + *options.connect_endpoint);
+            return 1;
+        }
+
+        const hlclient::goldsrc::ConnectionIntent connection{*address};
+        scene_source.mutable_world_state().set_connection_requested(true);
+        hlclient::core::log(
+            LogLevel::info,
+            "Requested GoldSrc server: " + connection.server().to_string());
+        hlclient::core::log(LogLevel::warning, hlclient::goldsrc::ConnectionIntent::status());
+    }
+
+    const auto frame_limit = smoke_test_frame_limit();
+    if (options.renderer == hlclient::core::RendererBackend::null) {
+        return run_null_renderer(scene_source, frame_limit);
+    }
+    return run_opengl_renderer(scene_source, frame_limit);
 }
 
 int application_main(const int argument_count,

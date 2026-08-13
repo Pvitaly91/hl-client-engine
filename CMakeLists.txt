@@ -74,11 +74,39 @@ target_link_libraries(hlclient_platform PRIVATE hlclient::core SDL3::SDL3-shared
 
 hlclient_add_library(
     hlclient_filesystem
+    include/hlclient/filesystem/file_system.hpp
     include/hlclient/filesystem/game_paths.hpp
+    include/hlclient/filesystem/rooted_file_system.hpp
     src/filesystem/game_paths.cpp
+    src/filesystem/rooted_file_system.cpp
 )
 add_library(hlclient::filesystem ALIAS hlclient_filesystem)
 target_link_libraries(hlclient_filesystem PRIVATE hlclient::core)
+
+hlclient_add_library(
+    hlclient_asset_api
+    include/hlclient/assets/asset_importer.hpp
+    include/hlclient/assets/asset_importer_registry.hpp
+    include/hlclient/assets/asset_source.hpp
+    include/hlclient/assets/asset_types.hpp
+    src/assets/asset_source.cpp
+)
+add_library(hlclient::asset_api ALIAS hlclient_asset_api)
+target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
+set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
+
+hlclient_add_library(
+    hlclient_asset_manager
+    include/hlclient/assets/asset_manager.hpp
+    src/assets/asset_manager.cpp
+)
+add_library(hlclient::asset_manager ALIAS hlclient_asset_manager)
+target_link_libraries(
+    hlclient_asset_manager
+    PUBLIC hlclient::asset_api hlclient::filesystem
+    PRIVATE hlclient::core
+)
+set_property(TARGET hlclient_asset_manager PROPERTY FOLDER "Engine/Assets")
 
 hlclient_add_library(
     hlclient_network
@@ -118,7 +146,8 @@ hlclient_add_library(
     src/client/client_world_state.cpp
 )
 add_library(hlclient::client ALIAS hlclient_client)
-target_link_libraries(hlclient_client PRIVATE hlclient::core hlclient::goldsrc)
+target_link_libraries(hlclient_client PRIVATE hlclient::core)
+set_property(TARGET hlclient_client PROPERTY FOLDER "Engine/Client")
 
 hlclient_add_library(
     hlclient_renderer_api
@@ -128,6 +157,33 @@ hlclient_add_library(
 )
 add_library(hlclient::renderer_api ALIAS hlclient_renderer_api)
 target_link_libraries(hlclient_renderer_api PRIVATE hlclient::core)
+set_property(TARGET hlclient_renderer_api PROPERTY FOLDER "Engine/Renderer")
+
+hlclient_add_library(
+    hlclient_scene_api
+    include/hlclient/client/client_scene_source.hpp
+    src/client/client_scene_source.cpp
+)
+add_library(hlclient::scene_api ALIAS hlclient_scene_api)
+target_link_libraries(
+    hlclient_scene_api
+    PUBLIC hlclient::client hlclient::renderer_api
+    PRIVATE hlclient::core
+)
+set_property(TARGET hlclient_scene_api PROPERTY FOLDER "Engine/Client")
+
+hlclient_add_library(
+    hlclient_renderer_null
+    include/hlclient/renderer/null/null_renderer.hpp
+    src/renderer/null/null_renderer.cpp
+)
+add_library(hlclient::renderer_null ALIAS hlclient_renderer_null)
+target_link_libraries(
+    hlclient_renderer_null
+    PUBLIC hlclient::renderer_api
+    PRIVATE hlclient::core
+)
+set_property(TARGET hlclient_renderer_null PROPERTY FOLDER "Engine/Renderer")
 
 hlclient_add_library(
     hlclient_renderer_opengl
@@ -140,6 +196,7 @@ target_link_libraries(
     PUBLIC hlclient::renderer_api
     PRIVATE hlclient::platform hlclient::glad OpenGL::GL
 )
+set_property(TARGET hlclient_renderer_opengl PROPERTY FOLDER "Engine/Renderer")
 
 add_executable(hlclient apps/hlclient/main.cpp)
 hlclient_enable_warnings(hlclient)
@@ -149,10 +206,14 @@ target_link_libraries(
         hlclient::core
         hlclient::platform
         hlclient::filesystem
+        hlclient::asset_api
+        hlclient::asset_manager
         hlclient::network
         hlclient::goldsrc
         hlclient::client
+        hlclient::scene_api
         hlclient::renderer_api
+        hlclient::renderer_null
         hlclient::renderer_opengl
 )
 set_target_properties(

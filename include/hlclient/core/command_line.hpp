@@ -7,12 +7,18 @@
 
 namespace hlclient::core {
 
+enum class RendererBackend {
+    opengl,
+    null,
+};
+
 struct CommandLineOptions {
     bool show_help{false};
     bool show_version{false};
     std::optional<std::string> base_directory;
     std::string game_directory{"valve"};
     std::optional<std::string> connect_endpoint;
+    RendererBackend renderer{RendererBackend::opengl};
 };
 
 struct CommandLineParseResult {

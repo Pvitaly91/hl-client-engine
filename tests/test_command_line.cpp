@@ -9,6 +9,7 @@
 namespace {
 
 using hlclient::core::parse_command_line;
+using hlclient::core::RendererBackend;
 
 TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
 {
@@ -22,6 +23,7 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     CHECK_FALSE(result.options->base_directory.has_value());
     CHECK(result.options->game_directory == "valve");
     CHECK_FALSE(result.options->connect_endpoint.has_value());
+    CHECK(result.options->renderer == RendererBackend::opengl);
     CHECK(result.error.empty());
 }
 
@@ -64,6 +66,42 @@ TEST_CASE("Command line parser accepts the long connect spelling", "[core][comma
     CHECK(*result.options->connect_endpoint == "192.0.2.10:27016");
 }
 
+TEST_CASE("Command line parser selects a renderer backend", "[core][command-line]")
+{
+    SECTION("null renderer")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"},
+            std::string_view{"null"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->renderer == RendererBackend::null);
+    }
+
+    SECTION("unsupported renderer")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"},
+            std::string_view{"software"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("Unsupported renderer") != std::string::npos);
+    }
+
+    SECTION("missing renderer name")
+    {
+        const std::array arguments{std::string_view{"--renderer"}};
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("Missing value") != std::string::npos);
+    }
+}
+
 TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
 {
     SECTION("unknown option")
@@ -102,6 +140,7 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("--game") != std::string_view::npos);
     CHECK(help.find("--connect") != std::string_view::npos);
     CHECK(help.find("+connect") != std::string_view::npos);
+    CHECK(help.find("--renderer") != std::string_view::npos);
 }
 
 } // namespace

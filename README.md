@@ -6,10 +6,11 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository is currently at **M0: project/bootstrap**. It opens a real SDL3
-window, creates an OpenGL 3.3 Core context, initializes a GLAD2 loader, renders
-a minimal frame loop, validates basic command-line and filesystem inputs, and
-contains local-only unit tests. It does **not** yet send `getchallenge`, perform
+The repository is currently at **M0.1: modular assets, formats, and scene
+sources**. In addition to the M0 SDL3/OpenGL bootstrap, it provides a virtual
+filesystem boundary, typed asset importer registries, neutral CPU assets, an
+asset manager, a scene-source contract, and a headless null renderer. It does
+**not** yet implement a real GoldSrc asset parser, send `getchallenge`, perform
 `connect` or sign-on, download resources, decode entity snapshots, or implement
 gameplay. `--connect` currently validates and records an IPv4 endpoint only.
 
@@ -104,7 +105,13 @@ The bootstrap can also run without Half-Life assets:
 .\build\bin\Debug\hlclient.exe
 .\build\bin\Debug\hlclient.exe --help
 .\build\bin\Debug\hlclient.exe --version
+.\build\bin\Debug\hlclient.exe --renderer null
 ```
+
+`--renderer opengl` is the default and retains the interactive SDL window.
+`--renderer null` runs a bounded headless frame without creating SDL, a window,
+an OpenGL context, or a GPU resource. `HLCLIENT_SMOKE_TEST_FRAMES` can set an
+explicit bounded frame count for either backend during smoke testing.
 
 To validate a user-owned Half-Life installation and a future connection target:
 
@@ -118,10 +125,15 @@ they are licensed to use.
 
 ## Architecture
 
-The central data-flow invariant is:
+The central data-flow invariants are:
 
 ```text
-GoldSrc packets -> ClientWorldState -> RenderScene -> Renderer
+Virtual filesystem -> Format importer -> Neutral CPU asset -> Asset manager
+
+GoldSrc network source --\
+                         +-> ClientWorldState -> RenderScene -> IRenderer
+hl.exe bridge source ----/                         |           |
+                                               OpenGL       Null
 ```
 
 The renderer must never parse packets or include GoldSrc networking structures.
@@ -136,12 +148,15 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
 - `hlclient`;
 - `hlclient_core`, `hlclient_platform`, `hlclient_filesystem`;
 - `hlclient_network`, `hlclient_goldsrc`, `hlclient_client`;
-- `hlclient_renderer_api`, `hlclient_renderer_opengl`;
+- `hlclient_asset_api`, `hlclient_asset_manager`, `hlclient_scene_api`;
+- `hlclient_renderer_api`, `hlclient_renderer_opengl`,
+  `hlclient_renderer_null`;
 - `hlclient_tests`;
 - SDL3, Catch2, GLAD2, and the Half-Life SDK reference target under
   `ThirdParty`.
 
-See [Architecture](docs/ARCHITECTURE.md), [Building](docs/BUILDING.md),
+See [Architecture](docs/ARCHITECTURE.md),
+[Asset pipeline](docs/ASSET_PIPELINE.md), [Building](docs/BUILDING.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
 

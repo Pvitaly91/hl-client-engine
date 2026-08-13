@@ -169,7 +169,7 @@ also done for Release and RelWithDebInfo. GLAD2 is a static project target and
 has no runtime DLL. Windows supplies `opengl32.dll`; the installed graphics
 driver must provide an OpenGL 3.3 Core-capable implementation.
 
-No project resources need to be copied for the M0 bootstrap. Half-Life assets
+No project resources need to be copied for the M0.1 bootstrap. Half-Life assets
 are optional unless `--basedir` is supplied, and are never copied into the build
 tree automatically.
 
@@ -178,8 +178,13 @@ tree automatically.
 ```powershell
 .\build\bin\Debug\hlclient.exe --version
 .\build\bin\Debug\hlclient.exe --help
+.\build\bin\Debug\hlclient.exe --renderer null
 .\build\bin\Debug\hlclient.exe
 ```
+
+The null renderer is headless and completes a bounded frame by default. It does
+not initialize SDL or require a display, OpenGL driver, or GPU, which makes it
+the runtime smoke path used by CI.
 
 The application can start with no game installation. To validate an installation:
 
@@ -193,7 +198,7 @@ To exercise endpoint parsing for future networking:
 .\build\bin\Debug\hlclient.exe --connect 127.0.0.1:27015
 ```
 
-That option does not contact a server in M0. Both spellings are accepted:
+That option does not contact a server in M0.1. Both spellings are accepted:
 
 ```text
 --connect <IPv4:port>
@@ -208,9 +213,9 @@ $env:HLCLIENT_SMOKE_TEST_FRAMES = "3"
 Remove-Item Env:HLCLIENT_SMOKE_TEST_FRAMES
 ```
 
-This still requires a usable graphical desktop and OpenGL driver. CI uses the
-non-windowing `--version` and `--help` paths instead of assuming that a hosted
-runner has a suitable interactive graphics session.
+This OpenGL smoke still requires a usable graphical desktop and OpenGL driver.
+CI uses `--version`, `--help`, and `--renderer null` instead of assuming that a
+hosted runner has a suitable interactive graphics session.
 
 ## Build options
 

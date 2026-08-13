@@ -1,18 +1,25 @@
 add_executable(hlclient_tests
+    test_asset_manager.cpp
+    test_asset_registry.cpp
     test_byte_io.cpp
     test_command_line.cpp
     test_game_paths.cpp
     test_network_address.cpp
+    test_scene_source.cpp
     test_udp_socket.cpp
 )
 
 target_link_libraries(hlclient_tests
     PRIVATE
         Catch2::Catch2WithMain
+        hlclient_asset_api
+        hlclient_asset_manager
         hlclient_core
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_network
+        hlclient_scene_api
+        hlclient_renderer_null
 )
 
 target_compile_features(hlclient_tests PRIVATE cxx_std_20)
@@ -34,3 +41,15 @@ else()
     add_test(NAME hlclient_tests COMMAND hlclient_tests)
     set_tests_properties(hlclient_tests PROPERTIES TIMEOUT 30)
 endif()
+
+add_test(
+    NAME hlclient_null_renderer_smoke
+    COMMAND $<TARGET_FILE:hlclient> --renderer null
+)
+set_tests_properties(
+    hlclient_null_renderer_smoke
+    PROPERTIES
+        ENVIRONMENT "HLCLIENT_SMOKE_TEST_FRAMES=2"
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
