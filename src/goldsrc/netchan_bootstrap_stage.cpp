@@ -216,6 +216,16 @@ const NetchanSession& NetchanBootstrapStage::session() const noexcept
     return session_;
 }
 
+NetchanSession* NetchanBootstrapStage::persistent_session() noexcept
+{
+    return state_ == NetchanBootstrapState::complete ? &session_ : nullptr;
+}
+
+const NetchanSession* NetchanBootstrapStage::persistent_session() const noexcept
+{
+    return state_ == NetchanBootstrapState::complete ? &session_ : nullptr;
+}
+
 bool NetchanBootstrapStage::validate_start(
     const NetchanBootstrapTimePoint now,
     const network::NetworkAddress& expected_local_endpoint)
@@ -608,33 +618,10 @@ bool NetchanBootstrapStage::process_target_datagram(
         &header,
         encoded_body_size);
 
-    auto inspected = session_.inspect_incoming(header);
-    if (!inspected || !inspected.inspection) {
-        const auto session_code = inspected.error
-                                      ? std::optional{inspected.error->code}
-                                      : std::nullopt;
-        const auto code = session_code && acknowledgement_error(*session_code)
-                              ? NetchanBootstrapErrorCode::invalid_acknowledgement
-                              : NetchanBootstrapErrorCode::invalid_sequence;
-        fail(
-            NetchanBootstrapState::protocol_error,
-            code,
-            std::nullopt,
-            session_code,
-            code == NetchanBootstrapErrorCode::invalid_acknowledgement
-                ? "Netchan packet carries an impossible acknowledgement"
-                : "Netchan session rejected the incoming header",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size,
-            &header,
-            encoded_body_size);
-        return false;
-    }
-    auto inspection = std::move(*inspected.inspection);
-    if (inspection.disposition() ==
-        NetchanIncomingSequenceDisposition::half_range_ambiguous) {
+    const auto sequence_disposition = compare_sequences(
+        header.sequence.sequence,
+        session_.state().incoming_sequence);
+    if (sequence_disposition == NetchanSequenceComparison::half_range_ambiguous) {
         fail(
             NetchanBootstrapState::protocol_error,
             NetchanBootstrapErrorCode::invalid_sequence,
@@ -649,9 +636,8 @@ bool NetchanBootstrapStage::process_target_datagram(
             encoded_body_size);
         return false;
     }
-    if (!inspection.should_commit()) {
-        const auto ignored = inspection.disposition() ==
-                                     NetchanIncomingSequenceDisposition::duplicate
+    if (sequence_disposition != NetchanSequenceComparison::newer) {
+        const auto ignored = sequence_disposition == NetchanSequenceComparison::equal
                                  ? NetchanBootstrapTraceClassification::
                                        duplicate_sequence_ignored
                                  : NetchanBootstrapTraceClassification::
@@ -731,6 +717,50 @@ bool NetchanBootstrapStage::process_target_datagram(
         emit_trace(
             NetchanBootstrapTraceClassification::fragmented_payload_pending_m2_3_3,
             now,
+            remote_endpoint_,
+            datagram_size,
+            &packet.header,
+            packet.payload.size());
+        return false;
+    }
+
+    // Fragmented traffic is a strict M2.3.3 boundary and must not enter ACK or
+    // reliable lifecycle validation. Only a fully decoded newer unfragmented
+    // packet may inspect and later commit persistent session state.
+    auto inspected = session_.inspect_incoming(packet.header);
+    if (!inspected || !inspected.inspection) {
+        const auto session_code = inspected.error
+                                      ? std::optional{inspected.error->code}
+                                      : std::nullopt;
+        const auto code = session_code && acknowledgement_error(*session_code)
+                              ? NetchanBootstrapErrorCode::invalid_acknowledgement
+                              : NetchanBootstrapErrorCode::invalid_sequence;
+        fail(
+            NetchanBootstrapState::protocol_error,
+            code,
+            std::nullopt,
+            session_code,
+            code == NetchanBootstrapErrorCode::invalid_acknowledgement
+                ? "Netchan packet carries an impossible acknowledgement"
+                : "Netchan session rejected the incoming header",
+            now,
+            NetchanBootstrapTraceClassification::protocol_failure,
+            remote_endpoint_,
+            datagram_size,
+            &packet.header,
+            packet.payload.size());
+        return false;
+    }
+    auto inspection = std::move(*inspected.inspection);
+    if (!inspection.should_commit()) {
+        fail(
+            NetchanBootstrapState::protocol_error,
+            NetchanBootstrapErrorCode::invalid_sequence,
+            std::nullopt,
+            NetchanSessionErrorCode::incoming_not_newer,
+            "Decoded netchan sequence changed before session inspection",
+            now,
+            NetchanBootstrapTraceClassification::protocol_failure,
             remote_endpoint_,
             datagram_size,
             &packet.header,

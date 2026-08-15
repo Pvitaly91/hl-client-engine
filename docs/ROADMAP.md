@@ -214,23 +214,84 @@ sign-on/application content and is not reproduced. Project `hlclient` to stock
 HLDS remains pending because there is no production Steam authentication
 provider and M2.3.1 does not invent that opaque body.
 
-There is no production reliable queue, retransmission lifecycle, fragment
-reassembly, file stream, `svc_*` parser, `ClientWorldState` update, or renderer
-work in M2.3.1. See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for the labeled
-sanitized profile and implementation boundary.
+M2.3.1 deliberately stopped before the reliable queue and retransmission
+lifecycle implemented by M2.3.2 below. Fragment reassembly, file streams,
+`svc_*` parsing, `ClientWorldState` updates, and renderer work remain outside
+M2.3.1. See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for the labeled sanitized
+profile and implementation boundary.
 
 ### M2.3.2 — Reliable channel state and retransmission
 
-**Status: next after M2.3.1.**
+**Status: completed for the bounded stock profile, persistent
+transport-independent session, and exact fake-HLDS UDP scope below.**
 
-Implement a bounded reliable send/receive lifecycle, acknowledgement-driven
-buffer retirement, explicit retransmission policy, reliable-toggle handling,
-and deterministic loss/duplicate/reorder tests without interpreting payload
-messages.
+The primary clean-room evidence contains exactly 16 `bounded_complete` stock
+client/stock HLDS research runs: two each for baseline/two generations,
+drop-first reliable, the no-server-ACK timer control, drop-first server ACK,
+duplicate reliable, stale-ACK replay, drop-second distinct reliable, and
+drop-first-two transmissions. Three separate baseline runs exercised the
+strict metadata-only verifier end to end and their summaries satisfy its
+strengthened baseline accounting rules. The 16 research captures are not
+claimed to have run through that later strengthened wrapper; no raw datagram,
+authentication/identity byte, or opaque payload is tracked.
+
+Stock-confirmed results are scoped precisely:
+
+- sequence bit 31 is reliable-payload presence, not generation;
+- acknowledgement bit 31 carries the alternating acknowledged generation;
+- retransmission is requested by an advancing wrong-generation ACK that is
+  numerically past `most_recent_sent_sequence` in the captured non-wrap range,
+  not by an observed time-only deadline, and is emitted at the next transmit
+  opportunity;
+- `first_sent_sequence` remains the lifecycle origin while every successful
+  retry advances `most_recent_sent_sequence`;
+- retries keep presence and generation, retain canonical decoded bytes, and
+  remunge them under the fresh sequence key;
+- matching-generation covering ACKs clear; lost ACK, duplicate datagram, two
+  generations, second-message loss, multi-loss, and stale-generation behavior
+  were repeated twice.
+
+The project implements one bounded pending-next accumulator, at most one owning
+in-flight canonical message, deterministic A/B preservation, alternating
+generation, incoming reliable-ACK state, 30-bit wrap-safe comparison, and
+read-only prepare followed by successful-send commit. Default datagrams are
+4,096 bytes, the default unfragmented reliable limit is 4,088 bytes, and the
+hard pending limit is 16,376 bytes. Oversize reliable data remains pending
+behind the typed M2.3.3 boundary; failed, abandoned, stale, or foreign
+transactions do not partially advance state. Applying the trigger and clearing
+relations across wrap is deterministic project-tested behavior; exact stock
+behavior at wrap remains pending.
+
+The exact matching-generation ACK between first and most-recent send could not
+be isolated in stock traffic, so latest-send coverage is a project fail-closed
+clearing rule. Reliable-prefix/current-unreliable-suffix composition is a
+deterministic, secondary-informed project policy because the opaque stock byte
+boundary was not independently isolated. These policies are documented rather
+than promoted to stock facts.
+
+The fake-HLDS real-UDP integration reuses the full
+challenge/connect/`ACCEPT`/byte-exact-first-ACK socket, source endpoint, and
+coordinator-owned session. It confirms one canonical outgoing reliable
+send/covering-ACK clear with no extra transmission and one owning incoming
+reliable marker with the correct ACK bit plus duplicate/older delivery once.
+Loss, lost-ACK, and pending A/B remain deterministic driver tests, not further
+real-UDP claims. Live `hlclient` to stock HLDS is still pending because no
+production Steam authentication provider or M2.4 sign-on producer exists.
+
+No production post-bootstrap scheduler or timeout owner is part of M2.3.2. The
+application/coordinator intentionally terminates at
+`--stop-after netchan-bootstrap`; an embedding owner must drive continuation I/O
+and call `NetchanSession::clear_reliable_state()` on timeout, cancellation,
+network failure, or protocol failure. The terminal mapping is covered by
+table-driven tests rather than claimed as current coordinator behavior.
+
+M2.3.2 adds no fragment construction/reassembly, file stream, `svc_*` parser,
+sign-on state, `ClientWorldState` update, renderer dependency, or public CLI for
+arbitrary reliable bytes.
 
 ### M2.3.3 — Normal/file fragmentation and reassembly
 
-**Status: planned after M2.3.2.**
+**Status: next after completed M2.3.2.**
 
 Implement bounded normal and file-stream fragmentation/reassembly from the
 captured descriptor boundary. Define safe ownership, transfer identity,
@@ -239,7 +300,7 @@ contract before downloads are allowed.
 
 ### M2.4 — Initial sign-on state machine
 
-**Status: planned after M2.3.3.**
+**Status: later, after M2.3.3.**
 
 Parse the minimum serverdata/signon messages into project-owned session state
 and reach a defined pre-resource sign-on point. Resource negotiation, snapshots,

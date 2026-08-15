@@ -129,7 +129,7 @@ TEST_CASE("Session classifies duplicate old and half-range input without mutatio
     CHECK_FALSE(session.first_incoming_committed());
 }
 
-TEST_CASE("Session observes acknowledgements without implementing reliable clearing",
+TEST_CASE("Session observes acknowledgement metadata transactionally",
           "[goldsrc][netchan][session][acknowledgement]")
 {
     SECTION("initial acknowledgement is a typed duplicate observation")
@@ -194,7 +194,7 @@ TEST_CASE("Session observes acknowledgements without implementing reliable clear
     }
 }
 
-TEST_CASE("First incoming commit is transactional and one-shot",
+TEST_CASE("Incoming commits are transactional and persist across packets",
           "[goldsrc][netchan][session][transaction]")
 {
     goldsrc::NetchanSession session;
@@ -217,18 +217,18 @@ TEST_CASE("First incoming commit is transactional and one-shot",
     REQUIRE(duplicate);
     CHECK(duplicate.inspection->disposition() ==
           goldsrc::NetchanIncomingSequenceDisposition::duplicate);
-    const auto second_commit = session.commit_incoming(
+    const auto duplicate_commit = session.commit_incoming(
         std::move(*duplicate.inspection));
-    REQUIRE_FALSE(second_commit);
-    REQUIRE(second_commit.error);
-    CHECK(second_commit.error->code ==
-          goldsrc::NetchanSessionErrorCode::first_incoming_already_committed);
+    REQUIRE_FALSE(duplicate_commit);
+    REQUIRE(duplicate_commit.error);
+    CHECK(duplicate_commit.error->code ==
+          goldsrc::NetchanSessionErrorCode::incoming_not_newer);
 
-    const auto newer = session.inspect_incoming(server_header(2U));
-    REQUIRE_FALSE(newer);
-    REQUIRE(newer.error);
-    CHECK(newer.error->code ==
-          goldsrc::NetchanSessionErrorCode::first_incoming_already_committed);
+    auto newer = session.inspect_incoming(server_header(2U));
+    REQUIRE(newer);
+    REQUIRE(newer.inspection);
+    REQUIRE(session.commit_incoming(std::move(*newer.inspection)));
+    CHECK(session.state().incoming_sequence == sequence(2U));
 }
 
 TEST_CASE("First ACK is exact transport-only sequence one and commits once",

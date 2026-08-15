@@ -466,6 +466,14 @@ GoldSrcHandshakeCoordinator::netchan_bootstrap_result() const noexcept
     static const std::optional<NetchanBootstrapResult> empty;
     return netchan_stage_ ? netchan_stage_->result() : empty;
 }
+NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
+{
+    return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
+}
+const NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() const noexcept
+{
+    return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
+}
 const std::optional<network::NetworkAddress>& GoldSrcHandshakeCoordinator::local_endpoint() const noexcept
 {
     return challenge_exchange_.local_endpoint();

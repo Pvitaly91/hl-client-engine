@@ -196,7 +196,9 @@ void append_uint32_le(std::vector<std::byte>& output, const std::uint32_t value)
     output.push_back(std::byte{static_cast<std::uint8_t>((value >> 24U) & 0xffU)});
 }
 
-[[nodiscard]] std::vector<std::byte> fragmented_packet(const std::size_t slot)
+[[nodiscard]] std::vector<std::byte> fragmented_packet(
+    const std::size_t slot,
+    const std::uint32_t acknowledgement = 0U)
 {
     if (slot >= goldsrc::kNetchanFragmentSlotCount) {
         throw std::runtime_error{"invalid synthetic fragment slot"};
@@ -221,7 +223,7 @@ void append_uint32_le(std::vector<std::byte>& output, const std::uint32_t value)
         datagram,
         goldsrc::kNetchanReliableSequenceFlag |
             goldsrc::kNetchanFragmentSequenceFlag | 1U);
-    append_uint32_le(datagram, 0U);
+    append_uint32_le(datagram, acknowledgement);
     datagram.insert(datagram.end(), decoded_body.begin(), decoded_body.end());
     return datagram;
 }
@@ -707,6 +709,30 @@ TEST_CASE("M2.3.1 slot-one fragment has the same typed pending boundary",
         goldsrc::NetchanBootstrapErrorCode::fragmented_payload_pending_m2_3_3);
     CHECK(transport.sent.empty());
     CHECK_FALSE(stage.session().first_incoming_committed());
+}
+
+TEST_CASE("Fragment pending takes precedence over reliable ACK validation",
+          "[goldsrc][netchan][bootstrap][fragment][pending][reliable]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    // ACK 1 is impossible before the first project transmission, but a valid
+    // fragmented packet is intentionally stopped at the M2.3.3 boundary
+    // before ACK/reliable lifecycle processing.
+    transport.queue(remote, fragmented_packet(0U, 1U));
+
+    stage.update(epoch + 1ms);
+    check_error(
+        stage,
+        goldsrc::NetchanBootstrapState::fragmented_payload_pending_m2_3_3,
+        goldsrc::NetchanBootstrapErrorCode::fragmented_payload_pending_m2_3_3);
+    CHECK(transport.sent.empty());
+    CHECK_FALSE(stage.session().first_incoming_committed());
+    CHECK(stage.session().state().incoming_sequence.value() == 0U);
+    CHECK(stage.persistent_session() == nullptr);
 }
 
 TEST_CASE("M2.3.1 first-packet timeout is deterministic and terminal",

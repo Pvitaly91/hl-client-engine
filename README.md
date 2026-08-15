@@ -6,17 +6,21 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has completed **M2.3.1: stock netchan wire bootstrap,
-sequencing, and the first acknowledgement** for the bounded captured profile
-and deterministic local fake-HLDS path. Completed M1–M2.3.1 behavior includes
-the Protocol 48 challenge, captured one-shot `connect` request, strict immediate
-connectionless
-`ACCEPT`/`REJECT`, an explicit authentication-provider boundary, same-socket
-netchan bootstrap, an owning first opaque payload, and exactly one required
-transport acknowledgement. There is no production reliable queue or
-retransmission lifecycle, fragment reassembly, Steam authentication provider,
-authentication bypass, `svc_*`/sign-on parsing, resource pipeline, snapshot
-handling, or gameplay.
+The repository has completed **M2.3.2: persistent unfragmented reliable netchan
+state and retransmission** for the bounded signed-stock evidence profile and
+the transport-independent project session. Completed M1–M2.3.2 behavior
+includes the Protocol 48 challenge, captured one-shot `connect` request, strict
+immediate connectionless `ACCEPT`/`REJECT`, an explicit
+authentication-provider boundary, same-socket netchan bootstrap, the base wire
+codec/transform, and bounded pending plus one-in-flight reliable state with
+transactional send commit. The dedicated fake-HLDS UDP integration now passes
+for the exact same-socket bootstrap/session, one outgoing reliable success and
+clear, and one incoming reliable delivery with duplicate/old filtering; loss,
+lost-ACK, and pending A/B remain deterministic session/driver tests. Live
+`hlclient` to stock HLDS remains pending. There is no fragment reassembly, Steam
+authentication provider, authentication bypass, `svc_*`/sign-on parsing,
+resource pipeline, snapshot handling, gameplay, or public raw reliable-payload
+CLI.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
 ## Reference platform
@@ -171,7 +175,7 @@ response. Acceptance exits successfully but does not create a netchan or enter
 sign-on; rejection, timeout, malformed response, and network failure exit
 nonzero. Rejection text is escaped and presentation-capped before logging.
 
-The M2.3.1 target stop point is:
+The M2.3.1 runtime stop point remains:
 
 ```powershell
 .\build\bin\Debug\hlclient.exe --renderer null `
@@ -180,13 +184,28 @@ The M2.3.1 target stop point is:
   --auth-material-file C:\private\hl-auth-material.bin --net-trace
 ```
 
-The production path is validated end to end against a deterministic local fake
-HLDS. That fake sends the first server sequenced datagram after `ACCEPT`; the
-project waits for it on the same UDP socket, obtains one complete opaque
+The M2.3.1 bootstrap path is validated end to end against a deterministic local
+fake HLDS. That fake sends the first server sequenced datagram after `ACCEPT`;
+the project waits for it on the same UDP socket, obtains one complete opaque
 unfragmented payload, and emits exactly one minimal transport acknowledgement.
-A completed bootstrap means only those operations succeeded. It still stops
-before every reliable retransmission, fragment reassembly, `svc_*`, or sign-on
-operation.
+A completed bootstrap means only those operations succeeded.
+
+M2.3.2 extends the transport-independent `NetchanSession` with bounded pending
+and in-flight reliable bytes, acknowledgement-gap retransmission, and atomic
+prepare/send/commit state. A deterministic fake-HLDS test reuses the same UDP
+transport, source endpoint, and coordinator-owned session after the full
+bootstrap; it proves one canonical outgoing send/covering-ACK clear with no
+extra transmission and one owning incoming reliable marker with the correct ACK
+bit plus duplicate/older delivery once. The runtime command above still
+terminates at the bootstrap boundary: it does not expose arbitrary reliable
+bytes or interpret sign-on content.
+
+M2.3.2 does not add a production post-bootstrap polling scheduler or timeout
+owner. The application/coordinator intentionally terminates at
+`--stop-after netchan-bootstrap`. An embedding owner that continues through the
+non-owning session access must drive later I/O and call
+`NetchanSession::clear_reliable_state()` on timeout, cancellation, network
+failure, or protocol failure; table-driven tests cover those terminal mappings.
 
 A first packet carrying the confirmed fragment flag is recognized but returns
 `fragmented_payload_pending_m2_3_3` with a nonzero exit; it is not acknowledged
@@ -195,8 +214,10 @@ as a completed payload and no fragment transfer is retained.
 Stock capture established a client-first post-`ACCEPT` order. The stock
 client's first reliable body is opaque sign-on/application content, so the
 project does not reproduce or disguise it as transport data. Consequently the
-deterministic fake-HLDS proof starts with the server packet and is not a claim
-that project `hlclient` can continue against stock HLDS.
+M2.3.1 deterministic bootstrap fixture starts with the server packet. The
+M2.3.2 integration queues only independently constructed test markers after
+bootstrap. Neither is a claim that project `hlclient` can continue against
+stock HLDS.
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -233,6 +254,30 @@ for M2.3.1 comprised six controlled stock sessions: two passive, one drop, one
 duplicate, and two reorder runs. The wrapper validates relay-reported bounded
 completion but neither prints payload bytes nor proves that project `hlclient`
 can authenticate to stock HLDS.
+
+The M2.3.2 reliable-state evidence has its own stricter metadata-only verifier:
+
+```powershell
+.\scripts\verify_stock_reliable_netchan_capture.ps1 `
+  -RelayPath C:\Tools\bounded-reliable-netchan-relay.ps1 `
+  -HalfLifePath C:\Games\Half-Life\hl.exe `
+  -HldsPath C:\Servers\Half-Life\hlds.exe `
+  -Game valve -Map boot_camp -Port 27320 `
+  -Scenario drop-first-client-reliable -TimeoutSeconds 30
+```
+
+Its fixed scenarios are `baseline`, `drop-first-client-reliable`,
+`drop-first-server-ack`, `duplicate-client-reliable`, and `delay-stale-ack`.
+The M2.3.2 primary evidence set contains exactly 16 `bounded_complete` runs:
+two each for baseline/two generations, drop-first reliable, the no-server-ACK
+timer control, drop-first server ACK, duplicate reliable, stale-ACK replay,
+drop-second distinct reliable, and drop-first-two transmissions. Three further
+baseline runs exercised the verifier end to end and their summaries satisfy its
+strengthened baseline action/accounting rules. The verifier accepts only a
+fixed metadata schema with `raw_packet_bytes_stored=false`; no raw
+capture, authentication material, identity bytes, or opaque payload bytes are
+tracked. See [GoldSrc netchan](docs/GOLDSRC_NETCHAN.md) for the exact
+stock-confirmed semantics and the separately labeled project policies.
 
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
@@ -324,9 +369,13 @@ This option is deliberately not applied globally to third-party code. Tests use
 Catch2, avoid Internet and external game/server dependencies, and run through
 CTest. M1/M2.1/M2.2 protocol and state-machine coverage uses synthetic fixtures
 and local fake-HLDS UDP tests. M2.3.1 adds independent netchan wire/sequence
-fixtures and a validated local fake-HLDS same-socket first-ACK path.
-Original-HLDS checks remain opt-in and do not turn stock-server acceptance into
-an automated-suite claim.
+fixtures and a validated local fake-HLDS same-socket first-ACK path. M2.3.2 adds
+deterministic persistent reliable-state, transaction, loss/ACK, duplicate,
+pending-A/B, payload-bound, fragment-boundary, and 30-bit wrap coverage. Its
+dedicated fake-HLDS UDP test confirms the exact same-socket success/incoming
+scope described above; loss, lost-ACK, and A/B remain deterministic driver
+coverage rather than extra real-UDP claims. Original-HLDS checks remain opt-in
+and do not turn stock-server acceptance into an automated-suite claim.
 
 ## License
 

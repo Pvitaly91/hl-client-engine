@@ -167,6 +167,7 @@ TEST_CASE("M2.3.1 fake HLDS completes same-socket netchan bootstrap and exact AC
         {},
         std::nullopt,
         netchan_config};
+    CHECK(handshake.netchan_session() == nullptr);
 
     const auto getchallenge = hlclient::goldsrc::build_getchallenge_request();
     REQUIRE(getchallenge);
@@ -206,6 +207,7 @@ TEST_CASE("M2.3.1 fake HLDS completes same-socket netchan bootstrap and exact AC
     handshake.update(epoch + 2ms);
     REQUIRE(handshake.state() ==
             hlclient::goldsrc::GoldSrcHandshakeState::waiting_for_netchan);
+    CHECK(handshake.netchan_session() == nullptr);
 
     const hlclient::goldsrc::ServerToClientNetchanPacket server_packet{
         hlclient::goldsrc::NetchanHeader{
@@ -227,6 +229,17 @@ TEST_CASE("M2.3.1 fake HLDS completes same-socket netchan bootstrap and exact AC
     handshake.update(epoch + 3ms);
     REQUIRE(handshake.state() ==
             hlclient::goldsrc::GoldSrcHandshakeState::netchan_bootstrap_complete);
+    auto* persistent_session = handshake.netchan_session();
+    REQUIRE(persistent_session != nullptr);
+    CHECK(persistent_session->state().last_outgoing_sequence == sequence(1U));
+    CHECK(persistent_session->state().next_outgoing_sequence == sequence(2U));
+    CHECK(persistent_session->state().incoming_sequence == sequence(1U));
+    CHECK(persistent_session->state().incoming_reliable_acknowledgement);
+    CHECK_FALSE(persistent_session->outgoing_reliable_toggle());
+    CHECK(persistent_session->pending_reliable_payload().empty());
+    CHECK_FALSE(persistent_session->in_flight_reliable_payload());
+    const auto& const_handshake = handshake;
+    CHECK(const_handshake.netchan_session() == persistent_session);
     REQUIRE(handshake.netchan_bootstrap_result());
     CHECK(handshake.netchan_bootstrap_result()->payload.bytes == bytes(kBootstrapPayload));
     CHECK(handshake.netchan_bootstrap_result()->payload.source_sequence.value() == 1U);
@@ -270,6 +283,7 @@ TEST_CASE("M2.3.1 fake HLDS completes same-socket netchan bootstrap and exact AC
     // transport packet after the required header acknowledgement.
     handshake.update(epoch + 2s);
     handshake.cancel(epoch + 3s);
+    CHECK(handshake.netchan_session() == persistent_session);
     bool unexpected_datagram = false;
     const auto quiet_deadline = std::chrono::steady_clock::now() + 25ms;
     while (std::chrono::steady_clock::now() < quiet_deadline) {

@@ -52,10 +52,11 @@ HlInjectionSceneSource -----/
 ```
 
 The current standalone provider owns the M1 challenge, M2.1 one-shot connect,
-and M2.2 bounded connectionless-response stages. M2.3.1 integration extends
-that same provider with a transport-only netchan bootstrap while retaining one
-UDP socket. Sign-on, resource state, snapshots, and commands remain future
-increments behind the same provider boundary. The future bridge adapts
+M2.2 bounded connectionless response, and M2.3.1 same-socket netchan bootstrap.
+M2.3.2 retains the resulting session and adds a persistent, bounded,
+unfragmented reliable transport state without interpreting its opaque bytes.
+Sign-on, resource state, snapshots, and commands remain future increments behind
+the same provider boundary. The future bridge adapts
 observed or exported in-process state to the same project types. It must not
 make renderer behavior depend on injected addresses or Valve private layouts.
 
@@ -68,10 +69,10 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_filesystem` | safe base/game path discovery and asset-facing I/O foundations | Steam discovery policy embedded in render code |
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
 | `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
-| `hlclient_goldsrc_netchan` | netchan classifier/base codec, payload transform, wrap-safe bootstrap session state, one first-ACK primitive, and bounded polling over an injected transport | reliable queues/retransmission, fragment reassembly, transport creation, authentication, files, `svc_*`, world/render state |
+| `hlclient_goldsrc_netchan` | netchan classifier/base codec, payload transform, wrap-safe persistent session, one bounded pending accumulator plus one in-flight canonical reliable message, atomic receive inspection/commit, transactional outgoing plans, first-ACK compatibility primitive, and fragment-pending boundary | fragment construction/reassembly, transport creation, authentication, files, `svc_*`, world/render state |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter and bounded local-file loading | discovery, caching, Steam integration, fallback search, protocol parsing |
-| `hlclient_goldsrc_client` | challenge/connect/response coordination and same-socket handoff to netchan bootstrap | auth generation, wire codec duplication, `svc_*`, OpenGL, SDL, world/render state |
+| `hlclient_goldsrc_client` | challenge/connect/response coordination, same-socket netchan bootstrap, retention of the resulting session, and non-owning continuation access | auth generation, wire codec duplication, arbitrary reliable payload production, `svc_*`, OpenGL, SDL, world/render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_asset_api` | owning asset sources, neutral CPU assets, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
@@ -133,7 +134,7 @@ Network input is untrusted. Parsers must:
 Compatibility constants may be checked against official SDK declarations, but
 the runtime implementation remains project-owned.
 
-The M2.3.1 integration path remains intentionally smaller than sign-on:
+The M2.3.2 integration path remains intentionally smaller than sign-on:
 
 ```text
 --connect IPv4:port
@@ -147,34 +148,62 @@ The M2.3.1 integration path remains intentionally smaller than sign-on:
               `-> optional ConnectResponseWaitStage on that transport/socket
                   -> strict connectionless ACCEPT/REJECT
                      |-> terminal M2.2 outcome
-                     `-> optional NetchanBootstrapStage on the same socket
-                         -> base codec/transform/wrap-safe sequence state
-                         -> owning unfragmented opaque payload plus one first ACK
-                            or typed fragmented-payload-pending boundary
-                         -> terminal M2.3.1 outcome before `svc_*`
+                      `-> optional NetchanBootstrapStage on the same socket
+                          -> base codec/transform/wrap-safe sequence state
+                          -> owning unfragmented opaque payload plus one first ACK
+                             or typed fragmented-payload-pending boundary
+                          -> coordinator-owned persistent NetchanSession
+                          -> current CLI terminal netchan-bootstrap outcome
+                             before arbitrary reliable bytes or `svc_*`
 ```
 
 The application has only an explicit user-file authentication provider; it
 does not generate tickets or integrate with Steam. The M2.2 response stop point
 still terminates immediately after bounded `ACCEPT` or `REJECT`. Only the
-explicit M2.3.1 stop point may hand the already-open transport to the netchan
-stage. That stage validates the unchanged local endpoint and exact remote
+explicit `netchan-bootstrap` stop point may hand the already-open transport to
+the netchan stage. That stage validates the unchanged local endpoint and exact remote
 endpoint, uses a five-second default and thirty-second hard timeout, and hands
-up only an owning opaque payload. Neither stage updates sign-on or world state.
+up only an owning opaque payload plus the persistent session. Neither stage
+updates sign-on or world state, and the application exposes no raw reliable-send
+CLI.
 
-Netchan M2.3.1 is split into pure wire/transform code, a narrow mutable session
-for sequence and acknowledgement observations, and a transport-facing
-bootstrap stage. The project defaults to 4,096-byte netchan datagrams and
-enforces a 16,384-byte hard datagram ceiling plus five-second default and
-thirty-second hard first-packet deadlines. These are project safety limits,
-not claims about stock engine maxima.
+Netchan M2.3.2 is split into pure wire/transform code, a transport-independent
+persistent session, and a transport-facing bootstrap stage. The project
+defaults to 4,096-byte netchan datagrams and a 4,088-byte unfragmented reliable
+limit, with hard ceilings of 16,384 and 16,376 bytes respectively. The pending
+accumulator is bounded at 16,376 bytes and coexists with only one owning
+in-flight message. Five-second default and thirty-second hard first-packet
+deadlines remain bootstrap policy. These are project safety limits, not claims
+about stock engine maxima.
 
-Stock captures record reliable toggles and a two-slot fragment descriptor
-boundary, but those observations do not enable their production lifecycles.
-M2.3.1 has no reliable queue or retransmission loop. A fragmented first packet
-ends with `fragmented_payload_pending_m2_3_3`; it is not reassembled, retained,
-treated as a complete payload, or written to the filesystem. Reliable channel
-state belongs to M2.3.2 and normal/file reassembly belongs to M2.3.3.
+The session prepares outgoing packets without mutation; only a successful send
+commit advances the numeric sequence, promotes pending A to in-flight, changes
+the new-message generation, or updates a retry's latest-send metadata. Failure
+or abandonment preserves pending B, in-flight A, sequences, and toggles.
+Canonical unencoded reliable bytes are remunged for each committed numeric
+sequence. Reliable-prefix/current-unreliable-suffix ordering is deterministic
+project policy because stock capture did not isolate the opaque boundary.
+
+Stock capture confirms presence-versus-generation and latest-send ACK-gap
+semantics; the exact matching-generation ACK between first and latest is a
+fail-closed project row. A fragmented packet still ends with
+`fragmented_payload_pending_m2_3_3`; it is not reassembled, retained, treated as
+a complete payload, acknowledged as complete, or written to the filesystem.
+Normal/file reassembly belongs to M2.3.3.
+
+The deterministic fake-HLDS UDP integration reuses the exact bootstrap socket,
+source endpoint, and coordinator-owned session. It covers an outgoing canonical
+reliable success/ACK clear with no extra send plus one incoming owning reliable
+marker, correct ACK bit, and duplicate/older delivery once. Loss, lost-ACK, and
+pending A/B are deterministic driver tests, not additional real-UDP claims.
+
+There is no production post-bootstrap polling scheduler or timeout owner in
+M2.3.2. The application and coordinator intentionally terminate at
+`--stop-after netchan-bootstrap`; an embedding owner using the non-owning
+continuation access must drive later I/O and call
+`NetchanSession::clear_reliable_state()` for timeout, cancellation, network
+failure, or protocol failure. Table-driven tests cover that terminal mapping;
+the coordinator is not claimed to perform it after its terminal outcome.
 
 Challenge traces use bounded previews. Connect-request, connect-response, and
 netchan traces are metadata-only and never contain the raw packet,
@@ -262,7 +291,7 @@ order:
    scene source;
 9. derive `RenderScene` from its `ClientWorldState`, render, and present;
 10. stop after the configured terminal challenge/connect-request/
-    connect-response/M2.3.1 netchan-bootstrap outcome, release the authentication
+    connect-response/M2.3.2 netchan-bootstrap outcome, release the authentication
     session, then shut down renderer resources before their platform dependencies.
 
 Partially initialized states must unwind safely through RAII. Logging and error

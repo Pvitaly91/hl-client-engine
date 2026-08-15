@@ -169,6 +169,11 @@ public:
     [[nodiscard]] const std::optional<ConnectResponse>& connect_response() const noexcept;
     [[nodiscard]] const std::optional<NetchanBootstrapResult>&
     netchan_bootstrap_result() const noexcept;
+    // Non-null only after a successful netchan bootstrap. The returned object
+    // is the same session that committed the M2.3.1 first ACK; callers must use
+    // the coordinator's original externally-owned datagram transport.
+    [[nodiscard]] NetchanSession* netchan_session() noexcept;
+    [[nodiscard]] const NetchanSession* netchan_session() const noexcept;
     [[nodiscard]] const std::optional<network::NetworkAddress>& local_endpoint() const noexcept;
     [[nodiscard]] std::size_t connect_send_attempts() const noexcept;
     [[nodiscard]] std::string_view error_context() const noexcept;

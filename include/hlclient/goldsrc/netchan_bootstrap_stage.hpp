@@ -164,6 +164,12 @@ public:
     first_packet_deadline() const noexcept;
     [[nodiscard]] std::size_t transmitted_packet_count() const noexcept;
     [[nodiscard]] const NetchanSession& session() const noexcept;
+    // Library-only continuation seam for M2.3.2. The exact bootstrap session
+    // becomes mutable only after the first payload and its byte-exact ACK have
+    // both committed successfully. Runtime CLI handling remains terminal at
+    // the netchan-bootstrap stop point.
+    [[nodiscard]] NetchanSession* persistent_session() noexcept;
+    [[nodiscard]] const NetchanSession* persistent_session() const noexcept;
 
 private:
     [[nodiscard]] bool validate_start(

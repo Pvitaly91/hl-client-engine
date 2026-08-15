@@ -310,6 +310,23 @@ TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
         CHECK(result.error.find("Unknown command-line argument") != std::string::npos);
     }
 
+    SECTION("raw reliable and sign-on injection options remain unavailable")
+    {
+        constexpr std::array forbidden{
+            std::string_view{"--send-reliable"},
+            std::string_view{"--raw-netchan-payload"},
+            std::string_view{"--inject-clc"},
+        };
+        for (const auto option : forbidden) {
+            CAPTURE(option);
+            const std::array arguments{option};
+            const auto result = parse_command_line(arguments);
+            CHECK_FALSE(result);
+            CHECK(result.error.find("Unknown command-line argument") !=
+                  std::string::npos);
+        }
+    }
+
     SECTION("missing value")
     {
         const std::array arguments{std::string_view{"--game"}};
