@@ -148,6 +148,29 @@ target_link_libraries(hlclient_goldsrc PUBLIC hlclient::network PRIVATE hlclient
 set_property(TARGET hlclient_goldsrc PROPERTY FOLDER "Engine/Network/GoldSrc")
 
 hlclient_add_library(
+    hlclient_goldsrc_netchan
+    include/hlclient/goldsrc/netchan_bootstrap_stage.hpp
+    include/hlclient/goldsrc/netchan_channel.hpp
+    include/hlclient/goldsrc/netchan_packet.hpp
+    include/hlclient/goldsrc/netchan_payload_transform.hpp
+    include/hlclient/goldsrc/netchan_reassembly.hpp
+    include/hlclient/goldsrc/netchan_sequence.hpp
+    src/goldsrc/netchan_bootstrap_stage.cpp
+    src/goldsrc/netchan_channel.cpp
+    src/goldsrc/netchan_packet.cpp
+    src/goldsrc/netchan_payload_transform.cpp
+    src/goldsrc/netchan_reassembly.cpp
+    src/goldsrc/netchan_sequence.cpp
+)
+add_library(hlclient::goldsrc_netchan ALIAS hlclient_goldsrc_netchan)
+target_link_libraries(
+    hlclient_goldsrc_netchan
+    PUBLIC hlclient::goldsrc hlclient::network
+    PRIVATE hlclient::core
+)
+set_property(TARGET hlclient_goldsrc_netchan PROPERTY FOLDER "Engine/Network/GoldSrc")
+
+hlclient_add_library(
     hlclient_auth
     include/hlclient/auth/authentication_provider.hpp
     src/auth/authentication_provider.cpp
@@ -168,7 +191,11 @@ hlclient_add_library(
 add_library(hlclient::goldsrc_client ALIAS hlclient_goldsrc_client)
 target_link_libraries(
     hlclient_goldsrc_client
-    PUBLIC hlclient::auth hlclient::goldsrc hlclient::network
+    PUBLIC
+        hlclient::auth
+        hlclient::goldsrc
+        hlclient::goldsrc_netchan
+        hlclient::network
     PRIVATE hlclient::core
 )
 set_property(TARGET hlclient_goldsrc_client PROPERTY FOLDER "Engine/Network/GoldSrc")

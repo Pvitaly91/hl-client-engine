@@ -222,7 +222,25 @@ input, sends one connect request on the same socket, and exits:
 ```
 
 The file is not copied or logged. Success means only that one datagram was sent;
-server acceptance, auth generation, netchan, and sign-on are not implemented.
+this `connect-request` stop point does not wait for a response or create a
+netchan. Authentication generation and sign-on remain unimplemented.
+
+The M2.3 transport-only path waits for connectionless `ACCEPT`, preserves the
+same socket, processes the confirmed bounded netchan profile, sends the required
+header acknowledgement, and exits with an owning opaque payload before any
+`svc_*` or sign-on parsing:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after netchan-bootstrap `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+The project-to-stock live path remains pending because the project has no
+production Steam authentication provider. The deterministic fake-HLDS path is
+part of CTest. See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for evidence labels,
+limits, and unsupported behavior.
 
 Add `--net-trace` when diagnosing the exchange:
 

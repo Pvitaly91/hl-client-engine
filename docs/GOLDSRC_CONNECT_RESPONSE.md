@@ -10,9 +10,11 @@ wait on the existing UDP transport, and a terminal application stop point:
 --stop-after connect-response
 ```
 
-It does not create a netchan, interpret sequenced traffic, acknowledge a
-sequence, retry `connect`, enter sign-on, or claim that the project client has
-completed a stock-server connection.
+The M2.2 response codec and `connect-response` stop point do not create a
+netchan, interpret sequenced traffic, acknowledge a sequence, retry `connect`,
+enter sign-on, or claim that the project client has completed a stock-server
+connection. M2.3 composes a separate optional stage after an accepted result;
+it does not enlarge the M2.2 codec's responsibility.
 
 The wire profile below comes from sanitized clean-room observations of stock
 Valve components. Raw captures that may contain authentication or identity
@@ -153,10 +155,14 @@ error. A truncated or malformed known response from the exact server is a
 protocol error. Unrelated connectionless classes from that server are ignored
 within the bounded receive budget.
 
-A nonconnectionless/sequenced packet from the expected endpoint is an explicit
-terminal `unexpected_sequenced_packet_pending_m2_3` boundary. M2.2 sends no
-acknowledgement and does not guess at sequence state. Netchan bootstrap,
-sequencing, acknowledgements, reliability, and fragmentation belong to M2.3.
+A nonconnectionless/sequenced packet received while this stage is still waiting
+for the connectionless result remains a typed protocol boundary; M2.2 sends no
+acknowledgement and does not guess at sequence state. After a decoded
+`ConnectAccepted`, the `connect-response` stop point terminates as before. Only
+an explicit `netchan-bootstrap` stop point may transfer the same
+`IDatagramTransport`, unchanged local endpoint, and exact remote endpoint to a
+separate M2.3 stage. Netchan sequencing, acknowledgements, reliability,
+transform, and fragmentation never move into this response parser.
 
 ## Verification status
 
@@ -170,9 +176,15 @@ Loopback fake-HLDS tests exercise the production UDP transport for both
 The evidence scopes remain distinct:
 
 - stock client -> stock HLDS response observations: recorded and sanitized;
+- stock client -> stock HLDS post-accept netchan observations: recorded and
+  sanitized separately;
 - project client -> local fake HLDS accept/reject paths: deterministic tests;
-- project client -> stock HLDS acceptance: not claimed or established.
+- project client -> local fake HLDS netchan bootstrap: deterministic M2.3
+  same-socket integration complete;
+- project client -> stock HLDS acceptance/bootstrap: not claimed or
+  established because no production Steam authentication provider exists.
 
 See [Connect request](GOLDSRC_CONNECT_REQUEST.md) for the preceding wire stage
-and [Authentication provider](AUTHENTICATION_PROVIDER.md) for authentication
-ownership and lifetime.
+and [Netchan](GOLDSRC_NETCHAN.md) for the strictly later sequenced stage.
+[Authentication provider](AUTHENTICATION_PROVIDER.md) defines authentication
+ownership and lifetime across both boundaries.

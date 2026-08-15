@@ -14,7 +14,8 @@ namespace {
 {
     return argument == "--basedir" || argument == "--game" || argument == "--connect" ||
            argument == "+connect" || argument == "--renderer" ||
-           argument == "--stop-after" || argument == "--auth-material-file" ||
+           argument == "--stop-after" || argument == "--auth-provider" ||
+           argument == "--auth-material-file" ||
            argument == "--name" || argument == "--model";
 }
 
@@ -73,10 +74,20 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::connect_request;
             } else if (value == "connect-response") {
                 options.stop_after = ConnectionStopPoint::connect_response;
+            } else if (value == "netchan-bootstrap") {
+                options.stop_after = ConnectionStopPoint::netchan_bootstrap;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
-                               " (expected challenge, connect-request, or connect-response)");
+                               " (expected challenge, connect-request, connect-response, "
+                               "or netchan-bootstrap)");
             }
+        } else if (argument == "--auth-provider") {
+            connect_request_setting_seen = true;
+            if (value != "file") {
+                return failure("Unsupported authentication provider: " + std::string{value} +
+                               " (expected file)");
+            }
+            options.authentication_provider = AuthenticationProviderKind::file;
         } else if (argument == "--auth-material-file") {
             connect_request_setting_seen = true;
             options.authentication_material_file = std::string{value};
@@ -96,12 +107,26 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     }
     if (options.stop_after == ConnectionStopPoint::challenge &&
         connect_request_setting_seen) {
-        return failure("--auth-material-file, --name, and --model require "
-                       "--stop-after connect-request or connect-response");
+        return failure("--auth-provider, --auth-material-file, --name, and --model require "
+                       "a connect-request, connect-response, or netchan-bootstrap stop point");
+    }
+    if (options.authentication_provider && !options.authentication_material_file) {
+        return failure("The file authentication provider requires --auth-material-file");
     }
     if (options.stop_after != ConnectionStopPoint::challenge &&
         !options.authentication_material_file) {
-        return failure("Connect request/response modes require --auth-material-file");
+        return failure(
+            "Connect request, response, and netchan modes require --auth-material-file");
+    }
+    if (options.stop_after == ConnectionStopPoint::netchan_bootstrap &&
+        !options.authentication_provider) {
+        return failure(
+            "Netchan bootstrap requires the explicit --auth-provider file selection");
+    }
+    if (options.authentication_material_file && !options.authentication_provider) {
+        // Preserve the M2.1/M2.2 spelling where the explicit material path
+        // selected the only available provider implicitly.
+        options.authentication_provider = AuthenticationProviderKind::file;
     }
 
     return CommandLineParseResult{std::move(options), {}};
@@ -118,18 +143,20 @@ Options:
   --game <directory>  Game directory below basedir (default: valve)
   --connect <ip:port> Start a GoldSrc handshake (challenge-only by default)
   +connect <ip:port>  GoldSrc-style alias for --connect
-  --stop-after <stage> Stop after challenge, connect-request, or connect-response
-                       (default: challenge)
+  --stop-after <stage> Stop after challenge, connect-request, connect-response,
+                       or netchan-bootstrap (default: challenge)
+  --auth-provider <name>
+                      Authentication provider for connect stages: file
   --auth-material-file <path>
-                      Local 245-byte auth input for request/response modes; never logged
+                      Local 245-byte auth input for file provider; never logged
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
 
 Connect-request mode sends once without waiting. Connect-response mode waits
-boundedly for the immediate connectionless accept/reject only. Neither mode
-implements authentication generation, netchan, or sign-on.
+boundedly for the immediate connectionless accept/reject only. Netchan-bootstrap
+mode stops before sign-on parsing. No mode implements authentication generation.
 )";
 }
 

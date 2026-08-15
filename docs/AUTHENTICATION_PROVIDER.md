@@ -72,12 +72,15 @@ session guard.
 The current application composition moves the remaining session into the
 handshake coordinator. Connect-request mode releases it at terminal
 `request_sent`; connect-response mode retains it through accept, reject,
-timeout, cancellation, or error. Member and move-assignment ordering ensures
-old material is destroyed before its provider lifetime guard.
+timeout, cancellation, or error. The M2.3 netchan stop point retains the same
+guard after `ACCEPT` and through bootstrap success, timeout, cancellation,
+network/protocol/fragment failure, or any other terminal netchan outcome.
+Member and move-assignment ordering ensures old material is destroyed before
+its provider lifetime guard.
 
 That ordering lets a future provider keep an external ticket or session handle
-valid through the complete response wait. The lifetime object's destructor
-must not log authentication data.
+valid through the complete selected handshake stop point, including netchan
+bootstrap. The lifetime object's destructor must not log authentication data.
 
 The boundary minimizes accidental exposure but is not secure-memory storage:
 current strings/vectors/stack arrays are not memory-locked and do not promise
@@ -132,9 +135,20 @@ provider categories; notably, a record larger than 245 bytes becomes
 `material_too_large` rather than a generic invalid record.
 
 The provider performs no discovery, persistence, output-directory copy,
-fallback, network access, or Steam integration. The composition root uses it
-only when `--auth-material-file` is supplied for `connect-request` or
-`connect-response` mode.
+fallback, network access, or Steam integration. The recommended explicit CLI
+form for any connect stage is:
+
+```text
+--auth-provider file --auth-material-file <explicit-local-path>
+```
+
+`file` is the only accepted provider name. `none`, `steam`, `bypass`, and every
+other name are rejected; there is no silent fallback. For M2.1/M2.2 command-line
+compatibility, `connect-request` and `connect-response` still accept the legacy
+spelling with `--auth-material-file` alone and infer the same file provider.
+The netchan documentation and examples use the explicit provider spelling.
+Provider/file settings are invalid for challenge-only mode and require an
+explicit `--connect` endpoint.
 
 ## Composition and shutdown
 
@@ -148,7 +162,10 @@ ExplicitFileAuthenticationProvider
     -> PreparedConnectRequest
     -> GoldSrcHandshakeCoordinator retains session guard
     -> challenge -> one connect send -> bounded response wait
-    -> terminal outcome -> release session guard
+       |-> selected connect-response terminal outcome
+       `-> accepted + selected same-socket netchan bootstrap
+           -> opaque payload + required ACK terminal outcome
+    -> release session guard
 ```
 
 Connect request traces expose only sizes/counts and a redaction marker.
@@ -157,6 +174,8 @@ not authentication material, and is separately escaped and presentation-capped
 before logging.
 
 The provider boundary is in-process modularity, not a security sandbox. No part
-of M2.2 authorizes bypassing Steam, server policy, VAC, access control, or
-third-party terms. A legitimate future provider requires its own platform,
-legal, storage, cancellation, and teardown review.
+of M2.2 or M2.3 authorizes bypassing Steam, server policy, VAC, access control,
+or third-party terms. The absence of a production Steam provider is why a
+project-client-to-stock-HLDS bootstrap remains pending. A legitimate future
+provider requires its own platform, legal, storage, cancellation, and teardown
+review.

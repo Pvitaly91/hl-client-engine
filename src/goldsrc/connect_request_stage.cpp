@@ -105,6 +105,33 @@ namespace {
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_netchan_state(
+    const NetchanBootstrapState state) noexcept
+{
+    switch (state) {
+    case NetchanBootstrapState::idle:
+    case NetchanBootstrapState::sending_initial_packet:
+    case NetchanBootstrapState::waiting_first:
+    case NetchanBootstrapState::processing:
+    case NetchanBootstrapState::waiting_fragments:
+    case NetchanBootstrapState::ack_pending:
+        return GoldSrcHandshakeState::waiting_for_netchan;
+    case NetchanBootstrapState::complete:
+        return GoldSrcHandshakeState::netchan_bootstrap_complete;
+    case NetchanBootstrapState::timed_out:
+        return GoldSrcHandshakeState::netchan_timed_out;
+    case NetchanBootstrapState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case NetchanBootstrapState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case NetchanBootstrapState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    case NetchanBootstrapState::secondary_stream_pending_m3:
+        return GoldSrcHandshakeState::file_stream_pending_m3;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 } // namespace
 
 ConnectRequestStage::ConnectRequestStage(
@@ -281,7 +308,9 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     ConnectRequestTraceCallback connect_trace_callback,
     ConnectResponseWaitConfig response_config,
     ConnectResponseTraceCallback response_trace_callback,
-    std::optional<auth::AuthenticationSession> authentication_session)
+    std::optional<auth::AuthenticationSession> authentication_session,
+    NetchanBootstrapConfig netchan_config,
+    NetchanBootstrapTraceCallback netchan_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -301,12 +330,20 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 remote_endpoint,
                 std::move(*prepared_request),
                 std::move(connect_trace_callback));
-            if (stop_point_ == HandshakeStopPoint::connect_response) {
+            if (stop_point_ == HandshakeStopPoint::connect_response ||
+                stop_point_ == HandshakeStopPoint::netchan_bootstrap) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
                     response_config,
                     std::move(response_trace_callback));
+            }
+            if (stop_point_ == HandshakeStopPoint::netchan_bootstrap) {
+                netchan_stage_.emplace(
+                    transport,
+                    remote_endpoint,
+                    std::move(netchan_config),
+                    std::move(netchan_trace_callback));
             }
         }
     } else if (authentication_session_) {
@@ -333,10 +370,16 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
     if (terminal()) {
         return;
     }
+    if (netchan_stage_ && state_ == GoldSrcHandshakeState::waiting_for_netchan) {
+        netchan_stage_->update(now);
+        synchronize_from_netchan();
+        release_authentication_session_if_terminal();
+        return;
+    }
     if (response_stage_ &&
         state_ == GoldSrcHandshakeState::waiting_for_connect_response) {
         response_stage_->update(now);
-        synchronize_from_response();
+        synchronize_from_response(now);
         release_authentication_session_if_terminal();
         return;
     }
@@ -350,10 +393,16 @@ void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
     if (terminal()) {
         return;
     }
+    if (netchan_stage_ && state_ == GoldSrcHandshakeState::waiting_for_netchan) {
+        netchan_stage_->cancel(now);
+        synchronize_from_netchan();
+        release_authentication_session_if_terminal();
+        return;
+    }
     if (response_stage_ &&
         state_ == GoldSrcHandshakeState::waiting_for_connect_response) {
         response_stage_->cancel(now);
-        synchronize_from_response();
+        synchronize_from_response(now);
         release_authentication_session_if_terminal();
         return;
     }
@@ -378,8 +427,12 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::request_sent:
         return stop_point_ == HandshakeStopPoint::connect_request;
     case GoldSrcHandshakeState::accepted:
+        return stop_point_ == HandshakeStopPoint::connect_response;
     case GoldSrcHandshakeState::rejected:
     case GoldSrcHandshakeState::connect_response_timed_out:
+    case GoldSrcHandshakeState::netchan_bootstrap_complete:
+    case GoldSrcHandshakeState::netchan_timed_out:
+    case GoldSrcHandshakeState::file_stream_pending_m3:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -392,6 +445,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::request_ready:
     case GoldSrcHandshakeState::sending_request:
     case GoldSrcHandshakeState::waiting_for_connect_response:
+    case GoldSrcHandshakeState::waiting_for_netchan:
         return false;
     }
     return true;
@@ -407,6 +461,12 @@ GoldSrcHandshakeCoordinator::connect_response() const noexcept
 {
     static const std::optional<ConnectResponse> empty;
     return response_stage_ ? response_stage_->response() : empty;
+}
+const std::optional<NetchanBootstrapResult>&
+GoldSrcHandshakeCoordinator::netchan_bootstrap_result() const noexcept
+{
+    static const std::optional<NetchanBootstrapResult> empty;
+    return netchan_stage_ ? netchan_stage_->result() : empty;
 }
 const std::optional<network::NetworkAddress>& GoldSrcHandshakeCoordinator::local_endpoint() const noexcept
 {
@@ -426,6 +486,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     }
     if (response_stage_ && response_stage_->error()) {
         return response_stage_->error()->context;
+    }
+    if (netchan_stage_ && netchan_stage_->error()) {
+        return netchan_stage_->error()->context;
     }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
@@ -452,7 +515,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
         *challenge_exchange_.local_endpoint()));
     state_ = map_connect_state(connect_stage_->state());
     if (state_ != GoldSrcHandshakeState::request_sent ||
-        stop_point_ != HandshakeStopPoint::connect_response) {
+        (stop_point_ != HandshakeStopPoint::connect_response &&
+         stop_point_ != HandshakeStopPoint::netchan_bootstrap)) {
         return;
     }
     if (!response_stage_) {
@@ -461,10 +525,11 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
         return;
     }
     static_cast<void>(response_stage_->start(now, *challenge_exchange_.local_endpoint()));
-    synchronize_from_response();
+    synchronize_from_response(now);
 }
 
-void GoldSrcHandshakeCoordinator::synchronize_from_response()
+void GoldSrcHandshakeCoordinator::synchronize_from_response(
+    const ChallengeExchangeTimePoint now)
 {
     if (!response_stage_) {
         state_ = GoldSrcHandshakeState::configuration_error;
@@ -475,6 +540,34 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response()
     if (response_stage_->error() &&
         response_stage_->error()->code ==
             ConnectResponseWaitErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+    if (state_ != GoldSrcHandshakeState::accepted ||
+        stop_point_ != HandshakeStopPoint::netchan_bootstrap) {
+        return;
+    }
+    if (!netchan_stage_ || !challenge_exchange_.local_endpoint()) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Netchan mode completed ACCEPT without a bootstrap stage or local endpoint";
+        return;
+    }
+    static_cast<void>(
+        netchan_stage_->start(now, *challenge_exchange_.local_endpoint()));
+    synchronize_from_netchan();
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_netchan()
+{
+    if (!netchan_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ = "Netchan mode has no bootstrap stage";
+        return;
+    }
+    state_ = map_netchan_state(netchan_stage_->state());
+    if (netchan_stage_->error() &&
+        netchan_stage_->error()->code ==
+            NetchanBootstrapErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

@@ -6,15 +6,15 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository is currently at **M2.2: connectionless accept/reject and the
-authentication-provider boundary**. In addition to the M0 SDL3/OpenGL bootstrap
-and M0.1 modular asset/scene boundaries, it implements the bounded GoldSrc
-connectionless envelope, the Protocol 48 challenge profile, strict ordered info
-strings, the captured one-shot `connect` request, and a bounded wait for its
-immediate connectionless result. It does **not** implement a Steam
-authentication provider, authentication generation or bypass, a netchan,
-sign-on, resources, snapshots, or gameplay. `--connect` remains challenge-only
-by default; the two later stop points are explicit.
+The repository has completed **M2.3: netchan bootstrap, sequencing, and
+acknowledgements** for the bounded captured profile and deterministic local
+fake-HLDS path. Completed M1–M2.3 behavior includes the Protocol 48 challenge,
+captured one-shot `connect` request, strict immediate connectionless
+`ACCEPT`/`REJECT`, an explicit authentication-provider boundary, same-socket
+netchan bootstrap, bounded normal reassembly, and the required acknowledgement.
+There is no production Steam authentication provider, authentication bypass,
+`svc_*`/sign-on parsing, resource pipeline, snapshot handling, or gameplay.
+`--connect` remains challenge-only by default; later stop points are explicit.
 
 ## Reference platform
 
@@ -139,6 +139,7 @@ boundary. Its contents are never logged and must not be committed:
 ```powershell
 .\build\bin\Debug\hlclient.exe --renderer null `
   --connect 127.0.0.1:27015 --stop-after connect-request `
+  --auth-provider file `
   --auth-material-file C:\private\hl-auth-material.bin --net-trace
 ```
 
@@ -146,12 +147,18 @@ A successful exit at this stop point proves transmission only, not server
 acceptance. The explicit file provider does not generate auth material, and
 M2.1 does not start netchan/sign-on.
 
+`--auth-provider file` is the recommended spelling and the only supported
+provider selection. The older `connect-request` and `connect-response` form
+with only `--auth-material-file` remains accepted for command-line
+compatibility. There is no `none`, `steam`, or `bypass` provider.
+
 To wait for and strictly decode the immediate M2.2 connectionless `ACCEPT` or
 `REJECT`, select the response stop point:
 
 ```powershell
 .\build\bin\Debug\hlclient.exe --renderer null `
   --connect 127.0.0.1:27015 --stop-after connect-response `
+  --auth-provider file `
   --auth-material-file C:\private\hl-auth-material.bin --net-trace
 ```
 
@@ -160,6 +167,21 @@ server endpoint, defaults to a five-second deadline, and exits after the typed
 response. Acceptance exits successfully but does not create a netchan or enter
 sign-on; rejection, timeout, malformed response, and network failure exit
 nonzero. Rejection text is escaped and presentation-capped before logging.
+
+The M2.3 target stop point is:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27015 --stop-after netchan-bootstrap `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+The production path is validated end to end against a deterministic local fake
+HLDS. A completed bootstrap means only that the same UDP socket processed a
+valid sequenced packet, obtained one complete opaque payload, and emitted the
+required acknowledgement behavior. It still stops before every `svc_*` or
+sign-on interpretation.
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -177,6 +199,23 @@ For an explicit manual check against a user-run original HLDS:
 
 The verifier can optionally start an explicitly supplied `hlds.exe`; see
 [Building](docs/BUILDING.md) for the exact form and cleanup behavior.
+
+To reproduce the bounded stock netchan observation with user-owned stock
+components and a user-supplied bounded relay:
+
+```powershell
+.\scripts\verify_stock_netchan_capture.ps1 `
+  -ClientPath C:\Games\Half-Life\hl.exe `
+  -HldsPath C:\Servers\Half-Life\hlds.exe `
+  -RelayPath C:\Tools\bounded-netchan-relay.ps1 `
+  -Game valve -Map boot_camp -Port 27128 `
+  -CapturePacketCount 64 -CaptureByteLimit 1048576 -TimeoutSeconds 30
+```
+
+This opt-in script is loopback-only, bounded, and writes process/capture output
+under ignored `manual-artifacts/netchan-captures/`. It validates relay-reported
+bounded completion but neither prints payload bytes nor proves that project
+`hlclient` can authenticate to stock HLDS.
 
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
@@ -206,7 +245,8 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
 
 - `hlclient`;
 - `hlclient_core`, `hlclient_platform`, `hlclient_filesystem`;
-- `hlclient_network`, `hlclient_goldsrc`, `hlclient_goldsrc_client`,
+- `hlclient_network`, `hlclient_goldsrc`, `hlclient_goldsrc_netchan`,
+  `hlclient_goldsrc_client`,
   `hlclient_auth`, `hlclient_app_support`, `hlclient_client`;
 - `hlclient_asset_api`, `hlclient_asset_manager`, `hlclient_scene_api`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
@@ -220,6 +260,7 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc connectionless protocol](docs/GOLDSRC_CONNECTIONLESS.md),
 [GoldSrc connect request](docs/GOLDSRC_CONNECT_REQUEST.md),
 [GoldSrc connect response](docs/GOLDSRC_CONNECT_RESPONSE.md),
+[GoldSrc netchan](docs/GOLDSRC_NETCHAN.md),
 [Authentication provider](docs/AUTHENTICATION_PROVIDER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
@@ -265,8 +306,10 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DHLCLIENT_WARNINGS_AS_E
 This option is deliberately not applied globally to third-party code. Tests use
 Catch2, avoid Internet and external game/server dependencies, and run through
 CTest. M1/M2.1/M2.2 protocol and state-machine coverage uses synthetic fixtures
-and local fake-HLDS UDP tests; original-HLDS checks remain opt-in and do not
-turn stock-server acceptance into an automated-suite claim.
+and local fake-HLDS UDP tests. M2.3 adds independent netchan fixtures and a
+validated local fake-HLDS same-socket bootstrap path.
+Original-HLDS checks remain opt-in and do not turn stock-server acceptance into
+an automated-suite claim.
 
 ## License
 

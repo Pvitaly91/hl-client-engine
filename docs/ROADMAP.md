@@ -145,9 +145,10 @@ interpretation. A project `hlclient` -> stock HLDS transmission or acceptance
 proof remains unperformed and is not required for the deterministic M2.1 codec
 and one-shot fake-HLDS milestone.
 
-At the M2.1 boundary, response semantics were still absent. Authentication
-generation, connect retry, netchan, sequencing, acknowledgements,
-fragmentation, sign-on, resources, and gameplay remain absent after M2.2.
+At the M2.1 boundary, response semantics were still absent. M2.2 subsequently
+added only the immediate response boundary. Authentication generation and
+bypass remain absent; netchan belongs only to M2.3, and sign-on, resources, and
+gameplay remain later work.
 
 ### M2.2 — Connectionless accept/reject and authentication-provider boundary
 
@@ -178,13 +179,45 @@ traffic as a typed terminal boundary reserved for M2.3.
 
 ### M2.3 — Netchan bootstrap, sequencing, and acknowledgements
 
-**Status: next.**
+**Status: completed for the captured profile and deterministic fake-HLDS path.**
 
-Implement the first sequenced-channel boundary, sequence/acknowledgement state,
-reliable state, fragmentation rules, and bounded timeout/disconnect behavior.
-Keep it separate from connectionless codecs and world/render state.
+The signed stock Valve client/HLDS post-`ACCEPT` profile has been captured
+through a bounded same-socket loopback relay. Confirmed observations include:
+
+- client-first sequenced traffic with scheduling-dependent padding sends;
+- an eight-byte little-endian sequence/acknowledgement header in both
+  directions, low-30-bit numeric sequences, sequence reliable/fragment bits,
+  and acknowledgement reliable toggle;
+- no qport and no checksum in this captured Protocol 48 profile;
+- the exact offset-8, low-sequence-byte-keyed, complete-word payload transform;
+- two ordered fragment descriptor slots and one observed five-fragment slot-0
+  message of 1,024 + 1,024 + 1,024 + 1,024 + 90 bytes;
+- piggyback acknowledgement behavior plus bounded drop, duplicate, and reorder
+  perturbations.
+
+Implementation validation covers pure packet, transform, wrap-safe sequence,
+reliable-state, bounded normal reassembly, the same-socket bootstrap stage, and
+deterministic fake HLDS integration. Project safety limits
+are a 4,096-byte default and 16,384-byte hard datagram bound, a 16,384-byte
+fragment bound, 1 MiB/1,024-fragment normal reassembly bound, one active normal
+transfer, and five-second default/thirty-second hard bootstrap timeout. These
+are project policy, not asserted stock maxima.
+
+Slot 1 remains an opaque secondary-stream boundary pending M3; no filename,
+path, payload persistence, or file write is permitted. The first client body
+and complete server payload remain opaque. M2.3 does not parse `svc_*`, update
+`ClientWorldState`, or add renderer work.
+
+The production fake-HLDS bootstrap, acknowledgement behavior, Win32 `/W4 /WX`
+build, regression suite, and acceptance checks pass. This completion is not a
+claim that the project client has authenticated to stock HLDS: that live path
+remains pending because there is no production Steam authentication provider.
+
+See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for the labeled sanitized profile.
 
 ### M2.4 — Initial sign-on state machine
+
+**Status: next after M2.3.**
 
 Parse the minimum serverdata/signon messages into project-owned session state
 and reach a defined pre-resource sign-on point. Resource negotiation, snapshots,

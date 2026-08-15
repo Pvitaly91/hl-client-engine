@@ -391,6 +391,97 @@ void log_connect_response_trace(const hlclient::goldsrc::ConnectResponseTraceEve
     hlclient::core::log(LogLevel::info, message);
 }
 
+void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& event)
+{
+    using Classification = hlclient::goldsrc::NetchanBootstrapTraceClassification;
+    if (event.classification == Classification::bootstrap_started ||
+        event.classification == Classification::receive_would_block) {
+        return;
+    }
+
+    const bool transmitted =
+        event.classification == Classification::initial_packet_sent ||
+        event.classification == Classification::acknowledgement_sent;
+    std::string classification;
+    switch (event.classification) {
+    case Classification::initial_packet_sent:
+        classification = "initial sequenced probe";
+        break;
+    case Classification::wrong_endpoint_ignored:
+        classification = "wrong endpoint ignored";
+        break;
+    case Classification::sequenced_packet_received:
+        classification = "sequenced";
+        break;
+    case Classification::duplicate_sequence_ignored:
+        classification = "duplicate sequence ignored";
+        break;
+    case Classification::older_sequence_ignored:
+        classification = "older sequence ignored";
+        break;
+    case Classification::fragment_accepted:
+        classification = "normal fragment accepted";
+        break;
+    case Classification::fragment_duplicate_ignored:
+        classification = "duplicate fragment ignored";
+        break;
+    case Classification::payload_ready:
+        classification = "opaque payload ready";
+        break;
+    case Classification::acknowledgement_sent:
+        classification = "sequenced acknowledgement";
+        break;
+    case Classification::bootstrap_complete:
+        classification = "netchan bootstrap complete";
+        break;
+    case Classification::datagram_truncated:
+        classification = "truncated sequenced datagram";
+        break;
+    case Classification::secondary_stream_pending_m3:
+        classification = "secondary stream pending M3";
+        break;
+    case Classification::bootstrap_timed_out:
+        classification = "netchan bootstrap timed out";
+        break;
+    case Classification::bootstrap_cancelled:
+        classification = "netchan bootstrap cancelled";
+        break;
+    case Classification::network_failure:
+        classification = "netchan network failure";
+        break;
+    case Classification::protocol_failure:
+        classification = "netchan protocol failure";
+        break;
+    case Classification::bootstrap_started:
+    case Classification::receive_would_block:
+        return;
+    }
+
+    std::string message = std::string{"[net] "} + (transmitted ? "TX " : "RX ") +
+                          event.endpoint.to_string() + ' ' + classification;
+    if (event.sequence) {
+        message += ", sequence=" + std::to_string(*event.sequence);
+    }
+    if (event.acknowledgement) {
+        message += ", ack=" + std::to_string(*event.acknowledgement);
+    }
+    message += std::string{", reliable="} + (event.reliable ? "yes" : "no") +
+               ", fragment=" + (event.fragmented ? "yes" : "no") +
+               ", reliable-ack=" +
+               (event.reliable_acknowledgement ? "yes" : "no");
+    if (event.datagram_size != 0U) {
+        message += ", datagram=" + std::to_string(event.datagram_size) + " bytes";
+    }
+    if (event.payload_size != 0U) {
+        message += ", opaque-payload=" + std::to_string(event.payload_size) + " bytes";
+    }
+    if (event.fragment_count) {
+        message += ", fragments=" + std::to_string(event.received_fragment_count) + '/' +
+                   std::to_string(*event.fragment_count);
+    }
+    hlclient::core::log(LogLevel::info, message);
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -462,11 +553,38 @@ void log_connect_response_trace(const hlclient::goldsrc::ConnectResponseTraceEve
     case State::connect_response_timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc connect-response wait timed out");
         return 1;
+    case State::netchan_bootstrap_complete: {
+        if (!handshake.netchan_bootstrap_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Netchan bootstrap completed without an owned opaque payload");
+            return 1;
+        }
+        const auto& payload = handshake.netchan_bootstrap_result()->payload;
+        hlclient::core::log(LogLevel::info, "GoldSrc netchan bootstrap complete");
+        hlclient::core::log(
+            LogLevel::info,
+            "Opaque transport payload: " + std::to_string(payload.bytes.size()) +
+                " bytes from sequence " +
+                std::to_string(payload.source_sequence.value()));
+        hlclient::core::log(
+            LogLevel::info,
+            "No svc_* messages were interpreted; sign-on remains M2.4");
+        return 0;
+    }
+    case State::netchan_timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc netchan bootstrap timed out");
+        return 1;
+    case State::file_stream_pending_m3:
+        hlclient::core::log(
+            LogLevel::error,
+            "GoldSrc secondary fragment stream is unsupported until M3; no file was written");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
     case State::cancelled:
-        hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange was cancelled");
+        hlclient::core::log(LogLevel::error, "GoldSrc handshake was cancelled");
         return 1;
     case State::configuration_error:
     case State::network_error:
@@ -483,6 +601,7 @@ void log_connect_response_trace(const hlclient::goldsrc::ConnectResponseTraceEve
     case State::request_ready:
     case State::sending_request:
     case State::waiting_for_connect_response:
+    case State::waiting_for_netchan:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -541,7 +660,11 @@ public:
               net_trace
                   ? hlclient::goldsrc::ConnectResponseTraceCallback{&log_connect_response_trace}
                   : hlclient::goldsrc::ConnectResponseTraceCallback{},
-              std::move(authentication_session)}
+              std::move(authentication_session),
+              {},
+              net_trace
+                  ? hlclient::goldsrc::NetchanBootstrapTraceCallback{&log_netchan_trace}
+                  : hlclient::goldsrc::NetchanBootstrapTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -612,7 +735,8 @@ struct RuntimeConnectPreparation {
     }
     if (!options.authentication_material_file) {
         throw std::invalid_argument{
-            "Connect request/response mode requires a local authentication material file"};
+            "Connect request, response, and netchan modes require a local authentication "
+            "material file"};
     }
 
     const auto path = path_from_utf8(*options.authentication_material_file);
@@ -838,6 +962,9 @@ int run(const hlclient::core::CommandLineOptions& options)
             break;
         case hlclient::core::ConnectionStopPoint::connect_response:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::connect_response;
+            break;
+        case hlclient::core::ConnectionStopPoint::netchan_bootstrap:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::netchan_bootstrap;
             break;
         }
         challenge_session = std::make_unique<HandshakeSession>(

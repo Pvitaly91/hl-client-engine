@@ -4,6 +4,7 @@
 #include <hlclient/goldsrc/challenge_exchange.hpp>
 #include <hlclient/goldsrc/connect_request.hpp>
 #include <hlclient/goldsrc/connect_response_wait.hpp>
+#include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
 
@@ -22,6 +23,7 @@ enum class HandshakeStopPoint {
     challenge,
     connect_request,
     connect_response,
+    netchan_bootstrap,
 };
 
 enum class ConnectRequestStageState {
@@ -124,6 +126,10 @@ enum class GoldSrcHandshakeState {
     accepted,
     rejected,
     connect_response_timed_out,
+    waiting_for_netchan,
+    netchan_bootstrap_complete,
+    netchan_timed_out,
+    file_stream_pending_m3,
     timed_out,
     cancelled,
     configuration_error,
@@ -143,7 +149,9 @@ public:
         ConnectRequestTraceCallback connect_trace_callback = {},
         ConnectResponseWaitConfig response_config = {},
         ConnectResponseTraceCallback response_trace_callback = {},
-        std::optional<auth::AuthenticationSession> authentication_session = std::nullopt);
+        std::optional<auth::AuthenticationSession> authentication_session = std::nullopt,
+        NetchanBootstrapConfig netchan_config = {},
+        NetchanBootstrapTraceCallback netchan_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -159,19 +167,23 @@ public:
     [[nodiscard]] HandshakeStopPoint stop_point() const noexcept;
     [[nodiscard]] const std::optional<ChallengeResponse>& challenge() const noexcept;
     [[nodiscard]] const std::optional<ConnectResponse>& connect_response() const noexcept;
+    [[nodiscard]] const std::optional<NetchanBootstrapResult>&
+    netchan_bootstrap_result() const noexcept;
     [[nodiscard]] const std::optional<network::NetworkAddress>& local_endpoint() const noexcept;
     [[nodiscard]] std::size_t connect_send_attempts() const noexcept;
     [[nodiscard]] std::string_view error_context() const noexcept;
 
 private:
     void synchronize_from_challenge(ChallengeExchangeTimePoint now);
-    void synchronize_from_response();
+    void synchronize_from_response(ChallengeExchangeTimePoint now);
+    void synchronize_from_netchan();
     void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
     ChallengeExchange challenge_exchange_;
     std::optional<ConnectRequestStage> connect_stage_;
     std::optional<ConnectResponseWaitStage> response_stage_;
+    std::optional<NetchanBootstrapStage> netchan_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;

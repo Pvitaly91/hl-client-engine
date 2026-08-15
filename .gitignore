@@ -23,6 +23,7 @@
 /manual-artifacts/
 /manual-artifacts/connect-captures/
 /manual-artifacts/connect-responses/
+/manual-artifacts/netchan-captures/
 *.coverage
 *.coveragexml
 

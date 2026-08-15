@@ -16,6 +16,11 @@ enum class ConnectionStopPoint {
     challenge,
     connect_request,
     connect_response,
+    netchan_bootstrap,
+};
+
+enum class AuthenticationProviderKind {
+    file,
 };
 
 struct CommandLineOptions {
@@ -26,6 +31,7 @@ struct CommandLineOptions {
     std::string game_directory{"valve"};
     std::optional<std::string> connect_endpoint;
     ConnectionStopPoint stop_after{ConnectionStopPoint::challenge};
+    std::optional<AuthenticationProviderKind> authentication_provider;
     std::optional<std::string> authentication_material_file;
     std::string player_name{"Player"};
     std::string player_model{"ivan"};

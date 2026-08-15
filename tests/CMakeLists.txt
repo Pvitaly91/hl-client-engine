@@ -17,8 +17,15 @@ add_executable(hlclient_tests
     test_connectionless_packet.cpp
     test_game_paths.cpp
     test_handshake_connect_response.cpp
+    test_handshake_netchan.cpp
     test_info_string.cpp
     test_network_address.cpp
+    test_netchan_bootstrap.cpp
+    test_netchan_fragments.cpp
+    test_netchan_packet.cpp
+    test_netchan_reliable.cpp
+    test_netchan_sequence.cpp
+    test_netchan_udp_integration.cpp
     test_scene_source.cpp
     test_udp_socket.cpp
 )
@@ -34,6 +41,7 @@ target_link_libraries(hlclient_tests
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_goldsrc_client
+        hlclient_goldsrc_netchan
         hlclient_network
         hlclient_scene_api
         hlclient_renderer_null

@@ -25,6 +25,7 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     CHECK(result.options->game_directory == "valve");
     CHECK_FALSE(result.options->connect_endpoint.has_value());
     CHECK(result.options->stop_after == hlclient::core::ConnectionStopPoint::challenge);
+    CHECK_FALSE(result.options->authentication_provider.has_value());
     CHECK_FALSE(result.options->authentication_material_file.has_value());
     CHECK(result.options->player_name == "Player");
     CHECK(result.options->player_model == "ivan");
@@ -111,7 +112,7 @@ TEST_CASE("Command line parser selects a renderer backend", "[core][command-line
 
 TEST_CASE("Command line parser validates explicit connect request mode", "[core][command-line]")
 {
-    SECTION("accepted explicit configuration")
+    SECTION("legacy connect-request file spelling remains accepted")
     {
         const std::array arguments{
             std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
@@ -124,13 +125,16 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         REQUIRE(result);
         CHECK(result.options->stop_after ==
               hlclient::core::ConnectionStopPoint::connect_request);
+        REQUIRE(result.options->authentication_provider);
+        CHECK(*result.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::file);
         REQUIRE(result.options->authentication_material_file);
         CHECK(*result.options->authentication_material_file == "auth.bin");
         CHECK(result.options->player_name == "Test Player");
         CHECK(result.options->player_model == "ivan");
     }
 
-    SECTION("accepted connect response configuration")
+    SECTION("legacy connect-response file spelling remains accepted")
     {
         const std::array arguments{
             std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
@@ -141,6 +145,28 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         REQUIRE(result);
         CHECK(result.options->stop_after ==
               hlclient::core::ConnectionStopPoint::connect_response);
+        REQUIRE(result.options->authentication_provider);
+        CHECK(*result.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::file);
+        REQUIRE(result.options->authentication_material_file);
+        CHECK(*result.options->authentication_material_file == "auth.bin");
+    }
+
+    SECTION("explicit file provider supports netchan bootstrap")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"netchan-bootstrap"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::netchan_bootstrap);
+        REQUIRE(result.options->authentication_provider);
+        CHECK(*result.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::file);
         REQUIRE(result.options->authentication_material_file);
         CHECK(*result.options->authentication_material_file == "auth.bin");
     }
@@ -172,6 +198,61 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         CHECK_FALSE(parse_command_line(arguments));
     }
 
+    SECTION("netchan bootstrap requires local auth file")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"netchan-bootstrap"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("netchan bootstrap requires explicit file provider selection")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"netchan-bootstrap"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("--auth-provider file") != std::string::npos);
+    }
+
+    SECTION("explicit file provider requires its material path")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"connect-response"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+        };
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("--auth-material-file") != std::string::npos);
+    }
+
+    SECTION("unsupported authentication providers are rejected")
+    {
+        constexpr std::array unsupported{
+            std::string_view{"none"},
+            std::string_view{"steam"},
+            std::string_view{"bypass"},
+        };
+        for (const auto provider : unsupported) {
+            CAPTURE(provider);
+            const std::array arguments{
+                std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+                std::string_view{"--stop-after"}, std::string_view{"netchan-bootstrap"},
+                std::string_view{"--auth-provider"}, provider,
+                std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            };
+            const auto result = parse_command_line(arguments);
+            CHECK_FALSE(result);
+            CHECK(result.error.find("Unsupported authentication provider") !=
+                  std::string::npos);
+        }
+    }
+
     SECTION("connect-only settings require connect")
     {
         const std::array arguments{
@@ -184,6 +265,25 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
     {
         const std::array arguments{
             std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("auth provider cannot alter challenge-only mode")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("auth provider requires connect")
+    {
+        const std::array arguments{
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
             std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
         };
         CHECK_FALSE(parse_command_line(arguments));
@@ -240,6 +340,9 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("--net-trace") != std::string_view::npos);
     CHECK(help.find("--stop-after") != std::string_view::npos);
     CHECK(help.find("connect-response") != std::string_view::npos);
+    CHECK(help.find("netchan-bootstrap") != std::string_view::npos);
+    CHECK(help.find("--auth-provider") != std::string_view::npos);
+    CHECK(help.find("file") != std::string_view::npos);
     CHECK(help.find("--auth-material-file") != std::string_view::npos);
     CHECK(help.find("--name") != std::string_view::npos);
     CHECK(help.find("--model") != std::string_view::npos);
