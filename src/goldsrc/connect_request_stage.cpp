@@ -110,10 +110,8 @@ namespace {
 {
     switch (state) {
     case NetchanBootstrapState::idle:
-    case NetchanBootstrapState::sending_initial_packet:
     case NetchanBootstrapState::waiting_first:
     case NetchanBootstrapState::processing:
-    case NetchanBootstrapState::waiting_fragments:
     case NetchanBootstrapState::ack_pending:
         return GoldSrcHandshakeState::waiting_for_netchan;
     case NetchanBootstrapState::complete:
@@ -126,8 +124,8 @@ namespace {
         return GoldSrcHandshakeState::network_error;
     case NetchanBootstrapState::protocol_error:
         return GoldSrcHandshakeState::protocol_error;
-    case NetchanBootstrapState::secondary_stream_pending_m3:
-        return GoldSrcHandshakeState::file_stream_pending_m3;
+    case NetchanBootstrapState::fragmented_payload_pending_m2_3_3:
+        return GoldSrcHandshakeState::fragmented_payload_pending_m2_3_3;
     }
     return GoldSrcHandshakeState::protocol_error;
 }
@@ -432,7 +430,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::connect_response_timed_out:
     case GoldSrcHandshakeState::netchan_bootstrap_complete:
     case GoldSrcHandshakeState::netchan_timed_out:
-    case GoldSrcHandshakeState::file_stream_pending_m3:
+    case GoldSrcHandshakeState::fragmented_payload_pending_m2_3_3:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:

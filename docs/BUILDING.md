@@ -66,7 +66,7 @@ git -C third_party/halflife-sdk rev-parse HEAD
 From the repository root, configure exactly as follows:
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
+cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DHLCLIENT_WARNINGS_AS_ERRORS=ON
 ```
 
 This produces the ordinary Visual Studio solution:
@@ -169,7 +169,7 @@ also done for Release and RelWithDebInfo. GLAD2 is a static project target and
 has no runtime DLL. Windows supplies `opengl32.dll`; the installed graphics
 driver must provide an OpenGL 3.3 Core-capable implementation.
 
-No project resources need to be copied for the current M2.1 client. Half-Life
+No project resources need to be copied for the current client. Half-Life
 assets are optional unless `--basedir` is supplied, and are never copied into
 the build tree automatically. The challenge-only network path also does not
 require local game assets.
@@ -218,6 +218,7 @@ input, sends one connect request on the same socket, and exits:
 ```powershell
 .\build\bin\Debug\hlclient.exe --renderer null `
   --connect 127.0.0.1:27015 --stop-after connect-request `
+  --auth-provider file `
   --auth-material-file C:\private\hl-auth-material.bin --net-trace
 ```
 
@@ -225,10 +226,11 @@ The file is not copied or logged. Success means only that one datagram was sent;
 this `connect-request` stop point does not wait for a response or create a
 netchan. Authentication generation and sign-on remain unimplemented.
 
-The M2.3 transport-only path waits for connectionless `ACCEPT`, preserves the
-same socket, processes the confirmed bounded netchan profile, sends the required
-header acknowledgement, and exits with an owning opaque payload before any
-`svc_*` or sign-on parsing:
+The M2.3.1 transport-only path waits for connectionless `ACCEPT`, preserves the
+same socket, processes one confirmed unfragmented netchan packet, sends exactly
+one minimal transport acknowledgement, and exits with an owning opaque payload
+before any reliable retransmission, fragment reassembly, `svc_*`, or sign-on
+parsing:
 
 ```powershell
 .\build\bin\Debug\hlclient.exe --renderer null `
@@ -237,10 +239,19 @@ header acknowledgement, and exits with an owning opaque payload before any
   --auth-material-file C:\private\hl-auth-material.bin --net-trace
 ```
 
-The project-to-stock live path remains pending because the project has no
-production Steam authentication provider. The deterministic fake-HLDS path is
-part of CTest. See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for evidence labels,
-limits, and unsupported behavior.
+A fragmented first packet produces the documented nonzero
+`fragmented_payload_pending_m2_3_3` outcome. M2.3.1 neither reassembles it nor
+sends an ACK that would misrepresent an incomplete opaque payload as complete.
+
+The six-run stock capture set established that the stock client sends first,
+but its initial reliable body is opaque sign-on/application content. The
+project does not reproduce it. Instead, the deterministic fake HLDS sends the
+first server packet and verifies the project's exact single ACK plus absence of
+an extra datagram. The project-to-stock live path remains pending because the
+project has no production Steam authentication provider or independently
+defined sign-on payload. Reliable retransmission is M2.3.2 and fragment
+reassembly is M2.3.3. See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for evidence
+labels, limits, and unsupported behavior.
 
 Add `--net-trace` when diagnosing the exchange:
 

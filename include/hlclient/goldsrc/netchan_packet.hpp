@@ -21,20 +21,9 @@ inline constexpr std::size_t kMaximumNetchanDatagramSize = 16'384U;
 inline constexpr std::uint32_t kNetchanReliableAcknowledgementFlag = 0x8000'0000U;
 inline constexpr std::uint32_t kNetchanReservedAcknowledgementFlag = 0x4000'0000U;
 // Inferred safety boundary: isolate the conventional split marker rather than
-// accepting it as a normal sequence word. M2.3 does not decode split packets.
+// accepting it as a normal sequence word. M2.3.1 does not decode split packets.
 inline constexpr std::uint32_t kUnsupportedNetchanSplitPacketMarker = 0xffff'fffeU;
 inline constexpr std::size_t kNetchanFragmentSlotCount = 2U;
-inline constexpr std::size_t kNetchanFragmentDescriptorFieldSize =
-    sizeof(std::uint32_t) + sizeof(std::uint16_t) + sizeof(std::uint16_t);
-// A secondary stream is never retained or persisted in M2.3. These named
-// observation ceilings are the largest decoded bytes that can follow one
-// present descriptor inside the configured default/hard datagram bounds.
-inline constexpr std::size_t kDefaultNetchanSecondaryStreamObservationBytes =
-    kDefaultNetchanDatagramSize - kNetchanHeaderSize -
-    kNetchanFragmentSlotCount - kNetchanFragmentDescriptorFieldSize;
-inline constexpr std::size_t kMaximumNetchanSecondaryStreamObservationBytes =
-    kMaximumNetchanDatagramSize - kNetchanHeaderSize -
-    kNetchanFragmentSlotCount - kNetchanFragmentDescriptorFieldSize;
 inline constexpr std::size_t kNetchanPacketDiagnosticTextLimit = 256U;
 
 enum class NetchanDatagramClassification {
@@ -42,6 +31,11 @@ enum class NetchanDatagramClassification {
     sequenced,
     unsupported_special,
     malformed,
+};
+
+enum class NetchanDirection {
+    server_to_client,
+    client_to_server,
 };
 
 struct NetchanDatagramClassificationResult {
@@ -60,7 +54,7 @@ struct NetchanHeader {
 };
 
 // A bounded, body-agnostic view used to apply numeric sequence policy before
-// parsing a retransmitted body. The strict direction-specific decoders still
+// parsing a duplicate or old body. The strict direction-specific decoders still
 // reject the unconfirmed acknowledgement bit 30 for admitted newer packets.
 struct NetchanHeaderPeek {
     NetchanHeader header;
@@ -68,7 +62,7 @@ struct NetchanHeaderPeek {
 };
 
 // Slot numbers are deliberately neutral. Stock capture confirms two ordered
-// descriptor slots, but M2.3 does not assign normal/file semantics to either.
+// descriptor slots, but M2.3.1 only recognizes their strict wire boundary.
 struct NetchanFragmentDescriptor {
     std::uint8_t slot_index{0U};
     std::uint32_t fragment_id{0U};
@@ -108,11 +102,10 @@ enum class NetchanPacketErrorCode {
     fragment_descriptor_truncated,
     fragment_flag_without_descriptor,
     descriptors_without_fragment_flag,
-    invalid_fragment_slot,
     zero_fragment_length,
     fragment_payload_out_of_bounds,
     fragment_payload_overlap,
-    fragment_payload_size_mismatch,
+    fragmented_encode_pending_m2_3_3,
     packet_too_large,
 };
 
@@ -197,16 +190,14 @@ using NetchanHeaderPeekResult = NetchanPacketDecodeResult<NetchanHeaderPeek>;
         return "fragment_flag_without_descriptor";
     case NetchanPacketErrorCode::descriptors_without_fragment_flag:
         return "descriptors_without_fragment_flag";
-    case NetchanPacketErrorCode::invalid_fragment_slot:
-        return "invalid_fragment_slot";
     case NetchanPacketErrorCode::zero_fragment_length:
         return "zero_fragment_length";
     case NetchanPacketErrorCode::fragment_payload_out_of_bounds:
         return "fragment_payload_out_of_bounds";
     case NetchanPacketErrorCode::fragment_payload_overlap:
         return "fragment_payload_overlap";
-    case NetchanPacketErrorCode::fragment_payload_size_mismatch:
-        return "fragment_payload_size_mismatch";
+    case NetchanPacketErrorCode::fragmented_encode_pending_m2_3_3:
+        return "fragmented_encode_pending_m2_3_3";
     case NetchanPacketErrorCode::packet_too_large:
         return "packet_too_large";
     }

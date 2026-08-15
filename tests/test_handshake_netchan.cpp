@@ -1,6 +1,7 @@
 #include <hlclient/auth/authentication_provider.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
+#include <hlclient/goldsrc/netchan_payload_transform.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -206,33 +207,28 @@ template<std::size_t Size>
     const std::span<const std::byte> payload)
 {
     return encode_server_packet(goldsrc::ServerToClientNetchanPacket{
-        server_header(1U, true, false, 1U, false),
+        server_header(1U, true, false, 0U, false),
         {},
         std::vector<std::byte>{payload.begin(), payload.end()},
     });
 }
 
-[[nodiscard]] std::vector<std::byte> secondary_stream_packet()
+[[nodiscard]] std::vector<std::byte> fragmented_server_packet()
 {
-    auto payload = bytes(std::array<std::uint8_t, 4U>{
-        0x90U,
-        0x91U,
-        0x92U,
-        0x93U,
+    auto datagram = bytes(std::array<std::uint8_t, 22U>{
+        0x01U, 0x00U, 0x00U, 0xc0U, // reliable + fragment, sequence 1
+        0x00U, 0x00U, 0x00U, 0x00U, // acknowledgement 0
+        0x01U,                         // slot 0 present
+        0x01U, 0x00U, 0x01U, 0x00U, // fragment id 0x00010001
+        0x00U, 0x00U,                // offset 0
+        0x04U, 0x00U,                // four-byte fragment
+        0x00U,                         // slot 1 absent
+        0x90U, 0x91U, 0x92U, 0x93U, // opaque fragment bytes
     });
-    goldsrc::NetchanFragmentSlots fragments{};
-    fragments[1U] = goldsrc::NetchanFragmentDescriptor{
-        1U,
-        0x0001'0001U,
-        0U,
-        static_cast<std::uint16_t>(payload.size()),
-        0U,
-    };
-    return encode_server_packet(goldsrc::ServerToClientNetchanPacket{
-        server_header(1U, true, true, 1U, false),
-        fragments,
-        std::move(payload),
-    });
+    goldsrc::encode_netchan_payload(
+        std::span<std::byte>{datagram}.subspan(goldsrc::kNetchanHeaderSize),
+        sequence(1U));
+    return datagram;
 }
 
 [[nodiscard]] goldsrc::ClientToServerNetchanPacket decode_client_packet(
@@ -299,7 +295,6 @@ struct PreparedWithSession {
 {
     goldsrc::NetchanBootstrapConfig config;
     config.first_packet_timeout = 50ms;
-    config.fragment_completion_timeout = 50ms;
     config.maximum_datagrams_per_update = 4U;
     config.maximum_outgoing_packets_per_update = 1U;
     return config;
@@ -365,8 +360,7 @@ void reach_netchan_wait(
     handshake.update(epoch + 2ms);
     REQUIRE(handshake.state() == GoldSrcHandshakeState::waiting_for_netchan);
     REQUIRE_FALSE(handshake.terminal());
-    REQUIRE(transport.sent.size() == 3U);
-    CHECK(transport.sent.back().destination == remote);
+    REQUIRE(transport.sent.size() == 2U);
     CHECK(handshake.connect_send_attempts() == 1U);
     REQUIRE(handshake.local_endpoint().has_value());
     CHECK(*handshake.local_endpoint() == transport.local);
@@ -396,7 +390,7 @@ void check_terminal_idempotence(
     CHECK(releases == 1U);
 }
 
-TEST_CASE("M2.3 coordinator hands ACCEPT to netchan on the same socket without same-call RX",
+TEST_CASE("M2.3.1 coordinator hands ACCEPT to netchan on the same socket without same-call RX",
           "[goldsrc][handshake][netchan][coordinator]")
 {
     FakeTransport transport;
@@ -424,7 +418,7 @@ TEST_CASE("M2.3 coordinator hands ACCEPT to netchan on the same socket without s
     handshake.update(epoch + 2ms);
     REQUIRE(handshake.state() == GoldSrcHandshakeState::waiting_for_netchan);
     REQUIRE_FALSE(handshake.terminal());
-    REQUIRE(transport.sent.size() == 3U);
+    REQUIRE(transport.sent.size() == 2U);
     CHECK(transport.receive_calls == receives_before_accept + 1U);
     REQUIRE(transport.incoming.size() == 1U);
     CHECK(releases == 0U);
@@ -432,26 +426,15 @@ TEST_CASE("M2.3 coordinator hands ACCEPT to netchan on the same socket without s
     REQUIRE(handshake.local_endpoint().has_value());
     CHECK(*handshake.local_endpoint() == transport.local);
 
-    const auto initial = decode_client_packet(transport.sent[2U]);
-    CHECK(initial.header.sequence.sequence.value() == 1U);
-    CHECK_FALSE(initial.header.sequence.flags.reliable);
-    CHECK_FALSE(initial.header.sequence.flags.fragmented);
-    CHECK(initial.header.acknowledgement.sequence.value() == 0U);
-    CHECK_FALSE(initial.header.acknowledgement.reliable);
-    REQUIRE(initial.payload.size() == goldsrc::kStockProtocol48MinimumDecodedPayloadSize);
-    CHECK(std::ranges::all_of(initial.payload, [](const std::byte value) {
-        return value == goldsrc::kStockProtocol48NetchanPaddingByte;
-    }));
-
     handshake.update(epoch + 3ms);
     REQUIRE(handshake.state() == GoldSrcHandshakeState::netchan_bootstrap_complete);
     REQUIRE(handshake.terminal());
-    REQUIRE(transport.sent.size() == 4U);
+    REQUIRE(transport.sent.size() == 3U);
     CHECK(transport.incoming.empty());
     CHECK(releases == 1U);
 
-    const auto acknowledgement = decode_client_packet(transport.sent[3U]);
-    CHECK(acknowledgement.header.sequence.sequence.value() == 2U);
+    const auto acknowledgement = decode_client_packet(transport.sent[2U]);
+    CHECK(acknowledgement.header.sequence.sequence.value() == 1U);
     CHECK_FALSE(acknowledgement.header.sequence.flags.reliable);
     CHECK_FALSE(acknowledgement.header.sequence.flags.fragmented);
     CHECK(acknowledgement.header.acknowledgement.sequence.value() == 1U);
@@ -469,16 +452,18 @@ TEST_CASE("M2.3 coordinator hands ACCEPT to netchan on the same socket without s
     const auto& result = handshake.netchan_bootstrap_result()->payload;
     CHECK(result.bytes == opaque_payload);
     CHECK(result.source_sequence.value() == 1U);
-    CHECK(result.reliable);
-    CHECK_FALSE(result.reassembled);
-    CHECK(result.fragment_count == 0U);
+    CHECK(result.source_acknowledgement.value() == 0U);
+    CHECK(result.sequence_flags.reliable);
+    CHECK_FALSE(result.sequence_flags.fragmented);
+    CHECK_FALSE(result.acknowledgement_reliable);
+    CHECK(result.direction == goldsrc::NetchanDirection::server_to_client);
     CHECK(result.received_at == epoch + 3ms);
 
     check_terminal_idempotence(transport, handshake, epoch + 3ms, releases);
     CHECK(handshake.netchan_bootstrap_result()->payload.bytes == opaque_payload);
 }
 
-TEST_CASE("M2.3 authentication lifetime spans ACCEPT and every netchan terminal path",
+TEST_CASE("M2.3.1 authentication lifetime spans ACCEPT and every netchan terminal path",
           "[goldsrc][handshake][netchan][auth][lifetime]")
 {
     const auto remote = NetworkAddress::loopback(27'015);
@@ -528,22 +513,6 @@ TEST_CASE("M2.3 authentication lifetime spans ACCEPT and every netchan terminal 
         check_terminal_idempotence(transport, handshake, epoch + 3ms, releases);
     }
 
-    SECTION("initial netchan send failure")
-    {
-        FakeTransport transport;
-        transport.failing_send_call = 3U;
-        std::size_t releases = 0U;
-        auto handshake = coordinator(transport, remote, prepare_with_session(releases));
-        reach_response_wait(transport, handshake, remote, epoch, releases);
-
-        transport.queue(remote, accepted_response());
-        handshake.update(epoch + 2ms);
-        CHECK(handshake.state() == GoldSrcHandshakeState::network_error);
-        CHECK(transport.sent.size() == 3U);
-        CHECK(releases == 1U);
-        check_terminal_idempotence(transport, handshake, epoch + 2ms, releases);
-    }
-
     SECTION("netchan receive failure")
     {
         FakeTransport transport;
@@ -566,7 +535,7 @@ TEST_CASE("M2.3 authentication lifetime spans ACCEPT and every netchan terminal 
         std::size_t releases = 0U;
         auto handshake = coordinator(transport, remote, prepare_with_session(releases));
         reach_netchan_wait(transport, handshake, remote, epoch, releases);
-        transport.failing_send_call = 4U;
+        transport.failing_send_call = 3U;
         const auto opaque_payload = bytes(std::array<std::uint8_t, 4U>{
             0xffU,
             0x00U,
@@ -578,23 +547,24 @@ TEST_CASE("M2.3 authentication lifetime spans ACCEPT and every netchan terminal 
         handshake.update(epoch + 3ms);
         CHECK(handshake.state() == GoldSrcHandshakeState::network_error);
         CHECK_FALSE(handshake.netchan_bootstrap_result().has_value());
-        CHECK(transport.sent.size() == 4U);
+        CHECK(transport.sent.size() == 3U);
         CHECK(releases == 1U);
         check_terminal_idempotence(transport, handshake, epoch + 3ms, releases);
     }
 
-    SECTION("secondary fragment stream remains explicitly pending")
+    SECTION("fragmented first payload remains explicitly pending M2.3.3")
     {
         FakeTransport transport;
         std::size_t releases = 0U;
         auto handshake = coordinator(transport, remote, prepare_with_session(releases));
         reach_netchan_wait(transport, handshake, remote, epoch, releases);
 
-        transport.queue(remote, secondary_stream_packet());
+        transport.queue(remote, fragmented_server_packet());
         handshake.update(epoch + 3ms);
-        CHECK(handshake.state() == GoldSrcHandshakeState::file_stream_pending_m3);
+        CHECK(handshake.state() ==
+              GoldSrcHandshakeState::fragmented_payload_pending_m2_3_3);
         CHECK_FALSE(handshake.netchan_bootstrap_result().has_value());
-        CHECK(transport.sent.size() == 3U);
+        CHECK(transport.sent.size() == 2U);
         CHECK(releases == 1U);
         check_terminal_idempotence(transport, handshake, epoch + 3ms, releases);
     }

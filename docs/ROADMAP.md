@@ -147,7 +147,7 @@ and one-shot fake-HLDS milestone.
 
 At the M2.1 boundary, response semantics were still absent. M2.2 subsequently
 added only the immediate response boundary. Authentication generation and
-bypass remain absent; netchan belongs only to M2.3, and sign-on, resources, and
+bypass remain absent; netchan begins only in M2.3.1, and sign-on, resources, and
 gameplay remain later work.
 
 ### M2.2 — Connectionless accept/reject and authentication-provider boundary
@@ -175,19 +175,21 @@ M2.2 adds:
 The stock observations establish wire layouts. The project path is proven
 against deterministic local fakes; project `hlclient` -> stock HLDS acceptance
 has not been performed or claimed. M2.2 creates no netchan and treats sequenced
-traffic as a typed terminal boundary reserved for M2.3.
+traffic as a typed terminal boundary reserved for M2.3.1.
 
-### M2.3 — Netchan bootstrap, sequencing, and acknowledgements
+### M2.3.1 — Stock netchan wire codec, sequencing, and first ACK
 
-**Status: completed for the captured profile and deterministic fake-HLDS path.**
+**Status: completed for the bounded captured profile and deterministic
+fake-HLDS path.**
 
-The signed stock Valve client/HLDS post-`ACCEPT` profile has been captured
-through a bounded same-socket loopback relay. Confirmed observations include:
+Six controlled signed-stock-client/stock-HLDS sessions were recorded through a
+bounded same-socket loopback relay: two passive, one drop, one duplicate, and
+two reorder runs. Confirmed observations include:
 
 - client-first sequenced traffic with scheduling-dependent padding sends;
 - an eight-byte little-endian sequence/acknowledgement header in both
   directions, low-30-bit numeric sequences, sequence reliable/fragment bits,
-  and acknowledgement reliable toggle;
+  and an acknowledgement reliable toggle;
 - no qport and no checksum in this captured Protocol 48 profile;
 - the exact offset-8, low-sequence-byte-keyed, complete-word payload transform;
 - two ordered fragment descriptor slots and one observed five-fragment slot-0
@@ -195,29 +197,49 @@ through a bounded same-socket loopback relay. Confirmed observations include:
 - piggyback acknowledgement behavior plus bounded drop, duplicate, and reorder
   perturbations.
 
-Implementation validation covers pure packet, transform, wrap-safe sequence,
-reliable-state, bounded normal reassembly, the same-socket bootstrap stage, and
-deterministic fake HLDS integration. Project safety limits
-are a 4,096-byte default and 16,384-byte hard datagram bound, a 16,384-byte
-fragment bound, 1 MiB/1,024-fragment normal reassembly bound, one active normal
-transfer, and five-second default/thirty-second hard bootstrap timeout. These
-are project policy, not asserted stock maxima.
+Those reliable and fragment facts are capture evidence, not claims that their
+complete production lifecycles are implemented in M2.3.1. The implementation
+contains the strict direction-specific base codec, payload transform,
+wrap-safe sequence and acknowledgement observations, duplicate/old filtering,
+same-socket bootstrap stage, owning first unfragmented opaque payload, and a
+single minimal first-ACK primitive. A fragment flag and its confirmed
+descriptor boundary produce the typed terminal outcome
+`fragmented_payload_pending_m2_3_3`; they are never reported as a complete
+payload.
 
-Slot 1 remains an opaque secondary-stream boundary pending M3; no filename,
-path, payload persistence, or file write is permitted. The first client body
-and complete server payload remain opaque. M2.3 does not parse `svc_*`, update
-`ClientWorldState`, or add renderer work.
+The deterministic fake HLDS deliberately sends the first sequenced packet
+after `ACCEPT`, then verifies exactly one project ACK and no extra datagram.
+The captured stock client sends first, but its first reliable body is opaque
+sign-on/application content and is not reproduced. Project `hlclient` to stock
+HLDS remains pending because there is no production Steam authentication
+provider and M2.3.1 does not invent that opaque body.
 
-The production fake-HLDS bootstrap, acknowledgement behavior, Win32 `/W4 /WX`
-build, regression suite, and acceptance checks pass. This completion is not a
-claim that the project client has authenticated to stock HLDS: that live path
-remains pending because there is no production Steam authentication provider.
+There is no production reliable queue, retransmission lifecycle, fragment
+reassembly, file stream, `svc_*` parser, `ClientWorldState` update, or renderer
+work in M2.3.1. See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for the labeled
+sanitized profile and implementation boundary.
 
-See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for the labeled sanitized profile.
+### M2.3.2 — Reliable channel state and retransmission
+
+**Status: next after M2.3.1.**
+
+Implement a bounded reliable send/receive lifecycle, acknowledgement-driven
+buffer retirement, explicit retransmission policy, reliable-toggle handling,
+and deterministic loss/duplicate/reorder tests without interpreting payload
+messages.
+
+### M2.3.3 — Normal/file fragmentation and reassembly
+
+**Status: planned after M2.3.2.**
+
+Implement bounded normal and file-stream fragmentation/reassembly from the
+captured descriptor boundary. Define safe ownership, transfer identity,
+timeouts, duplicate/conflict policy, and a filesystem-free file-stream output
+contract before downloads are allowed.
 
 ### M2.4 — Initial sign-on state machine
 
-**Status: next after M2.3.**
+**Status: planned after M2.3.3.**
 
 Parse the minimum serverdata/signon messages into project-owned session state
 and reach a defined pre-resource sign-on point. Resource negotiation, snapshots,
@@ -231,8 +253,8 @@ Planned work:
 
 - parse resource lists and consistency metadata;
 - map approved resources into sandboxed game/search paths;
-- implement bounded fragments/downloads where protocol compatibility requires
-  them, with traversal and overwrite protection;
+- consume the bounded M2.3.3 fragment transport for downloads where protocol
+  compatibility requires them, with traversal and overwrite protection;
 - verify sizes and available checksums before accepting content;
 - represent precache entries with engine-owned handles;
 - cache behavior and synthetic resource-list tests.

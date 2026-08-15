@@ -129,7 +129,7 @@ enum class GoldSrcHandshakeState {
     waiting_for_netchan,
     netchan_bootstrap_complete,
     netchan_timed_out,
-    file_stream_pending_m3,
+    fragmented_payload_pending_m2_3_3,
     timed_out,
     cancelled,
     configuration_error,

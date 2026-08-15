@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
+#include <hlclient/goldsrc/netchan_payload_transform.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <deque>
 #include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -35,10 +37,7 @@ public:
         if (throw_on_local_address) {
             throw std::runtime_error{"synthetic local endpoint exception"};
         }
-        if (!local_error.empty()) {
-            return network::DatagramLocalAddressResult{std::nullopt, local_error};
-        }
-        return network::DatagramLocalAddressResult{local, {}};
+        return network::DatagramLocalAddressResult{local, local_error};
     }
 
     [[nodiscard]] network::DatagramSendResult send_to(
@@ -108,7 +107,8 @@ public:
         });
     }
 
-    network::NetworkAddress local{network::NetworkAddress::loopback(30'000)};
+    std::optional<network::NetworkAddress> local{
+        network::NetworkAddress::loopback(30'000)};
     std::string local_error;
     mutable bool throw_on_local_address{false};
     bool throw_on_send{false};
@@ -142,11 +142,16 @@ public:
     return output;
 }
 
-[[nodiscard]] bool equal_bytes(
-    const std::span<const std::byte> left,
-    const std::span<const std::byte> right)
+template<std::size_t Size>
+[[nodiscard]] std::vector<std::byte> bytes(
+    const std::array<std::uint8_t, Size>& values)
 {
-    return std::ranges::equal(left, right);
+    std::vector<std::byte> output;
+    output.reserve(values.size());
+    std::ranges::transform(values, std::back_inserter(output), [](const std::uint8_t value) {
+        return std::byte{value};
+    });
+    return output;
 }
 
 [[nodiscard]] std::vector<std::byte> server_packet(
@@ -177,978 +182,706 @@ public:
     return std::move(*encoded.datagram);
 }
 
-[[nodiscard]] std::vector<std::byte> normal_fragment_packet(
-    const std::uint32_t packet_sequence,
-    const std::uint32_t acknowledgement,
-    const std::uint16_t one_based_index,
-    const std::uint16_t count,
-    std::vector<std::byte> fragment,
-    const bool reliable = true)
+void append_uint16_le(std::vector<std::byte>& output, const std::uint16_t value)
 {
-    if (fragment.size() > 0xffffU) {
-        throw std::runtime_error{"synthetic fragment is too large"};
-    }
-    goldsrc::NetchanFragmentSlots slots;
-    slots[0U] = goldsrc::NetchanFragmentDescriptor{
-        0U,
-        (static_cast<std::uint32_t>(one_based_index) << 16U) |
-            static_cast<std::uint32_t>(count),
-        0U,
-        static_cast<std::uint16_t>(fragment.size()),
-        0U,
-    };
-    const goldsrc::ServerToClientNetchanPacket packet{
-        goldsrc::NetchanHeader{
-            goldsrc::NetchanSequenceWord{
-                sequence(packet_sequence),
-                goldsrc::NetchanSequenceFlags{reliable, true},
-            },
-            goldsrc::NetchanAcknowledgementWord{sequence(acknowledgement), false},
-        },
-        std::move(slots),
-        std::move(fragment),
-    };
-    auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-    if (!encoded || !encoded.datagram) {
-        throw std::runtime_error{"unable to encode synthetic normal fragment"};
-    }
-    return std::move(*encoded.datagram);
+    output.push_back(std::byte{static_cast<std::uint8_t>(value & 0xffU)});
+    output.push_back(std::byte{static_cast<std::uint8_t>((value >> 8U) & 0xffU)});
 }
 
-[[nodiscard]] std::vector<std::byte> secondary_fragment_packet(
-    const std::uint32_t packet_sequence,
-    const std::uint32_t acknowledgement)
+void append_uint32_le(std::vector<std::byte>& output, const std::uint32_t value)
 {
-    auto payload = bytes({0x21U, 0x22U});
-    goldsrc::NetchanFragmentSlots slots;
-    slots[1U] = goldsrc::NetchanFragmentDescriptor{
-        1U,
-        0x0001'0001U,
-        0U,
-        static_cast<std::uint16_t>(payload.size()),
-        0U,
-    };
-    const goldsrc::ServerToClientNetchanPacket packet{
-        goldsrc::NetchanHeader{
-            goldsrc::NetchanSequenceWord{
-                sequence(packet_sequence),
-                goldsrc::NetchanSequenceFlags{true, true},
-            },
-            goldsrc::NetchanAcknowledgementWord{sequence(acknowledgement), false},
-        },
-        std::move(slots),
-        std::move(payload),
-    };
-    auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-    if (!encoded || !encoded.datagram) {
-        throw std::runtime_error{"unable to encode synthetic secondary fragment"};
+    output.push_back(std::byte{static_cast<std::uint8_t>(value & 0xffU)});
+    output.push_back(std::byte{static_cast<std::uint8_t>((value >> 8U) & 0xffU)});
+    output.push_back(std::byte{static_cast<std::uint8_t>((value >> 16U) & 0xffU)});
+    output.push_back(std::byte{static_cast<std::uint8_t>((value >> 24U) & 0xffU)});
+}
+
+[[nodiscard]] std::vector<std::byte> fragmented_packet(const std::size_t slot)
+{
+    if (slot >= goldsrc::kNetchanFragmentSlotCount) {
+        throw std::runtime_error{"invalid synthetic fragment slot"};
     }
-    return std::move(*encoded.datagram);
+
+    std::vector<std::byte> decoded_body;
+    for (std::size_t current = 0U; current < goldsrc::kNetchanFragmentSlotCount;
+         ++current) {
+        decoded_body.push_back(std::byte{current == slot ? 1U : 0U});
+        if (current == slot) {
+            append_uint32_le(decoded_body, 0x0001'0001U);
+            append_uint16_le(decoded_body, 0U);
+            append_uint16_le(decoded_body, 4U);
+        }
+    }
+    const auto fragment = bytes({0x10U, 0x20U, 0x30U, 0x40U});
+    decoded_body.insert(decoded_body.end(), fragment.begin(), fragment.end());
+    goldsrc::encode_netchan_payload(decoded_body, sequence(1U));
+
+    std::vector<std::byte> datagram;
+    append_uint32_le(
+        datagram,
+        goldsrc::kNetchanReliableSequenceFlag |
+            goldsrc::kNetchanFragmentSequenceFlag | 1U);
+    append_uint32_le(datagram, 0U);
+    datagram.insert(datagram.end(), decoded_body.begin(), decoded_body.end());
+    return datagram;
+}
+
+[[nodiscard]] std::vector<std::byte> ignored_header_only_packet(
+    const std::uint32_t numeric_sequence)
+{
+    std::vector<std::byte> datagram;
+    append_uint32_le(datagram, numeric_sequence);
+    // Reserved ACK bit and malformed body prove duplicate/old classification
+    // happens before strict body decoding.
+    append_uint32_le(datagram, goldsrc::kNetchanReservedAcknowledgementFlag);
+    datagram.push_back(std::byte{0xff});
+    return datagram;
 }
 
 [[nodiscard]] goldsrc::NetchanBootstrapConfig test_config()
 {
     goldsrc::NetchanBootstrapConfig config;
     config.first_packet_timeout = 100ms;
-    config.fragment_completion_timeout = 40ms;
+    config.maximum_datagram_size = goldsrc::kDefaultNetchanDatagramSize;
     config.maximum_datagrams_per_update = 8U;
     config.maximum_outgoing_packets_per_update = 1U;
+    config.maximum_opaque_payload_size =
+        goldsrc::kDefaultNetchanBootstrapOpaquePayloadSize;
     return config;
 }
 
-TEST_CASE("Netchan bootstrap sends one bounded project probe before polling",
+[[nodiscard]] const std::array<std::uint8_t, 16U>& exact_first_acknowledgement()
+{
+    // Independent literal: sequence 1, acknowledgement 1 with reliable ACK,
+    // followed by eight transformed 0x01 padding bytes under sequence key 1.
+    static constexpr std::array<std::uint8_t, 16U> fixture{
+        0x01U, 0x00U, 0x00U, 0x00U,
+        0x01U, 0x00U, 0x00U, 0x80U,
+        0x5aU, 0x19U, 0x01U, 0x00U,
+        0x1aU, 0x01U, 0x11U, 0x40U,
+    };
+    return fixture;
+}
+
+void require_started(
+    goldsrc::NetchanBootstrapStage& stage,
+    const goldsrc::NetchanBootstrapTimePoint now,
+    const network::NetworkAddress local)
+{
+    REQUIRE(stage.start(now, local));
+    REQUIRE(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
+    REQUIRE_FALSE(stage.terminal());
+}
+
+void check_error(
+    const goldsrc::NetchanBootstrapStage& stage,
+    const goldsrc::NetchanBootstrapState state,
+    const goldsrc::NetchanBootstrapErrorCode code)
+{
+    CHECK(stage.state() == state);
+    CHECK(stage.terminal());
+    REQUIRE(stage.error());
+    CHECK(stage.error()->code == code);
+    CHECK_FALSE(stage.error()->context.empty());
+    CHECK(stage.error()->context.size() <= goldsrc::kNetchanBootstrapDiagnosticTextLimit);
+    CHECK_FALSE(stage.result());
+}
+
+TEST_CASE("M2.3.1 bootstrap start validates same socket and sends nothing",
           "[goldsrc][netchan][bootstrap]")
 {
-    CHECK(goldsrc::kDefaultNetchanFirstPacketTimeout == 5s);
-    CHECK(goldsrc::kDefaultNetchanFragmentTimeout == 5s);
-    CHECK(goldsrc::kMaximumNetchanBootstrapTimeout == 30s);
-    CHECK(goldsrc::kDefaultNetchanBootstrapDatagramsPerUpdate == 8U);
-    CHECK(goldsrc::kMaximumNetchanBootstrapDatagramsPerUpdate == 64U);
-    CHECK(goldsrc::kDefaultNetchanBootstrapOutgoingPacketsPerUpdate == 1U);
-    CHECK(goldsrc::kMaximumNetchanBootstrapOutgoingPacketsPerUpdate == 8U);
-
     FakeDatagramTransport transport;
     const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
     goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
 
-    REQUIRE(stage.start(epoch, transport.local));
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
-    CHECK_FALSE(stage.terminal());
-    CHECK(stage.remote_endpoint() == remote);
-    REQUIRE(stage.local_endpoint());
-    CHECK(*stage.local_endpoint() == transport.local);
+    require_started(stage, epoch, *transport.local);
+    CHECK(stage.local_endpoint() == transport.local);
     REQUIRE(stage.first_packet_deadline());
     CHECK(*stage.first_packet_deadline() == epoch + 100ms);
-    CHECK_FALSE(stage.fragment_deadline());
-    CHECK_FALSE(stage.result());
-    CHECK_FALSE(stage.error());
-    CHECK(transport.local_address_queries == 1U);
-    CHECK(transport.receive_count == 0U);
-    REQUIRE(transport.sent.size() == 1U);
-    CHECK(transport.sent[0].destination == remote);
-    CHECK(stage.transmitted_packet_count() == 1U);
-
-    const auto decoded = goldsrc::decode_client_to_server_netchan_packet(
-        transport.sent[0].payload);
-    REQUIRE(decoded);
-    REQUIRE(decoded.packet);
-    CHECK(decoded.packet->header.sequence.sequence == sequence(1U));
-    CHECK_FALSE(decoded.packet->header.sequence.flags.reliable);
-    CHECK_FALSE(decoded.packet->header.sequence.flags.fragmented);
-    CHECK(decoded.packet->header.acknowledgement.sequence == sequence(0U));
-    CHECK_FALSE(decoded.packet->header.acknowledgement.reliable);
-    CHECK(decoded.packet->payload ==
-          std::vector<std::byte>(8U, goldsrc::kStockProtocol48NetchanPaddingByte));
+    CHECK(transport.sent.empty());
+    CHECK(stage.transmitted_packet_count() == 0U);
+    CHECK_FALSE(stage.session().first_incoming_committed());
+    CHECK_FALSE(stage.session().first_acknowledgement_prepared());
+    CHECK_FALSE(stage.session().first_acknowledgement_sent());
 }
 
-TEST_CASE("Netchan bootstrap can send a bounded synthetic initial reliable unit",
-          "[goldsrc][netchan][bootstrap][reliable]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    auto config = test_config();
-    const std::string marker{"RELIABLE_TEST_PAYLOAD"};
-    const auto marker_bytes = std::as_bytes(std::span{marker.data(), marker.size()});
-    config.initial_reliable_payload.assign(marker_bytes.begin(), marker_bytes.end());
-    goldsrc::NetchanBootstrapStage stage{transport, remote, config};
-
-    REQUIRE(stage.start({}, transport.local));
-    REQUIRE(transport.sent.size() == 1U);
-    const auto initial = goldsrc::decode_client_to_server_netchan_packet(
-        transport.sent.front().payload);
-    REQUIRE(initial.packet);
-    CHECK(initial.packet->header.sequence.flags.reliable);
-    CHECK(equal_bytes(initial.packet->payload, marker_bytes));
-    CHECK(stage.channel().has_reliable_in_flight());
-
-    transport.queue(
-        remote,
-        server_packet(1U, 1U, bytes({0x42U, 0x43U}), true, true));
-    stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-    REQUIRE(stage.result());
-    CHECK(equal_bytes(stage.result()->payload.bytes, bytes({0x42U, 0x43U})));
-    CHECK_FALSE(stage.channel().has_reliable_payload());
-}
-
-TEST_CASE("Netchan bootstrap rejects invalid bounds endpoints and clock overflow",
+TEST_CASE("M2.3.1 bootstrap configuration has finite hard bounds",
           "[goldsrc][netchan][bootstrap][configuration]")
 {
     const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto assert_invalid = [&](goldsrc::NetchanBootstrapConfig config,
-                                    const network::NetworkAddress endpoint =
-                                        network::NetworkAddress::loopback(27'128),
-                                    const network::NetworkAddress expected_local =
-                                        network::NetworkAddress::loopback(30'000),
-                                    const goldsrc::NetchanBootstrapTimePoint now = {}) {
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    const auto check_invalid = [&](const goldsrc::NetchanBootstrapConfig config) {
         FakeDatagramTransport transport;
-        goldsrc::NetchanBootstrapStage stage{transport, endpoint, std::move(config)};
-        CHECK_FALSE(stage.start(now, expected_local));
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::protocol_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code ==
-              goldsrc::NetchanBootstrapErrorCode::invalid_configuration);
-        CHECK(transport.local_address_queries == 0U);
-        CHECK(transport.send_attempt_count == 0U);
-        CHECK(transport.receive_count == 0U);
+        goldsrc::NetchanBootstrapStage stage{transport, remote, config};
+        CHECK_FALSE(stage.start(epoch, *transport.local));
+        check_error(
+            stage,
+            goldsrc::NetchanBootstrapState::protocol_error,
+            goldsrc::NetchanBootstrapErrorCode::invalid_configuration);
+        CHECK(transport.sent.empty());
     };
 
     auto config = test_config();
     config.first_packet_timeout = 0ms;
-    assert_invalid(config);
+    check_invalid(config);
     config = test_config();
-    config.fragment_completion_timeout =
-        goldsrc::kMaximumNetchanBootstrapTimeout + 1ms;
-    assert_invalid(config);
+    config.first_packet_timeout = goldsrc::kMaximumNetchanBootstrapTimeout + 1ms;
+    check_invalid(config);
     config = test_config();
-    config.maximum_datagrams_per_update = 0U;
-    assert_invalid(config);
-    config = test_config();
-    config.maximum_outgoing_packets_per_update =
-        goldsrc::kMaximumNetchanBootstrapOutgoingPacketsPerUpdate + 1U;
-    assert_invalid(config);
-    config = test_config();
-    config.maximum_datagram_size = goldsrc::kNetchanHeaderSize - 1U;
-    assert_invalid(config);
+    config.maximum_datagram_size = goldsrc::kMinimumNetchanBootstrapDatagramSize - 1U;
+    config.maximum_opaque_payload_size =
+        config.maximum_datagram_size - goldsrc::kNetchanHeaderSize;
+    check_invalid(config);
     config = test_config();
     config.maximum_datagram_size = goldsrc::kMaximumNetchanDatagramSize + 1U;
-    assert_invalid(config);
+    check_invalid(config);
     config = test_config();
-    config.reassembly_limits.maximum_reassembled_size = 0U;
-    assert_invalid(config);
+    config.maximum_datagrams_per_update = 0U;
+    check_invalid(config);
     config = test_config();
-    config.reassembly_limits.maximum_fragment_count =
-        goldsrc::kMaximumNormalFragmentsPerMessage + 1U;
-    assert_invalid(config);
+    config.maximum_datagrams_per_update =
+        goldsrc::kMaximumNetchanBootstrapDatagramsPerUpdate + 1U;
+    check_invalid(config);
     config = test_config();
-    config.channel_limits.maximum_packet_payload_size = 7U;
-    assert_invalid(config);
-    assert_invalid(test_config(), network::NetworkAddress{0U, 27'128});
-    assert_invalid(test_config(), network::NetworkAddress::loopback(0U));
-    assert_invalid(test_config(), remote, network::NetworkAddress::loopback(0U));
-    assert_invalid(
-        test_config(),
-        remote,
-        network::NetworkAddress::loopback(30'000),
-        goldsrc::NetchanBootstrapTimePoint::max() - 1ms);
+    config.maximum_outgoing_packets_per_update = 0U;
+    check_invalid(config);
+    config = test_config();
+    config.maximum_opaque_payload_size = 0U;
+    check_invalid(config);
+    config = test_config();
+    config.maximum_opaque_payload_size = config.maximum_datagram_size;
+    check_invalid(config);
+
+    SECTION("minimum 16-byte datagram budget is valid")
+    {
+        FakeDatagramTransport transport;
+        config = test_config();
+        config.maximum_datagram_size = goldsrc::kMinimumNetchanBootstrapDatagramSize;
+        config.maximum_opaque_payload_size =
+            goldsrc::kStockProtocol48MinimumDecodedPayloadSize;
+        goldsrc::NetchanBootstrapStage stage{transport, remote, config};
+        CHECK(stage.start(epoch, *transport.local));
+        CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
+        CHECK(transport.sent.empty());
+    }
 }
 
-TEST_CASE("Netchan bootstrap requires same local endpoint through the stage lifetime",
+TEST_CASE("M2.3.1 bootstrap rejects unavailable or mismatched local endpoints",
           "[goldsrc][netchan][bootstrap][endpoint]")
 {
     const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
 
-    SECTION("initial local query failure is typed and bounded")
+    SECTION("query error")
     {
         FakeDatagramTransport transport;
-        transport.local_error.assign(600U, 'x');
+        transport.local.reset();
+        transport.local_error = "synthetic endpoint failure";
         goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        CHECK_FALSE(stage.start({}, transport.local));
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::network_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code ==
-              goldsrc::NetchanBootstrapErrorCode::local_endpoint_unavailable);
-        CHECK(stage.error()->context.size() ==
-              goldsrc::kNetchanBootstrapDiagnosticTextLimit);
-        CHECK(transport.send_attempt_count == 0U);
+        CHECK_FALSE(stage.start(epoch, network::NetworkAddress::loopback(30'000)));
+        check_error(
+            stage,
+            goldsrc::NetchanBootstrapState::network_error,
+            goldsrc::NetchanBootstrapErrorCode::local_endpoint_unavailable);
     }
 
-    SECTION("local endpoint drift is detected before receive")
+    SECTION("query exception")
+    {
+        FakeDatagramTransport transport;
+        transport.throw_on_local_address = true;
+        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+        CHECK_FALSE(stage.start(epoch, network::NetworkAddress::loopback(30'000)));
+        check_error(
+            stage,
+            goldsrc::NetchanBootstrapState::network_error,
+            goldsrc::NetchanBootstrapErrorCode::local_endpoint_unavailable);
+    }
+
+    SECTION("different endpoint")
     {
         FakeDatagramTransport transport;
         goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        transport.local = network::NetworkAddress::loopback(30'001);
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::network_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code ==
-              goldsrc::NetchanBootstrapErrorCode::local_endpoint_changed);
-        CHECK(transport.receive_count == 0U);
-        CHECK(transport.send_attempt_count == 1U);
+        CHECK_FALSE(stage.start(epoch, network::NetworkAddress::loopback(30'001)));
+        check_error(
+            stage,
+            goldsrc::NetchanBootstrapState::network_error,
+            goldsrc::NetchanBootstrapErrorCode::local_endpoint_changed);
     }
 }
 
-TEST_CASE("Netchan bootstrap send and receive failures are terminal",
+TEST_CASE("M2.3.1 bootstrap detects local endpoint drift before receive",
+          "[goldsrc][netchan][bootstrap][endpoint]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+
+    transport.local = network::NetworkAddress::loopback(30'001);
+    stage.update(epoch + 1ms);
+    check_error(
+        stage,
+        goldsrc::NetchanBootstrapState::network_error,
+        goldsrc::NetchanBootstrapErrorCode::local_endpoint_changed);
+    CHECK(transport.receive_count == 0U);
+}
+
+TEST_CASE("M2.3.1 bootstrap would-block wait is nonterminal and quiet",
+          "[goldsrc][netchan][bootstrap][poll]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+
+    stage.update(epoch + 1ms);
+    CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
+    CHECK_FALSE(stage.terminal());
+    CHECK(transport.receive_count == 1U);
+    CHECK(transport.sent.empty());
+}
+
+TEST_CASE("M2.3.1 bootstrap owns opaque metadata and sends exact first ACK once",
+          "[goldsrc][netchan][bootstrap][ack]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+
+    const auto payload = bytes({0x4eU, 0x45U, 0x54U, 0x43U, 0x48U, 0x41U, 0x4eU});
+    transport.queue(remote, server_packet(1U, 0U, payload, true));
+    stage.update(epoch + 1ms);
+
+    REQUIRE(stage.state() == goldsrc::NetchanBootstrapState::complete);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == payload);
+    CHECK(stage.result()->payload.source_sequence.value() == 1U);
+    CHECK(stage.result()->payload.source_acknowledgement.value() == 0U);
+    CHECK(stage.result()->payload.sequence_flags.reliable);
+    CHECK_FALSE(stage.result()->payload.sequence_flags.fragmented);
+    CHECK_FALSE(stage.result()->payload.acknowledgement_reliable);
+    CHECK(stage.result()->payload.direction == goldsrc::NetchanDirection::server_to_client);
+    CHECK(stage.result()->payload.received_at == epoch + 1ms);
+    REQUIRE(transport.sent.size() == 1U);
+    CHECK(transport.sent[0].destination == remote);
+    CHECK(transport.sent[0].payload == bytes(exact_first_acknowledgement()));
+    CHECK(stage.transmitted_packet_count() == 1U);
+    CHECK(stage.session().first_incoming_committed());
+    CHECK(stage.session().first_acknowledgement_sent());
+
+    stage.update(epoch + 2ms);
+    stage.cancel(epoch + 3ms);
+    CHECK(transport.sent.size() == 1U);
+    CHECK(stage.result()->payload.bytes == payload);
+}
+
+TEST_CASE("M2.3.1 bootstrap preserves empty opaque payload without interpretation",
+          "[goldsrc][netchan][bootstrap][opaque]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, server_packet(1U, 0U, {}, false));
+
+    stage.update(epoch + 1ms);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes.empty());
+    CHECK(transport.sent.size() == 1U);
+}
+
+TEST_CASE("M2.3.1 bootstrap accepts the exact configured opaque payload bound",
+          "[goldsrc][netchan][bootstrap][bounds]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    auto config = test_config();
+    config.maximum_datagram_size = 64U;
+    config.maximum_opaque_payload_size = 16U;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, config};
+    require_started(stage, epoch, *transport.local);
+    const std::vector<std::byte> payload(16U, std::byte{0x41});
+    transport.queue(remote, server_packet(1U, 0U, payload));
+
+    stage.update(epoch + 1ms);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == payload);
+}
+
+TEST_CASE("M2.3.1 bootstrap rejects opaque payload bound plus one before ACK",
+          "[goldsrc][netchan][bootstrap][bounds]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    auto config = test_config();
+    config.maximum_datagram_size = 64U;
+    config.maximum_opaque_payload_size = 16U;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, config};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, server_packet(1U, 0U, std::vector<std::byte>(17U)));
+
+    stage.update(epoch + 1ms);
+    check_error(
+        stage,
+        goldsrc::NetchanBootstrapState::protocol_error,
+        goldsrc::NetchanBootstrapErrorCode::opaque_payload_too_large);
+    CHECK(transport.sent.empty());
+    CHECK_FALSE(stage.session().first_incoming_committed());
+}
+
+TEST_CASE("M2.3.1 duplicate is ignored before strict body decode",
+          "[goldsrc][netchan][bootstrap][duplicate]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, ignored_header_only_packet(0U));
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x42U})));
+
+    stage.update(epoch + 1ms);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == bytes({0x42U}));
+    CHECK(transport.sent.size() == 1U);
+}
+
+TEST_CASE("M2.3.1 old packet is ignored before strict body decode",
+          "[goldsrc][netchan][bootstrap][reorder]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(
+        remote,
+        ignored_header_only_packet(goldsrc::kNetchanSequenceMask - 2U));
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x43U})));
+
+    stage.update(epoch + 1ms);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == bytes({0x43U}));
+    CHECK(transport.sent.size() == 1U);
+}
+
+TEST_CASE("M2.3.1 wrong endpoint is ignored before parsing",
+          "[goldsrc][netchan][bootstrap][endpoint]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto wrong = network::NetworkAddress::loopback(27'129);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(wrong, bytes({0xffU}));
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x44U})));
+
+    stage.update(epoch + 1ms);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == bytes({0x44U}));
+    CHECK(transport.sent.size() == 1U);
+}
+
+TEST_CASE("M2.3.1 wrong-endpoint truncation cannot terminate the real session",
+          "[goldsrc][netchan][bootstrap][endpoint][bounds]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto wrong = network::NetworkAddress::loopback(27'129);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    transport.queue_truncated(wrong, goldsrc::kMaximumNetchanDatagramSize + 1U);
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x45U})));
+
+    stage.update(epoch + 1ms);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == bytes({0x45U}));
+}
+
+TEST_CASE("M2.3.1 target connectionless special and malformed packets are typed",
+          "[goldsrc][netchan][bootstrap][protocol]")
+{
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    const auto check_packet = [&](std::vector<std::byte> packet,
+                                  const goldsrc::NetchanBootstrapErrorCode code) {
+        FakeDatagramTransport transport;
+        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+        require_started(stage, epoch, *transport.local);
+        transport.queue(remote, std::move(packet));
+        stage.update(epoch + 1ms);
+        check_error(stage, goldsrc::NetchanBootstrapState::protocol_error, code);
+        CHECK(transport.sent.empty());
+    };
+
+    check_packet(
+        bytes({0xffU, 0xffU, 0xffU, 0xffU, 0x42U}),
+        goldsrc::NetchanBootstrapErrorCode::unexpected_connectionless_packet);
+    check_packet(
+        bytes({0xfeU, 0xffU, 0xffU, 0xffU, 0U, 0U, 0U, 0U}),
+        goldsrc::NetchanBootstrapErrorCode::unsupported_special_packet);
+    check_packet(
+        bytes({0U, 0U, 0U, 0U, 0U, 0U, 0U}),
+        goldsrc::NetchanBootstrapErrorCode::malformed_packet);
+}
+
+TEST_CASE("M2.3.1 impossible acknowledgement and half-range sequence are typed",
+          "[goldsrc][netchan][bootstrap][sequence]")
+{
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+
+    SECTION("future acknowledgement")
+    {
+        FakeDatagramTransport transport;
+        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+        require_started(stage, epoch, *transport.local);
+        transport.queue(remote, server_packet(1U, 1U, bytes({0x41U})));
+        stage.update(epoch + 1ms);
+        check_error(
+            stage,
+            goldsrc::NetchanBootstrapState::protocol_error,
+            goldsrc::NetchanBootstrapErrorCode::invalid_acknowledgement);
+    }
+
+    SECTION("half range")
+    {
+        FakeDatagramTransport transport;
+        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+        require_started(stage, epoch, *transport.local);
+        transport.queue(
+            remote,
+            server_packet(goldsrc::kNetchanSequenceHalfRange, 0U, bytes({0x41U})));
+        stage.update(epoch + 1ms);
+        check_error(
+            stage,
+            goldsrc::NetchanBootstrapState::protocol_error,
+            goldsrc::NetchanBootstrapErrorCode::invalid_sequence);
+    }
+}
+
+TEST_CASE("M2.3.1 slot-zero fragment is a typed pending boundary without ACK",
+          "[goldsrc][netchan][bootstrap][fragment][pending]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, fragmented_packet(0U));
+
+    stage.update(epoch + 1ms);
+    check_error(
+        stage,
+        goldsrc::NetchanBootstrapState::fragmented_payload_pending_m2_3_3,
+        goldsrc::NetchanBootstrapErrorCode::fragmented_payload_pending_m2_3_3);
+    CHECK(transport.sent.empty());
+    CHECK_FALSE(stage.session().first_incoming_committed());
+    CHECK(stage.session().state().incoming_sequence.value() == 0U);
+}
+
+TEST_CASE("M2.3.1 slot-one fragment has the same typed pending boundary",
+          "[goldsrc][netchan][bootstrap][fragment][pending]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, fragmented_packet(1U));
+
+    stage.update(epoch + 1ms);
+    check_error(
+        stage,
+        goldsrc::NetchanBootstrapState::fragmented_payload_pending_m2_3_3,
+        goldsrc::NetchanBootstrapErrorCode::fragmented_payload_pending_m2_3_3);
+    CHECK(transport.sent.empty());
+    CHECK_FALSE(stage.session().first_incoming_committed());
+}
+
+TEST_CASE("M2.3.1 first-packet timeout is deterministic and terminal",
+          "[goldsrc][netchan][bootstrap][timeout]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x41U})));
+
+    stage.update(epoch + 100ms);
+    CHECK(stage.state() == goldsrc::NetchanBootstrapState::timed_out);
+    CHECK(stage.terminal());
+    CHECK(transport.receive_count == 0U);
+    CHECK(transport.sent.empty());
+}
+
+TEST_CASE("M2.3.1 cancellation is terminal and idempotent",
+          "[goldsrc][netchan][bootstrap][cancel]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    stage.cancel(epoch + 1ms);
+    CHECK(stage.state() == goldsrc::NetchanBootstrapState::cancelled);
+    CHECK(stage.terminal());
+
+    stage.update(epoch + 2ms);
+    stage.cancel(epoch + 3ms);
+    CHECK(transport.receive_count == 0U);
+    CHECK(transport.sent.empty());
+}
+
+TEST_CASE("M2.3.1 receive failures and inconsistent metadata are typed",
           "[goldsrc][netchan][bootstrap][network]")
 {
     const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
 
-    SECTION("initial send fails without committing outgoing sequence")
+    SECTION("receive exception")
     {
         FakeDatagramTransport transport;
-        transport.send_results.push_back(network::DatagramSendResult{
-            network::DatagramSendStatus::error,
-            "synthetic send failure",
-        });
         goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        CHECK_FALSE(stage.start({}, transport.local));
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::network_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code == goldsrc::NetchanBootstrapErrorCode::send_failed);
-        CHECK(stage.channel().next_outgoing_sequence() == sequence(1U));
-        CHECK(stage.transmitted_packet_count() == 0U);
-        CHECK(transport.receive_count == 0U);
+        require_started(stage, epoch, *transport.local);
+        transport.throw_on_receive = true;
+        stage.update(epoch + 1ms);
+        check_error(
+            stage,
+            goldsrc::NetchanBootstrapState::network_error,
+            goldsrc::NetchanBootstrapErrorCode::receive_failed);
     }
 
-    SECTION("receive error is typed")
+    SECTION("inconsistent would block")
     {
         FakeDatagramTransport transport;
+        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+        require_started(stage, epoch, *transport.local);
         transport.incoming.push_back(network::DatagramTransportReceiveResult{
-            network::DatagramTransportReceiveStatus::error,
+            network::DatagramTransportReceiveStatus::would_block,
             std::nullopt,
-            std::nullopt,
-            0U,
-            "synthetic receive failure",
-        });
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::network_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code ==
-              goldsrc::NetchanBootstrapErrorCode::receive_failed);
-    }
-
-    SECTION("ACK send failure withholds a ready payload")
-    {
-        FakeDatagramTransport transport;
-        transport.send_results.push_back(network::DatagramSendResult{
-            network::DatagramSendStatus::sent,
+            remote,
+            1U,
             {},
         });
-        transport.send_results.push_back(network::DatagramSendResult{
-            network::DatagramSendStatus::error,
-            "synthetic ACK failure",
-        });
-        transport.queue(remote, server_packet(1U, 1U, bytes({0x31U}), true));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::network_error);
-        CHECK_FALSE(stage.result());
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code == goldsrc::NetchanBootstrapErrorCode::send_failed);
-        CHECK(stage.transmitted_packet_count() == 1U);
-    }
-}
-
-TEST_CASE("Receive metadata is strict while wrong endpoint precedes truncation",
-          "[goldsrc][netchan][bootstrap][transport]")
-{
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto spoofed = network::NetworkAddress::loopback(27'129);
-
-    SECTION("inconsistent source metadata is a network error")
-    {
-        FakeDatagramTransport transport;
-        auto payload = server_packet(1U, 1U, bytes({0x41U}));
-        const auto size = payload.size();
-        transport.incoming.push_back(network::DatagramTransportReceiveResult{
-            network::DatagramTransportReceiveStatus::received,
-            network::Datagram{remote, std::move(payload)},
-            spoofed,
-            size,
-            {},
-        });
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::network_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code ==
-              goldsrc::NetchanBootstrapErrorCode::inconsistent_receive_result);
-    }
-
-    SECTION("spoofed truncation is ignored before a valid target packet")
-    {
-        FakeDatagramTransport transport;
-        transport.queue_truncated(spoofed, 20'000U);
-        transport.queue(remote, server_packet(1U, 1U, bytes({0x42U}), true));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-        CHECK(transport.receive_count == 2U);
-        CHECK(stage.transmitted_packet_count() == 2U);
-    }
-
-    SECTION("target truncation is a protocol error")
-    {
-        FakeDatagramTransport transport;
-        transport.queue_truncated(remote, 20'000U);
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::protocol_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code ==
-              goldsrc::NetchanBootstrapErrorCode::datagram_truncated);
-    }
-}
-
-TEST_CASE("Every inconsistent datagram receive shape is rejected before parsing",
-          "[goldsrc][netchan][bootstrap][transport][consistency]")
-{
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto assert_inconsistent = [&](network::DatagramTransportReceiveResult result) {
-        FakeDatagramTransport transport;
-        transport.incoming.push_back(std::move(result));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::network_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code ==
-              goldsrc::NetchanBootstrapErrorCode::inconsistent_receive_result);
-        CHECK(stage.channel().incoming_sequence() == sequence(0U));
-        CHECK(stage.transmitted_packet_count() == 1U);
-    };
-
-    assert_inconsistent(network::DatagramTransportReceiveResult{
-        network::DatagramTransportReceiveStatus::would_block,
-        std::nullopt,
-        remote,
-        0U,
-        {},
-    });
-    assert_inconsistent(network::DatagramTransportReceiveResult{
-        network::DatagramTransportReceiveStatus::error,
-        std::nullopt,
-        remote,
-        0U,
-        "synthetic error with metadata",
-    });
-    assert_inconsistent(network::DatagramTransportReceiveResult{
-        network::DatagramTransportReceiveStatus::received,
-        network::Datagram{remote, bytes({0x01U})},
-        std::nullopt,
-        1U,
-        {},
-    });
-    assert_inconsistent(network::DatagramTransportReceiveResult{
-        network::DatagramTransportReceiveStatus::received,
-        std::nullopt,
-        remote,
-        1U,
-        {},
-    });
-    assert_inconsistent(network::DatagramTransportReceiveResult{
-        network::DatagramTransportReceiveStatus::received,
-        network::Datagram{remote, bytes({0x01U})},
-        remote,
-        2U,
-        {},
-    });
-    assert_inconsistent(network::DatagramTransportReceiveResult{
-        network::DatagramTransportReceiveStatus::received,
-        network::Datagram{remote, bytes({0x01U})},
-        remote,
-        1U,
-        "unexpected receive error text",
-    });
-    assert_inconsistent(network::DatagramTransportReceiveResult{
-        network::DatagramTransportReceiveStatus::truncated,
-        std::nullopt,
-        std::nullopt,
-        4'097U,
-        "synthetic truncation without source",
-    });
-    assert_inconsistent(network::DatagramTransportReceiveResult{
-        network::DatagramTransportReceiveStatus::truncated,
-        network::Datagram{remote, bytes({0x01U})},
-        remote,
-        4'097U,
-        "synthetic truncation with payload",
-    });
-}
-
-TEST_CASE("Target connectionless special and malformed datagrams fail distinctly",
-          "[goldsrc][netchan][bootstrap][classifier]")
-{
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto assert_protocol_error = [&](std::vector<std::byte> datagram,
-                                           const goldsrc::NetchanBootstrapErrorCode code) {
-        FakeDatagramTransport transport;
-        transport.queue(remote, std::move(datagram));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::protocol_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code == code);
-        CHECK(stage.transmitted_packet_count() == 1U);
-    };
-
-    assert_protocol_error(
-        bytes({0xffU, 0xffU, 0xffU, 0xffU, 0x42U}),
-        goldsrc::NetchanBootstrapErrorCode::unexpected_connectionless_packet);
-    assert_protocol_error(
-        bytes({0xfeU, 0xffU, 0xffU, 0xffU, 0U, 0U, 0U, 0U}),
-        goldsrc::NetchanBootstrapErrorCode::unsupported_special_packet);
-    assert_protocol_error(
-        bytes({1U, 2U, 3U, 4U, 5U, 6U, 7U}),
-        goldsrc::NetchanBootstrapErrorCode::malformed_packet);
-}
-
-TEST_CASE("Duplicate and older packets do not mutate channel state or cause ACK storms",
-          "[goldsrc][netchan][bootstrap][sequence]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    transport.queue(remote, server_packet(0U, 0U, bytes({0x20U}), true));
-    transport.queue(
-        remote,
-        server_packet(goldsrc::kNetchanSequenceMask, 0U, bytes({0x21U}), true));
-    transport.queue(remote, server_packet(1U, 1U, bytes({0x22U}), true));
-    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-
-    REQUIRE(stage.start({}, transport.local));
-    stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-    REQUIRE(stage.result());
-    CHECK(equal_bytes(stage.result()->payload.bytes, bytes({0x22U})));
-    CHECK(stage.channel().incoming_sequence() == sequence(1U));
-    CHECK(stage.channel().incoming_reliable_toggle());
-    CHECK(transport.receive_count == 3U);
-    CHECK(stage.transmitted_packet_count() == 2U);
-}
-
-TEST_CASE("Half-range sequence and invalid acknowledgements fail before ACK",
-          "[goldsrc][netchan][bootstrap][acknowledgement]")
-{
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto assert_error = [&](std::vector<std::byte> datagram,
-                                  const goldsrc::NetchanBootstrapErrorCode code) {
-        FakeDatagramTransport transport;
-        transport.queue(remote, std::move(datagram));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start({}, transport.local));
-        stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::protocol_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code == code);
-        CHECK(stage.transmitted_packet_count() == 1U);
-    };
-
-    assert_error(
-        server_packet(goldsrc::kNetchanSequenceHalfRange, 1U, bytes({0x31U})),
-        goldsrc::NetchanBootstrapErrorCode::invalid_sequence);
-    assert_error(
-        server_packet(1U, 2U, bytes({0x32U})),
-        goldsrc::NetchanBootstrapErrorCode::invalid_acknowledgement);
-    assert_error(
-        server_packet(1U, 1U, bytes({0x33U}), false, true),
-        goldsrc::NetchanBootstrapErrorCode::invalid_acknowledgement);
-
-    auto reserved_ack = server_packet(1U, 1U, bytes({0x34U}));
-    reserved_ack[7U] |= std::byte{0x40U};
-    assert_error(
-        std::move(reserved_ack),
-        goldsrc::NetchanBootstrapErrorCode::malformed_packet);
-}
-
-TEST_CASE("Padding is acknowledged but only non-padding becomes an owning result",
-          "[goldsrc][netchan][bootstrap][payload][capture]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    transport.queue(
-        remote,
-        server_packet(
-            1U,
-            1U,
-            std::vector<std::byte>(8U, goldsrc::kStockProtocol48NetchanPaddingByte)));
-    transport.queue(remote, server_packet(2U, 2U, bytes({0x51U, 0x52U}), true));
-    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-
-    REQUIRE(stage.start({}, transport.local));
-    stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
-    CHECK_FALSE(stage.result());
-    REQUIRE(transport.sent.size() == 2U);
-
-    // Independent benign golden: seq2, ACK server seq1, no reliable ACK,
-    // followed by the capture-confirmed key-2 encoding of eight 0x01 bytes.
-    const auto expected_first_ack = bytes({
-        0x02U, 0x00U, 0x00U, 0x00U,
-        0x01U, 0x00U, 0x00U, 0x00U,
-        0x59U, 0x19U, 0x01U, 0x03U,
-        0x19U, 0x01U, 0x11U, 0x43U,
-    });
-    CHECK(equal_bytes(transport.sent[1U].payload, expected_first_ack));
-
-    stage.update(goldsrc::NetchanBootstrapTimePoint{} + 2ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-    REQUIRE(stage.result());
-    CHECK(equal_bytes(stage.result()->payload.bytes, bytes({0x51U, 0x52U})));
-    CHECK(stage.result()->payload.source_sequence == sequence(2U));
-    CHECK(stage.result()->payload.reliable);
-    CHECK_FALSE(stage.result()->payload.reassembled);
-    CHECK(stage.result()->payload.fragment_count == 0U);
-    CHECK(transport.sent.size() == 3U);
-}
-
-TEST_CASE("Five unique normal fragments toggle once each and complete in index order",
-          "[goldsrc][netchan][bootstrap][fragments][capture]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    std::array<std::vector<std::byte>, 5U> fragments;
-    std::vector<std::byte> expected;
-    constexpr std::array<std::size_t, 5U> sizes{1'024U, 1'024U, 1'024U, 1'024U, 90U};
-    for (std::size_t index = 0U; index < fragments.size(); ++index) {
-        fragments[index].assign(
-            sizes[index],
-            std::byte{static_cast<std::uint8_t>(index + 1U)});
-        expected.insert(expected.end(), fragments[index].begin(), fragments[index].end());
-        transport.queue(
-            remote,
-            normal_fragment_packet(
-                static_cast<std::uint32_t>(index + 1U),
-                static_cast<std::uint32_t>(index + 1U),
-                static_cast<std::uint16_t>(index + 1U),
-                5U,
-                fragments[index]));
-    }
-    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
-
-    REQUIRE(stage.start(epoch, transport.local));
-    for (std::size_t index = 0U; index < fragments.size(); ++index) {
-        stage.update(epoch + std::chrono::milliseconds{static_cast<int>(index + 1U)});
-        CHECK(stage.channel().incoming_sequence() ==
-              sequence(static_cast<std::uint32_t>(index + 1U)));
-        CHECK(stage.channel().incoming_reliable_toggle() == ((index % 2U) == 0U));
-        if (index + 1U < fragments.size()) {
-            CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_fragments);
-            REQUIRE(stage.fragment_deadline());
-            CHECK(*stage.fragment_deadline() == epoch + 1ms + 40ms);
-        }
-    }
-
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-    REQUIRE(stage.result());
-    CHECK(equal_bytes(stage.result()->payload.bytes, expected));
-    CHECK(stage.result()->payload.reassembled);
-    CHECK(stage.result()->payload.reliable);
-    CHECK(stage.result()->payload.fragment_count == 5U);
-    CHECK(stage.result()->payload.source_sequence == sequence(5U));
-    CHECK_FALSE(stage.fragment_deadline());
-    CHECK(stage.transmitted_packet_count() == 6U);
-
-    // ACKs after the five unique reliable units carry alternating bit31 state.
-    for (std::size_t index = 0U; index < 5U; ++index) {
-        const auto ack = goldsrc::decode_client_to_server_netchan_packet(
-            transport.sent[index + 1U].payload);
-        REQUIRE(ack.packet);
-        CHECK(ack.packet->header.acknowledgement.sequence ==
-              sequence(static_cast<std::uint32_t>(index + 1U)));
-        CHECK(ack.packet->header.acknowledgement.reliable == ((index % 2U) == 0U));
-    }
-}
-
-TEST_CASE("Fresh-sequence exact fragment retransmission does not toggle or duplicate data",
-          "[goldsrc][netchan][bootstrap][fragments][duplicate]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto first = bytes({0x61U, 0x62U});
-    const auto second = bytes({0x63U});
-    transport.queue(remote, normal_fragment_packet(1U, 1U, 1U, 2U, first));
-    transport.queue(remote, normal_fragment_packet(2U, 2U, 1U, 2U, first));
-    transport.queue(remote, normal_fragment_packet(3U, 3U, 2U, 2U, second));
-    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
-
-    REQUIRE(stage.start(epoch, transport.local));
-    stage.update(epoch + 1ms);
-    CHECK(stage.channel().incoming_reliable_toggle());
-    REQUIRE(stage.fragment_deadline());
-    const auto fixed_deadline = *stage.fragment_deadline();
-
-    stage.update(epoch + 2ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_fragments);
-    CHECK(stage.channel().incoming_sequence() == sequence(2U));
-    CHECK(stage.channel().incoming_reliable_toggle());
-    REQUIRE(stage.fragment_deadline());
-    CHECK(*stage.fragment_deadline() == fixed_deadline);
-
-    stage.update(epoch + 3ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-    REQUIRE(stage.result());
-    CHECK(equal_bytes(stage.result()->payload.bytes, bytes({0x61U, 0x62U, 0x63U})));
-    CHECK_FALSE(stage.channel().incoming_reliable_toggle());
-}
-
-TEST_CASE("Same numeric fragment duplicate is ignored before reassembly and ACK",
-          "[goldsrc][netchan][bootstrap][fragments][duplicate][sequence]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto first = bytes({0x64U, 0x65U});
-    const auto second = bytes({0x66U});
-    transport.queue(remote, normal_fragment_packet(1U, 1U, 1U, 2U, first));
-    transport.queue(remote, normal_fragment_packet(1U, 1U, 1U, 2U, first));
-    transport.queue(remote, normal_fragment_packet(2U, 2U, 2U, 2U, second));
-    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
-
-    REQUIRE(stage.start(epoch, transport.local));
-    stage.update(epoch + 1ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_fragments);
-    CHECK(stage.channel().incoming_sequence() == sequence(1U));
-    CHECK(stage.channel().incoming_reliable_toggle());
-    CHECK(stage.transmitted_packet_count() == 2U);
-    REQUIRE(stage.fragment_deadline());
-    const auto fixed_deadline = *stage.fragment_deadline();
-
-    // The equal numeric sequence is discarded by the channel inspection token.
-    // Polling then reaches seq2 in the same update; only seq2 creates an ACK.
-    stage.update(epoch + 2ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-    REQUIRE(stage.result());
-    CHECK(equal_bytes(stage.result()->payload.bytes, bytes({0x64U, 0x65U, 0x66U})));
-    CHECK(stage.channel().incoming_sequence() == sequence(2U));
-    CHECK_FALSE(stage.channel().incoming_reliable_toggle());
-    CHECK(stage.transmitted_packet_count() == 3U);
-    CHECK(transport.receive_count == 3U);
-    CHECK_FALSE(stage.fragment_deadline());
-    CHECK(fixed_deadline == epoch + 41ms);
-}
-
-TEST_CASE("Malformed duplicate and older bodies are ignored from the header peek",
-          "[goldsrc][netchan][bootstrap][fragments][duplicate][malformed]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto first = bytes({0x67U, 0x68U});
-    const auto second = bytes({0x69U});
-    transport.queue(remote, normal_fragment_packet(1U, 1U, 1U, 2U, first));
-
-    // Both datagrams have an invalid/reserved ACK word and an invalid one-byte
-    // fragment body. A full codec pass would reject them. Numeric seq1 is an
-    // exact duplicate and numeric seq0 is older after seq1 has been admitted.
-    transport.queue(remote, bytes({
-                                0x01U, 0x00U, 0x00U, 0xc0U,
-                                0xffU, 0xffU, 0xffU, 0xffU,
-                                0x02U,
-                            }));
-    transport.queue(remote, bytes({
-                                0x00U, 0x00U, 0x00U, 0xc0U,
-                                0xffU, 0xffU, 0xffU, 0xffU,
-                                0x02U,
-                            }));
-    transport.queue(remote, normal_fragment_packet(2U, 2U, 2U, 2U, second));
-    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
-
-    REQUIRE(stage.start(epoch, transport.local));
-    stage.update(epoch + 1ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_fragments);
-    CHECK(stage.channel().incoming_sequence() == sequence(1U));
-    CHECK(stage.channel().incoming_reliable_toggle());
-    CHECK(stage.transmitted_packet_count() == 2U);
-    REQUIRE(stage.fragment_deadline());
-    const auto fixed_deadline = *stage.fragment_deadline();
-
-    stage.update(epoch + 2ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-    REQUIRE(stage.result());
-    CHECK(equal_bytes(stage.result()->payload.bytes, bytes({0x67U, 0x68U, 0x69U})));
-    CHECK(stage.channel().incoming_sequence() == sequence(2U));
-    CHECK_FALSE(stage.channel().incoming_reliable_toggle());
-    CHECK(stage.transmitted_packet_count() == 3U);
-    CHECK(transport.receive_count == 4U);
-    CHECK(fixed_deadline == epoch + 41ms);
-    CHECK_FALSE(stage.fragment_deadline());
-}
-
-TEST_CASE("Strict slot0 bootstrap rejects decoded bytes outside descriptor length",
-          "[goldsrc][netchan][bootstrap][fragments][layout]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    goldsrc::NetchanFragmentSlots slots;
-    slots[0U] = goldsrc::NetchanFragmentDescriptor{
-        0U,
-        0x0001'0001U,
-        0U,
-        1U,
-        0U,
-    };
-    const goldsrc::ServerToClientNetchanPacket packet{
-        goldsrc::NetchanHeader{
-            goldsrc::NetchanSequenceWord{
-                sequence(1U),
-                goldsrc::NetchanSequenceFlags{true, true},
-            },
-            goldsrc::NetchanAcknowledgementWord{sequence(1U), false},
-        },
-        std::move(slots),
-        bytes({0x6aU, 0x6bU}),
-    };
-    auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-    REQUIRE(encoded.datagram);
-    transport.queue(remote, std::move(*encoded.datagram));
-    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-
-    REQUIRE(stage.start({}, transport.local));
-    stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::protocol_error);
-    REQUIRE(stage.error());
-    CHECK(stage.error()->code ==
-          goldsrc::NetchanBootstrapErrorCode::invalid_fragment_layout);
-    CHECK(stage.channel().incoming_sequence() == sequence(0U));
-    CHECK_FALSE(stage.result());
-    CHECK(stage.transmitted_packet_count() == 1U);
-}
-
-TEST_CASE("Secondary stream is terminal M3 boundary with zero persistence or ACK",
-          "[goldsrc][netchan][bootstrap][secondary]")
-{
-    FakeDatagramTransport transport;
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    transport.queue(remote, secondary_fragment_packet(1U, 1U));
-    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-
-    REQUIRE(stage.start({}, transport.local));
-    stage.update(goldsrc::NetchanBootstrapTimePoint{} + 1ms);
-    CHECK(stage.state() ==
-          goldsrc::NetchanBootstrapState::secondary_stream_pending_m3);
-    CHECK(stage.terminal());
-    CHECK_FALSE(stage.result());
-    REQUIRE(stage.error());
-    CHECK(stage.error()->code ==
-          goldsrc::NetchanBootstrapErrorCode::secondary_stream_pending_m3);
-    CHECK(stage.channel().incoming_sequence() == sequence(0U));
-    CHECK(stage.transmitted_packet_count() == 1U);
-}
-
-TEST_CASE("First-packet and fixed fragment deadlines are deterministic",
-          "[goldsrc][netchan][bootstrap][timeout]")
-{
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
-
-    SECTION("first packet at exact deadline is late")
-    {
-        FakeDatagramTransport transport;
-        transport.queue(remote, server_packet(1U, 1U, bytes({0x71U}), true));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start(epoch, transport.local));
-        stage.update(epoch + 100ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::timed_out);
-        CHECK(transport.receive_count == 0U);
-        CHECK(transport.incoming.size() == 1U);
-        CHECK(stage.transmitted_packet_count() == 1U);
-    }
-
-    SECTION("fragment deadline is fixed from first accepted fragment")
-    {
-        FakeDatagramTransport transport;
-        transport.queue(remote, normal_fragment_packet(1U, 1U, 1U, 3U, bytes({0x71U})));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start(epoch, transport.local));
-        stage.update(epoch + 10ms);
-        REQUIRE(stage.fragment_deadline());
-        CHECK(*stage.fragment_deadline() == epoch + 50ms);
-        transport.queue(remote, normal_fragment_packet(2U, 2U, 2U, 3U, bytes({0x72U})));
-        stage.update(epoch + 49ms);
-        REQUIRE(stage.fragment_deadline());
-        CHECK(*stage.fragment_deadline() == epoch + 50ms);
-        stage.update(epoch + 50ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::timed_out);
-        CHECK_FALSE(stage.fragment_deadline());
-        CHECK_FALSE(stage.result());
-    }
-
-    SECTION("clock regression is a typed protocol error before receive")
-    {
-        FakeDatagramTransport transport;
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start(epoch + 10ms, transport.local));
-        stage.update(epoch + 9ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::protocol_error);
-        REQUIRE(stage.error());
-        CHECK(stage.error()->code ==
-              goldsrc::NetchanBootstrapErrorCode::time_moved_backwards);
-        CHECK(transport.receive_count == 0U);
-    }
-}
-
-TEST_CASE("Polling and outgoing work are independently bounded per update",
-          "[goldsrc][netchan][bootstrap][budget]")
-{
-    const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto spoofed = network::NetworkAddress::loopback(27'129);
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
-
-    SECTION("receive budget")
-    {
-        FakeDatagramTransport transport;
-        auto config = test_config();
-        config.maximum_datagrams_per_update = 2U;
-        transport.queue(spoofed, bytes({0x01U}));
-        transport.queue(spoofed, bytes({0x02U}));
-        transport.queue(remote, server_packet(1U, 1U, bytes({0x73U}), true));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, config};
-        REQUIRE(stage.start(epoch, transport.local));
         stage.update(epoch + 1ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
-        CHECK(transport.receive_count == 2U);
-        CHECK(transport.incoming.size() == 1U);
-        stage.update(epoch + 2ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-        CHECK(transport.receive_count == 3U);
-    }
-
-    SECTION("one successful ACK stops polling at default TX budget")
-    {
-        FakeDatagramTransport transport;
-        transport.queue(
-            remote,
-            server_packet(
-                1U,
-                1U,
-                std::vector<std::byte>(8U, goldsrc::kStockProtocol48NetchanPaddingByte)));
-        transport.queue(remote, server_packet(2U, 2U, bytes({0x74U}), true));
-        goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-        REQUIRE(stage.start(epoch, transport.local));
-        stage.update(epoch + 1ms);
-        CHECK(transport.receive_count == 1U);
-        CHECK(transport.incoming.size() == 1U);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
-        stage.update(epoch + 2ms);
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-        CHECK(transport.receive_count == 2U);
+        check_error(
+            stage,
+            goldsrc::NetchanBootstrapState::network_error,
+            goldsrc::NetchanBootstrapErrorCode::inconsistent_receive_result);
     }
 }
 
-TEST_CASE("Cancellation completion and failures are terminal and send nothing later",
-          "[goldsrc][netchan][bootstrap][terminal]")
+TEST_CASE("M2.3.1 ACK send failure withholds result and never retries",
+          "[goldsrc][netchan][bootstrap][ack][network]")
 {
     FakeDatagramTransport transport;
     const auto remote = network::NetworkAddress::loopback(27'128);
-    transport.queue(remote, server_packet(1U, 1U, bytes({0x81U}), true));
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
     goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
+    require_started(stage, epoch, *transport.local);
+    transport.send_results.push_back(network::DatagramSendResult{
+        network::DatagramSendStatus::error,
+        "synthetic ACK failure",
+    });
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x41U}), true));
 
-    REQUIRE(stage.start(epoch, transport.local));
-    stage.cancel(epoch + 1ms);
-    stage.cancel(epoch + 2ms);
-    stage.update(epoch + 3ms);
-    CHECK_FALSE(stage.start(epoch + 4ms, transport.local));
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::cancelled);
-    CHECK(stage.terminal());
-    CHECK(transport.receive_count == 0U);
-    CHECK(transport.incoming.size() == 1U);
+    stage.update(epoch + 1ms);
+    check_error(
+        stage,
+        goldsrc::NetchanBootstrapState::network_error,
+        goldsrc::NetchanBootstrapErrorCode::send_failed);
+    CHECK(transport.send_attempt_count == 1U);
+    CHECK(stage.transmitted_packet_count() == 0U);
+    CHECK(stage.session().first_incoming_committed());
+    CHECK(stage.session().first_acknowledgement_prepared());
+    CHECK_FALSE(stage.session().first_acknowledgement_sent());
+
+    stage.update(epoch + 2ms);
     CHECK(transport.send_attempt_count == 1U);
 }
 
-TEST_CASE("Metadata trace callbacks cannot reenter and thrown callbacks are isolated",
+TEST_CASE("M2.3.1 receive and transmit work stay bounded per update",
+          "[goldsrc][netchan][bootstrap][bounds]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    auto config = test_config();
+    config.maximum_datagrams_per_update = 2U;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, config};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, ignored_header_only_packet(0U));
+    transport.queue(remote, ignored_header_only_packet(0U));
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x41U}), true));
+
+    stage.update(epoch + 1ms);
+    CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
+    CHECK(transport.receive_count == 2U);
+    CHECK(transport.sent.empty());
+
+    stage.update(epoch + 2ms);
+    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
+    CHECK(transport.receive_count == 3U);
+    CHECK(transport.sent.size() == 1U);
+}
+
+TEST_CASE("M2.3.1 opaque svc-looking bytes are never interpreted",
+          "[goldsrc][netchan][bootstrap][opaque][signon]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
+    require_started(stage, epoch, *transport.local);
+    const auto svc_looking = bytes({0x0bU, 0xffU, 0x00U, 0x07U, 0x1dU});
+    transport.queue(remote, server_packet(1U, 0U, svc_looking));
+
+    stage.update(epoch + 1ms);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == svc_looking);
+    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
+}
+
+TEST_CASE("M2.3.1 trace is metadata-only reentrancy-safe and exception-isolated",
           "[goldsrc][netchan][bootstrap][trace]")
 {
     FakeDatagramTransport transport;
     const auto remote = network::NetworkAddress::loopback(27'128);
-    const auto epoch = goldsrc::NetchanBootstrapTimePoint{};
-    transport.queue(remote, server_packet(1U, 1U, bytes({0x91U}), true));
-
-    goldsrc::NetchanBootstrapStage* stage_pointer = nullptr;
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
     std::vector<goldsrc::NetchanBootstrapTraceEvent> events;
-    bool reentrant_start = true;
+    goldsrc::NetchanBootstrapStage* stage_pointer = nullptr;
     goldsrc::NetchanBootstrapStage stage{
         transport,
         remote,
         test_config(),
         [&](const goldsrc::NetchanBootstrapTraceEvent& event) {
             events.push_back(event);
-            reentrant_start = stage_pointer->start(epoch, transport.local);
-            stage_pointer->update(epoch + 1ms);
-            stage_pointer->cancel(epoch + 1ms);
+            if (stage_pointer != nullptr) {
+                stage_pointer->update(epoch + 1ms);
+            }
             throw std::runtime_error{"synthetic trace exception"};
         }};
     stage_pointer = &stage;
 
-    bool started = false;
-    REQUIRE_NOTHROW(started = stage.start(epoch, transport.local));
-    REQUIRE(started);
-    CHECK_FALSE(reentrant_start);
-    REQUIRE_NOTHROW(stage.update(epoch + 1ms));
-    CHECK(stage.state() == goldsrc::NetchanBootstrapState::complete);
-    CHECK(events.size() >= 6U);
-    CHECK(events.front().classification ==
-          goldsrc::NetchanBootstrapTraceClassification::bootstrap_started);
-    CHECK(events.back().classification ==
-          goldsrc::NetchanBootstrapTraceClassification::bootstrap_complete);
-    CHECK(events.back().endpoint == remote);
-    CHECK(events.back().sequence == 1U);
-    CHECK(events.back().acknowledgement == 1U);
-    CHECK(events.back().reliable);
-    CHECK_FALSE(events.back().fragmented);
-    CHECK(events.back().payload_size == 1U);
-    CHECK(events.back().transmitted_packet_count == 2U);
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x41U}), true));
+    stage.update(epoch + 2ms);
+    REQUIRE(stage.result());
+    CHECK(transport.sent.size() == 1U);
+    CHECK_FALSE(events.empty());
+    CHECK(events.back().transmitted_packet_count == 1U);
 }
 
 } // namespace

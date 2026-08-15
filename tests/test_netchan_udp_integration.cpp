@@ -120,7 +120,7 @@ template<std::size_t Size>
     throw std::runtime_error{"Timed out waiting for a bounded loopback datagram"};
 }
 
-TEST_CASE("M2.3 fake HLDS completes same-socket netchan bootstrap and exact ACK",
+TEST_CASE("M2.3.1 fake HLDS completes same-socket netchan bootstrap and exact ACK",
           "[goldsrc][netchan][udp][integration]")
 {
     NetworkRuntime runtime;
@@ -152,9 +152,8 @@ TEST_CASE("M2.3 fake HLDS completes same-socket netchan bootstrap and exact ACK"
     response_config.maximum_datagrams_per_update = 4U;
     hlclient::goldsrc::NetchanBootstrapConfig netchan_config;
     netchan_config.first_packet_timeout = 1s;
-    netchan_config.fragment_completion_timeout = 1s;
     netchan_config.maximum_datagrams_per_update = 4U;
-    netchan_config.maximum_outgoing_packets_per_update = 2U;
+    netchan_config.maximum_outgoing_packets_per_update = 1U;
 
     hlclient::goldsrc::GoldSrcHandshakeCoordinator handshake{
         transport,
@@ -202,35 +201,18 @@ TEST_CASE("M2.3 fake HLDS completes same-socket netchan bootstrap and exact ACK"
         accept_response(client_endpoint),
         error));
 
-    // The ACCEPT update starts netchan on the same transport and sends exactly
-    // one bounded initial padding probe, but intentionally does not poll RX.
+    // The ACCEPT update hands off the same socket but does not poll RX or emit
+    // the captured stock client's opaque client-first sign-on packet.
     handshake.update(epoch + 2ms);
     REQUIRE(handshake.state() ==
             hlclient::goldsrc::GoldSrcHandshakeState::waiting_for_netchan);
-    const auto initial = receive_bounded(
-        *server_socket,
-        hlclient::goldsrc::kMaximumNetchanDatagramSize);
-    CHECK(initial.source == client_endpoint);
-    const auto decoded_initial =
-        hlclient::goldsrc::decode_client_to_server_netchan_packet(initial.payload);
-    REQUIRE(decoded_initial);
-    CHECK(decoded_initial.packet->header.sequence.sequence.value() == 1U);
-    CHECK_FALSE(decoded_initial.packet->header.sequence.flags.reliable);
-    CHECK_FALSE(decoded_initial.packet->header.sequence.flags.fragmented);
-    CHECK(decoded_initial.packet->header.acknowledgement.sequence.value() == 0U);
-    CHECK_FALSE(decoded_initial.packet->header.acknowledgement.reliable);
-    REQUIRE(decoded_initial.packet->payload.size() ==
-            hlclient::goldsrc::kStockProtocol48MinimumDecodedPayloadSize);
-    for (const auto value : decoded_initial.packet->payload) {
-        CHECK(value == hlclient::goldsrc::kStockProtocol48NetchanPaddingByte);
-    }
 
     const hlclient::goldsrc::ServerToClientNetchanPacket server_packet{
         hlclient::goldsrc::NetchanHeader{
             hlclient::goldsrc::NetchanSequenceWord{
                 sequence(1U),
                 hlclient::goldsrc::NetchanSequenceFlags{true, false}},
-            hlclient::goldsrc::NetchanAcknowledgementWord{sequence(1U), false}},
+            hlclient::goldsrc::NetchanAcknowledgementWord{sequence(0U), false}},
         {},
         bytes(kBootstrapPayload),
     };
@@ -248,8 +230,12 @@ TEST_CASE("M2.3 fake HLDS completes same-socket netchan bootstrap and exact ACK"
     REQUIRE(handshake.netchan_bootstrap_result());
     CHECK(handshake.netchan_bootstrap_result()->payload.bytes == bytes(kBootstrapPayload));
     CHECK(handshake.netchan_bootstrap_result()->payload.source_sequence.value() == 1U);
-    CHECK(handshake.netchan_bootstrap_result()->payload.reliable);
-    CHECK_FALSE(handshake.netchan_bootstrap_result()->payload.reassembled);
+    CHECK(handshake.netchan_bootstrap_result()->payload.source_acknowledgement.value() == 0U);
+    CHECK(handshake.netchan_bootstrap_result()->payload.sequence_flags.reliable);
+    CHECK_FALSE(handshake.netchan_bootstrap_result()->payload.sequence_flags.fragmented);
+    CHECK_FALSE(handshake.netchan_bootstrap_result()->payload.acknowledgement_reliable);
+    CHECK(handshake.netchan_bootstrap_result()->payload.direction ==
+          hlclient::goldsrc::NetchanDirection::server_to_client);
     REQUIRE(handshake.local_endpoint());
     CHECK(*handshake.local_endpoint() == client_endpoint);
 
@@ -258,17 +244,17 @@ TEST_CASE("M2.3 fake HLDS completes same-socket netchan bootstrap and exact ACK"
         hlclient::goldsrc::kMaximumNetchanDatagramSize);
     CHECK(acknowledgement.source == client_endpoint);
     const auto expected_acknowledgement = bytes(std::array<std::uint8_t, 16U>{
-        0x02U, 0x00U, 0x00U, 0x00U,
+        0x01U, 0x00U, 0x00U, 0x00U,
         0x01U, 0x00U, 0x00U, 0x80U,
-        0x59U, 0x19U, 0x01U, 0x03U,
-        0x19U, 0x01U, 0x11U, 0x43U,
+        0x5aU, 0x19U, 0x01U, 0x00U,
+        0x1aU, 0x01U, 0x11U, 0x40U,
     });
     CHECK(acknowledgement.payload == expected_acknowledgement);
     const auto decoded_ack =
         hlclient::goldsrc::decode_client_to_server_netchan_packet(
             acknowledgement.payload);
     REQUIRE(decoded_ack);
-    CHECK(decoded_ack.packet->header.sequence.sequence.value() == 2U);
+    CHECK(decoded_ack.packet->header.sequence.sequence.value() == 1U);
     CHECK_FALSE(decoded_ack.packet->header.sequence.flags.reliable);
     CHECK_FALSE(decoded_ack.packet->header.sequence.flags.fragmented);
     CHECK(decoded_ack.packet->header.acknowledgement.sequence.value() == 1U);

@@ -6,14 +6,17 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has completed **M2.3: netchan bootstrap, sequencing, and
-acknowledgements** for the bounded captured profile and deterministic local
-fake-HLDS path. Completed M1–M2.3 behavior includes the Protocol 48 challenge,
-captured one-shot `connect` request, strict immediate connectionless
+The repository has completed **M2.3.1: stock netchan wire bootstrap,
+sequencing, and the first acknowledgement** for the bounded captured profile
+and deterministic local fake-HLDS path. Completed M1–M2.3.1 behavior includes
+the Protocol 48 challenge, captured one-shot `connect` request, strict immediate
+connectionless
 `ACCEPT`/`REJECT`, an explicit authentication-provider boundary, same-socket
-netchan bootstrap, bounded normal reassembly, and the required acknowledgement.
-There is no production Steam authentication provider, authentication bypass,
-`svc_*`/sign-on parsing, resource pipeline, snapshot handling, or gameplay.
+netchan bootstrap, an owning first opaque payload, and exactly one required
+transport acknowledgement. There is no production reliable queue or
+retransmission lifecycle, fragment reassembly, Steam authentication provider,
+authentication bypass, `svc_*`/sign-on parsing, resource pipeline, snapshot
+handling, or gameplay.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
 ## Reference platform
@@ -51,7 +54,7 @@ git submodule update --init --recursive
 The manual path is fully supported and is the acceptance-reference workflow:
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
+cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DHLCLIENT_WARNINGS_AS_ERRORS=ON
 cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
@@ -168,7 +171,7 @@ response. Acceptance exits successfully but does not create a netchan or enter
 sign-on; rejection, timeout, malformed response, and network failure exit
 nonzero. Rejection text is escaped and presentation-capped before logging.
 
-The M2.3 target stop point is:
+The M2.3.1 target stop point is:
 
 ```powershell
 .\build\bin\Debug\hlclient.exe --renderer null `
@@ -178,10 +181,22 @@ The M2.3 target stop point is:
 ```
 
 The production path is validated end to end against a deterministic local fake
-HLDS. A completed bootstrap means only that the same UDP socket processed a
-valid sequenced packet, obtained one complete opaque payload, and emitted the
-required acknowledgement behavior. It still stops before every `svc_*` or
-sign-on interpretation.
+HLDS. That fake sends the first server sequenced datagram after `ACCEPT`; the
+project waits for it on the same UDP socket, obtains one complete opaque
+unfragmented payload, and emits exactly one minimal transport acknowledgement.
+A completed bootstrap means only those operations succeeded. It still stops
+before every reliable retransmission, fragment reassembly, `svc_*`, or sign-on
+operation.
+
+A first packet carrying the confirmed fragment flag is recognized but returns
+`fragmented_payload_pending_m2_3_3` with a nonzero exit; it is not acknowledged
+as a completed payload and no fragment transfer is retained.
+
+Stock capture established a client-first post-`ACCEPT` order. The stock
+client's first reliable body is opaque sign-on/application content, so the
+project does not reproduce or disguise it as transport data. Consequently the
+deterministic fake-HLDS proof starts with the server packet and is not a claim
+that project `hlclient` can continue against stock HLDS.
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -213,9 +228,11 @@ components and a user-supplied bounded relay:
 ```
 
 This opt-in script is loopback-only, bounded, and writes process/capture output
-under ignored `manual-artifacts/netchan-captures/`. It validates relay-reported
-bounded completion but neither prints payload bytes nor proves that project
-`hlclient` can authenticate to stock HLDS.
+under ignored `manual-artifacts/netchan-captures/`. The local research set used
+for M2.3.1 comprised six controlled stock sessions: two passive, one drop, one
+duplicate, and two reorder runs. The wrapper validates relay-reported bounded
+completion but neither prints payload bytes nor proves that project `hlclient`
+can authenticate to stock HLDS.
 
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
@@ -306,8 +323,8 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DHLCLIENT_WARNINGS_AS_E
 This option is deliberately not applied globally to third-party code. Tests use
 Catch2, avoid Internet and external game/server dependencies, and run through
 CTest. M1/M2.1/M2.2 protocol and state-machine coverage uses synthetic fixtures
-and local fake-HLDS UDP tests. M2.3 adds independent netchan fixtures and a
-validated local fake-HLDS same-socket bootstrap path.
+and local fake-HLDS UDP tests. M2.3.1 adds independent netchan wire/sequence
+fixtures and a validated local fake-HLDS same-socket first-ACK path.
 Original-HLDS checks remain opt-in and do not turn stock-server acceptance into
 an automated-suite claim.
 

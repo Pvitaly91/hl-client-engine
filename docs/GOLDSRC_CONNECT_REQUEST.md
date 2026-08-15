@@ -220,7 +220,7 @@ During clean-room discovery unmodified stock clients transmitted the captured
 connect request through the relay and stock HLDS returned connectionless class
 `B` datagrams. Separate bounded rejection probes recorded class `9` responses.
 M2.2 now interprets those immediate layouts, while any following sequenced
-traffic remains the explicit M2.3 boundary. These observations establish stock
+traffic remains the explicit M2.3.1 boundary. These observations establish stock
 wire behavior; they are not a stock-server transmission or acceptance proof for
 this project's `hlclient` executable. Therefore:
 
@@ -233,5 +233,6 @@ this project's `hlclient` executable. Therefore:
   claimed.
 
 M2.2 connectionless accept/reject and the authentication-provider boundary are
-complete. M2.3 owns netchan sequencing/acknowledgements. M2.4 owns initial
-sign-on.
+complete. M2.3.1 owns the strict netchan wire/bootstrap and first ACK only;
+M2.3.2 owns reliable state and retransmission, M2.3.3 owns fragmentation and
+reassembly, and M2.4 owns initial sign-on.

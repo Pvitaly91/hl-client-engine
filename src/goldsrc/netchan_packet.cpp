@@ -6,7 +6,6 @@
 #include <hlclient/goldsrc/netchan_payload_transform.hpp>
 
 #include <algorithm>
-#include <limits>
 #include <utility>
 
 namespace hlclient::goldsrc {
@@ -261,72 +260,27 @@ template<typename Packet>
     const bool has_descriptors = std::ranges::any_of(
         packet.fragments,
         [](const auto& descriptor) { return descriptor.has_value(); });
+    if (packet.header.sequence.flags.fragmented) {
+        return encode_failure(
+            NetchanPacketErrorCode::fragmented_encode_pending_m2_3_3,
+            kNetchanHeaderSize,
+            "Fragmented packet construction is deferred to M2.3.3");
+    }
     if (!packet.header.sequence.flags.fragmented && has_descriptors) {
         return encode_failure(
             NetchanPacketErrorCode::descriptors_without_fragment_flag,
             kNetchanHeaderSize,
             "Netchan packet has fragment descriptors without the fragment flag");
     }
-    if (packet.header.sequence.flags.fragmented && !has_descriptors) {
-        return encode_failure(
-            NetchanPacketErrorCode::fragment_flag_without_descriptor,
-            kNetchanHeaderSize,
-            "Fragmented netchan packet has no present descriptor");
-    }
-
-    std::size_t descriptor_size = 0U;
-    if (packet.header.sequence.flags.fragmented) {
-        descriptor_size = kNetchanFragmentSlotCount;
-        for (std::size_t slot = 0U; slot < packet.fragments.size(); ++slot) {
-            if (!packet.fragments[slot]) {
-                continue;
-            }
-            const auto& descriptor = *packet.fragments[slot];
-            if (descriptor.slot_index != slot) {
-                return encode_failure(
-                    NetchanPacketErrorCode::invalid_fragment_slot,
-                    kNetchanHeaderSize,
-                    "Netchan fragment descriptor slot does not match its ordered position");
-            }
-            if (descriptor.length == 0U) {
-                return encode_failure(
-                    NetchanPacketErrorCode::zero_fragment_length,
-                    kNetchanHeaderSize,
-                    "Present netchan fragment descriptor has zero length");
-            }
-            constexpr std::size_t fields_size =
-                sizeof(std::uint32_t) + sizeof(std::uint16_t) + sizeof(std::uint16_t);
-            if (descriptor_size > std::numeric_limits<std::size_t>::max() - fields_size) {
-                return encode_failure(
-                    NetchanPacketErrorCode::packet_too_large,
-                    kNetchanHeaderSize,
-                    "Netchan fragment sizes overflow the host size type");
-            }
-            descriptor_size += fields_size;
-            if (descriptor.payload_offset != static_cast<std::size_t>(descriptor.offset)) {
-                return encode_failure(
-                    NetchanPacketErrorCode::fragment_payload_size_mismatch,
-                    kNetchanHeaderSize,
-                    "Netchan descriptor payload offset does not match its wire offset");
-            }
-        }
-        if (auto error = validate_fragment_payload_ranges(
-                packet.fragments,
-                packet.payload.size(),
-                kNetchanHeaderSize + descriptor_size)) {
-            return NetchanPacketEncodeResult{std::nullopt, std::move(error)};
-        }
-    }
 
     const auto maximum_body_size = limits.maximum_datagram_size - kNetchanHeaderSize;
-    if (descriptor_size > maximum_body_size ||
-        packet.payload.size() > maximum_body_size - descriptor_size) {
+    if (packet.payload.size() > maximum_body_size) {
         return encode_failure(
             NetchanPacketErrorCode::packet_too_large,
             limits.maximum_datagram_size,
             "Encoded netchan packet exceeds the configured project size bound");
     }
-    const auto body_size = descriptor_size + packet.payload.size();
+    const auto body_size = packet.payload.size();
 
     std::vector<std::byte> datagram(kNetchanHeaderSize + body_size);
     ByteWriter writer{datagram};
@@ -342,25 +296,6 @@ template<typename Packet>
             "Unable to encode the bounded netchan header");
     }
 
-    if (packet.header.sequence.flags.fragmented) {
-        for (const auto& descriptor : packet.fragments) {
-            if (!writer.write_uint8(descriptor ? 1U : 0U)) {
-                return encode_failure(
-                    NetchanPacketErrorCode::packet_too_large,
-                    writer.position(),
-                    "Unable to encode fragment descriptor presence");
-            }
-            if (descriptor &&
-                (!writer.write_uint32_le(descriptor->fragment_id) ||
-                 !writer.write_uint16_le(descriptor->offset) ||
-                 !writer.write_uint16_le(descriptor->length))) {
-                return encode_failure(
-                    NetchanPacketErrorCode::packet_too_large,
-                    writer.position(),
-                    "Unable to encode bounded fragment descriptor fields");
-            }
-        }
-    }
     if (!writer.write_bytes(packet.payload)) {
         return encode_failure(
             NetchanPacketErrorCode::packet_too_large,

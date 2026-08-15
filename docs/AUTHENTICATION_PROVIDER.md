@@ -72,9 +72,10 @@ session guard.
 The current application composition moves the remaining session into the
 handshake coordinator. Connect-request mode releases it at terminal
 `request_sent`; connect-response mode retains it through accept, reject,
-timeout, cancellation, or error. The M2.3 netchan stop point retains the same
+timeout, cancellation, or error. The M2.3.1 netchan stop point retains the same
 guard after `ACCEPT` and through bootstrap success, timeout, cancellation,
-network/protocol/fragment failure, or any other terminal netchan outcome.
+network/protocol failure, fragmented-payload-pending, or any other terminal
+netchan outcome.
 Member and move-assignment ordering ensures old material is destroyed before
 its provider lifetime guard.
 
@@ -96,8 +97,8 @@ session/request transfers are moves. During `ConnectRequestBuilder::build`, one
 additional bounded wire-datagram copy necessarily coexists with the owning
 material until the synchronous `send_to` returns; both are destroyed after the
 one-shot send while only the provider lifetime guard remains during response
-waiting. M2.2 does not add a custom allocator or claim that destroyed storage
-has been securely erased.
+waiting and an explicitly selected M2.3.1 bootstrap. M2.2/M2.3.1 do not add a
+custom allocator or claim that destroyed storage has been securely erased.
 
 Users must protect the source file with appropriate filesystem ownership and
 permissions, avoid committing or sharing it, and remove it according to their
@@ -163,8 +164,9 @@ ExplicitFileAuthenticationProvider
     -> GoldSrcHandshakeCoordinator retains session guard
     -> challenge -> one connect send -> bounded response wait
        |-> selected connect-response terminal outcome
-       `-> accepted + selected same-socket netchan bootstrap
-           -> opaque payload + required ACK terminal outcome
+       `-> accepted + selected same-socket M2.3.1 netchan bootstrap
+           -> first unfragmented opaque payload + exactly one ACK
+              or typed fragmented-payload-pending terminal outcome
     -> release session guard
 ```
 
@@ -174,8 +176,13 @@ not authentication material, and is separately escaped and presentation-capped
 before logging.
 
 The provider boundary is in-process modularity, not a security sandbox. No part
-of M2.2 or M2.3 authorizes bypassing Steam, server policy, VAC, access control,
+of M2.2 or M2.3.1 authorizes bypassing Steam, server policy, VAC, access control,
 or third-party terms. The absence of a production Steam provider is why a
 project-client-to-stock-HLDS bootstrap remains pending. A legitimate future
 provider requires its own platform, legal, storage, cancellation, and teardown
 review.
+
+The retained provider guard does not give netchan access to authentication
+bytes. M2.3.1 also has no reliable send queue, retransmission lifecycle, or
+fragment reassembler; those later transport milestones do not alter this
+authentication ownership boundary.

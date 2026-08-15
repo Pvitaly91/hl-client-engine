@@ -7,7 +7,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <span>
 #include <vector>
 
@@ -360,25 +359,33 @@ TEST_CASE("Netchan packet size configuration is strictly bounded",
         goldsrc::NetchanPacketLimits{goldsrc::kMaximumNetchanDatagramSize}));
 }
 
-TEST_CASE("Fragment descriptors decode in ordered neutral slots",
-          "[goldsrc][netchan][packet][fragments]")
+TEST_CASE("Fragment descriptors decode only as an ordered M2.3.3 boundary",
+          "[goldsrc][netchan][packet][fragments][pending]")
 {
-    goldsrc::NetchanFragmentSlots fragments{};
-    fragments[0] = goldsrc::NetchanFragmentDescriptor{0U, 0x0001'0005U, 0U, 2U, 0U};
-    fragments[1] = goldsrc::NetchanFragmentDescriptor{1U, 0x1122'3344U, 7U, 3U, 7U};
+    // Independent fixture. Decoded header: seq1 reliable+fragment, ACK2 with
+    // reliable ACK. Decoded body: two present descriptors followed by ten
+    // opaque bytes. The body bytes below are the independently calculated
+    // stock key-1 transform, not output from the production encoder.
+    const auto fixture = bytes(std::array<std::uint8_t, 36U>{
+        0x01U, 0x00U, 0x00U, 0xc0U,
+        0x02U, 0x00U, 0x00U, 0x80U,
+        0x5aU, 0x18U, 0x05U, 0x00U,
+        0x19U, 0x00U, 0x10U, 0x41U,
+        0x32U, 0x54U, 0x41U, 0x01U,
+        0x13U, 0x47U, 0x01U, 0x63U,
+        0x50U, 0x00U, 0x50U, 0x42U,
+        0x82U, 0xc2U, 0xd1U, 0x91U,
+        0x71U, 0x61U, 0x30U, 0x95U,
+    });
     const auto payload = bytes(std::array<std::uint8_t, 10U>{
         0x10U, 0x11U, 0x90U, 0x91U, 0x92U,
         0x93U, 0x94U, 0x20U, 0x21U, 0x22U});
-    const goldsrc::ServerToClientNetchanPacket packet{
-        header(1U, goldsrc::NetchanSequenceFlags{true, true}, 2U, true),
-        fragments,
-        payload,
-    };
 
-    auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-    REQUIRE(encoded);
-    const auto decoded = goldsrc::decode_server_to_client_netchan_packet(*encoded.datagram);
+    const auto decoded = goldsrc::decode_server_to_client_netchan_packet(fixture);
     REQUIRE(decoded);
+    CHECK(decoded.packet->header.sequence.sequence == sequence(1U));
+    CHECK(decoded.packet->header.sequence.flags.reliable);
+    CHECK(decoded.packet->header.sequence.flags.fragmented);
     REQUIRE(decoded.packet->fragments[0].has_value());
     REQUIRE(decoded.packet->fragments[1].has_value());
     CHECK(decoded.packet->fragments[0]->slot_index == 0U);
@@ -392,10 +399,6 @@ TEST_CASE("Fragment descriptors decode in ordered neutral slots",
     CHECK(decoded.packet->fragments[1]->length == 3U);
     CHECK(decoded.packet->fragments[1]->payload_offset == 7U);
     CHECK(bytes_equal(decoded.packet->payload, payload));
-
-    auto owned_payload = decoded.packet->payload;
-    encoded.datagram->clear();
-    CHECK(bytes_equal(owned_payload, payload));
 }
 
 TEST_CASE("Fragment decoder rejects malformed descriptor boundaries",
@@ -438,12 +441,12 @@ TEST_CASE("Fragment decoder rejects malformed descriptor boundaries",
     }
 }
 
-TEST_CASE("Fragment encoder rejects inconsistent remote-controlled sizes",
-          "[goldsrc][netchan][packet][fragments][bounds]")
+TEST_CASE("Fragment construction is a typed M2.3.3 boundary",
+          "[goldsrc][netchan][packet][fragments][pending]")
 {
     const auto payload = bytes(std::array<std::uint8_t, 2U>{0xaaU, 0xbbU});
 
-    SECTION("fragment flag without descriptor")
+    SECTION("fragment flag is never encoded in M2.3.1")
     {
         const goldsrc::ServerToClientNetchanPacket packet{
             header(1U, goldsrc::NetchanSequenceFlags{false, true}, 0U),
@@ -454,8 +457,8 @@ TEST_CASE("Fragment encoder rejects inconsistent remote-controlled sizes",
         REQUIRE_FALSE(encoded);
         REQUIRE(encoded.error);
         CHECK(
-            encoded.error->code ==
-            goldsrc::NetchanPacketErrorCode::fragment_flag_without_descriptor);
+            encoded.error->code == goldsrc::NetchanPacketErrorCode::
+                                       fragmented_encode_pending_m2_3_3);
     }
 
     SECTION("descriptor without fragment flag")
@@ -475,63 +478,15 @@ TEST_CASE("Fragment encoder rejects inconsistent remote-controlled sizes",
             goldsrc::NetchanPacketErrorCode::descriptors_without_fragment_flag);
     }
 
-    SECTION("zero length")
-    {
-        goldsrc::NetchanFragmentSlots fragments{};
-        fragments[0] = goldsrc::NetchanFragmentDescriptor{0U, 1U, 0U, 0U, 0U};
-        const goldsrc::ServerToClientNetchanPacket packet{
-            header(1U, goldsrc::NetchanSequenceFlags{false, true}, 0U),
-            fragments,
-            {},
-        };
-        const auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-        REQUIRE_FALSE(encoded);
-        REQUIRE(encoded.error);
-        CHECK(encoded.error->code == goldsrc::NetchanPacketErrorCode::zero_fragment_length);
-    }
-
-    SECTION("descriptor length exceeds payload")
-    {
-        goldsrc::NetchanFragmentSlots fragments{};
-        fragments[0] = goldsrc::NetchanFragmentDescriptor{0U, 1U, 0U, 3U, 0U};
-        const goldsrc::ServerToClientNetchanPacket packet{
-            header(1U, goldsrc::NetchanSequenceFlags{false, true}, 0U),
-            fragments,
-            payload,
-        };
-        const auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-        REQUIRE_FALSE(encoded);
-        REQUIRE(encoded.error);
-        CHECK(
-            encoded.error->code ==
-            goldsrc::NetchanPacketErrorCode::fragment_payload_out_of_bounds);
-    }
-
-    SECTION("descriptor ranges overlap")
-    {
-        goldsrc::NetchanFragmentSlots fragments{};
-        fragments[0] = goldsrc::NetchanFragmentDescriptor{0U, 1U, 0U, 2U, 0U};
-        fragments[1] = goldsrc::NetchanFragmentDescriptor{1U, 2U, 1U, 1U, 1U};
-        const goldsrc::ServerToClientNetchanPacket packet{
-            header(1U, goldsrc::NetchanSequenceFlags{false, true}, 0U),
-            fragments,
-            payload,
-        };
-        const auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-        REQUIRE_FALSE(encoded);
-        REQUIRE(encoded.error);
-        CHECK(encoded.error->code == goldsrc::NetchanPacketErrorCode::fragment_payload_overlap);
-    }
-
-    SECTION("maximum wire offset plus length is rejected before slicing")
+    SECTION("descriptor values do not bypass the pending outcome")
     {
         goldsrc::NetchanFragmentSlots fragments{};
         fragments[0] = goldsrc::NetchanFragmentDescriptor{
             0U,
             1U,
-            std::numeric_limits<std::uint16_t>::max(),
+            0U,
             1U,
-            std::numeric_limits<std::uint16_t>::max(),
+            0U,
         };
         const goldsrc::ServerToClientNetchanPacket packet{
             header(1U, goldsrc::NetchanSequenceFlags{true, true}, 0U),
@@ -542,78 +497,26 @@ TEST_CASE("Fragment encoder rejects inconsistent remote-controlled sizes",
         REQUIRE_FALSE(encoded);
         REQUIRE(encoded.error);
         CHECK(
-            encoded.error->code ==
-            goldsrc::NetchanPacketErrorCode::fragment_payload_out_of_bounds);
+            encoded.error->code == goldsrc::NetchanPacketErrorCode::
+                                       fragmented_encode_pending_m2_3_3);
     }
-}
-
-TEST_CASE("Secondary stream observation is bounded by named datagram policy",
-          "[goldsrc][netchan][packet][fragments][secondary][bounds]")
-{
-    const auto make_packet = [](const std::size_t payload_size) {
-        goldsrc::NetchanFragmentSlots fragments{};
-        fragments[1] = goldsrc::NetchanFragmentDescriptor{
-            1U,
-            0x0001'0001U,
-            0U,
-            static_cast<std::uint16_t>(payload_size),
-            0U,
-        };
-        return goldsrc::ServerToClientNetchanPacket{
-            header(1U, goldsrc::NetchanSequenceFlags{true, true}, 0U),
-            fragments,
-            std::vector<std::byte>(payload_size, std::byte{0x5a}),
-        };
-    };
-
-    const auto at_default = make_packet(
-        goldsrc::kDefaultNetchanSecondaryStreamObservationBytes);
-    const auto encoded_default =
-        goldsrc::encode_server_to_client_netchan_packet(at_default);
-    REQUIRE(encoded_default);
-    CHECK(encoded_default.datagram->size() == goldsrc::kDefaultNetchanDatagramSize);
-
-    const auto above_default = make_packet(
-        goldsrc::kDefaultNetchanSecondaryStreamObservationBytes + 1U);
-    const auto rejected_default =
-        goldsrc::encode_server_to_client_netchan_packet(above_default);
-    REQUIRE_FALSE(rejected_default);
-    REQUIRE(rejected_default.error);
-    CHECK(rejected_default.error->code == goldsrc::NetchanPacketErrorCode::packet_too_large);
-
-    const auto at_hard = make_packet(
-        goldsrc::kMaximumNetchanSecondaryStreamObservationBytes);
-    const auto encoded_hard = goldsrc::encode_server_to_client_netchan_packet(
-        at_hard,
-        goldsrc::NetchanPacketLimits{goldsrc::kMaximumNetchanDatagramSize});
-    REQUIRE(encoded_hard);
-    CHECK(encoded_hard.datagram->size() == goldsrc::kMaximumNetchanDatagramSize);
-
-    const auto above_hard = make_packet(
-        goldsrc::kMaximumNetchanSecondaryStreamObservationBytes + 1U);
-    const auto rejected_hard = goldsrc::encode_server_to_client_netchan_packet(
-        above_hard,
-        goldsrc::NetchanPacketLimits{goldsrc::kMaximumNetchanDatagramSize});
-    REQUIRE_FALSE(rejected_hard);
-    REQUIRE(rejected_hard.error);
-    CHECK(rejected_hard.error->code == goldsrc::NetchanPacketErrorCode::packet_too_large);
 }
 
 TEST_CASE("Every prefix of a valid fragmented fixture fails without partial output",
           "[goldsrc][netchan][packet][fragments][truncation]")
 {
-    goldsrc::NetchanFragmentSlots fragments{};
-    fragments[0] = goldsrc::NetchanFragmentDescriptor{0U, 0x0001'0005U, 0U, 4U, 0U};
-    const goldsrc::ServerToClientNetchanPacket packet{
-        header(1U, goldsrc::NetchanSequenceFlags{true, true}, 0U),
-        fragments,
-        bytes(std::array<std::uint8_t, 4U>{0x10U, 0x20U, 0x30U, 0x40U}),
-    };
-    const auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-    REQUIRE(encoded);
+    const auto fixture = bytes(std::array<std::uint8_t, 22U>{
+        0x01U, 0x00U, 0x00U, 0xc0U,
+        0x00U, 0x00U, 0x00U, 0x00U,
+        0x5aU, 0x18U, 0x05U, 0x00U,
+        0x1fU, 0x00U, 0x10U, 0x41U,
+        0x21U, 0x00U, 0x40U, 0x01U,
+        0x30U, 0x40U,
+    });
+    REQUIRE(goldsrc::decode_server_to_client_netchan_packet(fixture));
 
-    for (std::size_t size = 0U; size < encoded.datagram->size(); ++size) {
-        const auto prefix = std::span<const std::byte>{*encoded.datagram}.first(size);
+    for (std::size_t size = 0U; size < fixture.size(); ++size) {
+        const auto prefix = std::span<const std::byte>{fixture}.first(size);
         INFO("fragment fixture prefix length " << size);
         const auto decoded = goldsrc::decode_server_to_client_netchan_packet(prefix);
         REQUIRE_FALSE(decoded);
@@ -623,7 +526,7 @@ TEST_CASE("Every prefix of a valid fragmented fixture fails without partial outp
     }
 }
 
-TEST_CASE("Netchan encoder preserves its packet bound and reliable payload",
+TEST_CASE("Netchan encoder preserves its packet bound and reliable flag",
           "[goldsrc][netchan][packet][bounds]")
 {
     const goldsrc::ClientToServerNetchanPacket at_limit{
