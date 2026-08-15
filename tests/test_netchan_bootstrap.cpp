@@ -228,6 +228,49 @@ void append_uint32_le(std::vector<std::byte>& output, const std::uint32_t value)
     return datagram;
 }
 
+[[nodiscard]] std::vector<std::byte> normal_fragment_packet(
+    const std::uint32_t packet_sequence,
+    const std::uint32_t acknowledgement,
+    const std::uint16_t fragment_index,
+    const std::uint16_t fragment_count,
+    std::vector<std::byte> fragment_payload)
+{
+    const auto fragment_size = fragment_payload.size();
+    if (fragment_size == 0U ||
+        fragment_size > goldsrc::kStockProtocol48NormalFragmentChunkSize) {
+        throw std::runtime_error{"invalid synthetic normal fragment"};
+    }
+    goldsrc::NetchanFragmentSlots fragments;
+    fragments[0] = goldsrc::NetchanFragmentDescriptor{
+        0U,
+        (static_cast<std::uint32_t>(fragment_index) << 16U) |
+            static_cast<std::uint32_t>(fragment_count),
+        0U,
+        static_cast<std::uint16_t>(fragment_size),
+        0U,
+    };
+    const goldsrc::ServerToClientNetchanPacket packet{
+        goldsrc::NetchanHeader{
+            goldsrc::NetchanSequenceWord{
+                sequence(packet_sequence),
+                goldsrc::NetchanSequenceFlags{true, true},
+            },
+            goldsrc::NetchanAcknowledgementWord{
+                sequence(acknowledgement),
+                false,
+            },
+        },
+        std::move(fragments),
+        std::move(fragment_payload),
+        fragment_size,
+    };
+    auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
+    if (!encoded || !encoded.datagram) {
+        throw std::runtime_error{"unable to encode synthetic normal fragment"};
+    }
+    return std::move(*encoded.datagram);
+}
+
 [[nodiscard]] std::vector<std::byte> ignored_header_only_packet(
     const std::uint32_t numeric_sequence)
 {
@@ -352,21 +395,20 @@ TEST_CASE("M2.3.1 bootstrap configuration has finite hard bounds",
     config.maximum_opaque_payload_size = 0U;
     check_invalid(config);
     config = test_config();
-    config.maximum_opaque_payload_size = config.maximum_datagram_size;
+    config.maximum_opaque_payload_size = config.maximum_normal_transfer_size + 1U;
     check_invalid(config);
-
-    SECTION("minimum 16-byte datagram budget is valid")
-    {
-        FakeDatagramTransport transport;
-        config = test_config();
-        config.maximum_datagram_size = goldsrc::kMinimumNetchanBootstrapDatagramSize;
-        config.maximum_opaque_payload_size =
-            goldsrc::kStockProtocol48MinimumDecodedPayloadSize;
-        goldsrc::NetchanBootstrapStage stage{transport, remote, config};
-        CHECK(stage.start(epoch, *transport.local));
-        CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
-        CHECK(transport.sent.empty());
-    }
+    config = test_config();
+    config.fragment_transfer_timeout = 0ms;
+    check_invalid(config);
+    config = test_config();
+    config.maximum_fragment_datagram_size = config.maximum_datagram_size + 1U;
+    check_invalid(config);
+    config = test_config();
+    config.maximum_fragment_ranges = config.maximum_fragments_per_transfer - 1U;
+    check_invalid(config);
+    config = test_config();
+    config.maximum_events = goldsrc::kMinimumNetchanDriverEvents - 1U;
+    check_invalid(config);
 }
 
 TEST_CASE("M2.3.1 bootstrap rejects unavailable or mismatched local endpoints",
@@ -505,7 +547,6 @@ TEST_CASE("M2.3.1 bootstrap accepts the exact configured opaque payload bound",
     const auto remote = network::NetworkAddress::loopback(27'128);
     const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
     auto config = test_config();
-    config.maximum_datagram_size = 64U;
     config.maximum_opaque_payload_size = 16U;
     goldsrc::NetchanBootstrapStage stage{transport, remote, config};
     require_started(stage, epoch, *transport.local);
@@ -524,7 +565,6 @@ TEST_CASE("M2.3.1 bootstrap rejects opaque payload bound plus one before ACK",
     const auto remote = network::NetworkAddress::loopback(27'128);
     const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
     auto config = test_config();
-    config.maximum_datagram_size = 64U;
     config.maximum_opaque_payload_size = 16U;
     goldsrc::NetchanBootstrapStage stage{transport, remote, config};
     require_started(stage, epoch, *transport.local);
@@ -672,8 +712,8 @@ TEST_CASE("M2.3.1 impossible acknowledgement and half-range sequence are typed",
     }
 }
 
-TEST_CASE("M2.3.1 slot-zero fragment is a typed pending boundary without ACK",
-          "[goldsrc][netchan][bootstrap][fragment][pending]")
+TEST_CASE("M2.3.3 bootstrap reassembles a one-fragment normal payload and ACKs it",
+          "[goldsrc][netchan][bootstrap][fragment][reassembly]")
 {
     FakeDatagramTransport transport;
     const auto remote = network::NetworkAddress::loopback(27'128);
@@ -683,17 +723,18 @@ TEST_CASE("M2.3.1 slot-zero fragment is a typed pending boundary without ACK",
     transport.queue(remote, fragmented_packet(0U));
 
     stage.update(epoch + 1ms);
-    check_error(
-        stage,
-        goldsrc::NetchanBootstrapState::fragmented_payload_pending_m2_3_3,
-        goldsrc::NetchanBootstrapErrorCode::fragmented_payload_pending_m2_3_3);
-    CHECK(transport.sent.empty());
-    CHECK_FALSE(stage.session().first_incoming_committed());
-    CHECK(stage.session().state().incoming_sequence.value() == 0U);
+    REQUIRE(stage.state() == goldsrc::NetchanBootstrapState::complete);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == bytes({0x10U, 0x20U, 0x30U, 0x40U}));
+    REQUIRE(transport.sent.size() == 1U);
+    CHECK(transport.sent.front().payload == bytes(exact_first_acknowledgement()));
+    CHECK(stage.session().first_incoming_committed());
+    CHECK(stage.session().first_acknowledgement_sent());
+    CHECK(stage.persistent_session() != nullptr);
 }
 
-TEST_CASE("M2.3.1 slot-one fragment has the same typed pending boundary",
-          "[goldsrc][netchan][bootstrap][fragment][pending]")
+TEST_CASE("M2.3.3 bootstrap rejects the secondary fragment stream without ACK",
+          "[goldsrc][netchan][bootstrap][fragment][secondary]")
 {
     FakeDatagramTransport transport;
     const auto remote = network::NetworkAddress::loopback(27'128);
@@ -705,34 +746,114 @@ TEST_CASE("M2.3.1 slot-one fragment has the same typed pending boundary",
     stage.update(epoch + 1ms);
     check_error(
         stage,
-        goldsrc::NetchanBootstrapState::fragmented_payload_pending_m2_3_3,
-        goldsrc::NetchanBootstrapErrorCode::fragmented_payload_pending_m2_3_3);
+        goldsrc::NetchanBootstrapState::protocol_error,
+        goldsrc::NetchanBootstrapErrorCode::secondary_stream_pending_m3);
     CHECK(transport.sent.empty());
     CHECK_FALSE(stage.session().first_incoming_committed());
+    REQUIRE(stage.error()->reassembly_code);
+    CHECK(*stage.error()->reassembly_code ==
+          goldsrc::NetchanReassemblyErrorCode::secondary_stream_pending_m3);
 }
 
-TEST_CASE("Fragment pending takes precedence over reliable ACK validation",
-          "[goldsrc][netchan][bootstrap][fragment][pending][reliable]")
+TEST_CASE("M2.3.3 fragmented input validates peer ACK before transactional commit",
+          "[goldsrc][netchan][bootstrap][fragment][reliable]")
 {
     FakeDatagramTransport transport;
     const auto remote = network::NetworkAddress::loopback(27'128);
     const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
     goldsrc::NetchanBootstrapStage stage{transport, remote, test_config()};
     require_started(stage, epoch, *transport.local);
-    // ACK 1 is impossible before the first project transmission, but a valid
-    // fragmented packet is intentionally stopped at the M2.3.3 boundary
-    // before ACK/reliable lifecycle processing.
+    // ACK 1 is impossible before the first project transmission. Strict body
+    // and reassembly preparation happen first, but neither object commits.
     transport.queue(remote, fragmented_packet(0U, 1U));
 
     stage.update(epoch + 1ms);
     check_error(
         stage,
-        goldsrc::NetchanBootstrapState::fragmented_payload_pending_m2_3_3,
-        goldsrc::NetchanBootstrapErrorCode::fragmented_payload_pending_m2_3_3);
+        goldsrc::NetchanBootstrapState::protocol_error,
+        goldsrc::NetchanBootstrapErrorCode::invalid_acknowledgement);
     CHECK(transport.sent.empty());
     CHECK_FALSE(stage.session().first_incoming_committed());
     CHECK(stage.session().state().incoming_sequence.value() == 0U);
     CHECK(stage.persistent_session() == nullptr);
+}
+
+TEST_CASE("M2.3.3 bootstrap completes an out-of-order normal transfer once",
+          "[goldsrc][netchan][bootstrap][fragment][reassembly][project-policy]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    std::vector<goldsrc::NetchanBootstrapTraceEvent> trace;
+    goldsrc::NetchanBootstrapStage stage{
+        transport,
+        remote,
+        test_config(),
+        [&](const goldsrc::NetchanBootstrapTraceEvent& event) {
+            trace.push_back(event);
+        }};
+    require_started(stage, epoch, *transport.local);
+
+    std::vector<std::byte> canonical(
+        goldsrc::kStockProtocol48NormalFragmentChunkSize + 4U,
+        std::byte{0x41});
+    canonical[canonical.size() - 4U] = std::byte{0x54};
+    canonical[canonical.size() - 3U] = std::byte{0x45};
+    canonical[canonical.size() - 2U] = std::byte{0x53};
+    canonical[canonical.size() - 1U] = std::byte{0x54};
+    transport.queue(
+        remote,
+        normal_fragment_packet(
+            1U,
+            0U,
+            2U,
+            2U,
+            std::vector<std::byte>{canonical.end() - 4, canonical.end()}));
+    transport.queue(
+        remote,
+        normal_fragment_packet(
+            2U,
+            1U,
+            1U,
+            2U,
+            std::vector<std::byte>{
+                canonical.begin(),
+                canonical.begin() + static_cast<std::ptrdiff_t>(
+                    goldsrc::kStockProtocol48NormalFragmentChunkSize)}));
+
+    stage.update(epoch + 1ms);
+    CHECK(stage.state() == goldsrc::NetchanBootstrapState::waiting_first);
+    REQUIRE(transport.sent.size() == 1U);
+    CHECK(transport.sent.front().payload == bytes(exact_first_acknowledgement()));
+    stage.update(epoch + 2ms);
+    REQUIRE(stage.state() == goldsrc::NetchanBootstrapState::complete);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == canonical);
+    CHECK(transport.sent.size() == 2U);
+    CHECK(stage.transmitted_packet_count() == 2U);
+    const auto completion_trace = std::ranges::find_if(
+        trace.begin(),
+        trace.end(),
+        [](const goldsrc::NetchanBootstrapTraceEvent& event) {
+            return event.classification ==
+                goldsrc::NetchanBootstrapTraceClassification::
+                    normal_transfer_completed;
+        });
+    REQUIRE(completion_trace != trace.end());
+    const auto final_fragment_trace = std::ranges::find_if(
+        std::make_reverse_iterator(completion_trace),
+        trace.rend(),
+        [](const goldsrc::NetchanBootstrapTraceEvent& event) {
+            return event.classification ==
+                goldsrc::NetchanBootstrapTraceClassification::fragment_received;
+        });
+    REQUIRE(final_fragment_trace != trace.rend());
+    CHECK(final_fragment_trace->fragment_stream ==
+          goldsrc::NetchanFragmentStream::normal);
+    CHECK(final_fragment_trace->local_transfer_id.has_value());
+    CHECK(final_fragment_trace->fragment_length ==
+          goldsrc::kStockProtocol48NormalFragmentChunkSize);
+    CHECK(completion_trace->transfer_size == canonical.size());
 }
 
 TEST_CASE("M2.3.1 first-packet timeout is deterministic and terminal",
@@ -863,6 +984,29 @@ TEST_CASE("M2.3.1 receive and transmit work stay bounded per update",
     CHECK(transport.sent.size() == 1U);
 }
 
+TEST_CASE("Bootstrap facade yields exactly at its first owning payload",
+          "[goldsrc][netchan][bootstrap][bounds][stop]")
+{
+    FakeDatagramTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128);
+    const auto epoch = goldsrc::NetchanBootstrapTimePoint{} + 1s;
+    auto config = test_config();
+    config.maximum_datagrams_per_update = 8U;
+    config.maximum_outgoing_packets_per_update = 8U;
+    goldsrc::NetchanBootstrapStage stage{transport, remote, config};
+    require_started(stage, epoch, *transport.local);
+    transport.queue(remote, server_packet(1U, 0U, bytes({0x41U}), true));
+    transport.queue(remote, server_packet(2U, 1U, bytes({0x42U}), true));
+
+    stage.update(epoch + 1ms);
+    REQUIRE(stage.state() == goldsrc::NetchanBootstrapState::complete);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->payload.bytes == bytes({0x41U}));
+    CHECK(transport.receive_count == 1U);
+    CHECK(transport.incoming.size() == 1U);
+    CHECK(transport.sent.size() == 1U);
+}
+
 TEST_CASE("M2.3.1 opaque svc-looking bytes are never interpreted",
           "[goldsrc][netchan][bootstrap][opaque][signon]")
 {
@@ -908,6 +1052,12 @@ TEST_CASE("M2.3.1 trace is metadata-only reentrancy-safe and exception-isolated"
     CHECK(transport.sent.size() == 1U);
     CHECK_FALSE(events.empty());
     CHECK(events.back().transmitted_packet_count == 1U);
+    CHECK(std::ranges::count_if(
+              events,
+              [](const goldsrc::NetchanBootstrapTraceEvent& event) {
+                  return event.classification ==
+                      goldsrc::NetchanBootstrapTraceClassification::payload_ready;
+              }) == 1);
 }
 
 } // namespace

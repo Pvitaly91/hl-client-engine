@@ -72,16 +72,21 @@ session guard.
 The current application composition moves the remaining session into the
 handshake coordinator. Connect-request mode releases it at terminal
 `request_sent`; connect-response mode retains it through accept, reject,
-timeout, cancellation, or error. The M2.3.1 netchan stop point retains the same
-guard after `ACCEPT` and through bootstrap success, timeout, cancellation,
-network/protocol failure, fragmented-payload-pending, or any other terminal
-netchan outcome.
+timeout, cancellation, or error. For the M2.3.3 netchan stop, the client-layer
+composition moves the emptied session behind an authentication-agnostic
+`INetchanDriverLifetime`. The coordinator/stage-owned driver retains that guard
+after `ACCEPT` through unfragmented or reassembled bootstrap success, timeout,
+cancellation, network/protocol failure, backpressure, close, or another driver
+terminal outcome.
 Member and move-assignment ordering ensures old material is destroyed before
 its provider lifetime guard.
 
-That ordering lets a future provider keep an external ticket or session handle
-valid through the complete selected handshake stop point, including netchan
-bootstrap. The lifetime object's destructor must not log authentication data.
+The driver clears channel state and destroys its opaque lifetime exactly once
+on every terminal path. Netchan code sees neither `AuthenticationSession` nor
+authentication bytes. That ordering lets a future provider keep an external
+ticket or session handle valid through the complete selected handshake stop,
+including fragment reassembly and its final ACK. The lifetime object's
+destructor must not log authentication data.
 
 The boundary minimizes accidental exposure but is not secure-memory storage:
 current strings/vectors/stack arrays are not memory-locked and do not promise
@@ -97,8 +102,9 @@ session/request transfers are moves. During `ConnectRequestBuilder::build`, one
 additional bounded wire-datagram copy necessarily coexists with the owning
 material until the synchronous `send_to` returns; both are destroyed after the
 one-shot send while only the provider lifetime guard remains during response
-waiting and an explicitly selected M2.3.1 bootstrap. M2.2/M2.3.1 do not add a
-custom allocator or claim that destroyed storage has been securely erased.
+waiting and an explicitly selected M2.3.3 bootstrap/driver. These milestones do
+not add a custom allocator or claim that destroyed storage has been securely
+erased.
 
 Users must protect the source file with appropriate filesystem ownership and
 permissions, avoid committing or sharing it, and remove it according to their
@@ -164,10 +170,12 @@ ExplicitFileAuthenticationProvider
     -> GoldSrcHandshakeCoordinator retains session guard
     -> challenge -> one connect send -> bounded response wait
        |-> selected connect-response terminal outcome
-       `-> accepted + selected same-socket M2.3.1 netchan bootstrap
-           -> first unfragmented opaque payload + exactly one ACK
-              or typed fragmented-payload-pending terminal outcome
-    -> release session guard
+       `-> accepted + selected same-socket M2.3.3 netchan bootstrap
+           -> move emptied session behind INetchanDriverLifetime
+           -> stage/coordinator-owned NetchanDriver
+           -> first unfragmented or reassembled slot-0 opaque payload
+           -> required transport acknowledgement(s)
+           -> driver terminal cleanup releases guard exactly once
 ```
 
 Connect request traces expose only sizes/counts and a redaction marker.
@@ -176,13 +184,14 @@ not authentication material, and is separately escaped and presentation-capped
 before logging.
 
 The provider boundary is in-process modularity, not a security sandbox. No part
-of M2.2 or M2.3.1 authorizes bypassing Steam, server policy, VAC, access control,
+of M2.2–M2.3.3 authorizes bypassing Steam, server policy, VAC, access control,
 or third-party terms. The absence of a production Steam provider is why a
 project-client-to-stock-HLDS bootstrap remains pending. A legitimate future
 provider requires its own platform, legal, storage, cancellation, and teardown
 review.
 
 The retained provider guard does not give netchan access to authentication
-bytes. M2.3.1 also has no reliable send queue, retransmission lifecycle, or
-fragment reassembler; those later transport milestones do not alter this
-authentication ownership boundary.
+bytes. Reliable queues, retransmission, fragmentation/reassembly, and the
+persistent driver do not alter this authentication ownership boundary. The
+current CLI still stops at the first complete opaque netchan payload and does
+not enter M2.4 sign-on.

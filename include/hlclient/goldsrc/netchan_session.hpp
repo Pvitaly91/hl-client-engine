@@ -22,6 +22,15 @@ inline constexpr std::size_t kDefaultMaximumUnfragmentedReliablePayload =
     kDefaultNetchanDatagramSize - kNetchanHeaderSize;
 inline constexpr std::size_t kMaximumPendingReliablePayload =
     kMaximumNetchanDatagramSize - kNetchanHeaderSize;
+// Project safety bounds for the deterministic outgoing normal-fragment mirror.
+// They are not claims about a stock engine maximum. Fresh stock capture confirms
+// the 1,024-byte non-final chunk and per-fragment stop-and-wait behavior.
+inline constexpr std::size_t kMaximumOutgoingNormalFragmentTransferSize =
+    kMaximumPendingReliablePayload;
+inline constexpr std::size_t kMaximumOutgoingNormalFragments =
+    (kMaximumOutgoingNormalFragmentTransferSize +
+     kStockProtocol48NormalFragmentChunkSize - 1U) /
+    kStockProtocol48NormalFragmentChunkSize;
 
 struct NetchanSequenceState {
     NetchanSequence next_outgoing_sequence;
@@ -55,6 +64,16 @@ enum class NetchanAcknowledgementDisposition {
     stale,
 };
 
+// A fragmented newer packet must be classified only after its strict
+// descriptor/range has been transactionally prepared by the reassembler.
+// Exact fragment retransmissions advance numeric channel observations without
+// admitting/toggling the same reliable unit twice.
+enum class NetchanIncomingReliableUnitClassification {
+    unfragmented,
+    new_fragment_unit,
+    exact_fragment_retransmission,
+};
+
 struct NetchanAcknowledgementObservation {
     NetchanSequence sequence;
     bool reliable{false};
@@ -67,7 +86,12 @@ enum class ReliableTransmitDecision {
     send_new,
     retransmit,
     blocked_waiting_for_ack,
-    requires_fragmentation_pending_m2_3_3,
+    send_new_fragment,
+    retransmit_fragment,
+    // Project wrap policy: consume a numeric sequence whose fragment flags
+    // would collide with a connectionless/split classifier using an ordinary
+    // padded ACK-only datagram, then retry the unchanged fragment work.
+    advance_fragment_sequence,
 };
 
 struct NetchanReliableTransmitState {
@@ -91,6 +115,52 @@ struct InFlightReliablePayload {
     bool retransmission_requested{false};
 };
 
+class NetchanOutgoingFragmentTransferId final {
+public:
+    constexpr NetchanOutgoingFragmentTransferId() noexcept = default;
+
+    [[nodiscard]] constexpr bool valid() const noexcept
+    {
+        return value_ != 0U;
+    }
+
+    [[nodiscard]] constexpr std::uint64_t value() const noexcept
+    {
+        return value_;
+    }
+
+    friend constexpr bool operator==(
+        const NetchanOutgoingFragmentTransferId& left,
+        const NetchanOutgoingFragmentTransferId& right) noexcept = default;
+
+private:
+    friend class NetchanSession;
+
+    explicit constexpr NetchanOutgoingFragmentTransferId(
+        const std::uint64_t value) noexcept
+        : value_{value}
+    {
+    }
+
+    std::uint64_t value_{0U};
+};
+
+struct NetchanFragmentBuildPlan {
+    NetchanOutgoingFragmentTransferId transfer_id;
+    std::uint16_t fragment_index{0U};
+    std::uint16_t fragment_count{0U};
+    std::size_t canonical_offset{0U};
+    std::size_t canonical_length{0U};
+    bool retransmission{false};
+};
+
+struct NetchanOutgoingFragmentTransfer {
+    NetchanOutgoingFragmentTransferId transfer_id;
+    std::vector<std::byte> canonical_bytes;
+    std::uint16_t fragment_count{0U};
+    std::uint16_t current_fragment_index{0U};
+};
+
 enum class NetchanSessionErrorCode {
     invalid_configuration,
     future_acknowledgement,
@@ -103,16 +173,21 @@ enum class NetchanSessionErrorCode {
     stale_first_acknowledgement_transaction,
     first_acknowledgement_transaction_mismatch,
     reliable_queue_overflow,
-    reliable_payload_requires_fragmentation_pending_m2_3_3,
     unreliable_payload_does_not_fit,
     combined_payload_does_not_fit,
-    fragmented_payload_pending_m2_3_3,
     stale_outgoing_transaction,
     foreign_outgoing_transaction,
     outgoing_transaction_mismatch,
     reliable_send_count_overflow,
     session_revision_overflow,
     foreign_incoming_inspection,
+    fragment_reliable_classification_required,
+    fragment_reliable_classification_mismatch,
+    fragment_reliable_flag_required,
+    outgoing_fragment_transfer_too_large,
+    outgoing_fragment_count_overflow,
+    outgoing_fragment_datagram_does_not_fit,
+    outgoing_fragment_transfer_id_overflow,
 };
 
 struct NetchanSessionError {
@@ -163,11 +238,19 @@ public:
         return disposition_ == NetchanIncomingSequenceDisposition::newer;
     }
 
-    // Sequence bit 31 is reliable-byte presence. A committed newer packet with
-    // this bit toggles the receiver's independent reliable ACK generation.
+    // Sequence bit 31 is reliable-byte presence. A committed newer packet
+    // toggles the receiver's independent reliable ACK generation only when a
+    // validated caller classification admits it as a new reliable unit; an
+    // exact fragment retransmission preserves the current generation.
     [[nodiscard]] bool contains_new_reliable_data() const noexcept
     {
-        return should_commit() && header_.sequence.flags.reliable;
+        return should_commit() && contains_new_reliable_data_;
+    }
+
+    [[nodiscard]] NetchanIncomingReliableUnitClassification
+    reliable_unit_classification() const noexcept
+    {
+        return reliable_unit_classification_;
     }
 
     [[nodiscard]] bool incoming_reliable_acknowledgement_after_commit() const noexcept
@@ -183,6 +266,8 @@ private:
         NetchanIncomingSequenceDisposition disposition,
         std::uint32_t skipped_sequences,
         std::optional<NetchanAcknowledgementObservation> acknowledgement,
+        NetchanIncomingReliableUnitClassification reliable_unit_classification,
+        bool contains_new_reliable_data,
         bool incoming_reliable_acknowledgement_after_commit,
         std::shared_ptr<const NetchanSessionIdentity> session_identity,
         std::uint64_t session_revision) noexcept;
@@ -191,6 +276,9 @@ private:
     NetchanIncomingSequenceDisposition disposition_;
     std::uint32_t skipped_sequences_{0U};
     std::optional<NetchanAcknowledgementObservation> acknowledgement_;
+    NetchanIncomingReliableUnitClassification reliable_unit_classification_{
+        NetchanIncomingReliableUnitClassification::unfragmented};
+    bool contains_new_reliable_data_{false};
     bool incoming_reliable_acknowledgement_after_commit_{false};
     std::shared_ptr<const NetchanSessionIdentity> session_identity_;
     std::uint64_t session_revision_{0U};
@@ -275,6 +363,12 @@ public:
         return unreliable_payload_size_;
     }
 
+    [[nodiscard]] const std::optional<NetchanFragmentBuildPlan>&
+    fragment_plan() const noexcept
+    {
+        return fragment_plan_;
+    }
+
 private:
     friend class NetchanSession;
 
@@ -284,6 +378,8 @@ private:
         std::size_t reliable_payload_size,
         std::size_t unreliable_payload_size,
         bool planned_reliable_toggle,
+        std::optional<NetchanFragmentBuildPlan> fragment_plan,
+        std::vector<std::byte> planned_reliable_bytes,
         std::shared_ptr<const NetchanSessionIdentity> session_identity,
         std::uint64_t session_revision) noexcept;
 
@@ -292,6 +388,10 @@ private:
     std::size_t reliable_payload_size_{0U};
     std::size_t unreliable_payload_size_{0U};
     bool planned_reliable_toggle_{false};
+    std::optional<NetchanFragmentBuildPlan> fragment_plan_;
+    // Owning canonical range reserved during prepare so fragment send commit
+    // remains allocation-free and noexcept.
+    std::vector<std::byte> planned_reliable_bytes_;
     std::shared_ptr<const NetchanSessionIdentity> session_identity_;
     std::uint64_t session_revision_{0U};
     bool consumable_{true};
@@ -330,7 +430,9 @@ public:
     [[nodiscard]] const NetchanSessionLimits& limits() const noexcept;
 
     [[nodiscard]] NetchanIncomingInspectResult inspect_incoming(
-        const NetchanHeader& header) const noexcept;
+        const NetchanHeader& header,
+        NetchanIncomingReliableUnitClassification classification =
+            NetchanIncomingReliableUnitClassification::unfragmented) const noexcept;
 
     [[nodiscard]] NetchanSessionOperationResult commit_incoming(
         NetchanIncomingInspection&& inspection) noexcept;
@@ -361,6 +463,9 @@ public:
     [[nodiscard]] const std::optional<InFlightReliablePayload>&
     in_flight_reliable_payload() const noexcept;
     [[nodiscard]] bool outgoing_reliable_toggle() const noexcept;
+    [[nodiscard]] const std::optional<NetchanOutgoingFragmentTransfer>&
+    outgoing_fragment_transfer() const noexcept;
+    [[nodiscard]] bool has_outgoing_fragment_send_work() const noexcept;
     [[nodiscard]] bool first_incoming_committed() const noexcept;
     [[nodiscard]] bool first_acknowledgement_prepared() const noexcept;
     [[nodiscard]] bool first_acknowledgement_sent() const noexcept;
@@ -373,6 +478,7 @@ private:
     NetchanSessionLimits limits_;
     std::vector<std::byte> pending_reliable_payload_;
     std::optional<InFlightReliablePayload> in_flight_reliable_payload_;
+    std::optional<NetchanOutgoingFragmentTransfer> outgoing_fragment_transfer_;
     std::shared_ptr<const NetchanSessionIdentity> identity_;
     bool outgoing_reliable_toggle_{false};
     bool valid_configuration_{false};
@@ -380,6 +486,7 @@ private:
     bool first_acknowledgement_prepared_{false};
     bool first_acknowledgement_sent_{false};
     std::uint64_t revision_{0U};
+    std::uint64_t next_outgoing_fragment_transfer_id_{1U};
 };
 
 [[nodiscard]] constexpr std::string_view to_string(
@@ -394,8 +501,12 @@ private:
         return "retransmit";
     case ReliableTransmitDecision::blocked_waiting_for_ack:
         return "blocked_waiting_for_ack";
-    case ReliableTransmitDecision::requires_fragmentation_pending_m2_3_3:
-        return "requires_fragmentation_pending_m2_3_3";
+    case ReliableTransmitDecision::send_new_fragment:
+        return "send_new_fragment";
+    case ReliableTransmitDecision::retransmit_fragment:
+        return "retransmit_fragment";
+    case ReliableTransmitDecision::advance_fragment_sequence:
+        return "advance_fragment_sequence";
     }
     return "unknown";
 }
@@ -426,15 +537,10 @@ private:
         return "first_acknowledgement_transaction_mismatch";
     case NetchanSessionErrorCode::reliable_queue_overflow:
         return "reliable_queue_overflow";
-    case NetchanSessionErrorCode::
-        reliable_payload_requires_fragmentation_pending_m2_3_3:
-        return "reliable_payload_requires_fragmentation_pending_m2_3_3";
     case NetchanSessionErrorCode::unreliable_payload_does_not_fit:
         return "unreliable_payload_does_not_fit";
     case NetchanSessionErrorCode::combined_payload_does_not_fit:
         return "combined_payload_does_not_fit";
-    case NetchanSessionErrorCode::fragmented_payload_pending_m2_3_3:
-        return "fragmented_payload_pending_m2_3_3";
     case NetchanSessionErrorCode::stale_outgoing_transaction:
         return "stale_outgoing_transaction";
     case NetchanSessionErrorCode::foreign_outgoing_transaction:
@@ -447,6 +553,20 @@ private:
         return "session_revision_overflow";
     case NetchanSessionErrorCode::foreign_incoming_inspection:
         return "foreign_incoming_inspection";
+    case NetchanSessionErrorCode::fragment_reliable_classification_required:
+        return "fragment_reliable_classification_required";
+    case NetchanSessionErrorCode::fragment_reliable_classification_mismatch:
+        return "fragment_reliable_classification_mismatch";
+    case NetchanSessionErrorCode::fragment_reliable_flag_required:
+        return "fragment_reliable_flag_required";
+    case NetchanSessionErrorCode::outgoing_fragment_transfer_too_large:
+        return "outgoing_fragment_transfer_too_large";
+    case NetchanSessionErrorCode::outgoing_fragment_count_overflow:
+        return "outgoing_fragment_count_overflow";
+    case NetchanSessionErrorCode::outgoing_fragment_datagram_does_not_fit:
+        return "outgoing_fragment_datagram_does_not_fit";
+    case NetchanSessionErrorCode::outgoing_fragment_transfer_id_overflow:
+        return "outgoing_fragment_transfer_id_overflow";
     }
     return "unknown";
 }

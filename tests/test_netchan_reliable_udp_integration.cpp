@@ -255,7 +255,7 @@ enum class DriverDisposition {
     duplicate_ignored,
     older_ignored,
     wrong_endpoint_ignored,
-    fragmented_payload_pending_m2_3_3,
+    fragment_not_processed_by_m232_fixture,
     malformed,
     protocol_error,
 };
@@ -301,7 +301,7 @@ struct DriverResult {
     }
     if (decoded.packet->header.sequence.flags.fragmented) {
         return DriverResult{
-            DriverDisposition::fragmented_payload_pending_m2_3_3};
+            DriverDisposition::fragment_not_processed_by_m232_fixture};
     }
 
     auto inspected = session.inspect_incoming(decoded.packet->header);
@@ -836,7 +836,7 @@ TEST_CASE(
             expected,
             fragmented_server_packet(2U, 3U, false, false));
         CHECK(fragment.disposition ==
-              DriverDisposition::fragmented_payload_pending_m2_3_3);
+              DriverDisposition::fragment_not_processed_by_m232_fixture);
         CHECK(snapshot(session) == before);
     }
 

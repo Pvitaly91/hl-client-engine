@@ -168,6 +168,14 @@ template<std::size_t Size>
     return bytes(packet);
 }
 
+[[nodiscard]] std::vector<std::byte> rejected_response()
+{
+    std::string packet{"\xFF\xFF\xFF\xFF", 4U};
+    packet += "9Invalid connection.\n";
+    packet.push_back('\0');
+    return bytes(packet);
+}
+
 [[nodiscard]] goldsrc::NetchanSequence sequence(const std::uint32_t value)
 {
     const auto result = goldsrc::NetchanSequence::from_numeric(value);
@@ -229,6 +237,30 @@ template<std::size_t Size>
         std::span<std::byte>{datagram}.subspan(goldsrc::kNetchanHeaderSize),
         sequence(1U));
     return datagram;
+}
+
+[[nodiscard]] std::vector<std::byte> normal_fragment_packet(
+    const std::uint32_t packet_sequence,
+    const std::uint16_t fragment_index,
+    const std::uint16_t fragment_count,
+    std::vector<std::byte> fragment)
+{
+    const auto fragment_size = fragment.size();
+    goldsrc::NetchanFragmentSlots slots;
+    slots[0U] = goldsrc::NetchanFragmentDescriptor{
+        0U,
+        (static_cast<std::uint32_t>(fragment_index) << 16U) |
+            static_cast<std::uint32_t>(fragment_count),
+        0U,
+        static_cast<std::uint16_t>(fragment_size),
+        0U,
+    };
+    return encode_server_packet(goldsrc::ServerToClientNetchanPacket{
+        server_header(packet_sequence, true, true, 0U, false),
+        std::move(slots),
+        std::move(fragment),
+        fragment_size,
+    });
 }
 
 [[nodiscard]] goldsrc::ClientToServerNetchanPacket decode_client_packet(
@@ -469,6 +501,36 @@ TEST_CASE("M2.3.1 authentication lifetime spans ACCEPT and every netchan termina
     const auto remote = NetworkAddress::loopback(27'015);
     const auto epoch = ChallengeExchangeTimePoint{};
 
+    SECTION("rejection releases before any driver handoff")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        auto handshake = coordinator(transport, remote, prepare_with_session(releases));
+        reach_response_wait(transport, handshake, remote, epoch, releases);
+        transport.queue(remote, rejected_response());
+
+        handshake.update(epoch + 2ms);
+        CHECK(handshake.state() == GoldSrcHandshakeState::rejected);
+        CHECK(releases == 1U);
+        CHECK_FALSE(handshake.netchan_bootstrap_result());
+        check_terminal_idempotence(transport, handshake, epoch + 2ms, releases);
+    }
+
+    SECTION("coordinator destruction releases a handed-off active driver guard")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        {
+            auto handshake = coordinator(
+                transport,
+                remote,
+                prepare_with_session(releases));
+            reach_netchan_wait(transport, handshake, remote, epoch, releases);
+            CHECK(releases == 0U);
+        }
+        CHECK(releases == 1U);
+    }
+
     SECTION("first packet timeout")
     {
         FakeTransport transport;
@@ -480,6 +542,96 @@ TEST_CASE("M2.3.1 authentication lifetime spans ACCEPT and every netchan termina
         CHECK(handshake.state() == GoldSrcHandshakeState::netchan_timed_out);
         CHECK(releases == 1U);
         check_terminal_idempotence(transport, handshake, epoch + 52ms, releases);
+    }
+
+    SECTION("invalid driver start releases the handed-off guard")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        auto invalid_config = netchan_config();
+        invalid_config.maximum_events = 0U;
+        auto handshake = coordinator(
+            transport,
+            remote,
+            prepare_with_session(releases),
+            goldsrc::HandshakeStopPoint::netchan_bootstrap,
+            invalid_config);
+        reach_response_wait(transport, handshake, remote, epoch, releases);
+        transport.queue(remote, accepted_response());
+
+        handshake.update(epoch + 2ms);
+        CHECK(handshake.state() == GoldSrcHandshakeState::configuration_error);
+        CHECK(handshake.terminal());
+        CHECK(releases == 1U);
+        CHECK(transport.sent.size() == 2U);
+        check_terminal_idempotence(transport, handshake, epoch + 2ms, releases);
+    }
+
+    SECTION("incomplete normal transfer uses its fixed fragment deadline")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        auto config = netchan_config();
+        config.fragment_transfer_timeout = 20ms;
+        auto handshake = coordinator(
+            transport,
+            remote,
+            prepare_with_session(releases),
+            goldsrc::HandshakeStopPoint::netchan_bootstrap,
+            config);
+        reach_netchan_wait(transport, handshake, remote, epoch, releases);
+        transport.queue(
+            remote,
+            normal_fragment_packet(
+                1U,
+                1U,
+                2U,
+                std::vector<std::byte>(
+                    goldsrc::kStockProtocol48NormalFragmentChunkSize,
+                    std::byte{0x46})));
+        handshake.update(epoch + 3ms);
+        REQUIRE(handshake.state() == GoldSrcHandshakeState::waiting_for_netchan);
+        CHECK(releases == 0U);
+
+        handshake.update(epoch + 23ms);
+        CHECK(handshake.state() == GoldSrcHandshakeState::netchan_timed_out);
+        CHECK(handshake.error_context().find("fragment") != std::string_view::npos);
+        CHECK(releases == 1U);
+        check_terminal_idempotence(transport, handshake, epoch + 23ms, releases);
+    }
+
+    SECTION("admitted fragment does not disable channel inactivity timeout")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        auto config = netchan_config();
+        config.first_packet_timeout = 10ms;
+        config.fragment_transfer_timeout = 30ms;
+        auto handshake = coordinator(
+            transport,
+            remote,
+            prepare_with_session(releases),
+            goldsrc::HandshakeStopPoint::netchan_bootstrap,
+            config);
+        reach_netchan_wait(transport, handshake, remote, epoch, releases);
+        transport.queue(
+            remote,
+            normal_fragment_packet(
+                1U,
+                1U,
+                2U,
+                std::vector<std::byte>(
+                    goldsrc::kStockProtocol48NormalFragmentChunkSize,
+                    std::byte{0x43})));
+        handshake.update(epoch + 3ms);
+        REQUIRE(handshake.state() == GoldSrcHandshakeState::waiting_for_netchan);
+
+        handshake.update(epoch + 13ms);
+        CHECK(handshake.state() == GoldSrcHandshakeState::netchan_timed_out);
+        CHECK(handshake.error_context().find("inactivity") !=
+              std::string_view::npos);
+        CHECK(releases == 1U);
+        check_terminal_idempotence(transport, handshake, epoch + 13ms, releases);
     }
 
     SECTION("cancel while waiting")
@@ -552,7 +704,7 @@ TEST_CASE("M2.3.1 authentication lifetime spans ACCEPT and every netchan termina
         check_terminal_idempotence(transport, handshake, epoch + 3ms, releases);
     }
 
-    SECTION("fragmented first payload remains explicitly pending M2.3.3")
+    SECTION("fragmented first payload reassembles before terminal success")
     {
         FakeTransport transport;
         std::size_t releases = 0U;
@@ -562,9 +714,18 @@ TEST_CASE("M2.3.1 authentication lifetime spans ACCEPT and every netchan termina
         transport.queue(remote, fragmented_server_packet());
         handshake.update(epoch + 3ms);
         CHECK(handshake.state() ==
-              GoldSrcHandshakeState::fragmented_payload_pending_m2_3_3);
-        CHECK_FALSE(handshake.netchan_bootstrap_result().has_value());
-        CHECK(transport.sent.size() == 2U);
+              GoldSrcHandshakeState::netchan_bootstrap_complete);
+        REQUIRE(handshake.netchan_bootstrap_result().has_value());
+        CHECK(handshake.netchan_bootstrap_result()->payload.bytes ==
+              bytes(std::array<std::uint8_t, 4U>{
+                  0x90U,
+                  0x91U,
+                  0x92U,
+                  0x93U,
+              }));
+        CHECK(transport.sent.size() == 3U);
+        CHECK(handshake.netchan_session() != nullptr);
+        CHECK(handshake.netchan_session()->first_acknowledgement_sent());
         CHECK(releases == 1U);
         check_terminal_idempotence(transport, handshake, epoch + 3ms, releases);
     }

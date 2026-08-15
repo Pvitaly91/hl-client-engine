@@ -226,11 +226,11 @@ The file is not copied or logged. Success means only that one datagram was sent;
 this `connect-request` stop point does not wait for a response or create a
 netchan. Authentication generation and sign-on remain unimplemented.
 
-The M2.3.1 transport-only path waits for connectionless `ACCEPT`, preserves the
-same socket, processes one confirmed unfragmented netchan packet, sends exactly
-one minimal transport acknowledgement, and exits with an owning opaque payload
-before any reliable retransmission, fragment reassembly, `svc_*`, or sign-on
-parsing:
+The M2.3.3 transport-only path waits for connectionless `ACCEPT`, preserves the
+same socket, and runs a bounded `NetchanDriver` through the selected stop. An
+unfragmented first payload completes directly; supported slot-0 fragments are
+ACKed per fragment and reassembled before the first complete owning opaque
+payload is returned. The CLI then exits before `svc_*` or sign-on parsing:
 
 ```powershell
 .\build\bin\Debug\hlclient.exe --renderer null `
@@ -239,9 +239,12 @@ parsing:
   --auth-material-file C:\private\hl-auth-material.bin --net-trace
 ```
 
-A fragmented first packet produces the documented nonzero
-`fragmented_payload_pending_m2_3_3` outcome. M2.3.1 neither reassembles it nor
-sends an ACK that would misrepresent an incomplete opaque payload as complete.
+The bootstrap stage/coordinator owns the driver and optional authentication
+lifetime through success or a typed timeout, cancellation, network, protocol,
+or backpressure terminal. Cleanup releases reliable, fragment, and one-shot
+unreliable state exactly once. The driver borrows the already-bound transport;
+it does not replace or close that socket. No raw reliable/fragment payload CLI
+is provided.
 
 The six-run stock capture set established that the stock client sends first,
 but its initial reliable body is opaque sign-on/application content. The
@@ -249,9 +252,11 @@ project does not reproduce it. Instead, the deterministic fake HLDS sends the
 first server packet and verifies the project's exact single ACK plus absence of
 an extra datagram. The project-to-stock live path remains pending because the
 project has no production Steam authentication provider or independently
-defined sign-on payload. Reliable retransmission is M2.3.2 and fragment
-reassembly is M2.3.3. See [GoldSrc netchan](GOLDSRC_NETCHAN.md) for evidence
-labels, limits, and unsupported behavior.
+defined sign-on payload. Persistent reliable state is M2.3.2; bounded normal
+fragmentation/reassembly and the driver are M2.3.3. See
+[GoldSrc netchan](GOLDSRC_NETCHAN.md) and
+[GoldSrc fragmentation](GOLDSRC_FRAGMENTATION.md) for evidence labels, limits,
+and unsupported behavior.
 
 Add `--net-trace` when diagnosing the exchange:
 

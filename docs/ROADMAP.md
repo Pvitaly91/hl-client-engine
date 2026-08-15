@@ -202,10 +202,10 @@ complete production lifecycles are implemented in M2.3.1. The implementation
 contains the strict direction-specific base codec, payload transform,
 wrap-safe sequence and acknowledgement observations, duplicate/old filtering,
 same-socket bootstrap stage, owning first unfragmented opaque payload, and a
-single minimal first-ACK primitive. A fragment flag and its confirmed
-descriptor boundary produce the typed terminal outcome
-`fragmented_payload_pending_m2_3_3`; they are never reported as a complete
-payload.
+single minimal first-ACK primitive. At the M2.3.1 boundary, a fragment flag and
+its confirmed descriptor boundary produced the typed terminal outcome
+`fragmented_payload_pending_m2_3_3`; M2.3.3 below supersedes that historical
+boundary with bounded reassembly.
 
 The deterministic fake HLDS deliberately sends the first sequenced packet
 after `ACCEPT`, then verifies exactly one project ACK and no extra datagram.
@@ -284,23 +284,78 @@ application/coordinator intentionally terminates at
 and call `NetchanSession::clear_reliable_state()` on timeout, cancellation,
 network failure, or protocol failure. The terminal mapping is covered by
 table-driven tests rather than claimed as current coordinator behavior.
+M2.3.3 below supplies the bounded same-transport driver and composes it through
+the current bootstrap stop.
 
 M2.3.2 adds no fragment construction/reassembly, file stream, `svc_*` parser,
 sign-on state, `ClientWorldState` update, renderer dependency, or public CLI for
-arbitrary reliable bytes.
+arbitrary reliable bytes. The normal-fragment transport portion advances in
+M2.3.3; the remaining application layers do not.
 
-### M2.3.3 — Normal/file fragmentation and reassembly
+### M2.3.3 — Normal-stream fragmentation, reassembly, and persistent driver
 
-**Status: next after completed M2.3.2.**
+**Status: completed for the bounded project incoming slot-0, persistent-driver,
+and deterministic outgoing scope below. Stock multi-fragment client-to-server
+and live project-to-stock verification remain pending; this is not a full
+stock-fragment compatibility claim.**
 
-Implement bounded normal and file-stream fragmentation/reassembly from the
-captured descriptor boundary. Define safe ownership, transfer identity,
-timeouts, duplicate/conflict policy, and a filesystem-free file-stream output
-contract before downloads are allowed.
+Fresh clean-room evidence contains 12 accepted `bounded_complete` stock
+client/stock HLDS runs: two each for baseline, drop-middle, exact duplicate,
+old-index replay after a newer packet, drop-first, and drop-final. Rejected and
+incomplete attempts are recorded separately and do not count; no raw datagram,
+authentication/identity byte, opaque fragment byte, or process log is tracked.
+
+Stock-confirmed results are scoped precisely:
+
+- the transformed body has two ordered slots; present is
+  `1 + u32LE packed ordinal/count + u16LE offset + u16LE length`, absent is one
+  zero byte;
+- observed traffic uses slot 0 only, 1,024-byte non-final normal chunks,
+  per-datagram offsets, and no stable wire transfer ID;
+- complete five- and six-fragment server transfers reappeared in both baseline
+  runs, with the second transfer restarting at ordinal 1;
+- sequence presence bit 31 is set on every fragment and ACK generation
+  alternates **per fragment**, superseding the unsupported single-generation
+  assumption;
+- missing first/middle/final fragments retry only the missing canonical range
+  under a fresh sequence after latest-send ACK-gap evidence; the final covering
+  matching-generation ACK gates the next transfer;
+- same-sequence duplicates and a lower-sequence old replay are ignored before
+  second delivery/ACK rollback.
+
+The project implements strict pure fragment body/full-packet codecs,
+transactional filesystem-free slot-0 normal reassembly, fixed transfer
+deadlines, bounded owning events, deterministic unseen out-of-order buffering,
+conflict/replacement rejection, and a metadata-only completion tombstone that
+requires ordinal 1 to begin the next transfer. `NetchanDriver` borrows the
+already-bound transport, enforces exact endpoints and bounded updates, combines
+session/reassembly commit with fragment ACK, preserves contemporaneous suffix
+payloads, and clears reliable/reassembly/unreliable/lifetime state exactly once
+on terminal paths. The bootstrap stage/coordinator owns that driver until an
+unfragmented or reassembled first opaque payload is acknowledged and completes
+the current CLI stop.
+
+Outgoing reliable bodies above the unfragmented limit deterministically become
+slot-0 transfers of at most 16,376 bytes/16 fragments. Scheduling is
+per-fragment stop-and-wait with alternating generation, latest-covering ACK
+clear, same canonical range under a fresh retry sequence, and one-shot suffix
+bytes that are not retained for retry. This count-greater-than-one C2S behavior
+is project deterministic/tested; natural stock-client capture reached count one
+only.
+
+Still pending: true unseen stock reorder and incomplete-transfer replacement,
+an accepted old-after-completion replay pair, slot-1/file and simultaneous-slot
+semantics, compression universality/decompression, stock-client multi-fragment
+C2S verification, and live project-client-to-stock fragmentation. No filename,
+path, file write, decompression, or sign-on interpretation is part of M2.3.3.
+Slot-1/file work stays deferred to M3 and requires stock evidence plus a safe
+output contract before resource downloads are enabled.
+See [GoldSrc fragmentation](GOLDSRC_FRAGMENTATION.md) for exact evidence labels,
+limits, fixtures, and APIs.
 
 ### M2.4 — Initial sign-on state machine
 
-**Status: later, after M2.3.3.**
+**Status: next.**
 
 Parse the minimum serverdata/signon messages into project-owned session state
 and reach a defined pre-resource sign-on point. Resource negotiation, snapshots,

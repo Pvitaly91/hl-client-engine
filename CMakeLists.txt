@@ -150,13 +150,17 @@ set_property(TARGET hlclient_goldsrc PROPERTY FOLDER "Engine/Network/GoldSrc")
 hlclient_add_library(
     hlclient_goldsrc_netchan
     include/hlclient/goldsrc/netchan_bootstrap_stage.hpp
+    include/hlclient/goldsrc/netchan_driver.hpp
     include/hlclient/goldsrc/netchan_packet.hpp
     include/hlclient/goldsrc/netchan_payload_transform.hpp
+    include/hlclient/goldsrc/netchan_reassembly.hpp
     include/hlclient/goldsrc/netchan_sequence.hpp
     include/hlclient/goldsrc/netchan_session.hpp
     src/goldsrc/netchan_bootstrap_stage.cpp
+    src/goldsrc/netchan_driver.cpp
     src/goldsrc/netchan_packet.cpp
     src/goldsrc/netchan_payload_transform.cpp
+    src/goldsrc/netchan_reassembly.cpp
     src/goldsrc/netchan_sequence.cpp
     src/goldsrc/netchan_session.cpp
 )

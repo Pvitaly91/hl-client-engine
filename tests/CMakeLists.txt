@@ -21,7 +21,12 @@ add_executable(hlclient_tests
     test_info_string.cpp
     test_network_address.cpp
     test_netchan_bootstrap.cpp
+    test_netchan_driver.cpp
+    test_netchan_fragment_packet.cpp
+    test_netchan_fragment_udp_integration.cpp
+    test_netchan_outgoing_fragments.cpp
     test_netchan_packet.cpp
+    test_netchan_reassembly.cpp
     test_netchan_reliable.cpp
     test_netchan_reliable_udp_integration.cpp
     test_netchan_sequence.cpp

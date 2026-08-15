@@ -191,7 +191,7 @@ TEST_CASE("Reliable transmit decision gives active in-flight state priority",
     CHECK(goldsrc::decide_reliable_transmit({true, false, false, false}) ==
           Decision::send_new);
     CHECK(goldsrc::decide_reliable_transmit({true, false, false, true}) ==
-          Decision::requires_fragmentation_pending_m2_3_3);
+          Decision::send_new_fragment);
     CHECK(goldsrc::decide_reliable_transmit({true, true, false, true}) ==
           Decision::blocked_waiting_for_ack);
     CHECK(goldsrc::decide_reliable_transmit({true, true, true, true}) ==
@@ -201,7 +201,7 @@ TEST_CASE("Reliable transmit decision gives active in-flight state priority",
 TEST_CASE("Reliable queue appends chunks and rejects overflow atomically",
           "[goldsrc][netchan][reliable][queue]")
 {
-    goldsrc::NetchanSession session{goldsrc::NetchanSessionLimits{32U, 16U, 20U}};
+    goldsrc::NetchanSession session{goldsrc::NetchanSessionLimits{64U, 16U, 20U}};
     const auto initial = snapshot(session);
     REQUIRE(session.queue_reliable({}));
     check_snapshot(session, initial);
@@ -229,17 +229,19 @@ TEST_CASE("Reliable queue appends chunks and rejects overflow atomically",
     check_snapshot(session, full);
 
     const auto requires_fragmentation = session.prepare_outgoing_packet();
-    REQUIRE_FALSE(requires_fragmentation);
-    REQUIRE(requires_fragmentation.error);
-    CHECK(requires_fragmentation.error->code == goldsrc::NetchanSessionErrorCode::
-                                                      reliable_payload_requires_fragmentation_pending_m2_3_3);
+    REQUIRE(requires_fragmentation);
+    REQUIRE(requires_fragmentation.plan);
+    CHECK(requires_fragmentation.plan->reliable_decision() ==
+          goldsrc::ReliableTransmitDecision::send_new_fragment);
+    REQUIRE(requires_fragmentation.plan->fragment_plan());
+    CHECK(requires_fragmentation.plan->fragment_plan()->fragment_count == 1U);
     check_snapshot(session, full);
 }
 
-TEST_CASE("Unfragmented reliable boundary accepts max and defers max plus one",
+TEST_CASE("Unfragmented reliable boundary activates fragments at max plus one",
           "[goldsrc][netchan][reliable][limits][fragment]")
 {
-    constexpr goldsrc::NetchanSessionLimits limits{32U, 16U, 20U};
+    constexpr goldsrc::NetchanSessionLimits limits{64U, 16U, 20U};
 
     for (const auto accepted_size : std::array<std::size_t, 2U>{15U, 16U}) {
         CAPTURE(accepted_size);
@@ -260,10 +262,12 @@ TEST_CASE("Unfragmented reliable boundary accepts max and defers max plus one",
     REQUIRE(deferred.queue_reliable(plus_one));
     const auto before = snapshot(deferred);
     const auto prepared = deferred.prepare_outgoing_packet();
-    REQUIRE_FALSE(prepared);
-    REQUIRE(prepared.error);
-    CHECK(prepared.error->code == goldsrc::NetchanSessionErrorCode::
-                                      reliable_payload_requires_fragmentation_pending_m2_3_3);
+    REQUIRE(prepared);
+    REQUIRE(prepared.plan);
+    CHECK(prepared.plan->reliable_decision() ==
+          goldsrc::ReliableTransmitDecision::send_new_fragment);
+    REQUIRE(prepared.plan->fragment_plan());
+    CHECK(prepared.plan->fragment_plan()->canonical_length == plus_one.size());
     check_snapshot(deferred, before);
 }
 
@@ -919,23 +923,31 @@ TEST_CASE("Incoming reliable presence toggles ACK generation only on committed n
     CHECK_FALSE(acknowledgement.packet().header.acknowledgement.reliable);
 }
 
-TEST_CASE("Fragment and stale receive transactions leave all reliable state unchanged",
+TEST_CASE("Fragment classification and stale receive transactions are atomic",
           "[goldsrc][netchan][reliable][incoming][fragment]")
 {
-    SECTION("newer fragment returns the M2.3.3 boundary without commit")
+    SECTION("M2.3.3 fragment admission requires explicit reassembly classification")
     {
         goldsrc::NetchanSession session;
-        auto fragment = session.inspect_incoming(
-            server_header(1U, 0U, true, false, true));
-        REQUIRE(fragment);
         const auto before = snapshot(session);
-        const auto rejected = session.commit_incoming(
-            std::move(*fragment.inspection));
-        REQUIRE_FALSE(rejected);
-        REQUIRE(rejected.error);
-        CHECK(rejected.error->code ==
-              goldsrc::NetchanSessionErrorCode::fragmented_payload_pending_m2_3_3);
+        const auto unclassified = session.inspect_incoming(
+            server_header(1U, 0U, true, false, true));
+        REQUIRE_FALSE(unclassified);
+        REQUIRE(unclassified.error);
+        CHECK(unclassified.error->code == goldsrc::NetchanSessionErrorCode::
+                                              fragment_reliable_classification_required);
         check_snapshot(session, before);
+
+        auto fragment = session.inspect_incoming(
+            server_header(1U, 0U, true, false, true),
+            goldsrc::NetchanIncomingReliableUnitClassification::
+                new_fragment_unit);
+        REQUIRE(fragment);
+        REQUIRE(fragment.inspection);
+        REQUIRE(fragment.inspection->contains_new_reliable_data());
+        REQUIRE(session.commit_incoming(std::move(*fragment.inspection)));
+        CHECK(session.state().incoming_sequence == sequence(1U));
+        CHECK(session.state().incoming_reliable_acknowledgement);
     }
 
     SECTION("receive commit after another state mutation is stale")

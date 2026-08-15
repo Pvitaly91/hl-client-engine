@@ -1,17 +1,14 @@
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 
-#include <exception>
-#include <span>
 #include <utility>
 
 namespace hlclient::goldsrc {
 namespace {
 
-[[nodiscard]] bool is_terminal_state(const NetchanBootstrapState state) noexcept
+[[nodiscard]] bool terminal_state(const NetchanBootstrapState state) noexcept
 {
     switch (state) {
     case NetchanBootstrapState::complete:
-    case NetchanBootstrapState::fragmented_payload_pending_m2_3_3:
     case NetchanBootstrapState::timed_out:
     case NetchanBootstrapState::cancelled:
     case NetchanBootstrapState::network_error:
@@ -26,36 +23,134 @@ namespace {
     return true;
 }
 
-[[nodiscard]] bool can_add(
-    const NetchanBootstrapTimePoint time,
-    const std::chrono::milliseconds duration) noexcept
+[[nodiscard]] NetchanBootstrapErrorCode map_error_code(
+    const NetchanDriverErrorCode code) noexcept
 {
-    return duration.count() >= 0 && time <= NetchanBootstrapTimePoint::max() - duration;
-}
-
-[[nodiscard]] std::string bounded_text(std::string text)
-{
-    if (text.size() > kNetchanBootstrapDiagnosticTextLimit) {
-        text.resize(kNetchanBootstrapDiagnosticTextLimit);
+    switch (code) {
+    case NetchanDriverErrorCode::invalid_configuration:
+    case NetchanDriverErrorCode::not_active:
+    case NetchanDriverErrorCode::reentrant_operation:
+    case NetchanDriverErrorCode::reliable_queue_failed:
+    case NetchanDriverErrorCode::unreliable_payload_too_large:
+    case NetchanDriverErrorCode::unreliable_payload_pending:
+        return NetchanBootstrapErrorCode::invalid_configuration;
+    case NetchanDriverErrorCode::time_moved_backwards:
+        return NetchanBootstrapErrorCode::time_moved_backwards;
+    case NetchanDriverErrorCode::local_endpoint_unavailable:
+        return NetchanBootstrapErrorCode::local_endpoint_unavailable;
+    case NetchanDriverErrorCode::local_endpoint_changed:
+        return NetchanBootstrapErrorCode::local_endpoint_changed;
+    case NetchanDriverErrorCode::receive_failed:
+        return NetchanBootstrapErrorCode::receive_failed;
+    case NetchanDriverErrorCode::inconsistent_receive_result:
+        return NetchanBootstrapErrorCode::inconsistent_receive_result;
+    case NetchanDriverErrorCode::datagram_truncated:
+        return NetchanBootstrapErrorCode::datagram_truncated;
+    case NetchanDriverErrorCode::unexpected_connectionless_packet:
+        return NetchanBootstrapErrorCode::unexpected_connectionless_packet;
+    case NetchanDriverErrorCode::unsupported_special_packet:
+        return NetchanBootstrapErrorCode::unsupported_special_packet;
+    case NetchanDriverErrorCode::malformed_packet:
+        return NetchanBootstrapErrorCode::malformed_packet;
+    case NetchanDriverErrorCode::invalid_sequence:
+        return NetchanBootstrapErrorCode::invalid_sequence;
+    case NetchanDriverErrorCode::invalid_acknowledgement:
+        return NetchanBootstrapErrorCode::invalid_acknowledgement;
+    case NetchanDriverErrorCode::opaque_payload_too_large:
+        return NetchanBootstrapErrorCode::opaque_payload_too_large;
+    case NetchanDriverErrorCode::packet_encode_failed:
+        return NetchanBootstrapErrorCode::packet_encode_failed;
+    case NetchanDriverErrorCode::send_failed:
+        return NetchanBootstrapErrorCode::send_failed;
+    case NetchanDriverErrorCode::fragment_reassembly_failed:
+        return NetchanBootstrapErrorCode::fragment_reassembly_failed;
+    case NetchanDriverErrorCode::secondary_stream_pending_m3:
+        return NetchanBootstrapErrorCode::secondary_stream_pending_m3;
+    case NetchanDriverErrorCode::fragment_transfer_timed_out:
+        return NetchanBootstrapErrorCode::fragment_transfer_timed_out;
+    case NetchanDriverErrorCode::channel_inactivity_timed_out:
+        return NetchanBootstrapErrorCode::channel_inactivity_timed_out;
+    case NetchanDriverErrorCode::event_backpressure:
+        return NetchanBootstrapErrorCode::event_backpressure;
     }
-    return text;
+    return NetchanBootstrapErrorCode::invalid_configuration;
 }
 
-[[nodiscard]] bool headers_equal(
-    const NetchanHeader& left,
-    const NetchanHeader& right) noexcept
+[[nodiscard]] NetchanBootstrapState map_driver_state(
+    const NetchanDriverState state) noexcept
 {
-    return left.sequence.sequence == right.sequence.sequence &&
-           left.sequence.flags == right.sequence.flags &&
-           left.acknowledgement.sequence == right.acknowledgement.sequence &&
-           left.acknowledgement.reliable == right.acknowledgement.reliable;
+    switch (state) {
+    case NetchanDriverState::idle:
+        return NetchanBootstrapState::idle;
+    case NetchanDriverState::active:
+        return NetchanBootstrapState::waiting_first;
+    case NetchanDriverState::cancelled:
+        return NetchanBootstrapState::cancelled;
+    case NetchanDriverState::timed_out:
+        return NetchanBootstrapState::timed_out;
+    case NetchanDriverState::network_error:
+        return NetchanBootstrapState::network_error;
+    case NetchanDriverState::protocol_error:
+    case NetchanDriverState::backpressure:
+    case NetchanDriverState::closed:
+        return NetchanBootstrapState::protocol_error;
+    }
+    return NetchanBootstrapState::protocol_error;
 }
 
-[[nodiscard]] bool acknowledgement_error(
-    const NetchanSessionErrorCode code) noexcept
+[[nodiscard]] std::optional<NetchanBootstrapTraceClassification>
+map_trace_classification(const NetchanDriverTraceClassification classification) noexcept
 {
-    return code == NetchanSessionErrorCode::future_acknowledgement ||
-           code == NetchanSessionErrorCode::acknowledgement_half_range_ambiguous;
+    switch (classification) {
+    case NetchanDriverTraceClassification::driver_started:
+        return NetchanBootstrapTraceClassification::bootstrap_started;
+    case NetchanDriverTraceClassification::receive_would_block:
+        return NetchanBootstrapTraceClassification::receive_would_block;
+    case NetchanDriverTraceClassification::wrong_endpoint_ignored:
+        return NetchanBootstrapTraceClassification::wrong_endpoint_ignored;
+    case NetchanDriverTraceClassification::duplicate_sequence_ignored:
+        return NetchanBootstrapTraceClassification::duplicate_sequence_ignored;
+    case NetchanDriverTraceClassification::older_sequence_ignored:
+        return NetchanBootstrapTraceClassification::older_sequence_ignored;
+    case NetchanDriverTraceClassification::sequenced_packet_received:
+        return NetchanBootstrapTraceClassification::sequenced_packet_received;
+    case NetchanDriverTraceClassification::fragment_received:
+        return NetchanBootstrapTraceClassification::fragment_received;
+    case NetchanDriverTraceClassification::normal_transfer_completed:
+        return NetchanBootstrapTraceClassification::normal_transfer_completed;
+    case NetchanDriverTraceClassification::payload_ready:
+        // The facade emits this exactly once after selecting and owning the
+        // bootstrap result. Driver payload events can also be contemporaneous
+        // fragment suffixes that are not the bootstrap result.
+        return std::nullopt;
+    case NetchanDriverTraceClassification::packet_sent:
+        return NetchanBootstrapTraceClassification::acknowledgement_sent;
+    case NetchanDriverTraceClassification::normal_transfer_timed_out:
+        return NetchanBootstrapTraceClassification::normal_transfer_timed_out;
+    case NetchanDriverTraceClassification::secondary_stream_pending_m3:
+        return NetchanBootstrapTraceClassification::secondary_stream_pending_m3;
+    case NetchanDriverTraceClassification::channel_timed_out:
+        return NetchanBootstrapTraceClassification::bootstrap_timed_out;
+    case NetchanDriverTraceClassification::driver_cancelled:
+        return NetchanBootstrapTraceClassification::bootstrap_cancelled;
+    case NetchanDriverTraceClassification::network_failure:
+        return NetchanBootstrapTraceClassification::network_failure;
+    case NetchanDriverTraceClassification::protocol_failure:
+        return NetchanBootstrapTraceClassification::protocol_failure;
+    case NetchanDriverTraceClassification::driver_closed:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool can_add_timeout(
+    const NetchanBootstrapTimePoint now,
+    const std::chrono::milliseconds timeout) noexcept
+{
+    const auto duration =
+        std::chrono::duration_cast<NetchanBootstrapClock::duration>(timeout);
+    return duration > NetchanBootstrapClock::duration::zero() &&
+           now <= NetchanBootstrapTimePoint::max() - duration;
 }
 
 } // namespace
@@ -67,14 +162,15 @@ NetchanBootstrapStage::NetchanBootstrapStage(
     NetchanBootstrapTraceCallback trace_callback)
     : transport_{transport},
       remote_endpoint_{remote_endpoint},
-      config_{config},
+      config_{std::move(config)},
       trace_callback_{std::move(trace_callback)}
 {
 }
 
 bool NetchanBootstrapStage::start(
     const NetchanBootstrapTimePoint now,
-    const network::NetworkAddress& expected_local_endpoint)
+    const network::NetworkAddress& expected_local_endpoint,
+    std::unique_ptr<INetchanDriverLifetime> connection_lifetime)
 {
     if (trace_callback_active_ || state_ != NetchanBootstrapState::idle) {
         return false;
@@ -82,91 +178,115 @@ bool NetchanBootstrapStage::start(
 
     started_at_ = now;
     last_update_ = now;
-    if (!validate_start(now, expected_local_endpoint)) {
+    local_endpoint_ = expected_local_endpoint;
+    const auto configured_driver = driver_config();
+    if (config_.first_packet_timeout <= std::chrono::milliseconds::zero() ||
+        config_.first_packet_timeout > kMaximumNetchanBootstrapTimeout ||
+        !can_add_timeout(now, config_.first_packet_timeout) ||
+        !::hlclient::goldsrc::valid_configuration(configured_driver)) {
+        state_ = NetchanBootstrapState::protocol_error;
+        error_ = NetchanBootstrapError{
+            NetchanBootstrapErrorCode::invalid_configuration,
+            std::nullopt,
+            std::nullopt,
+            "Invalid bounded netchan bootstrap/driver configuration",
+            std::nullopt,
+        };
+        emit_trace(
+            NetchanBootstrapTraceClassification::protocol_failure,
+            now,
+            remote_endpoint_);
+        return false;
+    }
+    first_packet_deadline_ = now +
+        std::chrono::duration_cast<NetchanBootstrapClock::duration>(
+            config_.first_packet_timeout);
+    state_ = NetchanBootstrapState::waiting_first;
+
+    try {
+        driver_ = std::make_unique<NetchanDriver>(
+            transport_,
+            remote_endpoint_,
+            configured_driver,
+            std::move(connection_lifetime),
+            [this](const NetchanDriverTraceEvent& event) {
+                handle_driver_trace(event);
+            });
+    } catch (...) {
+        state_ = NetchanBootstrapState::protocol_error;
+        error_ = NetchanBootstrapError{
+            NetchanBootstrapErrorCode::invalid_configuration,
+            std::nullopt,
+            std::nullopt,
+            "Unable to create the bounded persistent netchan driver",
+            std::nullopt,
+        };
+        emit_trace(
+            NetchanBootstrapTraceClassification::protocol_failure,
+            now,
+            remote_endpoint_);
         return false;
     }
 
-    first_packet_deadline_ = now + config_.first_packet_timeout;
-    state_ = NetchanBootstrapState::waiting_first;
-    emit_trace(
-        NetchanBootstrapTraceClassification::bootstrap_started,
-        now,
-        remote_endpoint_);
+    if (!driver_->start(now, expected_local_endpoint)) {
+        fail_from_driver(now);
+        return false;
+    }
+    local_endpoint_ = driver_->local_endpoint();
     return true;
 }
 
 void NetchanBootstrapStage::update(const NetchanBootstrapTimePoint now)
 {
-    if (trace_callback_active_ || state_ != NetchanBootstrapState::waiting_first) {
+    if (trace_callback_active_ || state_ != NetchanBootstrapState::waiting_first ||
+        !driver_) {
         return;
     }
     if (last_update_ && now < *last_update_) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::time_moved_backwards,
-            std::nullopt,
-            std::nullopt,
-            "Netchan bootstrap time moved backwards",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_);
+        driver_->update(now);
+        fail_from_driver(now);
         return;
     }
     last_update_ = now;
 
-    // A packet queued exactly at the deadline is late. The injected clock is
-    // authoritative, so timeout is checked before polling the transport.
-    if (first_packet_deadline_ && now >= *first_packet_deadline_) {
+    if (!driver_->session().first_incoming_committed() &&
+        first_packet_deadline_ && now >= *first_packet_deadline_) {
+        driver_->close(now);
         state_ = NetchanBootstrapState::timed_out;
+        error_ = NetchanBootstrapError{
+            NetchanBootstrapErrorCode::channel_inactivity_timed_out,
+            std::nullopt,
+            std::nullopt,
+            "Netchan first-packet deadline elapsed",
+            std::nullopt,
+        };
         emit_trace(
             NetchanBootstrapTraceClassification::bootstrap_timed_out,
             now,
             remote_endpoint_);
         return;
     }
-    if (!validate_local_continuity(now)) {
-        return;
-    }
 
-    std::size_t outgoing_packets_this_update = 0U;
-    for (std::size_t processed = 0U;
-         processed < config_.maximum_datagrams_per_update;
-         ++processed) {
-        network::DatagramTransportReceiveResult received;
-        try {
-            received = transport_.receive(config_.maximum_datagram_size);
-        } catch (...) {
-            fail(
-                NetchanBootstrapState::network_error,
-                NetchanBootstrapErrorCode::receive_failed,
-                std::nullopt,
-                std::nullopt,
-                "Datagram transport threw while receiving a netchan packet",
-                now,
-                NetchanBootstrapTraceClassification::network_failure,
-                remote_endpoint_);
-            return;
-        }
-
-        if (!process_receive_result(
-                std::move(received),
-                now,
-                outgoing_packets_this_update)) {
-            return;
-        }
-    }
+    driver_->update(now);
+    synchronize_from_driver(now);
 }
 
 void NetchanBootstrapStage::cancel(const NetchanBootstrapTimePoint now)
 {
-    if (trace_callback_active_ || state_ == NetchanBootstrapState::idle || terminal()) {
+    if (trace_callback_active_ || state_ == NetchanBootstrapState::idle ||
+        terminal()) {
         return;
     }
-    state_ = NetchanBootstrapState::cancelled;
-    emit_trace(
-        NetchanBootstrapTraceClassification::bootstrap_cancelled,
-        now,
-        remote_endpoint_);
+    if (driver_) {
+        driver_->cancel(now);
+        synchronize_from_driver(now);
+    } else {
+        state_ = NetchanBootstrapState::cancelled;
+        emit_trace(
+            NetchanBootstrapTraceClassification::bootstrap_cancelled,
+            now,
+            remote_endpoint_);
+    }
 }
 
 NetchanBootstrapState NetchanBootstrapStage::state() const noexcept
@@ -176,7 +296,7 @@ NetchanBootstrapState NetchanBootstrapStage::state() const noexcept
 
 bool NetchanBootstrapStage::terminal() const noexcept
 {
-    return is_terminal_state(state_);
+    return terminal_state(state_);
 }
 
 const network::NetworkAddress& NetchanBootstrapStage::remote_endpoint() const noexcept
@@ -190,12 +310,14 @@ NetchanBootstrapStage::local_endpoint() const noexcept
     return local_endpoint_;
 }
 
-const std::optional<NetchanBootstrapResult>& NetchanBootstrapStage::result() const noexcept
+const std::optional<NetchanBootstrapResult>&
+NetchanBootstrapStage::result() const noexcept
 {
     return result_;
 }
 
-const std::optional<NetchanBootstrapError>& NetchanBootstrapStage::error() const noexcept
+const std::optional<NetchanBootstrapError>&
+NetchanBootstrapStage::error() const noexcept
 {
     return error_;
 }
@@ -208,826 +330,170 @@ NetchanBootstrapStage::first_packet_deadline() const noexcept
 
 std::size_t NetchanBootstrapStage::transmitted_packet_count() const noexcept
 {
-    return transmitted_packet_count_;
+    return driver_ ? driver_->transmitted_packet_count() : 0U;
 }
 
 const NetchanSession& NetchanBootstrapStage::session() const noexcept
 {
-    return session_;
+    return driver_ ? driver_->session() : idle_session_;
 }
 
 NetchanSession* NetchanBootstrapStage::persistent_session() noexcept
 {
-    return state_ == NetchanBootstrapState::complete ? &session_ : nullptr;
+    return state_ == NetchanBootstrapState::complete && driver_
+               ? &driver_->compatibility_session()
+               : nullptr;
 }
 
 const NetchanSession* NetchanBootstrapStage::persistent_session() const noexcept
 {
-    return state_ == NetchanBootstrapState::complete ? &session_ : nullptr;
+    return state_ == NetchanBootstrapState::complete && driver_
+               ? &driver_->session()
+               : nullptr;
 }
 
-bool NetchanBootstrapStage::validate_start(
-    const NetchanBootstrapTimePoint now,
-    const network::NetworkAddress& expected_local_endpoint)
+NetchanDriverConfig NetchanBootstrapStage::driver_config() const noexcept
 {
-    const bool valid_timeout = config_.first_packet_timeout.count() > 0 &&
-                               config_.first_packet_timeout <=
-                                   kMaximumNetchanBootstrapTimeout &&
-                               can_add(now, config_.first_packet_timeout);
-    const bool valid_datagram_limit =
-        config_.maximum_datagram_size >= kMinimumNetchanBootstrapDatagramSize &&
-        config_.maximum_datagram_size <= kMaximumNetchanDatagramSize;
-    const auto maximum_body_size = valid_datagram_limit
-                                       ? config_.maximum_datagram_size - kNetchanHeaderSize
-                                       : 0U;
-    const bool valid_opaque_limit = config_.maximum_opaque_payload_size > 0U &&
-                                    config_.maximum_opaque_payload_size <=
-                                        kMaximumNetchanBootstrapOpaquePayloadSize &&
-                                    config_.maximum_opaque_payload_size <= maximum_body_size;
-    const bool valid_poll_limits =
-        config_.maximum_datagrams_per_update > 0U &&
-        config_.maximum_datagrams_per_update <=
-            kMaximumNetchanBootstrapDatagramsPerUpdate &&
-        config_.maximum_outgoing_packets_per_update > 0U &&
-        config_.maximum_outgoing_packets_per_update <=
-            kMaximumNetchanBootstrapOutgoingPacketsPerUpdate;
-    const bool valid_endpoints = remote_endpoint_.ipv4_host_order() != 0U &&
-                                 remote_endpoint_.port() != 0U &&
-                                 expected_local_endpoint.port() != 0U;
-    if (!valid_timeout || !valid_datagram_limit || !valid_opaque_limit ||
-        !valid_poll_limits || !valid_endpoints || !session_.valid_configuration()) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::invalid_configuration,
-            std::nullopt,
-            session_.valid_configuration()
-                ? std::nullopt
-                : std::optional{NetchanSessionErrorCode::invalid_configuration},
-            "Invalid netchan bootstrap configuration, state, time, or endpoint",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_);
-        return false;
-    }
-
-    network::DatagramLocalAddressResult local;
-    try {
-        local = transport_.local_address();
-    } catch (...) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::local_endpoint_unavailable,
-            std::nullopt,
-            std::nullopt,
-            "Datagram transport threw while querying the local endpoint",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_);
-        return false;
-    }
-    if (!local || !local.address) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::local_endpoint_unavailable,
-            std::nullopt,
-            std::nullopt,
-            local.error.empty() ? "Unable to query the local datagram endpoint"
-                                : std::move(local.error),
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_);
-        return false;
-    }
-    if (*local.address != expected_local_endpoint) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::local_endpoint_changed,
-            std::nullopt,
-            std::nullopt,
-            "Datagram transport local endpoint changed before netchan bootstrap",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_);
-        return false;
-    }
-    local_endpoint_ = *local.address;
-    return true;
+    NetchanDriverConfig driver;
+    driver.channel_inactivity_timeout = config_.first_packet_timeout;
+    driver.fragment_transfer_timeout = config_.fragment_transfer_timeout;
+    driver.maximum_datagram_size = config_.maximum_datagram_size;
+    driver.maximum_fragment_datagram_size =
+        config_.maximum_fragment_datagram_size;
+    driver.maximum_fragment_payload_size = config_.maximum_fragment_payload_size;
+    driver.maximum_normal_transfer_size = config_.maximum_normal_transfer_size;
+    driver.maximum_fragments_per_transfer =
+        config_.maximum_fragments_per_transfer;
+    driver.maximum_active_normal_transfers =
+        config_.maximum_active_normal_transfers;
+    driver.maximum_fragment_ranges = config_.maximum_fragment_ranges;
+    driver.maximum_opaque_payload_size = config_.maximum_opaque_payload_size;
+    driver.maximum_unreliable_payload_size =
+        config_.maximum_datagram_size > kNetchanHeaderSize
+            ? config_.maximum_datagram_size - kNetchanHeaderSize
+            : 0U;
+    driver.maximum_datagrams_per_update = config_.maximum_datagrams_per_update;
+    driver.maximum_outgoing_packets_per_update =
+        config_.maximum_outgoing_packets_per_update;
+    driver.maximum_events = config_.maximum_events;
+    driver.yield_after_owning_payload = true;
+    return driver;
 }
 
-bool NetchanBootstrapStage::validate_local_continuity(
+void NetchanBootstrapStage::synchronize_from_driver(
     const NetchanBootstrapTimePoint now)
 {
-    network::DatagramLocalAddressResult local;
-    try {
-        local = transport_.local_address();
-    } catch (...) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::local_endpoint_unavailable,
-            std::nullopt,
-            std::nullopt,
-            "Datagram transport threw while checking local endpoint continuity",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_);
-        return false;
-    }
-    if (!local || !local.address) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::local_endpoint_unavailable,
-            std::nullopt,
-            std::nullopt,
-            local.error.empty() ? "Unable to verify the local datagram endpoint"
-                                : std::move(local.error),
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_);
-        return false;
-    }
-    if (!local_endpoint_ || *local.address != *local_endpoint_) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::local_endpoint_changed,
-            std::nullopt,
-            std::nullopt,
-            "Datagram transport local endpoint changed during netchan bootstrap",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_);
-        return false;
-    }
-    return true;
-}
-
-bool NetchanBootstrapStage::process_receive_result(
-    network::DatagramTransportReceiveResult received,
-    const NetchanBootstrapTimePoint now,
-    std::size_t& outgoing_packets_this_update)
-{
-    if (received.source && received.datagram &&
-        *received.source != received.datagram->source) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::inconsistent_receive_result,
-            std::nullopt,
-            std::nullopt,
-            "Datagram transport reported conflicting source endpoints",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            *received.source,
-            received.payload_size);
-        return false;
+    if (!driver_) {
+        return;
     }
 
-    if (received.status == network::DatagramTransportReceiveStatus::would_block) {
-        if (received.datagram || received.source || received.payload_size != 0U ||
-            !received.error.empty()) {
-            fail(
-                NetchanBootstrapState::network_error,
-                NetchanBootstrapErrorCode::inconsistent_receive_result,
-                std::nullopt,
-                std::nullopt,
-                "Would-block receive result carried datagram metadata",
-                now,
-                NetchanBootstrapTraceClassification::network_failure,
-                remote_endpoint_,
-                received.payload_size);
-            return false;
+    bool reassembled_payload_pending = false;
+    while (auto event = driver_->poll_event()) {
+        if (event->type == NetchanDriverEventType::normal_transfer_completed) {
+            reassembled_payload_pending = true;
+            continue;
         }
-        emit_trace(
-            NetchanBootstrapTraceClassification::receive_would_block,
-            now,
-            remote_endpoint_);
-        return false;
-    }
-
-    if (received.status == network::DatagramTransportReceiveStatus::error) {
-        if (received.datagram || received.source || received.payload_size != 0U) {
-            fail(
-                NetchanBootstrapState::network_error,
-                NetchanBootstrapErrorCode::inconsistent_receive_result,
-                std::nullopt,
-                std::nullopt,
-                "Failed receive result carried datagram metadata",
-                now,
-                NetchanBootstrapTraceClassification::network_failure,
-                received.source.value_or(remote_endpoint_),
-                received.payload_size);
-        } else {
-            fail(
-                NetchanBootstrapState::network_error,
-                NetchanBootstrapErrorCode::receive_failed,
-                std::nullopt,
-                std::nullopt,
-                received.error.empty() ? "Datagram receive failed"
-                                       : std::move(received.error),
-                now,
-                NetchanBootstrapTraceClassification::network_failure,
-                remote_endpoint_);
+        if (event->type != NetchanDriverEventType::payload_ready ||
+            !event->payload) {
+            continue;
         }
-        return false;
-    }
-
-    if (!received.source) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::inconsistent_receive_result,
-            std::nullopt,
-            std::nullopt,
-            "Datagram transport omitted the packet source endpoint",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_,
-            received.payload_size);
-        return false;
-    }
-    const auto source = *received.source;
-
-    if (received.status == network::DatagramTransportReceiveStatus::received) {
-        if (!received.datagram ||
-            received.payload_size != received.datagram->payload.size() ||
-            !received.error.empty()) {
-            fail(
-                NetchanBootstrapState::network_error,
-                NetchanBootstrapErrorCode::inconsistent_receive_result,
-                std::nullopt,
-                std::nullopt,
-                "Datagram transport returned inconsistent payload metadata",
-                now,
-                NetchanBootstrapTraceClassification::network_failure,
-                source,
-                received.payload_size);
-            return false;
+        if (event->payload->sequence_flags.fragmented &&
+            !reassembled_payload_pending) {
+            // A contemporaneous suffix is a separate owning driver event. The
+            // compatibility bootstrap waits for the complete normal transfer.
+            continue;
         }
-    } else if (received.status == network::DatagramTransportReceiveStatus::truncated) {
-        if (received.datagram) {
-            fail(
-                NetchanBootstrapState::network_error,
-                NetchanBootstrapErrorCode::inconsistent_receive_result,
-                std::nullopt,
-                std::nullopt,
-                "Truncated receive result unexpectedly contained a datagram",
-                now,
-                NetchanBootstrapTraceClassification::network_failure,
-                source,
-                received.payload_size);
-            return false;
-        }
-    } else {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::inconsistent_receive_result,
-            std::nullopt,
-            std::nullopt,
-            "Datagram transport returned an inconsistent receive status",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            source,
-            received.payload_size);
-        return false;
-    }
 
-    // Exact endpoint filtering deliberately precedes truncation and parsing.
-    if (source != remote_endpoint_) {
-        emit_trace(
-            NetchanBootstrapTraceClassification::wrong_endpoint_ignored,
-            now,
-            source,
-            received.payload_size);
-        return true;
-    }
-
-    if (received.status == network::DatagramTransportReceiveStatus::truncated) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::datagram_truncated,
-            std::nullopt,
-            std::nullopt,
-            "Netchan datagram exceeds the configured project limit",
-            now,
-            NetchanBootstrapTraceClassification::datagram_truncated,
-            source,
-            received.payload_size);
-        return false;
-    }
-
-    if (!received.datagram) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::inconsistent_receive_result,
-            std::nullopt,
-            std::nullopt,
-            "Received status omitted the datagram payload",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            source,
-            received.payload_size);
-        return false;
-    }
-    if (received.datagram->payload.size() > config_.maximum_datagram_size) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::datagram_truncated,
-            NetchanPacketErrorCode::datagram_too_large,
-            std::nullopt,
-            "Transport returned a netchan datagram above its requested size bound",
-            now,
-            NetchanBootstrapTraceClassification::datagram_truncated,
-            source,
-            received.datagram->payload.size());
-        return false;
-    }
-    return process_target_datagram(
-        std::move(received.datagram->payload),
-        now,
-        outgoing_packets_this_update);
-}
-
-bool NetchanBootstrapStage::process_target_datagram(
-    std::vector<std::byte> datagram,
-    const NetchanBootstrapTimePoint now,
-    std::size_t& outgoing_packets_this_update)
-{
-    const auto datagram_size = datagram.size();
-    state_ = NetchanBootstrapState::processing;
-    const auto classification = classify_netchan_datagram(datagram);
-    if (classification.classification == NetchanDatagramClassification::connectionless) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::unexpected_connectionless_packet,
-            NetchanPacketErrorCode::connectionless_packet,
-            std::nullopt,
-            "Unexpected connectionless packet after ACCEPT",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size);
-        return false;
-    }
-    if (classification.classification ==
-        NetchanDatagramClassification::unsupported_special) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::unsupported_special_packet,
-            NetchanPacketErrorCode::unsupported_special_packet,
-            std::nullopt,
-            "Unsupported split/special packet during netchan bootstrap",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size);
-        return false;
-    }
-    if (classification.classification != NetchanDatagramClassification::sequenced) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::malformed_packet,
-            NetchanPacketErrorCode::datagram_too_short,
-            std::nullopt,
-            "Malformed datagram cannot contain a complete netchan header",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size);
-        return false;
-    }
-
-    const auto peeked = peek_netchan_header(datagram);
-    if (!peeked || !peeked.packet) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::malformed_packet,
-            peeked.error ? std::optional{peeked.error->code}
-                         : std::optional{NetchanPacketErrorCode::datagram_too_short},
-            std::nullopt,
-            "Unable to peek the complete bounded netchan header",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size);
-        return false;
-    }
-    const auto& header = peeked.packet->header;
-    const auto encoded_body_size = datagram_size - kNetchanHeaderSize;
-    emit_trace(
-        NetchanBootstrapTraceClassification::sequenced_packet_received,
-        now,
-        remote_endpoint_,
-        datagram_size,
-        &header,
-        encoded_body_size);
-
-    const auto sequence_disposition = compare_sequences(
-        header.sequence.sequence,
-        session_.state().incoming_sequence);
-    if (sequence_disposition == NetchanSequenceComparison::half_range_ambiguous) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::invalid_sequence,
-            std::nullopt,
-            std::nullopt,
-            "Netchan sequence is exactly half the wrap range from current state",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size,
-            &header,
-            encoded_body_size);
-        return false;
-    }
-    if (sequence_disposition != NetchanSequenceComparison::newer) {
-        const auto ignored = sequence_disposition == NetchanSequenceComparison::equal
-                                 ? NetchanBootstrapTraceClassification::
-                                       duplicate_sequence_ignored
-                                 : NetchanBootstrapTraceClassification::
-                                       older_sequence_ignored;
-        state_ = NetchanBootstrapState::waiting_first;
-        emit_trace(
-            ignored,
-            now,
-            remote_endpoint_,
-            datagram_size,
-            &header,
-            encoded_body_size);
-        return true;
-    }
-
-    // Only an admitted newer sequence reaches the strict transform/body codec.
-    ServerToClientNetchanDecodeResult decoded;
-    try {
-        decoded = decode_server_to_client_netchan_packet(
-            datagram,
-            NetchanPacketLimits{config_.maximum_datagram_size});
-    } catch (...) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::malformed_packet,
-            std::nullopt,
-            std::nullopt,
-            "Netchan decoder threw while processing a bounded datagram",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size,
-            &header,
-            encoded_body_size);
-        return false;
-    }
-    if (!decoded || !decoded.packet) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::malformed_packet,
-            decoded.error ? std::optional{decoded.error->code} : std::nullopt,
-            std::nullopt,
-            decoded.error ? decoded.error->context : "Unable to decode netchan packet",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size,
-            &header,
-            encoded_body_size);
-        return false;
-    }
-    auto& packet = *decoded.packet;
-    if (!headers_equal(packet.header, header)) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::malformed_packet,
-            std::nullopt,
-            std::nullopt,
-            "Strict netchan decode disagreed with the bounded header peek",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size,
-            &header,
-            packet.payload.size());
-        return false;
-    }
-
-    if (packet.header.sequence.flags.fragmented) {
-        state_ = NetchanBootstrapState::fragmented_payload_pending_m2_3_3;
-        error_ = NetchanBootstrapError{
-            NetchanBootstrapErrorCode::fragmented_payload_pending_m2_3_3,
-            std::nullopt,
-            std::nullopt,
-            "Fragmented netchan payload is deferred to M2.3.3",
+        const auto payload_size = event->payload->bytes.size();
+        NetchanHeader header{
+            NetchanSequenceWord{
+                event->payload->source_sequence,
+                event->payload->sequence_flags,
+            },
+            NetchanAcknowledgementWord{
+                event->payload->source_acknowledgement,
+                event->payload->acknowledgement_reliable,
+            },
         };
+        result_ = NetchanBootstrapResult{std::move(*event->payload)};
         emit_trace(
-            NetchanBootstrapTraceClassification::fragmented_payload_pending_m2_3_3,
+            NetchanBootstrapTraceClassification::payload_ready,
             now,
             remote_endpoint_,
-            datagram_size,
-            &packet.header,
-            packet.payload.size());
-        return false;
-    }
-
-    // Fragmented traffic is a strict M2.3.3 boundary and must not enter ACK or
-    // reliable lifecycle validation. Only a fully decoded newer unfragmented
-    // packet may inspect and later commit persistent session state.
-    auto inspected = session_.inspect_incoming(packet.header);
-    if (!inspected || !inspected.inspection) {
-        const auto session_code = inspected.error
-                                      ? std::optional{inspected.error->code}
-                                      : std::nullopt;
-        const auto code = session_code && acknowledgement_error(*session_code)
-                              ? NetchanBootstrapErrorCode::invalid_acknowledgement
-                              : NetchanBootstrapErrorCode::invalid_sequence;
-        fail(
-            NetchanBootstrapState::protocol_error,
-            code,
-            std::nullopt,
-            session_code,
-            code == NetchanBootstrapErrorCode::invalid_acknowledgement
-                ? "Netchan packet carries an impossible acknowledgement"
-                : "Netchan session rejected the incoming header",
+            0U,
+            &header,
+            payload_size);
+        driver_->close(now);
+        state_ = NetchanBootstrapState::complete;
+        emit_trace(
+            NetchanBootstrapTraceClassification::bootstrap_complete,
             now,
-            NetchanBootstrapTraceClassification::protocol_failure,
             remote_endpoint_,
-            datagram_size,
-            &packet.header,
-            packet.payload.size());
-        return false;
-    }
-    auto inspection = std::move(*inspected.inspection);
-    if (!inspection.should_commit()) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::invalid_sequence,
-            std::nullopt,
-            NetchanSessionErrorCode::incoming_not_newer,
-            "Decoded netchan sequence changed before session inspection",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size,
-            &packet.header,
-            packet.payload.size());
-        return false;
+            0U,
+            &header,
+            payload_size);
+        return;
     }
 
-    if (packet.payload.size() > config_.maximum_opaque_payload_size) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::opaque_payload_too_large,
-            std::nullopt,
-            std::nullopt,
-            "Decoded netchan payload exceeds the configured opaque payload bound",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size,
-            &packet.header,
-            packet.payload.size());
-        return false;
+    if (driver_->terminal()) {
+        fail_from_driver(now);
     }
-
-    NetchanBootstrapResult candidate{
-        OwnedNetchanPayload{
-            std::move(packet.payload),
-            packet.header.sequence.sequence,
-            packet.header.acknowledgement.sequence,
-            packet.header.sequence.flags,
-            packet.header.acknowledgement.reliable,
-            NetchanDirection::server_to_client,
-            now,
-        },
-    };
-    emit_trace(
-        NetchanBootstrapTraceClassification::payload_ready,
-        now,
-        remote_endpoint_,
-        datagram_size,
-        &packet.header,
-        candidate.payload.bytes.size());
-
-    const auto committed = session_.commit_incoming(std::move(inspection));
-    if (!committed) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::invalid_sequence,
-            std::nullopt,
-            committed.error ? std::optional{committed.error->code} : std::nullopt,
-            "Netchan session could not commit the admitted first packet",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            datagram_size,
-            &packet.header,
-            candidate.payload.bytes.size());
-        return false;
-    }
-
-    state_ = NetchanBootstrapState::ack_pending;
-    if (!send_first_acknowledgement(
-            now,
-            outgoing_packets_this_update,
-            packet.header,
-            candidate.payload.bytes.size())) {
-        return false;
-    }
-
-    result_ = std::move(candidate);
-    state_ = NetchanBootstrapState::complete;
-    emit_trace(
-        NetchanBootstrapTraceClassification::bootstrap_complete,
-        now,
-        remote_endpoint_,
-        datagram_size,
-        &packet.header,
-        result_->payload.bytes.size());
-    return false;
 }
 
-bool NetchanBootstrapStage::send_first_acknowledgement(
-    const NetchanBootstrapTimePoint now,
-    std::size_t& outgoing_packets_this_update,
-    const NetchanHeader& incoming_header,
-    const std::size_t payload_size)
+void NetchanBootstrapStage::fail_from_driver(const NetchanBootstrapTimePoint now)
 {
-    if (outgoing_packets_this_update >= config_.maximum_outgoing_packets_per_update) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::invalid_configuration,
-            std::nullopt,
-            std::nullopt,
-            "Netchan acknowledgement would exceed the bounded update TX budget",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            0U,
-            &incoming_header,
-            payload_size);
-        return false;
+    if (!driver_ || state_ == NetchanBootstrapState::complete) {
+        return;
     }
-
-    NetchanFirstAcknowledgementPrepareResult prepared;
-    try {
-        prepared = session_.prepare_first_acknowledgement();
-    } catch (...) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::packet_encode_failed,
-            std::nullopt,
-            std::nullopt,
-            "Unable to prepare the bounded first netchan acknowledgement",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            0U,
-            &incoming_header,
-            payload_size);
-        return false;
+    state_ = map_driver_state(driver_->state());
+    if (const auto& driver_error = driver_->last_error()) {
+        error_ = NetchanBootstrapError{
+            map_error_code(driver_error->code),
+            driver_error->packet_code,
+            driver_error->session_code,
+            driver_error->context,
+            driver_error->reassembly_code,
+        };
     }
-    if (!prepared || !prepared.transaction) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::packet_encode_failed,
-            std::nullopt,
-            prepared.error ? std::optional{prepared.error->code} : std::nullopt,
-            "Netchan session could not prepare the first acknowledgement",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            0U,
-            &incoming_header,
-            payload_size);
-        return false;
-    }
-
-    const auto& acknowledgement = prepared.transaction->packet();
-    NetchanPacketEncodeResult encoded;
-    try {
-        encoded = encode_client_to_server_netchan_packet(
-            acknowledgement,
-            NetchanPacketLimits{config_.maximum_datagram_size});
-    } catch (...) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::packet_encode_failed,
-            std::nullopt,
-            std::nullopt,
-            "Netchan encoder threw while producing the bounded first acknowledgement",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            0U,
-            &acknowledgement.header,
-            acknowledgement.payload.size());
-        return false;
-    }
-    if (!encoded || !encoded.datagram) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::packet_encode_failed,
-            encoded.error ? std::optional{encoded.error->code} : std::nullopt,
-            std::nullopt,
-            encoded.error ? encoded.error->context
-                          : "Unable to encode the first netchan acknowledgement",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            0U,
-            &acknowledgement.header,
-            acknowledgement.payload.size());
-        return false;
-    }
-
-    network::DatagramSendResult sent;
-    try {
-        sent = transport_.send_to(remote_endpoint_, *encoded.datagram);
-    } catch (...) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::send_failed,
-            std::nullopt,
-            std::nullopt,
-            "Datagram transport threw while sending the first netchan acknowledgement",
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_,
-            encoded.datagram->size(),
-            &acknowledgement.header,
-            acknowledgement.payload.size());
-        return false;
-    }
-    if (!sent || !sent.error.empty()) {
-        fail(
-            NetchanBootstrapState::network_error,
-            NetchanBootstrapErrorCode::send_failed,
-            std::nullopt,
-            std::nullopt,
-            sent.error.empty() ? "Datagram transport failed to send the first ACK"
-                               : std::move(sent.error),
-            now,
-            NetchanBootstrapTraceClassification::network_failure,
-            remote_endpoint_,
-            encoded.datagram->size(),
-            &acknowledgement.header,
-            acknowledgement.payload.size());
-        return false;
-    }
-    ++transmitted_packet_count_;
-    ++outgoing_packets_this_update;
-
-    const auto committed = session_.commit_first_acknowledgement(
-        std::move(*prepared.transaction));
-    if (!committed) {
-        fail(
-            NetchanBootstrapState::protocol_error,
-            NetchanBootstrapErrorCode::packet_encode_failed,
-            std::nullopt,
-            committed.error ? std::optional{committed.error->code} : std::nullopt,
-            "Sent first netchan acknowledgement could not be committed",
-            now,
-            NetchanBootstrapTraceClassification::protocol_failure,
-            remote_endpoint_,
-            encoded.datagram->size(),
-            &acknowledgement.header,
-            acknowledgement.payload.size());
-        return false;
-    }
-
-    emit_trace(
-        NetchanBootstrapTraceClassification::acknowledgement_sent,
-        now,
-        remote_endpoint_,
-        encoded.datagram->size(),
-        &acknowledgement.header,
-        acknowledgement.payload.size());
-    return true;
+    static_cast<void>(now);
 }
 
-void NetchanBootstrapStage::fail(
-    const NetchanBootstrapState state,
-    const NetchanBootstrapErrorCode code,
-    const std::optional<NetchanPacketErrorCode> packet_code,
-    const std::optional<NetchanSessionErrorCode> session_code,
-    std::string context,
-    const NetchanBootstrapTimePoint now,
-    const NetchanBootstrapTraceClassification classification,
-    const network::NetworkAddress endpoint,
-    const std::size_t datagram_size,
-    const NetchanHeader* const header,
-    const std::size_t payload_size)
+void NetchanBootstrapStage::handle_driver_trace(
+    const NetchanDriverTraceEvent& driver_event)
 {
-    state_ = state;
-    result_.reset();
-    error_ = NetchanBootstrapError{
-        code,
-        packet_code,
-        session_code,
-        bounded_text(std::move(context)),
-    };
-    emit_trace(
-        classification,
-        now,
-        endpoint,
-        datagram_size,
-        header,
-        payload_size);
+    const auto classification =
+        map_trace_classification(driver_event.classification);
+    if (!classification || !trace_callback_ || trace_callback_active_) {
+        return;
+    }
+
+    NetchanBootstrapTraceEvent event;
+    event.classification = *classification;
+    event.state = map_driver_state(driver_event.state);
+    event.elapsed = elapsed(last_update_.value_or(
+        started_at_.value_or(NetchanBootstrapTimePoint{})));
+    event.endpoint = driver_event.endpoint;
+    event.datagram_size = driver_event.datagram_size;
+    event.payload_size = driver_event.payload_size;
+    event.sequence = driver_event.sequence;
+    event.acknowledgement = driver_event.acknowledgement;
+    event.reliable = driver_event.reliable;
+    event.fragmented = driver_event.fragmented;
+    event.reliable_acknowledgement = driver_event.reliable_acknowledgement;
+    event.fragment_stream = driver_event.fragment_stream;
+    event.local_transfer_id = driver_event.local_transfer_id;
+    event.fragment_offset = driver_event.fragment_offset;
+    event.fragment_length = driver_event.fragment_length;
+    event.covered_size = driver_event.covered_size;
+    event.transfer_size = driver_event.transfer_size;
+    event.transmitted_packet_count = driver_event.transmitted_packet_count;
+
+    trace_callback_active_ = true;
+    try {
+        trace_callback_(event);
+    } catch (...) {
+    }
+    trace_callback_active_ = false;
 }
 
 void NetchanBootstrapStage::emit_trace(
@@ -1041,7 +507,6 @@ void NetchanBootstrapStage::emit_trace(
     if (!trace_callback_ || trace_callback_active_) {
         return;
     }
-
     NetchanBootstrapTraceEvent event;
     event.classification = classification;
     event.state = state_;
@@ -1049,7 +514,7 @@ void NetchanBootstrapStage::emit_trace(
     event.endpoint = endpoint;
     event.datagram_size = datagram_size;
     event.payload_size = payload_size;
-    event.transmitted_packet_count = transmitted_packet_count_;
+    event.transmitted_packet_count = transmitted_packet_count();
     if (header != nullptr) {
         event.sequence = header->sequence.sequence.value();
         event.acknowledgement = header->acknowledgement.sequence.value();
@@ -1057,7 +522,6 @@ void NetchanBootstrapStage::emit_trace(
         event.fragmented = header->sequence.flags.fragmented;
         event.reliable_acknowledgement = header->acknowledgement.reliable;
     }
-
     trace_callback_active_ = true;
     try {
         trace_callback_(event);
@@ -1069,10 +533,11 @@ void NetchanBootstrapStage::emit_trace(
 std::chrono::milliseconds NetchanBootstrapStage::elapsed(
     const NetchanBootstrapTimePoint now) const noexcept
 {
-    if (!started_at_ || now <= *started_at_) {
-        return std::chrono::milliseconds{0};
+    if (!started_at_ || now < *started_at_) {
+        return std::chrono::milliseconds::zero();
     }
-    return std::chrono::duration_cast<std::chrono::milliseconds>(now - *started_at_);
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - *started_at_);
 }
 
 } // namespace hlclient::goldsrc

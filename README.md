@@ -6,21 +6,21 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has completed **M2.3.2: persistent unfragmented reliable netchan
-state and retransmission** for the bounded signed-stock evidence profile and
-the transport-independent project session. Completed M1–M2.3.2 behavior
-includes the Protocol 48 challenge, captured one-shot `connect` request, strict
-immediate connectionless `ACCEPT`/`REJECT`, an explicit
+The repository has completed the bounded project scope of **M2.3.3: normal
+fragmentation, reassembly, and persistent netchan driver**. Implemented
+M1–M2.3.3 behavior includes the Protocol 48 challenge,
+captured one-shot `connect` request, strict immediate connectionless
+`ACCEPT`/`REJECT`, an explicit
 authentication-provider boundary, same-socket netchan bootstrap, the base wire
-codec/transform, and bounded pending plus one-in-flight reliable state with
-transactional send commit. The dedicated fake-HLDS UDP integration now passes
-for the exact same-socket bootstrap/session, one outgoing reliable success and
-clear, and one incoming reliable delivery with duplicate/old filtering; loss,
-lost-ACK, and pending A/B remain deterministic session/driver tests. Live
-`hlclient` to stock HLDS remains pending. There is no fragment reassembly, Steam
-authentication provider, authentication bypass, `svc_*`/sign-on parsing,
-resource pipeline, snapshot handling, gameplay, or public raw reliable-payload
-CLI.
+codec/transform, persistent reliable state, a strict two-slot fragment codec,
+transactional slot-0 normal reassembly, deterministic outgoing normal
+fragmentation, and a bounded same-transport `NetchanDriver`. Twelve accepted
+signed-stock research runs confirm the supported descriptor shape and the
+per-fragment ACK/retry behavior; project outgoing multi-fragment C2S scheduling
+is deterministic/tested but remains pending stock verification. Live
+`hlclient` to stock HLDS, slot-1/file semantics, universal compression behavior,
+a Steam authentication provider, `svc_*`/sign-on parsing, resources, snapshots,
+gameplay, and a public raw payload CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
 ## Reference platform
@@ -184,11 +184,12 @@ The M2.3.1 runtime stop point remains:
   --auth-material-file C:\private\hl-auth-material.bin --net-trace
 ```
 
-The M2.3.1 bootstrap path is validated end to end against a deterministic local
-fake HLDS. That fake sends the first server sequenced datagram after `ACCEPT`;
-the project waits for it on the same UDP socket, obtains one complete opaque
-unfragmented payload, and emits exactly one minimal transport acknowledgement.
-A completed bootstrap means only those operations succeeded.
+The original M2.3.1 unfragmented bootstrap branch remains validated end to end
+against a deterministic local fake HLDS. That fake sends the first server
+sequenced datagram after `ACCEPT`; the project waits on the same UDP socket,
+obtains one complete opaque payload, and emits exactly one minimal transport
+acknowledgement. M2.3.3 extends the same stop to the reassembled fragment branch
+described below.
 
 M2.3.2 extends the transport-independent `NetchanSession` with bounded pending
 and in-flight reliable bytes, acknowledgement-gap retransmission, and atomic
@@ -200,16 +201,22 @@ bit plus duplicate/older delivery once. The runtime command above still
 terminates at the bootstrap boundary: it does not expose arbitrary reliable
 bytes or interpret sign-on content.
 
-M2.3.2 does not add a production post-bootstrap polling scheduler or timeout
-owner. The application/coordinator intentionally terminates at
-`--stop-after netchan-bootstrap`. An embedding owner that continues through the
-non-owning session access must drive later I/O and call
-`NetchanSession::clear_reliable_state()` on timeout, cancellation, network
-failure, or protocol failure; table-driven tests cover those terminal mappings.
+M2.3.3 makes `NetchanDriver` the reusable same-transport polling and timeout
+owner. The netchan bootstrap stage/coordinator constructs and owns it through
+the selected stop point: an unfragmented first payload completes directly,
+while supported slot-0 fragments are admitted, ACKed per fragment, and
+reassembled before the first owning payload completes the stop. The CLI still
+terminates at `--stop-after netchan-bootstrap`; it does not interpret or expose
+arbitrary payload bytes or continue into sign-on.
 
-A first packet carrying the confirmed fragment flag is recognized but returns
-`fragmented_payload_pending_m2_3_3` with a nonzero exit; it is not acknowledged
-as a completed payload and no fragment transfer is retained.
+An embedding owner can construct the persistent driver with the already-bound
+`IDatagramTransport`, exact endpoints, monotonic time, and an optional opaque
+connection-lifetime guard. Terminal paths clear reliable, fragment, and
+one-shot unreliable state and release the guard exactly once. A lower-level
+caller that uses `NetchanSession` without the driver must still call
+`clear_reliable_state()` on terminal failure. This project path is covered by
+deterministic/fake-HLDS tests; live project-to-stock fragmentation remains
+pending.
 
 Stock capture established a client-first post-`ACCEPT` order. The stock
 client's first reliable body is opaque sign-on/application content, so the
@@ -279,6 +286,26 @@ capture, authentication material, identity bytes, or opaque payload bytes are
 tracked. See [GoldSrc netchan](docs/GOLDSRC_NETCHAN.md) for the exact
 stock-confirmed semantics and the separately labeled project policies.
 
+The M2.3.3 fragment research has a separate metadata-only verifier:
+
+```powershell
+.\scripts\verify_stock_netchan_fragments.ps1 `
+  -RelayPath C:\Tools\bounded-fragment-relay.ps1 `
+  -HalfLifePath C:\Games\Half-Life\hl.exe `
+  -HldsPath C:\Servers\Half-Life\hlds.exe `
+  -Game valve -Map boot_camp -Port 27420 `
+  -Scenario drop-middle-fragment -TimeoutSeconds 45
+```
+
+The primary evidence is 12 `bounded_complete` research runs: two each for
+baseline, drop-middle, exact duplicate, old-index replay after a newer packet,
+drop-first, and drop-final. The reorder pair does not establish true unseen
+out-of-order stock delivery. Rejected and incomplete attempts are listed
+separately in [GoldSrc fragmentation](docs/GOLDSRC_FRAGMENTATION.md) and do not
+count. The strengthened wrapper permits only one metadata file with
+`raw_packet_bytes_stored=false`, validates scenario-specific action/accounting
+and cleanup, and never turns a failed cleanup into accepted evidence.
+
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
 they are licensed to use.
@@ -323,6 +350,7 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc connect request](docs/GOLDSRC_CONNECT_REQUEST.md),
 [GoldSrc connect response](docs/GOLDSRC_CONNECT_RESPONSE.md),
 [GoldSrc netchan](docs/GOLDSRC_NETCHAN.md),
+[GoldSrc fragmentation](docs/GOLDSRC_FRAGMENTATION.md),
 [Authentication provider](docs/AUTHENTICATION_PROVIDER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
@@ -374,8 +402,18 @@ deterministic persistent reliable-state, transaction, loss/ACK, duplicate,
 pending-A/B, payload-bound, fragment-boundary, and 30-bit wrap coverage. Its
 dedicated fake-HLDS UDP test confirms the exact same-socket success/incoming
 scope described above; loss, lost-ACK, and A/B remain deterministic driver
-coverage rather than extra real-UDP claims. Original-HLDS checks remain opt-in
-and do not turn stock-server acceptance into an automated-suite claim.
+coverage rather than extra real-UDP claims. M2.3.3 adds strict fragment-body
+fixtures, malformed/range matrices, transactional normal reassembly, fixed
+deadlines, duplicate/conflict/replacement handling, per-fragment reliable
+generation, deterministic outgoing fragmentation, and bounded driver
+receive/send/backpressure/cleanup coverage. A real-loopback fake-HLDS suite runs
+the production handshake through `ACCEPT` and then the same-socket driver: its
+incoming out-of-order/duplicate scenario passes 20/20 runs, and its independently
+decoded outgoing drop/retry/clear scenario passes 20/20 runs. Separate cases
+prove fixed missing-fragment timeout without partial delivery or extra traffic,
+and the typed secondary-stream boundary without payload delivery or persistence.
+These are bounded project tests, not stock interoperability claims. Stock-client
+multi-fragment C2S and live project-to-stock checks remain opt-in/pending.
 
 ## License
 

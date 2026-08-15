@@ -120,7 +120,8 @@ TEST_CASE("Session classifies duplicate old and half-range input without mutatio
     CHECK_FALSE(ambiguous.inspection->acknowledgement());
 
     const auto skipped = session.inspect_incoming(
-        server_header(3U, 0U, true, true, true));
+        server_header(3U, 0U, true, true, true),
+        goldsrc::NetchanIncomingReliableUnitClassification::new_fragment_unit);
     REQUIRE(skipped);
     CHECK(skipped.inspection->disposition() ==
           goldsrc::NetchanIncomingSequenceDisposition::newer);

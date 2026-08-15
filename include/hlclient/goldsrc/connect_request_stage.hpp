@@ -129,7 +129,6 @@ enum class GoldSrcHandshakeState {
     waiting_for_netchan,
     netchan_bootstrap_complete,
     netchan_timed_out,
-    fragmented_payload_pending_m2_3_3,
     timed_out,
     cancelled,
     configuration_error,
@@ -170,7 +169,7 @@ public:
     [[nodiscard]] const std::optional<NetchanBootstrapResult>&
     netchan_bootstrap_result() const noexcept;
     // Non-null only after a successful netchan bootstrap. The returned object
-    // is the same session that committed the M2.3.1 first ACK; callers must use
+    // is the same session that committed the M2.3.3 bootstrap ACKs; callers must use
     // the coordinator's original externally-owned datagram transport.
     [[nodiscard]] NetchanSession* netchan_session() noexcept;
     [[nodiscard]] const NetchanSession* netchan_session() const noexcept;

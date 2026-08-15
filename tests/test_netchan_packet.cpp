@@ -359,8 +359,8 @@ TEST_CASE("Netchan packet size configuration is strictly bounded",
         goldsrc::NetchanPacketLimits{goldsrc::kMaximumNetchanDatagramSize}));
 }
 
-TEST_CASE("Fragment descriptors decode only as an ordered M2.3.3 boundary",
-          "[goldsrc][netchan][packet][fragments][pending]")
+TEST_CASE("Fragment descriptor ranges reject an uncovered interior gap",
+          "[goldsrc][netchan][packet][fragments][bounds]")
 {
     // Independent fixture. Decoded header: seq1 reliable+fragment, ACK2 with
     // reliable ACK. Decoded body: two present descriptors followed by ten
@@ -377,28 +377,10 @@ TEST_CASE("Fragment descriptors decode only as an ordered M2.3.3 boundary",
         0x82U, 0xc2U, 0xd1U, 0x91U,
         0x71U, 0x61U, 0x30U, 0x95U,
     });
-    const auto payload = bytes(std::array<std::uint8_t, 10U>{
-        0x10U, 0x11U, 0x90U, 0x91U, 0x92U,
-        0x93U, 0x94U, 0x20U, 0x21U, 0x22U});
-
-    const auto decoded = goldsrc::decode_server_to_client_netchan_packet(fixture);
-    REQUIRE(decoded);
-    CHECK(decoded.packet->header.sequence.sequence == sequence(1U));
-    CHECK(decoded.packet->header.sequence.flags.reliable);
-    CHECK(decoded.packet->header.sequence.flags.fragmented);
-    REQUIRE(decoded.packet->fragments[0].has_value());
-    REQUIRE(decoded.packet->fragments[1].has_value());
-    CHECK(decoded.packet->fragments[0]->slot_index == 0U);
-    CHECK(decoded.packet->fragments[0]->fragment_id == 0x0001'0005U);
-    CHECK(decoded.packet->fragments[0]->offset == 0U);
-    CHECK(decoded.packet->fragments[0]->length == 2U);
-    CHECK(decoded.packet->fragments[0]->payload_offset == 0U);
-    CHECK(decoded.packet->fragments[1]->slot_index == 1U);
-    CHECK(decoded.packet->fragments[1]->fragment_id == 0x1122'3344U);
-    CHECK(decoded.packet->fragments[1]->offset == 7U);
-    CHECK(decoded.packet->fragments[1]->length == 3U);
-    CHECK(decoded.packet->fragments[1]->payload_offset == 7U);
-    CHECK(bytes_equal(decoded.packet->payload, payload));
+    check_decode_error(
+        goldsrc::decode_server_to_client_netchan_packet(fixture),
+        goldsrc::NetchanPacketErrorCode::invalid_fragment_offset,
+        fixture.size());
 }
 
 TEST_CASE("Fragment decoder rejects malformed descriptor boundaries",
@@ -441,12 +423,12 @@ TEST_CASE("Fragment decoder rejects malformed descriptor boundaries",
     }
 }
 
-TEST_CASE("Fragment construction is a typed M2.3.3 boundary",
-          "[goldsrc][netchan][packet][fragments][pending]")
+TEST_CASE("Fragment construction is strict and uses the normal packet codec",
+          "[goldsrc][netchan][packet][fragments][encode]")
 {
     const auto payload = bytes(std::array<std::uint8_t, 2U>{0xaaU, 0xbbU});
 
-    SECTION("fragment flag is never encoded in M2.3.1")
+    SECTION("fragment flag requires at least one descriptor")
     {
         const goldsrc::ServerToClientNetchanPacket packet{
             header(1U, goldsrc::NetchanSequenceFlags{false, true}, 0U),
@@ -457,8 +439,8 @@ TEST_CASE("Fragment construction is a typed M2.3.3 boundary",
         REQUIRE_FALSE(encoded);
         REQUIRE(encoded.error);
         CHECK(
-            encoded.error->code == goldsrc::NetchanPacketErrorCode::
-                                       fragmented_encode_pending_m2_3_3);
+            encoded.error->code ==
+            goldsrc::NetchanPacketErrorCode::fragment_flag_without_descriptor);
     }
 
     SECTION("descriptor without fragment flag")
@@ -478,14 +460,14 @@ TEST_CASE("Fragment construction is a typed M2.3.3 boundary",
             goldsrc::NetchanPacketErrorCode::descriptors_without_fragment_flag);
     }
 
-    SECTION("descriptor values do not bypass the pending outcome")
+    SECTION("valid descriptor is encoded and decoded losslessly")
     {
         goldsrc::NetchanFragmentSlots fragments{};
         fragments[0] = goldsrc::NetchanFragmentDescriptor{
             0U,
-            1U,
+            0x0001'0001U,
             0U,
-            1U,
+            2U,
             0U,
         };
         const goldsrc::ServerToClientNetchanPacket packet{
@@ -494,11 +476,13 @@ TEST_CASE("Fragment construction is a typed M2.3.3 boundary",
             payload,
         };
         const auto encoded = goldsrc::encode_server_to_client_netchan_packet(packet);
-        REQUIRE_FALSE(encoded);
-        REQUIRE(encoded.error);
-        CHECK(
-            encoded.error->code == goldsrc::NetchanPacketErrorCode::
-                                       fragmented_encode_pending_m2_3_3);
+        REQUIRE(encoded);
+        const auto decoded =
+            goldsrc::decode_server_to_client_netchan_packet(*encoded.datagram);
+        REQUIRE(decoded);
+        REQUIRE(decoded.packet->fragments[0]);
+        CHECK(decoded.packet->fragments[0]->fragment_id == 0x0001'0001U);
+        CHECK(bytes_equal(decoded.packet->payload, payload));
     }
 }
 

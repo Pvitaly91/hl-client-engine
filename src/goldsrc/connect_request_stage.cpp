@@ -5,6 +5,18 @@
 namespace hlclient::goldsrc {
 namespace {
 
+class AuthenticationDriverLifetime final : public INetchanDriverLifetime {
+public:
+    explicit AuthenticationDriverLifetime(
+        auth::AuthenticationSession&& session) noexcept
+        : session_{std::move(session)}
+    {
+    }
+
+private:
+    auth::AuthenticationSession session_;
+};
+
 [[nodiscard]] bool stage_terminal(const ConnectRequestStageState state) noexcept
 {
     switch (state) {
@@ -124,8 +136,6 @@ namespace {
         return GoldSrcHandshakeState::network_error;
     case NetchanBootstrapState::protocol_error:
         return GoldSrcHandshakeState::protocol_error;
-    case NetchanBootstrapState::fragmented_payload_pending_m2_3_3:
-        return GoldSrcHandshakeState::fragmented_payload_pending_m2_3_3;
     }
     return GoldSrcHandshakeState::protocol_error;
 }
@@ -430,7 +440,6 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::connect_response_timed_out:
     case GoldSrcHandshakeState::netchan_bootstrap_complete:
     case GoldSrcHandshakeState::netchan_timed_out:
-    case GoldSrcHandshakeState::fragmented_payload_pending_m2_3_3:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -558,8 +567,18 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
             "Netchan mode completed ACCEPT without a bootstrap stage or local endpoint";
         return;
     }
-    static_cast<void>(
-        netchan_stage_->start(now, *challenge_exchange_.local_endpoint()));
+    std::unique_ptr<INetchanDriverLifetime> driver_lifetime;
+    if (authentication_session_) {
+        driver_lifetime = std::make_unique<AuthenticationDriverLifetime>(
+            std::move(*authentication_session_));
+        // From ACCEPT onward the driver is the sole lifetime owner. Resetting
+        // the moved-from optional cannot release the provider guard.
+        authentication_session_.reset();
+    }
+    static_cast<void>(netchan_stage_->start(
+        now,
+        *challenge_exchange_.local_endpoint(),
+        std::move(driver_lifetime)));
     synchronize_from_netchan();
 }
 

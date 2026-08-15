@@ -409,6 +409,12 @@ void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& even
     case Classification::sequenced_packet_received:
         classification = "sequenced";
         break;
+    case Classification::fragment_received:
+        classification = "fragment received";
+        break;
+    case Classification::normal_transfer_completed:
+        classification = "normal fragment transfer complete";
+        break;
     case Classification::duplicate_sequence_ignored:
         classification = "duplicate sequence ignored";
         break;
@@ -419,7 +425,8 @@ void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& even
         classification = "opaque payload ready";
         break;
     case Classification::acknowledgement_sent:
-        classification = "sequenced acknowledgement";
+        classification = event.fragmented ? "fragment packet" :
+                                            "sequenced acknowledgement";
         break;
     case Classification::bootstrap_complete:
         classification = "netchan bootstrap complete";
@@ -427,8 +434,11 @@ void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& even
     case Classification::datagram_truncated:
         classification = "truncated sequenced datagram";
         break;
-    case Classification::fragmented_payload_pending_m2_3_3:
-        classification = "fragmented payload pending M2.3.3";
+    case Classification::normal_transfer_timed_out:
+        classification = "normal fragment transfer timed out";
+        break;
+    case Classification::secondary_stream_pending_m3:
+        classification = "unconfirmed secondary fragment stream rejected";
         break;
     case Classification::bootstrap_timed_out:
         classification = "netchan bootstrap timed out";
@@ -464,6 +474,29 @@ void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& even
     }
     if (event.payload_size != 0U) {
         message += ", opaque-payload=" + std::to_string(event.payload_size) + " bytes";
+    }
+    if (event.fragment_stream) {
+        message += std::string{", stream="} +
+                   (*event.fragment_stream ==
+                            hlclient::goldsrc::NetchanFragmentStream::normal
+                        ? "normal"
+                        : "unconfirmed-slot-1");
+    }
+    if (event.local_transfer_id) {
+        message += ", transfer=<local:" +
+                   std::to_string(*event.local_transfer_id) + '>';
+    }
+    if (event.fragment_length != 0U) {
+        message += ", range=" + std::to_string(event.fragment_offset) + '+' +
+                   std::to_string(event.fragment_length);
+    }
+    if (event.covered_size != 0U || event.transfer_size != 0U) {
+        message += ", coverage=" + std::to_string(event.covered_size) + '/' +
+                   std::to_string(event.transfer_size);
+    }
+    if (transmitted) {
+        message += ", tx-count=" +
+                   std::to_string(event.transmitted_packet_count);
     }
     hlclient::core::log(LogLevel::info, message);
 }
@@ -560,11 +593,6 @@ void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& even
     }
     case State::netchan_timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc netchan bootstrap timed out");
-        return 1;
-    case State::fragmented_payload_pending_m2_3_3:
-        hlclient::core::log(
-            LogLevel::error,
-            "GoldSrc fragmented payload is deferred to M2.3.3; no payload was delivered");
         return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
