@@ -15,6 +15,11 @@ add_executable(hlclient_tests
     test_connect_udp_integration.cpp
     test_command_line.cpp
     test_connectionless_packet.cpp
+    test_bit_reader.cpp
+    test_delta_description.cpp
+    test_delta_description_stream.cpp
+    test_delta_description_stage.cpp
+    test_delta_schema_registry.cpp
     test_game_paths.cpp
     test_handshake_connect_response.cpp
     test_handshake_netchan.cpp

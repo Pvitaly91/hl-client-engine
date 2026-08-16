@@ -80,10 +80,13 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::signon_boundary;
             } else if (value == "pre-resource") {
                 options.stop_after = ConnectionStopPoint::pre_resource;
+            } else if (value == "delta-schemas") {
+                options.stop_after = ConnectionStopPoint::delta_schemas;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
                                " (expected challenge, connect-request, connect-response, "
-                               "netchan-bootstrap, signon-boundary, or pre-resource)");
+                               "netchan-bootstrap, signon-boundary, pre-resource, or "
+                               "delta-schemas)");
             }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
@@ -113,7 +116,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         connect_request_setting_seen) {
         return failure("--auth-provider, --auth-material-file, --name, and --model require "
                        "a connect-request, connect-response, netchan-bootstrap, or "
-                       "signon-boundary/pre-resource stop point");
+                       "signon-boundary/pre-resource/delta-schemas stop point");
     }
     if (options.authentication_provider && !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
@@ -126,7 +129,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     }
     if ((options.stop_after == ConnectionStopPoint::netchan_bootstrap ||
          options.stop_after == ConnectionStopPoint::signon_boundary ||
-         options.stop_after == ConnectionStopPoint::pre_resource) &&
+         options.stop_after == ConnectionStopPoint::pre_resource ||
+         options.stop_after == ConnectionStopPoint::delta_schemas) &&
         !options.authentication_provider) {
         return failure(
             "Netchan bootstrap and sign-on require the explicit "
@@ -153,7 +157,8 @@ Options:
   --connect <ip:port> Start a GoldSrc handshake (challenge-only by default)
   +connect <ip:port>  GoldSrc-style alias for --connect
   --stop-after <stage> Stop after challenge, connect-request, connect-response,
-                       netchan-bootstrap, signon-boundary, or pre-resource
+                       netchan-bootstrap, signon-boundary, pre-resource, or
+                       delta-schemas
                        (default: challenge)
   --auth-provider <name>
                       Authentication provider for connect stages: file
@@ -171,6 +176,9 @@ initial request and stops before the first confirmed complex service-message bod
 Pre-resource continues the same retained stream through typed server-info and one
 confirmed simple control, then stops at the confirmed complex-message boundary.
 It does not send a resource request or parse that boundary body.
+Delta-schemas continues at that exact cursor, publishes an immutable metadata
+registry for the confirmed opcode-14 sequence, and stops before consuming the
+following post-delta body. It sends no resource response.
 No mode implements authentication generation.
 )";
 }

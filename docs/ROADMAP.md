@@ -397,6 +397,25 @@ pre-resource composition; live project-to-stock remains pending a production
 Steam authentication provider. See
 [GoldSrc server info](GOLDSRC_SERVERINFO.md).
 
+### M2.4.3 — GoldSrc delta-description schemas
+
+**Status: completed for the bounded metadata-registry scope.**
+
+M2.4.3 retains the exact M2.4.2 payload, socket, driver, and authentication
+lifetime, independently confirms opcode 14 as the delta-description sequence,
+and parses seven ordered schemas/219 owning field definitions through a strict
+LSB-first reader. The registry is immutable metadata with exact cursor and
+bit/byte accounting; it is not used for packet decoding or runtime memory.
+
+Sixteen accepted stock projections are stable across repeated baselines, two
+maps, maxplayers 1/2/8, label changes, clean restarts, and one same-process map
+change. Deterministic same-socket fake-HLDS tests exercise 20/20 baseline,
+20/20 fragmented/reordered/duplicate, and 20/20 multi-schema differential
+runs. Numeric opcode 44 is the exact next boundary, but its semantic/body is
+not independently confirmed, so it remains a neutral `PostDeltaBoundary` and
+is wholly unconsumed. See
+[GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md).
+
 ## M3 — Resource and precache pipeline
 
 **Goal:** negotiate, validate, and prepare the server-required resource set.
@@ -405,9 +424,10 @@ Steam authentication provider. See
 
 **Status: next; not started.**
 
-Discover the opcode-14 body/resource transition independently, freeze its
-bounded layout, and implement only an owning resource-list codec after the
-evidence gate. M2.4.2 does not contain this parser or a client resource command.
+Discover the numeric opcode-44 body/resource transition independently, freeze
+its bounded layout, and implement only an owning resource-list codec after the
+evidence gate. M2.4.3 does not contain this parser or a client resource
+command.
 
 ### M3.2 — Local resource resolution and precache state
 

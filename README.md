@@ -6,11 +6,11 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented the bounded single-client project scope of
-**M2.4.2: typed GoldSrc server-info and a pre-resource boundary**. Full primary
-evidence completion remains pending because the local stock environment could
-not produce a second-client handshake to identify one opaque slot candidate.
-Implemented M1–M2.4.2 behavior includes the Protocol 48 challenge,
+The repository has implemented the bounded project scope of
+**M2.4.3: owning GoldSrc delta-description schemas**. The earlier M2.4.2
+single-client evidence gap remains: the local stock environment could not
+produce a second-client handshake to identify one opaque server-info slot
+candidate. Implemented M1–M2.4.3 behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`, an explicit
 authentication-provider boundary, same-socket netchan bootstrap, the base wire
@@ -19,16 +19,18 @@ transactional slot-0 normal reassembly, deterministic outgoing normal
 fragmentation, a bounded same-transport `NetchanDriver`, the exact typed
 client-first `new` request, strict `BZ2\0` envelope decompression, one confirmed
 bounded text-control message, a strict typed opcode-11 server-info parser, one
-neutral post-serverinfo control, and an exact stop before the next complex
-pre-resource body. Twelve accepted
+neutral post-serverinfo control, seven ordered owning delta schemas, and an
+exact stop at the numeric opcode-44 post-delta boundary. Twelve accepted
 signed-stock research runs confirm the supported descriptor shape and the
 per-fragment ACK/retry behavior; project outgoing multi-fragment C2S scheduling
 is deterministic/tested but remains pending stock verification. A separate
 12-run signed-stock sign-on set confirms the request, reliable lifecycle,
 envelope, opcode order, and initial boundary. A separate 16-run differential
 set confirms the server-info grammar, exposed fields, dynamic cursor, and
-post-serverinfo order. Live `hlclient` to stock HLDS, slot-1/file semantics,
-general `svc_*` parsing, opcode-14 semantics, a Steam
+post-serverinfo order; the same 16 ignored canonical payloads independently
+confirm the opcode-14 delta grammar and stable 219-field registry. Live
+`hlclient` to stock HLDS, slot-1/file semantics, general `svc_*` parsing,
+opcode-44 semantics/body, a Steam
 authentication provider, resources, snapshots, gameplay, and a public raw
 payload CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
@@ -270,6 +272,22 @@ The bounded success log sanitizes only confirmed game/map metadata and omits
 the server label and opaque fields. The stock second-client evidence gap leaves the offset-29 candidate
 private, so M2.4.2 is not described as fully evidence-complete.
 
+The explicit delta-schema continuation is:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after delta-schemas `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+It retains that same driver/payload/authentication lifetime, decodes all seven
+opcode-14 messages transactionally into an immutable ordered registry, and
+stops at numeric opcode 44 without consuming its body or sending a resource
+response. Opcode 44 deliberately remains `PostDeltaBoundary`: available
+evidence does not independently establish its resource-list semantic. See
+[GoldSrc delta descriptions](docs/GOLDSRC_DELTA_DESCRIPTIONS.md).
+
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
 project client exercises request plus accept/reject behavior against
@@ -387,6 +405,23 @@ attempts failed before canonical `getchallenge` and are explicitly excluded.
 The wrapper accepts exactly one strict metadata document, while raw research
 projections stay ignored. See [GoldSrc server info](docs/GOLDSRC_SERVERINFO.md)
 for the exact field evidence table and pending semantics.
+
+The M2.4.3 verifier projects the exact delta stream from one accepted ignored
+M2.4.2 canonical payload and can revalidate the metadata under either
+PowerShell host:
+
+```powershell
+.\scripts\verify_stock_delta_descriptions.ps1 `
+  -SourceRunDirectory .\manual-artifacts\signon-captures\<accepted-run>
+
+.\scripts\verify_stock_delta_descriptions.ps1 `
+  -ValidateMetadataPath .\manual-artifacts\delta-description-captures\<accepted-run>\metadata.json
+```
+
+It stores only selected schema names, counts, masks, message geometry, and
+definition hashes. Raw payloads, full field lists, authentication values, and
+the opcode-44 body remain ignored/untracked. See
+[GoldSrc delta descriptions](docs/GOLDSRC_DELTA_DESCRIPTIONS.md).
 
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets

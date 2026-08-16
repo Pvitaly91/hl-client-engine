@@ -1,3 +1,5 @@
+#include "delta_test_fixture.hpp"
+
 #include <hlclient/auth/authentication_provider.hpp>
 #include <hlclient/goldsrc/challenge_protocol.hpp>
 #include <hlclient/goldsrc/connect_request.hpp>
@@ -33,6 +35,7 @@ using namespace std::chrono_literals;
 namespace auth = hlclient::auth;
 namespace goldsrc = hlclient::goldsrc;
 namespace network = hlclient::network;
+namespace delta_fixture = hlclient::test::delta_fixture;
 
 inline constexpr std::string_view kAuthenticationMarker =
     "TEST_AUTH_MATERIAL";
@@ -375,6 +378,14 @@ void send_server_datagram(
     return config;
 }
 
+[[nodiscard]] goldsrc::DeltaDescriptionStageConfig delta_integration_config()
+{
+    goldsrc::DeltaDescriptionStageConfig config;
+    config.pre_resource = integration_config();
+    config.maximum_events = 32U;
+    return config;
+}
+
 [[nodiscard]] goldsrc::ClientToServerNetchanPacket require_initial_request(
     const network::Datagram& datagram,
     const network::NetworkAddress client_endpoint)
@@ -424,6 +435,12 @@ struct TraceCounts {
     std::size_t server_info{0U};
     std::size_t control{0U};
     std::size_t boundary{0U};
+};
+
+struct DeltaTraceCounts {
+    std::size_t schemas{0U};
+    std::size_t registries{0U};
+    std::size_t boundaries{0U};
 };
 
 enum class Scenario {
@@ -718,6 +735,265 @@ void run_fake_hlds(const std::size_t run, const Scenario scenario)
     require_no_datagram(*server);
 }
 
+void run_fake_hlds_delta(const std::size_t run, const Scenario scenario)
+{
+    INFO("fake-HLDS delta-schema run " << run + 1U << "/20");
+    network::NetworkRuntime runtime;
+    INFO(runtime.error_message());
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto server = network::UdpSocket::open_ipv4(runtime, error);
+    INFO(error);
+    REQUIRE(server);
+    REQUIRE(server->bind(network::NetworkAddress::loopback(0U), error));
+    const auto server_endpoint = server->local_address(error);
+    INFO(error);
+    REQUIRE(server_endpoint);
+
+    auto client_socket = network::UdpSocket::open_ipv4(runtime, error);
+    INFO(error);
+    REQUIRE(client_socket);
+    REQUIRE(client_socket->bind(network::NetworkAddress::loopback(0U), error));
+    network::UdpDatagramTransport transport{std::move(*client_socket)};
+
+    std::size_t releases = 0U;
+    DeltaTraceCounts traces;
+    auto prepared = prepared_request_with_session(releases);
+    goldsrc::GoldSrcHandshakeCoordinator handshake{
+        transport,
+        *server_endpoint,
+        goldsrc::HandshakeStopPoint::delta_schemas,
+        std::move(prepared.request),
+        challenge_config(),
+        {},
+        {},
+        response_config(),
+        {},
+        std::move(prepared.session),
+        {},
+        {},
+        {},
+        {},
+        {},
+        {},
+        delta_integration_config(),
+        [&traces](const goldsrc::DeltaDescriptionTraceEvent& event) {
+            using Classification =
+                goldsrc::DeltaDescriptionTraceClassification;
+            switch (event.classification) {
+            case Classification::delta_schema_decoded:
+                ++traces.schemas;
+                break;
+            case Classification::delta_registry_ready:
+                ++traces.registries;
+                break;
+            case Classification::post_delta_boundary_reached:
+                ++traces.boundaries;
+                break;
+            case Classification::stage_started:
+            case Classification::pre_resource_boundary_reached:
+            case Classification::stage_cancelled:
+            case Classification::stage_timed_out:
+            case Classification::unsupported_message:
+            case Classification::backpressure:
+            case Classification::secondary_stream_pending_m3:
+            case Classification::network_failure:
+            case Classification::protocol_failure:
+                break;
+            }
+        }};
+
+    const auto scenario_offset = 1'000U +
+        static_cast<std::size_t>(scenario) * 100U;
+    const auto epoch = goldsrc::ChallengeExchangeTimePoint{} +
+        std::chrono::milliseconds{static_cast<std::int64_t>(
+            scenario_offset + run + 1U)};
+    REQUIRE(handshake.start(epoch));
+    const auto challenge_request = receive_bounded(
+        *server,
+        goldsrc::kMaximumConnectionlessChallengeDatagramSize);
+    const auto expected_challenge = goldsrc::build_getchallenge_request();
+    REQUIRE(expected_challenge);
+    CHECK(challenge_request.payload == *expected_challenge.datagram);
+    const auto client_endpoint = challenge_request.source;
+
+    constexpr std::uint32_t challenge = 0x7f00'2510U;
+    send_server_datagram(
+        *server,
+        client_endpoint,
+        challenge_response(challenge),
+        error);
+    handshake.update(epoch + 1ms);
+    REQUIRE(handshake.state() ==
+            goldsrc::GoldSrcHandshakeState::waiting_for_connect_response);
+    const auto connect = receive_bounded(
+        *server,
+        goldsrc::kMaximumConnectDatagramSize);
+    CHECK(connect.source == client_endpoint);
+    const auto parsed = goldsrc::parse_connect_request(connect.payload, [] {
+        auto profile = goldsrc::ConnectCompatibilityProfile{};
+        profile.protected_authentication_is_ascii_hex = false;
+        return profile;
+    }());
+    REQUIRE(parsed);
+    CHECK(parsed.request->challenge() == challenge);
+
+    send_server_datagram(
+        *server,
+        client_endpoint,
+        accept_response(client_endpoint),
+        error);
+    handshake.update(epoch + 2ms);
+    REQUIRE(handshake.state() ==
+            goldsrc::GoldSrcHandshakeState::waiting_for_delta_schemas);
+    CHECK_FALSE(handshake.terminal());
+    REQUIRE(handshake.local_endpoint());
+    CHECK(*handshake.local_endpoint() == client_endpoint);
+    CHECK(handshake.connect_send_attempts() == 1U);
+    CHECK_FALSE(handshake.delta_description_result());
+    CHECK(releases == 0U);
+    require_no_datagram(*server);
+
+    handshake.update(epoch + 3ms);
+    const auto request_datagram = receive_bounded(
+        *server,
+        goldsrc::kMaximumNetchanDatagramSize);
+    const auto request = require_initial_request(request_datagram, client_endpoint);
+    CHECK(request.header.acknowledgement.sequence == sequence(0U));
+    CHECK_FALSE(request.header.acknowledgement.reliable);
+
+    std::vector<std::vector<std::byte>> schemas{
+        delta_fixture::schema(
+            scenario == Scenario::differential && run % 2U != 0U
+                ? "alpha_variant_t"
+                : "alpha_t",
+            delta_fixture::kSchemaAlphaFields),
+        delta_fixture::schema("bravo_t", delta_fixture::kSchemaBravoFields),
+    };
+    if (scenario == Scenario::differential) {
+        schemas.push_back(delta_fixture::schema(
+            "charlie_t",
+            delta_fixture::kSchemaAlphaFields));
+    }
+
+    std::vector<std::byte> boundary_body;
+    if (scenario == Scenario::fragmented_reordered) {
+        boundary_body.reserve(3'500U);
+        std::uint32_t state = 0x6d2b'79f5U;
+        for (std::size_t index = 0U; index < 3'500U; ++index) {
+            state = state * 1'664'525U + 1'013'904'223U;
+            boundary_body.push_back(static_cast<std::byte>(state >> 24U));
+        }
+    } else {
+        boundary_body = bytes({0xa5U, 0x5aU});
+    }
+    const auto semantic = delta_fixture::service_payload(
+        schemas,
+        goldsrc::kStockPostDeltaBoundaryOpcode,
+        boundary_body);
+    const auto envelope = service_envelope(semantic);
+
+    if (scenario != Scenario::fragmented_reordered) {
+        REQUIRE(envelope.size() <=
+                goldsrc::kStockProtocol48NormalFragmentChunkSize);
+        send_server_datagram(
+            *server,
+            client_endpoint,
+            encode_server_packet(
+                request.header.sequence.sequence.value(),
+                envelope),
+            error);
+        handshake.update(epoch + 4ms);
+        require_transport_ack(*server, client_endpoint);
+    } else {
+        REQUIRE(envelope.size() >
+                goldsrc::kStockProtocol48NormalFragmentChunkSize);
+        const auto count_size =
+            (envelope.size() +
+             goldsrc::kStockProtocol48NormalFragmentChunkSize - 1U) /
+            goldsrc::kStockProtocol48NormalFragmentChunkSize;
+        REQUIRE(count_size >= 3U);
+        REQUIRE(count_size <= (std::numeric_limits<std::uint16_t>::max)());
+        const auto count = static_cast<std::uint16_t>(count_size);
+        const auto final_offset = static_cast<std::size_t>(count - 1U) *
+            goldsrc::kStockProtocol48NormalFragmentChunkSize;
+        const auto final_datagram = independent_server_fragment(
+            1U,
+            request.header.sequence.sequence.value(),
+            count,
+            count,
+            std::span<const std::byte>{envelope}.subspan(final_offset));
+
+        send_server_datagram(*server, client_endpoint, final_datagram, error);
+        handshake.update(epoch + 4ms);
+        require_transport_ack(*server, client_endpoint);
+        send_server_datagram(*server, client_endpoint, final_datagram, error);
+        handshake.update(epoch + 5ms);
+        require_no_datagram(*server);
+
+        auto now = epoch + 6ms;
+        std::uint32_t packet_sequence = 2U;
+        for (std::uint16_t index = 1U; index < count; ++index) {
+            const auto offset = static_cast<std::size_t>(index - 1U) *
+                goldsrc::kStockProtocol48NormalFragmentChunkSize;
+            const auto length = (std::min)(
+                goldsrc::kStockProtocol48NormalFragmentChunkSize,
+                envelope.size() - offset);
+            send_server_datagram(
+                *server,
+                client_endpoint,
+                independent_server_fragment(
+                    packet_sequence,
+                    request.header.sequence.sequence.value(),
+                    index,
+                    count,
+                    std::span<const std::byte>{envelope}.subspan(offset, length)),
+                error);
+            handshake.update(now);
+            require_transport_ack(*server, client_endpoint);
+            ++packet_sequence;
+            now += 1ms;
+        }
+    }
+
+    REQUIRE(handshake.state() ==
+            goldsrc::GoldSrcHandshakeState::delta_schemas_ready);
+    REQUIRE(handshake.terminal());
+    REQUIRE(handshake.delta_description_result());
+    const auto& result = *handshake.delta_description_result();
+    const auto expected_schema_count =
+        scenario == Scenario::differential ? 3U : 2U;
+    CHECK(result.registry().schema_count() == expected_schema_count);
+    CHECK(result.registry().schemas()[0U].name() ==
+          (scenario == Scenario::differential && run % 2U != 0U
+               ? "alpha_variant_t"
+               : "alpha_t"));
+    CHECK(result.registry().schemas()[1U].name() == "bravo_t");
+    CHECK(result.registry().total_field_count() ==
+          expected_schema_count * 2U);
+    CHECK(result.boundary().opcode() == goldsrc::kStockPostDeltaBoundaryOpcode);
+    CHECK(result.boundary().category() ==
+          goldsrc::PostDeltaBoundaryCategory::stock_observed_opcode_44);
+    CHECK(result.boundary().remaining_byte_count() == boundary_body.size());
+    CHECK(result.pre_resource().source_payload().reassembled() ==
+          (scenario == Scenario::fragmented_reordered));
+    CHECK(traces.schemas == expected_schema_count);
+    CHECK(traces.registries == 1U);
+    CHECK(traces.boundaries == 1U);
+    CHECK(handshake.error_context().empty());
+    CHECK(releases == 1U);
+    require_no_datagram(*server);
+
+    handshake.update(epoch + 1s);
+    handshake.cancel(epoch + 2s);
+    CHECK(handshake.state() ==
+          goldsrc::GoldSrcHandshakeState::delta_schemas_ready);
+    CHECK(traces.registries == 1U);
+    CHECK(traces.boundaries == 1U);
+    CHECK(releases == 1U);
+    require_no_datagram(*server);
+}
+
 } // namespace
 
 TEST_CASE("Fake HLDS pre-resource baseline repeats 20 of 20",
@@ -741,5 +1017,29 @@ TEST_CASE("Fake HLDS pre-resource differential offsets repeat 20 of 20",
 {
     for (std::size_t run = 0U; run < 20U; ++run) {
         run_fake_hlds(run, Scenario::differential);
+    }
+}
+
+TEST_CASE("Fake HLDS delta-schema baseline repeats 20 of 20",
+          "[goldsrc][delta][udp][baseline][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_fake_hlds_delta(run, Scenario::baseline);
+    }
+}
+
+TEST_CASE("Fake HLDS delta-schema fragmented reordered duplicate repeats 20 of 20",
+          "[goldsrc][delta][udp][fragment][reordered][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_fake_hlds_delta(run, Scenario::fragmented_reordered);
+    }
+}
+
+TEST_CASE("Fake HLDS delta-schema multi-schema differential repeats 20 of 20",
+          "[goldsrc][delta][udp][differential][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_fake_hlds_delta(run, Scenario::differential);
     }
 }

@@ -14,6 +14,8 @@
 
 namespace hlclient::goldsrc {
 
+class DeltaDescriptionStage;
+
 using PreResourceSignonClock = InitialSignonClock;
 using PreResourceSignonTimePoint = InitialSignonTimePoint;
 
@@ -165,6 +167,27 @@ public:
     [[nodiscard]] std::size_t request_queue_count() const noexcept;
 
 private:
+    friend class DeltaDescriptionStage;
+
+    struct RetainConnectionAtBoundary final {};
+
+    PreResourceSignonStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        PreResourceSignonConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+    PreResourceSignonStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        PreResourceSignonConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback trace_callback,
+        bool retain_connection_at_boundary);
+
+    [[nodiscard]] const OwnedServicePayload* retained_source_payload() const noexcept;
+    void finalize_retained_boundary(PreResourceSignonTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count = 1U) const noexcept;
     void push_event(PreResourceSignonEvent event) noexcept;
     void drain_initial_events() noexcept;
@@ -199,6 +222,7 @@ private:
     PreResourceSignonTraceCallback trace_callback_;
     bool trace_callback_active_{false};
     bool configuration_valid_{false};
+    bool retain_connection_at_boundary_{false};
     InitialSignonStage initial_stage_;
     std::vector<std::optional<PreResourceSignonEvent>> event_slots_;
     std::size_t event_head_{0U};

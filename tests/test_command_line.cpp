@@ -209,6 +209,23 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         CHECK(*result.options->authentication_material_file == "auth.bin");
     }
 
+    SECTION("explicit file provider supports the delta-schema boundary")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"delta-schemas"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::delta_schemas);
+        REQUIRE(result.options->authentication_provider);
+        CHECK(*result.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::file);
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -299,6 +316,18 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         CHECK(result.error.find("--auth-provider file") != std::string::npos);
     }
 
+    SECTION("delta schemas require explicit file provider selection")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"delta-schemas"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("--auth-provider file") != std::string::npos);
+    }
+
     SECTION("unsafe pre-resource bypass and execution switches are rejected")
     {
         constexpr std::array rejected{
@@ -310,6 +339,13 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             std::string_view{"--mount-server-map"},
             std::string_view{"--download-resource"},
             std::string_view{"--skip-auth"},
+            std::string_view{"--raw-delta"},
+            std::string_view{"--inject-delta"},
+            std::string_view{"--skip-delta"},
+            std::string_view{"--apply-delta"},
+            std::string_view{"--sendres"},
+            std::string_view{"--resource-response"},
+            std::string_view{"--mount-server-path"},
         };
         for (const auto argument : rejected) {
             CAPTURE(argument);

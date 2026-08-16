@@ -18,8 +18,10 @@ The bounded single-client implementation and fake-HLDS profile are present.
 The milestone is **not fully evidence-complete**: two safe attempts to launch a
 second signed stock client never emitted the canonical `getchallenge`, so the
 one-byte field at body offset 29 remains an opaque slot candidate and is not a
-public `ClientSlot`. Opcode 14's exact position is confirmed, but its semantic
-name and body layout remain pending. M3.1 resource-list discovery has not begun.
+public `ClientSlot`. M2.4.3 subsequently confirms opcode 14 as the bounded
+delta-description sequence; this M2.4.2 boundary and stop behavior remain
+unchanged. The numeric opcode-44 body after those schemas remains pending, and
+M3.1 resource-list discovery has not begun.
 
 Evidence labels in this document are:
 
@@ -189,8 +191,10 @@ Opcode 54 is represented by a neutral `PreResourceControl`; no third-party
 semantic name is assigned. Opcode 14 is represented by
 `ResourcePhaseBoundary` with `server_message` direction. The boundary/order is
 stock-confirmed under prompt category C, so its evidence value is
-`confirmed_pre_resource_boundary_body_pending`; the opcode-14 semantic and
-body remain pending. A baseline with the usual 40-byte opcode-8 prefix has opcode 11 at
+`confirmed_pre_resource_boundary_body_pending`. M2.4.3 now independently
+confirms opcode 14 as the delta-description sequence and parses that sequence
+through an exact retained cursor; M2.4.2 itself still stops without consuming
+the body. A baseline with the usual 40-byte opcode-8 prefix has opcode 11 at
 absolute offset 42, opcode 54 at 196, and opcode 14 at 199. A four-byte server
 label moves those latter offsets to 191 and 194. The maxplayers-1 profile may
 omit opcode 8 entirely, placing opcode 11 at offset 0; continuation always uses
@@ -244,13 +248,17 @@ skip/bypass, download, or arbitrary server-command CLI options.
 ## Evidence-gated limitations
 
 - body offset 29 has no accepted second-client differential and stays opaque;
-- opcode 14 has an exact confirmed boundary but no public semantic/body codec;
+- opcode 14 is now independently confirmed and implemented as the bounded
+  M2.4.3 delta-description sequence; M2.4.2 retains its original stop behavior;
+- the numeric opcode-44 body following delta schemas has no confirmed public
+  semantic/body codec;
 - the later `sendres` tail and its immediate triggering condition are pending;
 - the map/mode-dependent `u32` and fixed 16-byte value remain opaque;
 - the fourth NUL string is cursor-bounded but not public semantic state;
 - live project-client to stock-HLDS pre-resource sign-on remains pending a
   production Steam authentication provider.
 
-The next planned implementation milestone is M3.1, resource-list discovery and
-a bounded codec, but it must not begin until the M2.4.2 evidence gap is handled
-or explicitly accepted.
+See [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md) for the
+M2.4.3 continuation. The next planned implementation milestone is M3.1,
+resource-list discovery and a bounded codec for the still-neutral opcode-44
+body.

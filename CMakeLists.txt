@@ -174,13 +174,19 @@ set_property(TARGET hlclient_goldsrc_netchan PROPERTY FOLDER "Engine/Network/Gol
 
 hlclient_add_library(
     hlclient_goldsrc_signon
+    include/hlclient/goldsrc/bit_reader.hpp
     include/hlclient/goldsrc/client_message.hpp
+    include/hlclient/goldsrc/delta_description.hpp
+    include/hlclient/goldsrc/delta_description_stage.hpp
     include/hlclient/goldsrc/initial_signon_stage.hpp
     include/hlclient/goldsrc/pre_resource_signon_stage.hpp
     include/hlclient/goldsrc/server_info.hpp
     include/hlclient/goldsrc/service_message_stream.hpp
     include/hlclient/goldsrc/service_payload_envelope.hpp
+    src/goldsrc/bit_reader.cpp
     src/goldsrc/client_message.cpp
+    src/goldsrc/delta_description.cpp
+    src/goldsrc/delta_description_stage.cpp
     src/goldsrc/initial_signon_stage.cpp
     src/goldsrc/pre_resource_signon_stage.cpp
     src/goldsrc/server_info.cpp

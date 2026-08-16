@@ -200,6 +200,35 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_delta_description_state(
+    const DeltaDescriptionStageState state) noexcept
+{
+    switch (state) {
+    case DeltaDescriptionStageState::idle:
+    case DeltaDescriptionStageState::waiting_for_pre_resource_state:
+    case DeltaDescriptionStageState::decoding_delta_stream:
+    case DeltaDescriptionStageState::delta_registry_ready:
+        return GoldSrcHandshakeState::waiting_for_delta_schemas;
+    case DeltaDescriptionStageState::post_delta_boundary_reached:
+        return GoldSrcHandshakeState::delta_schemas_ready;
+    case DeltaDescriptionStageState::unsupported_message:
+        return GoldSrcHandshakeState::delta_unsupported_message;
+    case DeltaDescriptionStageState::timed_out:
+        return GoldSrcHandshakeState::delta_timed_out;
+    case DeltaDescriptionStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case DeltaDescriptionStageState::backpressure:
+        return GoldSrcHandshakeState::delta_backpressure;
+    case DeltaDescriptionStageState::secondary_stream_pending_m3:
+        return GoldSrcHandshakeState::delta_secondary_stream_pending_m3;
+    case DeltaDescriptionStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case DeltaDescriptionStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] bool signon_start_network_failure(
     const std::optional<NetchanDriverErrorCode> driver_code) noexcept
 {
@@ -420,7 +449,9 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     InitialSignonConfig signon_config,
     InitialSignonTraceCallback signon_trace_callback,
     PreResourceSignonConfig pre_resource_config,
-    PreResourceSignonTraceCallback pre_resource_trace_callback)
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionStageConfig delta_config,
+    DeltaDescriptionTraceCallback delta_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -443,7 +474,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
             if (stop_point_ == HandshakeStopPoint::connect_response ||
                 stop_point_ == HandshakeStopPoint::netchan_bootstrap ||
                 stop_point_ == HandshakeStopPoint::signon_boundary ||
-                stop_point_ == HandshakeStopPoint::pre_resource) {
+                stop_point_ == HandshakeStopPoint::pre_resource ||
+                stop_point_ == HandshakeStopPoint::delta_schemas) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -472,6 +504,15 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                     std::move(signon_trace_callback),
                     std::move(pre_resource_trace_callback));
             }
+            if (stop_point_ == HandshakeStopPoint::delta_schemas) {
+                delta_description_stage_.emplace(
+                    transport,
+                    remote_endpoint,
+                    std::move(delta_config),
+                    std::move(signon_trace_callback),
+                    std::move(pre_resource_trace_callback),
+                    std::move(delta_trace_callback));
+            }
         }
     } else if (authentication_session_) {
         configuration_error_ =
@@ -495,6 +536,13 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (delta_description_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_delta_schemas) {
+        delta_description_stage_->update(now);
+        synchronize_from_delta_description();
+        release_authentication_session_if_terminal();
         return;
     }
     if (pre_resource_stage_ &&
@@ -531,6 +579,13 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (delta_description_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_delta_schemas) {
+        delta_description_stage_->cancel(now);
+        synchronize_from_delta_description();
+        release_authentication_session_if_terminal();
         return;
     }
     if (pre_resource_stage_ &&
@@ -595,6 +650,11 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::pre_resource_unsupported_message:
     case GoldSrcHandshakeState::pre_resource_backpressure:
     case GoldSrcHandshakeState::pre_resource_secondary_stream_pending_m3:
+    case GoldSrcHandshakeState::delta_schemas_ready:
+    case GoldSrcHandshakeState::delta_timed_out:
+    case GoldSrcHandshakeState::delta_unsupported_message:
+    case GoldSrcHandshakeState::delta_backpressure:
+    case GoldSrcHandshakeState::delta_secondary_stream_pending_m3:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -610,6 +670,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_netchan:
     case GoldSrcHandshakeState::waiting_for_signon:
     case GoldSrcHandshakeState::waiting_for_pre_resource:
+    case GoldSrcHandshakeState::waiting_for_delta_schemas:
         return false;
     }
     return true;
@@ -656,6 +717,18 @@ GoldSrcHandshakeCoordinator::pre_resource_error() const noexcept
     static const std::optional<PreResourceSignonError> empty;
     return pre_resource_stage_ ? pre_resource_stage_->error() : empty;
 }
+const std::optional<DeltaDescriptionSignonState>&
+GoldSrcHandshakeCoordinator::delta_description_result() const noexcept
+{
+    static const std::optional<DeltaDescriptionSignonState> empty;
+    return delta_description_stage_ ? delta_description_stage_->result() : empty;
+}
+const std::optional<DeltaDescriptionStageError>&
+GoldSrcHandshakeCoordinator::delta_description_error() const noexcept
+{
+    static const std::optional<DeltaDescriptionStageError> empty;
+    return delta_description_stage_ ? delta_description_stage_->error() : empty;
+}
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
     return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
@@ -692,6 +765,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (pre_resource_stage_ && pre_resource_stage_->error()) {
         return pre_resource_stage_->error()->context;
     }
+    if (delta_description_stage_ && delta_description_stage_->error()) {
+        return delta_description_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -720,7 +796,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
         (stop_point_ != HandshakeStopPoint::connect_response &&
          stop_point_ != HandshakeStopPoint::netchan_bootstrap &&
          stop_point_ != HandshakeStopPoint::signon_boundary &&
-         stop_point_ != HandshakeStopPoint::pre_resource)) {
+         stop_point_ != HandshakeStopPoint::pre_resource &&
+         stop_point_ != HandshakeStopPoint::delta_schemas)) {
         return;
     }
     if (!response_stage_) {
@@ -749,13 +826,16 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
     if (state_ != GoldSrcHandshakeState::accepted ||
         (stop_point_ != HandshakeStopPoint::netchan_bootstrap &&
          stop_point_ != HandshakeStopPoint::signon_boundary &&
-         stop_point_ != HandshakeStopPoint::pre_resource)) {
+         stop_point_ != HandshakeStopPoint::pre_resource &&
+         stop_point_ != HandshakeStopPoint::delta_schemas)) {
         return;
     }
     if (!challenge_exchange_.local_endpoint() ||
         (stop_point_ == HandshakeStopPoint::netchan_bootstrap && !netchan_stage_) ||
         (stop_point_ == HandshakeStopPoint::signon_boundary && !signon_stage_) ||
-        (stop_point_ == HandshakeStopPoint::pre_resource && !pre_resource_stage_)) {
+        (stop_point_ == HandshakeStopPoint::pre_resource && !pre_resource_stage_) ||
+        (stop_point_ == HandshakeStopPoint::delta_schemas &&
+         !delta_description_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
             "Post-ACCEPT mode has no transport stage or stable local endpoint";
@@ -787,6 +867,18 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
             state_ == GoldSrcHandshakeState::waiting_for_pre_resource) {
             // start() is transactional and intentionally leaves the stage idle
             // on failure. Never turn that idle/error pair into a nonterminal wait.
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::delta_schemas) {
+        const bool delta_started = delta_description_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime));
+        synchronize_from_delta_description();
+        if (!delta_started &&
+            state_ == GoldSrcHandshakeState::waiting_for_delta_schemas) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -873,6 +965,37 @@ void GoldSrcHandshakeCoordinator::synchronize_from_pre_resource()
     if (pre_resource_error &&
         pre_resource_error->code ==
             PreResourceSignonErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_delta_description()
+{
+    if (!delta_description_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Delta-schema mode has no delta-description stage";
+        return;
+    }
+    const auto& delta_error = delta_description_stage_->error();
+    if (delta_description_stage_->state() == DeltaDescriptionStageState::idle &&
+        delta_error) {
+        if (delta_error->code ==
+                DeltaDescriptionStageErrorCode::invalid_configuration ||
+            delta_error->driver_code ==
+                NetchanDriverErrorCode::invalid_configuration) {
+            state_ = GoldSrcHandshakeState::configuration_error;
+        } else if (signon_start_network_failure(delta_error->driver_code)) {
+            state_ = GoldSrcHandshakeState::network_error;
+        } else {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    state_ = map_delta_description_state(delta_description_stage_->state());
+    if (delta_error &&
+        delta_error->code ==
+            DeltaDescriptionStageErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

@@ -122,9 +122,44 @@ PreResourceSignonStage::PreResourceSignonStage(
     PreResourceSignonConfig config,
     InitialSignonTraceCallback initial_trace_callback,
     PreResourceSignonTraceCallback trace_callback)
+    : PreResourceSignonStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(trace_callback),
+          false}
+{
+}
+
+PreResourceSignonStage::PreResourceSignonStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    PreResourceSignonConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : PreResourceSignonStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(trace_callback),
+          true}
+{
+}
+
+PreResourceSignonStage::PreResourceSignonStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    PreResourceSignonConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback trace_callback,
+    const bool retain_connection_at_boundary)
     : config_{std::move(config)},
       trace_callback_{std::move(trace_callback)},
       configuration_valid_{valid_pre_resource_signon_configuration(config_)},
+      retain_connection_at_boundary_{retain_connection_at_boundary},
       initial_stage_{
           transport,
           remote_endpoint,
@@ -495,7 +530,9 @@ void PreResourceSignonStage::decode_retained_boundary(
     state_ = PreResourceSignonStageState::server_info_ready;
     result_.emplace(std::move(*decoded->state));
     state_ = PreResourceSignonStageState::pre_resource_boundary_reached;
-    initial_stage_.finalize_retained_boundary(now);
+    if (!retain_connection_at_boundary_) {
+        initial_stage_.finalize_retained_boundary(now);
+    }
 
     const auto& committed_source = result_->source_payload();
     emit_trace(
@@ -521,6 +558,22 @@ void PreResourceSignonStage::decode_retained_boundary(
         0U,
         nullptr,
         &result_->boundary());
+}
+
+const OwnedServicePayload*
+PreResourceSignonStage::retained_source_payload() const noexcept
+{
+    if (!retain_connection_at_boundary_) {
+        return nullptr;
+    }
+    const auto& initial_result = initial_stage_.result();
+    return initial_result ? &initial_result->boundary_payload : nullptr;
+}
+
+void PreResourceSignonStage::finalize_retained_boundary(
+    const PreResourceSignonTimePoint now) noexcept
+{
+    initial_stage_.finalize_retained_boundary(now);
 }
 
 void PreResourceSignonStage::fail_from_initial() noexcept

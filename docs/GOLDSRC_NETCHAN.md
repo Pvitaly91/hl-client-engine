@@ -571,6 +571,11 @@ confirmed neutral control, and stops before the next complex body. This does
 not add a generic `svc_*` parser, resource send, path consumer, or world/render
 handoff. See [GoldSrc server info](GOLDSRC_SERVERINFO.md).
 
+M2.4.3 adds a distinct `delta-schemas` continuation above that retained
+payload. It publishes an owning ordered opcode-14 metadata registry and stops
+at numeric opcode 44 without applying schemas or consuming the following body.
+See [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md).
+
 The public M2.3.3 boundary is project-owned and typed:
 
 - `NetchanSequence`, `NetchanSequenceFlags`, and wrap-safe comparison helpers;
@@ -617,9 +622,9 @@ The following remain **pending** in this profile:
   envelope and universal compression behavior;
 - stock-client count-greater-than-one C2S fragmentation and live
   project-client-to-stock fragment interoperability;
-- service-message semantics beyond the bounded M2.4.2 opcode-14 pre-resource
-  boundary, including delta descriptions, resources, snapshots, commands, and
-  gameplay.
+- service-message semantics beyond the bounded M2.4.3 opcode-44 post-delta
+  boundary, including resources, snapshots, commands, and gameplay; runtime
+  application of the metadata-only delta registry also remains pending.
 
 No pending item is filled from a third-party field name or implementation.
 Capture observations have priority over secondary behavioral cross-checks.

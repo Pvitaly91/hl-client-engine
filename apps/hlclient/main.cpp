@@ -657,6 +657,67 @@ void log_pre_resource_signon_trace(
     hlclient::core::log(LogLevel::info, message);
 }
 
+void log_delta_description_trace(
+    const hlclient::goldsrc::DeltaDescriptionTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::DeltaDescriptionTraceClassification;
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::pre_resource_boundary_reached:
+        return;
+    case Classification::delta_schema_decoded:
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] delta schema decoded: " +
+                hlclient::goldsrc::sanitize_service_text_for_presentation(
+                    event.schema_name) +
+                ", index=" + std::to_string(event.schema_index) +
+                ", fields=" + std::to_string(event.field_count) +
+                ", bits=" + std::to_string(event.bits_consumed) +
+                ", bytes=" + std::to_string(event.bytes_consumed));
+        return;
+    case Classification::delta_registry_ready:
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] delta registry ready: schemas=" +
+                std::to_string(event.schema_index) +
+                ", fields=" + std::to_string(event.field_count) +
+                ", bits=" + std::to_string(event.bits_consumed) +
+                ", bytes=" + std::to_string(event.bytes_consumed));
+        return;
+    case Classification::post_delta_boundary_reached:
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] next boundary opcode=" +
+                std::to_string(static_cast<unsigned int>(
+                    event.boundary_opcode.value_or(0U))) +
+                " offset=" + std::to_string(event.byte_offset));
+        return;
+    case Classification::stage_cancelled:
+        hlclient::core::log(LogLevel::error, "Delta-description stage cancelled");
+        return;
+    case Classification::stage_timed_out:
+        hlclient::core::log(LogLevel::error, "Delta-description stage timed out");
+        return;
+    case Classification::unsupported_message:
+        hlclient::core::log(LogLevel::error, "Unsupported delta-description message");
+        return;
+    case Classification::backpressure:
+        hlclient::core::log(LogLevel::error, "Delta-description event backpressure");
+        return;
+    case Classification::secondary_stream_pending_m3:
+        hlclient::core::log(LogLevel::error, "Secondary stream remains pending M3");
+        return;
+    case Classification::network_failure:
+        hlclient::core::log(LogLevel::error, "Delta-description network failure");
+        return;
+    case Classification::protocol_failure:
+        hlclient::core::log(LogLevel::error, "Delta-description protocol failure");
+        return;
+    }
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -866,6 +927,54 @@ void log_pre_resource_signon_trace(
             LogLevel::error,
             "Unconfirmed secondary netchan stream remains pending M3");
         return 1;
+    case State::delta_schemas_ready:
+    {
+        if (!handshake.delta_description_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Delta-description sign-on completed without an owning result");
+            return 1;
+        }
+        const auto& result = *handshake.delta_description_result();
+        const auto& registry = result.registry();
+        const auto& boundary = result.boundary();
+        for (const auto& schema : registry.schemas()) {
+            hlclient::core::log(
+                LogLevel::info,
+                "[signon] delta schema decoded: " +
+                    hlclient::goldsrc::sanitize_service_text_for_presentation(
+                        schema.name()) +
+                    ", fields=" + std::to_string(schema.field_count()));
+        }
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] delta registry ready: schemas=" +
+                std::to_string(registry.schema_count()) +
+                ", fields=" + std::to_string(registry.total_field_count()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] next boundary opcode=" +
+                std::to_string(static_cast<unsigned int>(boundary.opcode())) +
+                " offset=" + std::to_string(boundary.byte_offset()) +
+                " unconsumed-body=" +
+                std::to_string(boundary.remaining_byte_count()) + " bytes");
+        hlclient::core::log(
+            LogLevel::info,
+            "No post-delta body was parsed and no resource response was sent");
+        return 0;
+    }
+    case State::delta_timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc delta-schema sign-on timed out");
+        return 1;
+    case State::delta_unsupported_message:
+        hlclient::core::log(LogLevel::error, "Unsupported delta-description message");
+        return 1;
+    case State::delta_backpressure:
+        hlclient::core::log(LogLevel::error, "Delta-description event queue reached its hard bound");
+        return 1;
+    case State::delta_secondary_stream_pending_m3:
+        hlclient::core::log(LogLevel::error, "Unconfirmed secondary stream remains pending M3");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -890,6 +999,7 @@ void log_pre_resource_signon_trace(
     case State::waiting_for_netchan:
     case State::waiting_for_signon:
     case State::waiting_for_pre_resource:
+    case State::waiting_for_delta_schemas:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -961,7 +1071,12 @@ public:
                net_trace
                    ? hlclient::goldsrc::PreResourceSignonTraceCallback{
                          &log_pre_resource_signon_trace}
-                   : hlclient::goldsrc::PreResourceSignonTraceCallback{}}
+                   : hlclient::goldsrc::PreResourceSignonTraceCallback{},
+               {},
+               net_trace
+                   ? hlclient::goldsrc::DeltaDescriptionTraceCallback{
+                         &log_delta_description_trace}
+                   : hlclient::goldsrc::DeltaDescriptionTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -1268,6 +1383,9 @@ int run(const hlclient::core::CommandLineOptions& options)
             break;
         case hlclient::core::ConnectionStopPoint::pre_resource:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::pre_resource;
+            break;
+        case hlclient::core::ConnectionStopPoint::delta_schemas:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::delta_schemas;
             break;
         }
         challenge_session = std::make_unique<HandshakeSession>(
