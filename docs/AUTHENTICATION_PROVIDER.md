@@ -184,7 +184,7 @@ not authentication material, and is separately escaped and presentation-capped
 before logging.
 
 The provider boundary is in-process modularity, not a security sandbox. No part
-of M2.2–M2.4.1 authorizes bypassing Steam, server policy, VAC, access control,
+of M2.2–M2.4.2 authorizes bypassing Steam, server policy, VAC, access control,
 or third-party terms. The absence of a production Steam provider is why a
 project-client-to-stock-HLDS bootstrap remains pending. A legitimate future
 provider requires its own platform, legal, storage, cancellation, and teardown
@@ -197,4 +197,7 @@ persistent driver do not alter this authentication ownership boundary. The
 The explicit `signon-boundary` mode transfers the same provider guard into
 `InitialSignonStage` at `ACCEPT` and releases it exactly once on boundary,
 timeout, cancellation, network/protocol error, backpressure, or secondary
-stream pending. Neither mode gives netchan/sign-on codecs access to auth bytes.
+stream pending. The `pre-resource` composition privately retains that exact
+stage/driver guard through the synchronous typed server-info continuation and
+releases it once at its success or terminal failure. No mode gives
+netchan/sign-on codecs access to auth bytes.

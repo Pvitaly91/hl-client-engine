@@ -5,6 +5,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <bzlib.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -12,6 +14,7 @@
 #include <cstdint>
 #include <deque>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -247,6 +250,100 @@ template<std::size_t Size>
     });
 }
 
+void append_u32_le(std::vector<std::byte>& output, const std::uint32_t value)
+{
+    output.push_back(static_cast<std::byte>(value & 0xffU));
+    output.push_back(static_cast<std::byte>((value >> 8U) & 0xffU));
+    output.push_back(static_cast<std::byte>((value >> 16U) & 0xffU));
+    output.push_back(static_cast<std::byte>((value >> 24U) & 0xffU));
+}
+
+void append_nul_string(
+    std::vector<std::byte>& output,
+    const std::string_view value)
+{
+    const auto source = std::as_bytes(std::span{value.data(), value.size()});
+    output.insert(output.end(), source.begin(), source.end());
+    output.push_back(std::byte{0U});
+}
+
+[[nodiscard]] std::vector<std::byte> pre_resource_semantic_fixture(
+    const bool include_leading_text = true,
+    const std::uint8_t maximum_clients = 8U)
+{
+    std::vector<std::byte> output;
+    if (include_leading_text) {
+        output.push_back(std::byte{8U});
+        append_nul_string(output, "x");
+    }
+    output.push_back(std::byte{11U});
+    append_u32_le(output, 48U);
+    append_u32_le(output, 0x1234'5678U);
+    append_u32_le(output, 0xdead'beefU);
+    for (std::uint8_t value = 0U; value < 16U; ++value) {
+        output.push_back(static_cast<std::byte>(value));
+    }
+    output.push_back(static_cast<std::byte>(maximum_clients));
+    output.push_back(std::byte{0U});
+    output.push_back(maximum_clients == 1U ? std::byte{0U} : std::byte{1U});
+    append_nul_string(output, "sample");
+    append_nul_string(output, "Local Test");
+    append_nul_string(output, "maps/test_alpha.bsp");
+    append_nul_string(output, "alpha beta");
+    output.push_back(std::byte{0U});
+    output.push_back(
+        static_cast<std::byte>(goldsrc::kPreResourceSimpleControlOpcode));
+    output.push_back(std::byte{0U});
+    output.push_back(std::byte{0U});
+    output.push_back(
+        static_cast<std::byte>(goldsrc::kPreResourceComplexBoundaryOpcode));
+    output.push_back(std::byte{0xa5U});
+    output.push_back(std::byte{0x5aU});
+    return output;
+}
+
+[[nodiscard]] std::vector<std::byte> service_envelope(
+    const std::span<const std::byte> semantic)
+{
+    REQUIRE_FALSE(semantic.empty());
+    REQUIRE(semantic.size() <= (std::numeric_limits<unsigned int>::max)());
+    std::vector<char> source;
+    source.reserve(semantic.size());
+    std::ranges::transform(
+        semantic,
+        std::back_inserter(source),
+        [](const std::byte value) {
+            return static_cast<char>(std::to_integer<std::uint8_t>(value));
+        });
+    const auto bound = source.size() + source.size() / 100U + 601U;
+    REQUIRE(bound <= (std::numeric_limits<unsigned int>::max)());
+    std::vector<char> compressed(bound);
+    auto compressed_size = static_cast<unsigned int>(compressed.size());
+    REQUIRE(BZ2_bzBuffToBuffCompress(
+                compressed.data(),
+                &compressed_size,
+                source.data(),
+                static_cast<unsigned int>(source.size()),
+                9,
+                0,
+                30) == BZ_OK);
+    compressed.resize(compressed_size);
+
+    std::vector<std::byte> envelope{
+        std::byte{0x42U},
+        std::byte{0x5aU},
+        std::byte{0x32U},
+        std::byte{0U},
+    };
+    std::ranges::transform(
+        compressed,
+        std::back_inserter(envelope),
+        [](const char value) {
+            return static_cast<std::byte>(static_cast<unsigned char>(value));
+        });
+    return envelope;
+}
+
 [[nodiscard]] std::vector<std::byte> signon_server_packet(
     std::vector<std::byte> payload)
 {
@@ -412,6 +509,46 @@ struct PreparedWithSession {
         {},
         {},
         std::move(signon_config),
+        {},
+    };
+}
+
+[[nodiscard]] goldsrc::PreResourceSignonConfig pre_resource_config()
+{
+    goldsrc::PreResourceSignonConfig config;
+    config.initial_signon.driver.channel_inactivity_timeout = 50ms;
+    config.initial_signon.driver.fragment_transfer_timeout = 50ms;
+    config.initial_signon.driver.maximum_datagrams_per_update = 8U;
+    config.initial_signon.driver.maximum_outgoing_packets_per_update = 8U;
+    config.initial_signon.driver.maximum_events = 32U;
+    config.initial_signon.maximum_events = 32U;
+    config.initial_signon.maximum_driver_events_per_update = 32U;
+    config.maximum_events = 32U;
+    return config;
+}
+
+[[nodiscard]] GoldSrcHandshakeCoordinator pre_resource_coordinator(
+    FakeTransport& transport,
+    const NetworkAddress remote,
+    PreparedWithSession prepared,
+    goldsrc::PreResourceSignonConfig config = pre_resource_config())
+{
+    return GoldSrcHandshakeCoordinator{
+        transport,
+        remote,
+        goldsrc::HandshakeStopPoint::pre_resource,
+        std::move(prepared.request),
+        challenge_config(),
+        {},
+        {},
+        response_config(),
+        {},
+        std::move(prepared.session),
+        {},
+        {},
+        {},
+        {},
+        std::move(config),
         {},
     };
 }
@@ -962,6 +1099,150 @@ TEST_CASE("Sign-on coordinator terminalizes transactional stage-start failures",
         CHECK(handshake.initial_signon_error()->code ==
               goldsrc::InitialSignonErrorCode::driver_start_failed);
         CHECK(handshake.initial_signon_error()->driver_code ==
+              goldsrc::NetchanDriverErrorCode::local_endpoint_changed);
+        CHECK(transport.sent.size() == 2U);
+        CHECK(releases == 1U);
+        check_terminal_idempotence(transport, handshake, epoch + 2ms, releases);
+    }
+}
+
+TEST_CASE("Pre-resource stop point preserves one socket and authentication lifetime",
+          "[goldsrc][handshake][pre-resource][coordinator][auth]")
+{
+    FakeTransport transport;
+    const auto remote = NetworkAddress::loopback(27'015);
+    const auto epoch = ChallengeExchangeTimePoint{};
+    std::size_t releases = 0U;
+    auto handshake = pre_resource_coordinator(
+        transport,
+        remote,
+        prepare_with_session(releases));
+
+    reach_response_wait(transport, handshake, remote, epoch, releases);
+    transport.queue(remote, accepted_response());
+    handshake.update(epoch + 2ms);
+
+    REQUIRE(handshake.state() ==
+            GoldSrcHandshakeState::waiting_for_pre_resource);
+    REQUIRE_FALSE(handshake.terminal());
+    CHECK(transport.sent.size() == 2U);
+    CHECK(releases == 0U);
+    CHECK_FALSE(handshake.initial_signon_result());
+    CHECK_FALSE(handshake.pre_resource_result());
+
+    handshake.update(epoch + 3ms);
+    REQUIRE(handshake.state() ==
+            GoldSrcHandshakeState::waiting_for_pre_resource);
+    REQUIRE(transport.sent.size() == 3U);
+    const auto request = decode_client_packet(transport.sent[2U]);
+    CHECK(request.header.sequence.sequence.value() == 1U);
+    CHECK(request.header.sequence.flags.reliable);
+    CHECK(request.payload[0U] == std::byte{3U});
+    CHECK(request.payload[1U] == std::byte{'n'});
+    CHECK(request.payload[2U] == std::byte{'e'});
+    CHECK(request.payload[3U] == std::byte{'w'});
+    CHECK(request.payload[4U] == std::byte{0U});
+    CHECK(releases == 0U);
+
+    const auto semantic = pre_resource_semantic_fixture();
+    transport.queue(
+        remote,
+        signon_server_packet(service_envelope(semantic)));
+    handshake.update(epoch + 4ms);
+
+    REQUIRE(handshake.state() ==
+            GoldSrcHandshakeState::pre_resource_boundary_reached);
+    REQUIRE(handshake.terminal());
+    CHECK(releases == 1U);
+    REQUIRE(transport.sent.size() == 4U);
+    const auto acknowledgement = decode_client_packet(transport.sent[3U]);
+    CHECK(acknowledgement.header.sequence.sequence.value() == 2U);
+    CHECK_FALSE(acknowledgement.header.sequence.flags.reliable);
+    CHECK(acknowledgement.header.acknowledgement.sequence.value() == 1U);
+    CHECK(acknowledgement.header.acknowledgement.reliable);
+    CHECK(std::ranges::all_of(
+        acknowledgement.payload,
+        [](const std::byte value) {
+            return value == goldsrc::kStockProtocol48NetchanPaddingByte;
+        }));
+
+    CHECK_FALSE(handshake.initial_signon_result());
+    REQUIRE(handshake.pre_resource_result());
+    const auto& result = *handshake.pre_resource_result();
+    CHECK(result.server_info().protocol_version() ==
+          goldsrc::ProtocolVersion::goldsrc_48);
+    CHECK(result.server_info().maximum_clients().value() == 8U);
+    CHECK(result.server_info().multi_client_mode());
+    REQUIRE(result.controls().size() == 1U);
+    CHECK(result.controls().front().opcode() ==
+          goldsrc::kPreResourceSimpleControlOpcode);
+    CHECK(result.boundary().opcode() ==
+          goldsrc::kPreResourceComplexBoundaryOpcode);
+    CHECK(result.boundary().byte_offset() == 88U);
+    CHECK(result.boundary().remaining_byte_count() == 2U);
+    CHECK(result.boundary().direction() ==
+          goldsrc::ResourcePhaseBoundaryDirection::server_message);
+    CHECK(result.source_payload().initial_boundary_offset() == 3U);
+    CHECK(result.source_payload().server_info_body_offset() == 4U);
+    CHECK(result.source_payload().payload_size() == semantic.size());
+    CHECK(handshake.error_context().empty());
+
+    check_terminal_idempotence(transport, handshake, epoch + 4ms, releases);
+    CHECK(transport.sent.size() == 4U);
+}
+
+TEST_CASE("Pre-resource coordinator terminalizes transactional stage-start failures",
+          "[goldsrc][handshake][pre-resource][coordinator][auth][error]")
+{
+    const auto remote = NetworkAddress::loopback(27'015);
+    const auto epoch = ChallengeExchangeTimePoint{};
+
+    SECTION("invalid pre-resource configuration")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        auto config = pre_resource_config();
+        config.maximum_events = 0U;
+        auto handshake = pre_resource_coordinator(
+            transport,
+            remote,
+            prepare_with_session(releases),
+            config);
+
+        reach_response_wait(transport, handshake, remote, epoch, releases);
+        transport.queue(remote, accepted_response());
+        handshake.update(epoch + 2ms);
+
+        CHECK(handshake.state() == GoldSrcHandshakeState::configuration_error);
+        CHECK(handshake.terminal());
+        REQUIRE(handshake.pre_resource_error());
+        CHECK(handshake.pre_resource_error()->code ==
+              goldsrc::PreResourceSignonErrorCode::invalid_configuration);
+        CHECK(transport.sent.size() == 2U);
+        CHECK(releases == 1U);
+        check_terminal_idempotence(transport, handshake, epoch + 2ms, releases);
+    }
+
+    SECTION("same-socket local endpoint changes before nested driver start")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        auto handshake = pre_resource_coordinator(
+            transport,
+            remote,
+            prepare_with_session(releases));
+
+        reach_response_wait(transport, handshake, remote, epoch, releases);
+        transport.changed_local_address_call = transport.local_address_calls + 1U;
+        transport.queue(remote, accepted_response());
+        handshake.update(epoch + 2ms);
+
+        CHECK(handshake.state() == GoldSrcHandshakeState::network_error);
+        CHECK(handshake.terminal());
+        REQUIRE(handshake.pre_resource_error());
+        CHECK(handshake.pre_resource_error()->code ==
+              goldsrc::PreResourceSignonErrorCode::initial_signon_start_failed);
+        CHECK(handshake.pre_resource_error()->driver_code ==
               goldsrc::NetchanDriverErrorCode::local_endpoint_changed);
         CHECK(transport.sent.size() == 2U);
         CHECK(releases == 1U);

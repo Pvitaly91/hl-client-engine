@@ -246,14 +246,15 @@ unreliable state exactly once. The driver borrows the already-bound transport;
 it does not replace or close that socket. No raw reliable/fragment payload CLI
 is provided.
 
-The six-run stock capture set established that the stock client sends first,
-but its initial reliable body is opaque sign-on/application content. The
-project does not reproduce it. Instead, the deterministic fake HLDS sends the
+The six-run M2.3.1 stock capture set established that the stock client sends
+first, while that milestone deliberately kept its initial reliable body opaque.
+At the `netchan-bootstrap` stop, the deterministic fake HLDS therefore sends the
 first server packet and verifies the project's exact single ACK plus absence of
-an extra datagram. The project-to-stock live path remains pending because the
-project has no production Steam authentication provider or independently
-defined sign-on payload. Persistent reliable state is M2.3.2; bounded normal
-fragmentation/reassembly and the driver are M2.3.3. See
+an extra datagram. Later explicit sign-on stops use the independently captured
+fixed request described below. The project-to-stock live path remains pending
+because the project has no production Steam authentication provider. Persistent
+reliable state is M2.3.2; bounded normal fragmentation/reassembly and the driver
+are M2.3.3. See
 [GoldSrc netchan](GOLDSRC_NETCHAN.md) and
 [GoldSrc fragmentation](GOLDSRC_FRAGMENTATION.md) for evidence labels, limits,
 and unsupported behavior.
@@ -275,6 +276,22 @@ opcode 11 was reached without parsing its body. No resource/spawn continuation
 is sent. Live project-to-stock sign-on remains pending a production Steam
 authentication provider; the completed project path is proved against local
 fake-HLDS fixtures.
+
+The M2.4.2 continuation retains that exact socket/driver/auth lifetime and
+stops before the confirmed opcode-14 category-C boundary body:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after pre-resource `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+Success publishes owning typed server-info metadata, consumes only the exact
+empty-string/zero opcode-54 control, and sends no resource command. Game/map
+values are untrusted metadata; they are never used as filesystem paths. The
+second-client slot candidate remains evidence-gated and private. See
+[GoldSrc server info](GOLDSRC_SERVERINFO.md).
 
 Add `--net-trace` when diagnosing the exchange:
 

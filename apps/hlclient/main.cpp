@@ -574,6 +574,89 @@ void log_initial_signon_trace(
     hlclient::core::log(LogLevel::info, message);
 }
 
+void log_pre_resource_signon_trace(
+    const hlclient::goldsrc::PreResourceSignonTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::PreResourceSignonTraceClassification;
+    std::string classification;
+    switch (event.classification) {
+    case Classification::stage_started:
+        return;
+    case Classification::initial_boundary_reached:
+        classification = "initial boundary retained";
+        break;
+    case Classification::server_info_ready:
+        classification = "server-info decoded";
+        break;
+    case Classification::pre_resource_control:
+        classification = "pre-resource control decoded";
+        break;
+    case Classification::pre_resource_boundary_reached:
+        classification = "pre-resource boundary reached";
+        break;
+    case Classification::stage_cancelled:
+        classification = "pre-resource stage cancelled";
+        break;
+    case Classification::stage_timed_out:
+        classification = "pre-resource stage timed out";
+        break;
+    case Classification::secondary_stream_pending_m3:
+        classification = "secondary stream pending M3";
+        break;
+    case Classification::unsupported_message:
+        classification = "unsupported pre-resource message";
+        break;
+    case Classification::backpressure:
+        classification = "pre-resource event backpressure";
+        break;
+    case Classification::network_failure:
+        classification = "pre-resource network failure";
+        break;
+    case Classification::protocol_failure:
+        classification = "pre-resource protocol failure";
+        break;
+    }
+
+    std::string message = "[signon] " + classification;
+    if (event.protocol_version) {
+        message += ", protocol=" + std::to_string(*event.protocol_version);
+    }
+    if (event.maximum_clients) {
+        message += ", max-clients=" + std::to_string(
+            static_cast<unsigned int>(*event.maximum_clients));
+    }
+    if (event.multi_client_mode) {
+        message += std::string{", multi-client="} +
+                   (*event.multi_client_mode ? "yes" : "no");
+    }
+    if (event.opcode) {
+        message += ", opcode=" + std::to_string(
+            static_cast<unsigned int>(*event.opcode));
+        message += ", offset=" + std::to_string(event.byte_offset);
+    }
+    if (event.byte_count != 0U) {
+        message += ", bytes=" + std::to_string(event.byte_count);
+    }
+    if (event.string_length != 0U) {
+        message += ", string-length=" +
+                   std::to_string(event.string_length);
+    }
+    if (event.boundary_direction) {
+        message += ", direction=" + std::string{
+            hlclient::goldsrc::to_string(*event.boundary_direction)};
+    }
+    if (event.evidence_status) {
+        message += ", evidence=" + std::string{
+            hlclient::goldsrc::to_string(*event.evidence_status)};
+    }
+    if (event.transmitted_packet_count != 0U) {
+        message += ", tx-count=" +
+                   std::to_string(event.transmitted_packet_count);
+    }
+    hlclient::core::log(LogLevel::info, message);
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -709,6 +792,80 @@ void log_initial_signon_trace(
             LogLevel::error,
             "Unconfirmed secondary netchan stream remains pending M3");
         return 1;
+    case State::pre_resource_boundary_reached: {
+        if (!handshake.pre_resource_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Pre-resource sign-on completed without an owned typed result");
+            return 1;
+        }
+        const auto& result = *handshake.pre_resource_result();
+        const auto& server_info = result.server_info();
+        const auto& boundary = result.boundary();
+        hlclient::core::log(LogLevel::info, "[signon] server-info decoded");
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] protocol=" +
+                std::to_string(static_cast<std::uint32_t>(
+                    server_info.protocol_version())));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] max-clients=" +
+                std::to_string(static_cast<unsigned int>(
+                    server_info.maximum_clients().value())));
+        hlclient::core::log(
+            LogLevel::info,
+            std::string{"[signon] multi-client="} +
+                (server_info.multi_client_mode() ? "yes" : "no"));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] game=" +
+                hlclient::goldsrc::sanitize_service_text_for_presentation(
+                    server_info.game_directory()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] map=" +
+                hlclient::goldsrc::sanitize_service_text_for_presentation(
+                    server_info.map_file_path()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] confirmed-pre-resource-controls=" +
+                std::to_string(result.controls().size()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] pre-resource boundary opcode=" +
+                std::to_string(static_cast<unsigned int>(boundary.opcode())) +
+                " offset=" + std::to_string(boundary.byte_offset()) +
+                " unconsumed-body=" +
+                std::to_string(boundary.remaining_byte_count()) +
+                " bytes direction=" +
+                std::string{hlclient::goldsrc::to_string(boundary.direction())} +
+                " evidence=" +
+                std::string{hlclient::goldsrc::to_string(
+                    boundary.evidence_status())});
+        hlclient::core::log(
+            LogLevel::info,
+            "No resource request was sent; the complex boundary body remains untouched");
+        return 0;
+    }
+    case State::pre_resource_timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc pre-resource sign-on timed out");
+        return 1;
+    case State::pre_resource_unsupported_message:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unsupported service opcode before the pre-resource boundary");
+        return 1;
+    case State::pre_resource_backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Pre-resource sign-on event queue reached its hard bound");
+        return 1;
+    case State::pre_resource_secondary_stream_pending_m3:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unconfirmed secondary netchan stream remains pending M3");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -732,6 +889,7 @@ void log_initial_signon_trace(
     case State::waiting_for_connect_response:
     case State::waiting_for_netchan:
     case State::waiting_for_signon:
+    case State::waiting_for_pre_resource:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -798,7 +956,12 @@ public:
                {},
                net_trace
                    ? hlclient::goldsrc::InitialSignonTraceCallback{&log_initial_signon_trace}
-                   : hlclient::goldsrc::InitialSignonTraceCallback{}}
+                   : hlclient::goldsrc::InitialSignonTraceCallback{},
+               {},
+               net_trace
+                   ? hlclient::goldsrc::PreResourceSignonTraceCallback{
+                         &log_pre_resource_signon_trace}
+                   : hlclient::goldsrc::PreResourceSignonTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -1102,6 +1265,9 @@ int run(const hlclient::core::CommandLineOptions& options)
             break;
         case hlclient::core::ConnectionStopPoint::signon_boundary:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::signon_boundary;
+            break;
+        case hlclient::core::ConnectionStopPoint::pre_resource:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::pre_resource;
             break;
         }
         challenge_session = std::make_unique<HandshakeSession>(

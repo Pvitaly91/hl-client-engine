@@ -17,6 +17,8 @@
 
 namespace hlclient::goldsrc {
 
+class PreResourceSignonStage;
+
 using InitialSignonClock = NetchanDriverClock;
 using InitialSignonTimePoint = NetchanDriverTimePoint;
 
@@ -187,6 +189,25 @@ public:
     [[nodiscard]] const NetchanDriver* driver() const noexcept;
 
 private:
+    friend class PreResourceSignonStage;
+
+    // Only the owning pre-resource facade can keep the already-started driver
+    // alive across the M2.4.1 semantic boundary. Ordinary callers always use
+    // the public constructor above and retain the historical close-on-boundary
+    // behavior.
+    struct RetainConnectionAtBoundary final {};
+
+    InitialSignonStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        InitialSignonConfig config,
+        InitialSignonTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+
+    // Idempotently closes the one retained driver and its lifetime guard after
+    // the friend-owned continuation reaches a terminal outcome.
+    void finalize_retained_boundary(InitialSignonTimePoint now) noexcept;
+
     class Implementation;
     std::unique_ptr<Implementation> implementation_;
 };

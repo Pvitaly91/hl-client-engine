@@ -32,14 +32,6 @@ namespace {
     return true;
 }
 
-[[nodiscard]] std::string bounded_context(std::string context)
-{
-    if (context.size() > kInitialSignonDiagnosticTextLimit) {
-        context.resize(kInitialSignonDiagnosticTextLimit);
-    }
-    return context;
-}
-
 class InitialSignonEventRing final {
 public:
     explicit InitialSignonEventRing(const std::size_t capacity)
@@ -198,11 +190,13 @@ public:
         network::IDatagramTransport& transport,
         const network::NetworkAddress remote_endpoint,
         InitialSignonConfig config,
-        InitialSignonTraceCallback trace_callback)
+        InitialSignonTraceCallback trace_callback,
+        const bool retain_connection_at_boundary)
         : transport_{transport},
           remote_endpoint_{remote_endpoint},
           config_{std::move(config)},
           trace_callback_{std::move(trace_callback)},
+          retain_connection_at_boundary_{retain_connection_at_boundary},
           configuration_valid_{valid_initial_signon_configuration(config_)},
           events_{configuration_valid_ ? config_.maximum_events : 0U}
     {
@@ -227,13 +221,12 @@ public:
         }
         error_.reset();
         if (!configuration_valid_) {
-            error_ = InitialSignonError{
+            set_start_error(
                 InitialSignonErrorCode::invalid_configuration,
                 std::nullopt,
                 std::nullopt,
                 std::nullopt,
-                "Initial sign-on configuration is outside project bounds",
-            };
+                "Initial sign-on configuration is outside project bounds");
             return false;
         }
 
@@ -250,24 +243,24 @@ public:
             return false;
         }
         if (!built || !built.bytes) {
-            error_ = InitialSignonError{
+            set_start_error(
                 InitialSignonErrorCode::initial_request_build_failed,
                 built.error ? std::optional{built.error->code} : std::nullopt,
                 std::nullopt,
                 std::nullopt,
-                built.error ? bounded_context(built.error->context)
-                            : "Unable to build the exact initial sign-on request",
-            };
+                built.error
+                    ? std::string_view{built.error->context}
+                    : std::string_view{
+                          "Unable to build the exact initial sign-on request"});
             return false;
         }
         if (built.bytes->empty()) {
-            error_ = InitialSignonError{
+            set_start_error(
                 InitialSignonErrorCode::initial_request_build_failed,
                 std::nullopt,
                 std::nullopt,
                 std::nullopt,
-                "Exact initial sign-on request must not be empty",
-            };
+                "Exact initial sign-on request must not be empty");
             return false;
         }
 
@@ -286,16 +279,29 @@ public:
             error_->code = InitialSignonErrorCode::driver_start_failed;
             return false;
         }
-        if (!candidate->start(now, expected_local_endpoint)) {
+        bool driver_started = false;
+        try {
+            driver_started = candidate->start(now, expected_local_endpoint);
+        } catch (...) {
+            try {
+                candidate->close(now);
+            } catch (...) {
+            }
+            error_.emplace();
+            error_->code = InitialSignonErrorCode::driver_start_failed;
+            return false;
+        }
+        if (!driver_started) {
             const auto& driver_error = candidate->last_error();
-            error_ = InitialSignonError{
+            set_start_error(
                 InitialSignonErrorCode::driver_start_failed,
                 std::nullopt,
                 std::nullopt,
                 driver_error ? std::optional{driver_error->code} : std::nullopt,
-                driver_error ? bounded_context(driver_error->context)
-                             : "Persistent netchan driver rejected start",
-            };
+                driver_error
+                    ? std::string_view{driver_error->context}
+                    : std::string_view{
+                          "Persistent netchan driver rejected start"});
             return false;
         }
 
@@ -313,14 +319,15 @@ public:
         }
         if (!queued) {
             candidate->close(now);
-            error_ = InitialSignonError{
+            set_start_error(
                 InitialSignonErrorCode::initial_request_queue_failed,
                 std::nullopt,
                 std::nullopt,
                 queued.error ? std::optional{queued.error->code} : std::nullopt,
-                queued.error ? bounded_context(queued.error->context)
-                             : "Persistent driver rejected the initial request",
-            };
+                queued.error
+                    ? std::string_view{queued.error->context}
+                    : std::string_view{
+                          "Persistent driver rejected the initial request"});
             return false;
         }
 
@@ -458,7 +465,43 @@ public:
     }
     [[nodiscard]] const NetchanDriver* driver() const noexcept { return driver_.get(); }
 
+    void finalize_retained_boundary(const InitialSignonTimePoint now) noexcept
+    {
+        if (!retain_connection_at_boundary_ ||
+            state_ != InitialSignonState::signon_boundary_reached) {
+            return;
+        }
+        cleanup(now);
+    }
+
 private:
+    void set_start_error(
+        const InitialSignonErrorCode code,
+        const std::optional<ClientMessageErrorCode> client_message_code,
+        const std::optional<ServiceMessageErrorCode> service_message_code,
+        const std::optional<NetchanDriverErrorCode> driver_code,
+        const std::string_view context) noexcept
+    {
+        error_.reset();
+        try {
+            error_.emplace();
+        } catch (...) {
+            return;
+        }
+        error_->code = code;
+        error_->client_message_code = client_message_code;
+        error_->service_message_code = service_message_code;
+        error_->driver_code = driver_code;
+        const auto bounded = context.substr(
+            0U,
+            (std::min)(context.size(), kInitialSignonDiagnosticTextLimit));
+        try {
+            error_->context.assign(bounded.data(), bounded.size());
+        } catch (...) {
+            error_->context.clear();
+        }
+    }
+
     void observe_request_transmit(const InitialSignonTimePoint now)
     {
         if (request_transmitted_ || !driver_) {
@@ -653,8 +696,10 @@ private:
         if (!envelope || !envelope.envelope) {
             fail(
                 InitialSignonErrorCode::service_payload_envelope_decode_failed,
-                envelope.error ? bounded_context(envelope.error->context)
-                               : "Unable to decode the bounded service envelope",
+                envelope.error
+                    ? std::string_view{envelope.error->context}
+                    : std::string_view{
+                          "Unable to decode the bounded service envelope"},
                 now,
                 std::nullopt,
                 std::nullopt,
@@ -681,8 +726,10 @@ private:
             fail(
                 unsupported ? InitialSignonErrorCode::unsupported_service_opcode
                             : InitialSignonErrorCode::service_message_decode_failed,
-                decoded.error ? bounded_context(decoded.error->context)
-                              : "Unable to decode the bounded service payload",
+                decoded.error
+                    ? std::string_view{decoded.error->context}
+                    : std::string_view{
+                          "Unable to decode the bounded service payload"},
                 now,
                 std::nullopt,
                 decoded.error ? std::optional{decoded.error->code} : std::nullopt);
@@ -771,7 +818,9 @@ private:
             });
             accumulated_messages_.clear();
             state_ = InitialSignonState::signon_boundary_reached;
-            cleanup(now);
+            if (!retain_connection_at_boundary_) {
+                cleanup(now);
+            }
             emit_trace(
                 InitialSignonTraceClassification::signon_boundary_reached,
                 payload_size,
@@ -800,8 +849,10 @@ private:
                               : InitialSignonErrorCode::driver_protocol_error;
         fail(
             code,
-            driver_error ? bounded_context(driver_error->context)
-                         : "Persistent netchan driver terminated unexpectedly",
+            driver_error
+                ? std::string_view{driver_error->context}
+                : std::string_view{
+                      "Persistent netchan driver terminated unexpectedly"},
             now,
             std::nullopt,
             std::nullopt,
@@ -810,26 +861,39 @@ private:
 
     void fail(
         const InitialSignonErrorCode code,
-        std::string context,
+        const std::string_view context,
         const InitialSignonTimePoint now,
         const std::optional<ClientMessageErrorCode> client_code = std::nullopt,
         const std::optional<ServiceMessageErrorCode> service_code = std::nullopt,
         const std::optional<NetchanDriverErrorCode> driver_code = std::nullopt,
         const std::optional<ServicePayloadEnvelopeErrorCode> envelope_code =
-            std::nullopt)
+            std::nullopt) noexcept
     {
         if (terminal_state(state_)) {
             return;
         }
         state_ = state_for_error(code);
-        error_ = InitialSignonError{
-            code,
-            client_code,
-            service_code,
-            driver_code,
-            bounded_context(std::move(context)),
-            envelope_code,
-        };
+        error_.reset();
+        try {
+            error_.emplace();
+        } catch (...) {
+            cleanup(now);
+            emit_trace(trace_for_error(code));
+            return;
+        }
+        error_->code = code;
+        error_->client_message_code = client_code;
+        error_->service_message_code = service_code;
+        error_->driver_code = driver_code;
+        error_->envelope_code = envelope_code;
+        const auto bounded = context.substr(
+            0U,
+            (std::min)(context.size(), kInitialSignonDiagnosticTextLimit));
+        try {
+            error_->context.assign(bounded.data(), bounded.size());
+        } catch (...) {
+            error_->context.clear();
+        }
         cleanup(now);
         emit_trace(trace_for_error(code));
     }
@@ -882,6 +946,7 @@ private:
     network::NetworkAddress remote_endpoint_;
     InitialSignonConfig config_;
     InitialSignonTraceCallback trace_callback_;
+    bool retain_connection_at_boundary_{false};
     bool trace_callback_active_{false};
     bool configuration_valid_{false};
     InitialSignonEventRing events_;
@@ -912,7 +977,23 @@ InitialSignonStage::InitialSignonStage(
           transport,
           remote_endpoint,
           std::move(config),
-          std::move(trace_callback))}
+          std::move(trace_callback),
+          false)}
+{
+}
+
+InitialSignonStage::InitialSignonStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    InitialSignonConfig config,
+    InitialSignonTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : implementation_{std::make_unique<Implementation>(
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(trace_callback),
+          true)}
 {
 }
 
@@ -998,6 +1079,12 @@ std::size_t InitialSignonStage::request_queue_count() const noexcept
 const NetchanDriver* InitialSignonStage::driver() const noexcept
 {
     return implementation_->driver();
+}
+
+void InitialSignonStage::finalize_retained_boundary(
+    const InitialSignonTimePoint now) noexcept
+{
+    implementation_->finalize_retained_boundary(now);
 }
 
 } // namespace hlclient::goldsrc

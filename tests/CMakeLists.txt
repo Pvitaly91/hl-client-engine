@@ -37,6 +37,10 @@ add_executable(hlclient_tests
     test_netchan_udp_integration.cpp
     test_scene_source.cpp
     test_service_message_stream.cpp
+    test_pre_resource_service_stream.cpp
+    test_pre_resource_signon_stage.cpp
+    test_pre_resource_udp_integration.cpp
+    test_server_info.cpp
     test_service_payload_envelope.cpp
     test_udp_socket.cpp
 )

@@ -58,9 +58,12 @@ fragment codec, bounded normal reassembly, deterministic outgoing
 fragmentation, and a reusable transport-facing driver without interpreting
 opaque bytes. M2.4.1 reuses that exact driver for the one captured client
 request, strict in-memory service-envelope decoding, confirmed simple early
-messages, and a typed stop before the first complex body. Resource state,
-snapshots, and commands remain future increments behind the same provider
-boundary. The future bridge adapts
+messages, and a typed stop before the first complex body. M2.4.2 continues that
+exact owning payload through a strict typed server-info body, one confirmed
+neutral control, and a category-C stop before the next complex body. The
+second-client slot field, resource state, snapshots, and commands remain future
+evidence or implementation increments behind the same provider boundary. The
+future bridge adapts
 observed or exported in-process state to the same project types. It must not
 make renderer behavior depend on injected addresses or Valve private layouts.
 
@@ -74,10 +77,10 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
 | `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
 | `hlclient_goldsrc_netchan` | netchan classifier/base/fragment codec, payload transform, wrap-safe persistent session, bounded pending plus one reliable unit in flight, transactional unfragmented/fragment sends, filesystem-free slot-0 normal reassembly, bounded same-transport driver, owning events, metadata-only traces, and first-ACK compatibility primitive | transport creation/closure, authentication semantics or bytes, slot-1/file interpretation, decompression, files, `svc_*`, world/render state |
-| `hlclient_goldsrc_signon` | exact fixed initial client request, strict `BZ2\0` in-memory envelope decoder, bounded confirmed early-message decoder, owning complex-message boundary, and same-driver `InitialSignonStage` | arbitrary string commands, boundary-body/serverinfo/resource parsing, command execution, filesystem, renderer, SDL, assets, world state |
+| `hlclient_goldsrc_signon` | exact fixed initial client request, strict `BZ2\0` in-memory envelope decoder, bounded confirmed service-message continuation, owning immutable server-info/pre-resource state, same-driver initial/pre-resource stages, and exact cursor accounting | arbitrary string/resource commands, opcode-14 body or resource-list parsing, command execution, filesystem, renderer, SDL, assets, world state |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter and bounded local-file loading | discovery, caching, Steam integration, fallback search, protocol parsing |
-| `hlclient_goldsrc_client` | challenge/connect/response coordination, same-socket bootstrap or initial-sign-on composition, and driver/auth-lifetime ownership through the selected terminal stop | auth generation, wire codec duplication, arbitrary reliable payload production, boundary-body/resources, OpenGL, SDL, world/render state |
+| `hlclient_goldsrc_client` | challenge/connect/response coordination, same-socket bootstrap/initial/pre-resource composition, and driver/auth-lifetime ownership through the selected terminal stop | auth generation, wire codec duplication, arbitrary reliable payload production, resource-body negotiation, OpenGL, SDL, world/render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_asset_api` | owning asset sources, neutral CPU assets, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
@@ -139,7 +142,7 @@ Network input is untrusted. Parsers must:
 Compatibility constants may be checked against official SDK declarations, but
 the runtime implementation remains project-owned.
 
-The current application path reaches only the bounded initial sign-on boundary:
+The current application path reaches only the bounded pre-resource boundary:
 
 ```text
 --connect IPv4:port
@@ -163,16 +166,23 @@ The current application path reaches only the bounded initial sign-on boundary:
                          -> request ACK and normal-stream reassembly
                          -> strict BZ2-NUL in-memory envelope
                          -> bounded opcode-8 text control
-                         -> terminal opcode-11 boundary; body untouched
+                         |-> terminal opcode-11 boundary; body untouched
+                         `-> optional PreResourceSignonStage facade
+                             -> exact-cursor typed opcode-11 server-info
+                             -> bounded empty-string/zero opcode-54 control
+                             -> terminal opcode-14 category-C boundary;
+                                body untouched and no client continuation
 ```
 
 The application has only an explicit user-file authentication provider; it
-does not generate tickets or integrate with Steam. Both terminal stages compose
-the driver on the already-bound transport and validate unchanged local/exact
-remote endpoints. The sign-on branch queues only the fixed five-byte request,
-owns at most one pre-ACK payload, and closes after publishing the complex
-boundary. Neither branch exposes raw reliable/fragment bytes or updates world
-or renderer state.
+does not generate tickets or integrate with Steam. Each later terminal stage
+composes the driver on the already-bound transport and validates unchanged
+local/exact remote endpoints. The sign-on branch queues only the fixed
+five-byte request and owns at most one pre-ACK payload. The public M2.4.1 route
+closes after publishing its complex boundary; the private pre-resource facade
+retains that same driver/lifetime only long enough to parse the already-owned
+payload and publish the confirmed category-C boundary. No route exposes raw
+reliable/fragment bytes or updates filesystem, world, asset, or renderer state.
 
 M2.3.3 splits netchan into pure base/fragment wire codecs and transform,
 transport-independent persistent reliable state, a transactional normal
@@ -216,21 +226,26 @@ promoted to stock-server interoperability claims.
 bootstrap stage/coordinator constructs and owns one through `--stop-after
 netchan-bootstrap`; `--stop-after signon-boundary` instead creates
 `InitialSignonStage` directly after `ACCEPT`, so no second driver competes for
-the socket. An embedding composition can also own the driver persistently. In both
-cases the existing transport and optional opaque `INetchanDriverLifetime` stay
-valid through the driver terminal. Timeout, cancellation, network/protocol
+the socket. `--stop-after pre-resource` creates `PreResourceSignonStage`, whose
+nested private-retention mode reuses that exact initial stage, driver, socket,
+and lifetime until the synchronous server-info continuation terminates. An
+embedding composition can also own the driver persistently. In every case the
+existing transport and optional opaque `INetchanDriverLifetime` stay valid
+through the driver terminal. Timeout, cancellation, network/protocol
 failure, event backpressure, and close clear reliable/reassembly/unreliable
 state and release that guard exactly once. A lower-level session caller remains
 responsible for `NetchanSession::clear_reliable_state()` on terminal failure.
 
 Challenge traces use bounded previews. Connect-request, connect-response,
-netchan, fragment, driver, and sign-on traces are metadata-only and never
+netchan, fragment, driver, initial-sign-on, and pre-resource traces are
+metadata-only and never
 contain raw packets, authentication bytes, server text, compressed/decompressed
 payload, or boundary remainder. Rejection text reaches logging only through the
 bounded presentation sanitizer. See
 [Connect response](GOLDSRC_CONNECT_RESPONSE.md),
 [Netchan](GOLDSRC_NETCHAN.md), [Fragmentation](GOLDSRC_FRAGMENTATION.md),
-[Initial sign-on](GOLDSRC_INITIAL_SIGNON.md), and
+[Initial sign-on](GOLDSRC_INITIAL_SIGNON.md),
+[Server info](GOLDSRC_SERVERINFO.md), and
 [Authentication provider](AUTHENTICATION_PROVIDER.md).
 
 ## Filesystem and asset boundary
@@ -307,14 +322,15 @@ order:
 6. select the built-in OpenGL or null renderer;
 7. for OpenGL only, initialize SDL and create the window/context before the
    renderer;
-8. poll events where applicable, advance the handshake coordinator, and, for
-   the netchan stop, let its stage-owned driver process the same socket until the
-   first complete owning payload is acknowledged;
+8. poll events where applicable, advance the handshake coordinator, and let
+   the selected stage-owned driver process the same socket until the requested
+   opaque, initial-sign-on, or pre-resource boundary is acknowledged and
+   published;
 9. derive `RenderScene` from its `ClientWorldState`, render, and present;
 10. stop after the configured terminal challenge/connect-request/
-    connect-response/M2.3.3 netchan-bootstrap outcome, let driver terminal
-    cleanup release its optional lifetime exactly once, then shut down renderer
-    resources before their platform dependencies.
+    connect-response/netchan-bootstrap/signon-boundary/pre-resource outcome,
+    let driver terminal cleanup release its optional lifetime exactly once,
+    then shut down renderer resources before their platform dependencies.
 
 Partially initialized states must unwind safely through RAII. Logging and error
 messages should identify the failed boundary without exposing secrets or

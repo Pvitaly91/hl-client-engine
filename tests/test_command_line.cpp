@@ -190,6 +190,25 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         CHECK(*result.options->authentication_material_file == "auth.bin");
     }
 
+    SECTION("explicit file provider supports the pre-resource boundary")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"pre-resource"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::pre_resource);
+        REQUIRE(result.options->authentication_provider);
+        CHECK(*result.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::file);
+        REQUIRE(result.options->authentication_material_file);
+        CHECK(*result.options->authentication_material_file == "auth.bin");
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -257,6 +276,49 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         const auto result = parse_command_line(arguments);
         CHECK_FALSE(result);
         CHECK(result.error.find("--auth-provider file") != std::string::npos);
+    }
+
+    SECTION("pre-resource boundary requires local auth file")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"pre-resource"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("pre-resource boundary requires explicit file provider selection")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"pre-resource"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("--auth-provider file") != std::string::npos);
+    }
+
+    SECTION("unsafe pre-resource bypass and execution switches are rejected")
+    {
+        constexpr std::array rejected{
+            std::string_view{"--raw-serverinfo"},
+            std::string_view{"--skip-serverinfo"},
+            std::string_view{"--send-resource-command"},
+            std::string_view{"--raw-stringcmd"},
+            std::string_view{"--execute-stufftext"},
+            std::string_view{"--mount-server-map"},
+            std::string_view{"--download-resource"},
+            std::string_view{"--skip-auth"},
+        };
+        for (const auto argument : rejected) {
+            CAPTURE(argument);
+            const std::array arguments{argument};
+            const auto result = parse_command_line(arguments);
+            CHECK_FALSE(result);
+            CHECK(result.error.find("Unknown command-line argument") !=
+                  std::string::npos);
+        }
     }
 
     SECTION("explicit file provider requires its material path")
@@ -405,6 +467,7 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("connect-response") != std::string_view::npos);
     CHECK(help.find("netchan-bootstrap") != std::string_view::npos);
     CHECK(help.find("signon-boundary") != std::string_view::npos);
+    CHECK(help.find("pre-resource") != std::string_view::npos);
     CHECK(help.find("--auth-provider") != std::string_view::npos);
     CHECK(help.find("file") != std::string_view::npos);
     CHECK(help.find("--auth-material-file") != std::string_view::npos);

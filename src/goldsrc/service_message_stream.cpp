@@ -19,6 +19,26 @@ namespace {
     };
 }
 
+[[nodiscard]] PreResourceServiceDecodeResult pre_resource_failure(
+    const PreResourceServiceErrorCode code,
+    const std::size_t byte_offset,
+    const std::optional<std::uint8_t> wire_opcode,
+    const std::optional<ServerInfoErrorCode> server_info_code,
+    std::string context)
+{
+    return PreResourceServiceDecodeResult{
+        std::nullopt,
+        PreResourceServiceError{
+            code,
+            byte_offset,
+            wire_opcode,
+            server_info_code,
+            std::move(context),
+        },
+        0U,
+    };
+}
+
 [[nodiscard]] std::size_t escaped_size(const unsigned char value) noexcept
 {
     if (value == '\\' || value == '\n' || value == '\r' || value == '\t') {
@@ -61,6 +81,204 @@ void append_escaped(std::string& output, const unsigned char value)
 }
 
 } // namespace
+
+ResourcePhaseBoundary::ResourcePhaseBoundary(
+    const std::uint8_t opcode,
+    const std::size_t byte_offset,
+    const std::size_t remaining_byte_count,
+    const ResourcePhaseBoundaryDirection direction,
+    const ResourcePhaseEvidenceStatus evidence_status) noexcept
+    : opcode_{opcode},
+      byte_offset_{byte_offset},
+      remaining_byte_count_{remaining_byte_count},
+      direction_{direction},
+      evidence_status_{evidence_status}
+{
+}
+
+std::uint8_t ResourcePhaseBoundary::opcode() const noexcept
+{
+    return opcode_;
+}
+
+std::size_t ResourcePhaseBoundary::byte_offset() const noexcept
+{
+    return byte_offset_;
+}
+
+std::size_t ResourcePhaseBoundary::remaining_byte_count() const noexcept
+{
+    return remaining_byte_count_;
+}
+
+ResourcePhaseBoundaryDirection ResourcePhaseBoundary::direction() const noexcept
+{
+    return direction_;
+}
+
+ResourcePhaseEvidenceStatus ResourcePhaseBoundary::evidence_status() const noexcept
+{
+    return evidence_status_;
+}
+
+PreResourceControl::PreResourceControl(
+    const std::uint8_t opcode,
+    const std::size_t byte_offset,
+    const std::size_t byte_count,
+    const std::size_t string_length,
+    const std::uint8_t control_value) noexcept
+    : opcode_{opcode},
+      byte_offset_{byte_offset},
+      byte_count_{byte_count},
+      string_length_{string_length},
+      control_value_{control_value}
+{
+}
+
+std::uint8_t PreResourceControl::opcode() const noexcept
+{
+    return opcode_;
+}
+
+std::size_t PreResourceControl::byte_offset() const noexcept
+{
+    return byte_offset_;
+}
+
+std::size_t PreResourceControl::byte_count() const noexcept
+{
+    return byte_count_;
+}
+
+std::size_t PreResourceControl::string_length() const noexcept
+{
+    return string_length_;
+}
+
+std::uint8_t PreResourceControl::control_value() const noexcept
+{
+    return control_value_;
+}
+
+PreResourceSourcePayloadMetadata::PreResourceSourcePayloadMetadata(
+    const std::size_t payload_size,
+    const std::uint32_t source_sequence,
+    const std::uint32_t source_acknowledgement,
+    const bool source_reliable,
+    const bool reassembled,
+    const bool decompressed,
+    const bool acknowledgement_reliable,
+    const NetchanDirection direction,
+    const NetchanDriverTimePoint received_at,
+    const std::size_t initial_boundary_offset,
+    const std::size_t server_info_body_offset,
+    const std::size_t server_info_body_size) noexcept
+    : payload_size_{payload_size},
+      source_sequence_{source_sequence},
+      source_acknowledgement_{source_acknowledgement},
+      source_reliable_{source_reliable},
+      reassembled_{reassembled},
+      decompressed_{decompressed},
+      acknowledgement_reliable_{acknowledgement_reliable},
+      direction_{direction},
+      received_at_{received_at},
+      initial_boundary_offset_{initial_boundary_offset},
+      server_info_body_offset_{server_info_body_offset},
+      server_info_body_size_{server_info_body_size}
+{
+}
+
+std::size_t PreResourceSourcePayloadMetadata::payload_size() const noexcept
+{
+    return payload_size_;
+}
+
+std::uint32_t PreResourceSourcePayloadMetadata::source_sequence() const noexcept
+{
+    return source_sequence_;
+}
+
+std::uint32_t PreResourceSourcePayloadMetadata::source_acknowledgement() const noexcept
+{
+    return source_acknowledgement_;
+}
+
+bool PreResourceSourcePayloadMetadata::source_reliable() const noexcept
+{
+    return source_reliable_;
+}
+
+bool PreResourceSourcePayloadMetadata::reassembled() const noexcept
+{
+    return reassembled_;
+}
+
+bool PreResourceSourcePayloadMetadata::decompressed() const noexcept
+{
+    return decompressed_;
+}
+
+bool PreResourceSourcePayloadMetadata::acknowledgement_reliable() const noexcept
+{
+    return acknowledgement_reliable_;
+}
+
+NetchanDirection PreResourceSourcePayloadMetadata::direction() const noexcept
+{
+    return direction_;
+}
+
+NetchanDriverTimePoint PreResourceSourcePayloadMetadata::received_at() const noexcept
+{
+    return received_at_;
+}
+
+std::size_t PreResourceSourcePayloadMetadata::initial_boundary_offset() const noexcept
+{
+    return initial_boundary_offset_;
+}
+
+std::size_t PreResourceSourcePayloadMetadata::server_info_body_offset() const noexcept
+{
+    return server_info_body_offset_;
+}
+
+std::size_t PreResourceSourcePayloadMetadata::server_info_body_size() const noexcept
+{
+    return server_info_body_size_;
+}
+
+PreResourceSignonState::PreResourceSignonState(
+    ServerInfoState server_info,
+    std::vector<PreResourceControl> controls,
+    ResourcePhaseBoundary boundary,
+    PreResourceSourcePayloadMetadata source_payload) noexcept
+    : server_info_{std::move(server_info)},
+      controls_{std::move(controls)},
+      boundary_{std::move(boundary)},
+      source_payload_{source_payload}
+{
+}
+
+const ServerInfoState& PreResourceSignonState::server_info() const noexcept
+{
+    return server_info_;
+}
+
+const std::vector<PreResourceControl>& PreResourceSignonState::controls() const noexcept
+{
+    return controls_;
+}
+
+const ResourcePhaseBoundary& PreResourceSignonState::boundary() const noexcept
+{
+    return boundary_;
+}
+
+const PreResourceSourcePayloadMetadata& PreResourceSignonState::source_payload() const noexcept
+{
+    return source_payload_;
+}
 
 bool valid_service_message_limits(const ServiceMessageLimits& limits) noexcept
 {
@@ -260,6 +478,239 @@ ServiceMessageDecodeResult ServiceMessageStreamDecoder::decode(
             message_count,
         },
         std::nullopt,
+    };
+}
+
+PreResourceServiceDecodeResult ServiceMessageStreamDecoder::continue_to_pre_resource(
+    const OwnedServicePayload& payload,
+    const ServiceMessageBoundary& initial_boundary) const
+{
+    if (!valid_configuration()) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::invalid_configuration,
+            0U,
+            std::nullopt,
+            std::nullopt,
+            "Service-message limits are outside project hard caps");
+    }
+    if (!payload.decompressed) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::payload_not_decompressed,
+            0U,
+            std::nullopt,
+            std::nullopt,
+            "Pre-resource continuation requires a decompressed owning payload");
+    }
+    if (payload.bytes.size() > limits_.maximum_payload_size) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::payload_too_large,
+            limits_.maximum_payload_size,
+            std::nullopt,
+            std::nullopt,
+            "Pre-resource service payload exceeds the configured bound");
+    }
+    if (initial_boundary.opcode != ServiceMessageOpcode::complex_signon_boundary) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::wrong_initial_boundary_opcode,
+            initial_boundary.byte_offset,
+            static_cast<std::uint8_t>(initial_boundary.opcode),
+            std::nullopt,
+            "Continuation input is not the M2.4.1 opcode-11 boundary");
+    }
+    if (payload.direction != NetchanDirection::server_to_client ||
+        initial_boundary.byte_offset >= payload.bytes.size()) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::invalid_initial_boundary_geometry,
+            initial_boundary.byte_offset,
+            std::nullopt,
+            std::nullopt,
+            "Initial service boundary is outside the owning server payload");
+    }
+
+    const auto wire_boundary_opcode = std::to_integer<std::uint8_t>(
+        payload.bytes[initial_boundary.byte_offset]);
+    if (wire_boundary_opcode !=
+        static_cast<std::uint8_t>(ServiceMessageOpcode::complex_signon_boundary)) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::invalid_initial_boundary_geometry,
+            initial_boundary.byte_offset,
+            wire_boundary_opcode,
+            std::nullopt,
+            "Owning payload does not contain opcode 11 at the supplied boundary");
+    }
+
+    const auto body_offset = initial_boundary.byte_offset + 1U;
+    const auto expected_remaining = payload.bytes.size() - body_offset;
+    if (initial_boundary.remaining_byte_count != expected_remaining) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::invalid_initial_boundary_geometry,
+            body_offset,
+            wire_boundary_opcode,
+            std::nullopt,
+            "Initial boundary remaining-byte count does not match the owning payload");
+    }
+
+    const ServerInfoParser parser{{limits_.maximum_string_length}};
+    auto parsed = parser.parse(
+        std::span<const std::byte>{payload.bytes}.subspan(body_offset));
+    if (!parsed) {
+        const auto relative_error = parsed.error ? parsed.error->byte_offset : 0U;
+        if (relative_error > expected_remaining) {
+            return pre_resource_failure(
+                PreResourceServiceErrorCode::size_overflow,
+                body_offset,
+                wire_boundary_opcode,
+                parsed.error ? std::optional{parsed.error->code} : std::nullopt,
+                "Server-info parser returned an out-of-range diagnostic offset");
+        }
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::server_info_decode_failed,
+            body_offset + relative_error,
+            wire_boundary_opcode,
+            parsed.error ? std::optional{parsed.error->code} : std::nullopt,
+            parsed.error ? parsed.error->context
+                         : "Server-info parser returned no state or diagnostic");
+    }
+    if (!parsed.state || parsed.bytes_consumed == 0U ||
+        parsed.bytes_consumed > expected_remaining) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::size_overflow,
+            body_offset,
+            wire_boundary_opcode,
+            std::nullopt,
+            "Server-info parser returned invalid consumption metadata");
+    }
+
+    if (limits_.maximum_messages_per_payload < 3U) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::message_limit_exceeded,
+            body_offset + parsed.bytes_consumed,
+            std::nullopt,
+            std::nullopt,
+            "Pre-resource publication exceeds the configured message bound");
+    }
+
+    auto offset = body_offset + parsed.bytes_consumed;
+    if (offset >= payload.bytes.size()) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::missing_post_server_info_control,
+            offset,
+            std::nullopt,
+            std::nullopt,
+            "Server-info is not followed by the confirmed simple control");
+    }
+
+    const auto control_opcode = std::to_integer<std::uint8_t>(payload.bytes[offset]);
+    if (control_opcode != kPreResourceSimpleControlOpcode) {
+        const auto code = control_opcode ==
+                                  static_cast<std::uint8_t>(
+                                      ServiceMessageOpcode::complex_signon_boundary)
+                              ? PreResourceServiceErrorCode::duplicate_server_info
+                              : PreResourceServiceErrorCode::
+                                    unsupported_post_server_info_opcode;
+        return pre_resource_failure(
+            code,
+            offset,
+            control_opcode,
+            std::nullopt,
+            "Unexpected service opcode follows the decoded server-info body");
+    }
+    if (payload.bytes.size() - offset < 3U) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::truncated_post_server_info_control,
+            payload.bytes.size(),
+            control_opcode,
+            std::nullopt,
+            "Confirmed opcode-54 control body is truncated");
+    }
+    if (payload.bytes[offset + 1U] != std::byte{0U} ||
+        payload.bytes[offset + 2U] != std::byte{0U}) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::invalid_post_server_info_control,
+            offset + 1U,
+            control_opcode,
+            std::nullopt,
+            "Opcode-54 control must contain the captured empty NUL string and zero byte");
+    }
+
+    std::vector<PreResourceControl> controls;
+    controls.reserve(1U);
+    controls.push_back(PreResourceControl{
+        control_opcode,
+        offset,
+        3U,
+        0U,
+        0U,
+    });
+    offset += 3U;
+
+    if (offset >= payload.bytes.size()) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::missing_pre_resource_boundary,
+            offset,
+            std::nullopt,
+            std::nullopt,
+            "Confirmed simple control is not followed by a complex boundary opcode");
+    }
+    const auto complex_opcode = std::to_integer<std::uint8_t>(payload.bytes[offset]);
+    if (complex_opcode != kPreResourceComplexBoundaryOpcode) {
+        const auto code = complex_opcode ==
+                                  static_cast<std::uint8_t>(
+                                      ServiceMessageOpcode::complex_signon_boundary)
+                              ? PreResourceServiceErrorCode::duplicate_server_info
+                              : PreResourceServiceErrorCode::
+                                    unsupported_post_server_info_opcode;
+        return pre_resource_failure(
+            code,
+            offset,
+            complex_opcode,
+            std::nullopt,
+            "Unexpected service opcode follows the confirmed opcode-54 control");
+    }
+
+    const auto complex_offset = offset;
+    ++offset;
+    if (offset == payload.bytes.size()) {
+        return pre_resource_failure(
+            PreResourceServiceErrorCode::boundary_body_missing,
+            offset,
+            complex_opcode,
+            std::nullopt,
+            "Complex pre-resource boundary opcode has no body byte to preserve");
+    }
+
+    auto boundary = ResourcePhaseBoundary{
+        complex_opcode,
+        complex_offset,
+        payload.bytes.size() - offset,
+        ResourcePhaseBoundaryDirection::server_message,
+        ResourcePhaseEvidenceStatus::
+            confirmed_pre_resource_boundary_body_pending,
+    };
+    auto source_payload = PreResourceSourcePayloadMetadata{
+        payload.bytes.size(),
+        payload.source_sequence,
+        payload.source_acknowledgement,
+        payload.source_reliable,
+        payload.reassembled,
+        payload.decompressed,
+        payload.acknowledgement_reliable,
+        payload.direction,
+        payload.received_at,
+        initial_boundary.byte_offset,
+        body_offset,
+        parsed.bytes_consumed,
+    };
+
+    return PreResourceServiceDecodeResult{
+        PreResourceSignonState{
+            std::move(*parsed.state),
+            std::move(controls),
+            std::move(boundary),
+            source_payload,
+        },
+        std::nullopt,
+        3U,
     };
 }
 

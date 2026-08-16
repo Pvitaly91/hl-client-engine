@@ -170,6 +170,36 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_pre_resource_state(
+    const PreResourceSignonStageState state) noexcept
+{
+    switch (state) {
+    case PreResourceSignonStageState::idle:
+    case PreResourceSignonStageState::waiting_for_initial_boundary:
+    case PreResourceSignonStageState::decoding_server_info:
+    case PreResourceSignonStageState::server_info_ready:
+    case PreResourceSignonStageState::decoding_pre_resource_messages:
+        return GoldSrcHandshakeState::waiting_for_pre_resource;
+    case PreResourceSignonStageState::pre_resource_boundary_reached:
+        return GoldSrcHandshakeState::pre_resource_boundary_reached;
+    case PreResourceSignonStageState::unsupported_message:
+        return GoldSrcHandshakeState::pre_resource_unsupported_message;
+    case PreResourceSignonStageState::timed_out:
+        return GoldSrcHandshakeState::pre_resource_timed_out;
+    case PreResourceSignonStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case PreResourceSignonStageState::backpressure:
+        return GoldSrcHandshakeState::pre_resource_backpressure;
+    case PreResourceSignonStageState::secondary_stream_pending_m3:
+        return GoldSrcHandshakeState::pre_resource_secondary_stream_pending_m3;
+    case PreResourceSignonStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case PreResourceSignonStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] bool signon_start_network_failure(
     const std::optional<NetchanDriverErrorCode> driver_code) noexcept
 {
@@ -388,7 +418,9 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     NetchanBootstrapConfig netchan_config,
     NetchanBootstrapTraceCallback netchan_trace_callback,
     InitialSignonConfig signon_config,
-    InitialSignonTraceCallback signon_trace_callback)
+    InitialSignonTraceCallback signon_trace_callback,
+    PreResourceSignonConfig pre_resource_config,
+    PreResourceSignonTraceCallback pre_resource_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -410,7 +442,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 std::move(connect_trace_callback));
             if (stop_point_ == HandshakeStopPoint::connect_response ||
                 stop_point_ == HandshakeStopPoint::netchan_bootstrap ||
-                stop_point_ == HandshakeStopPoint::signon_boundary) {
+                stop_point_ == HandshakeStopPoint::signon_boundary ||
+                stop_point_ == HandshakeStopPoint::pre_resource) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -430,6 +463,14 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                     remote_endpoint,
                     std::move(signon_config),
                     std::move(signon_trace_callback));
+            }
+            if (stop_point_ == HandshakeStopPoint::pre_resource) {
+                pre_resource_stage_.emplace(
+                    transport,
+                    remote_endpoint,
+                    std::move(pre_resource_config),
+                    std::move(signon_trace_callback),
+                    std::move(pre_resource_trace_callback));
             }
         }
     } else if (authentication_session_) {
@@ -454,6 +495,13 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (pre_resource_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_pre_resource) {
+        pre_resource_stage_->update(now);
+        synchronize_from_pre_resource();
+        release_authentication_session_if_terminal();
         return;
     }
     if (signon_stage_ && state_ == GoldSrcHandshakeState::waiting_for_signon) {
@@ -483,6 +531,13 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (pre_resource_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_pre_resource) {
+        pre_resource_stage_->cancel(now);
+        synchronize_from_pre_resource();
+        release_authentication_session_if_terminal();
         return;
     }
     if (signon_stage_ && state_ == GoldSrcHandshakeState::waiting_for_signon) {
@@ -535,6 +590,11 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::signon_unsupported_service:
     case GoldSrcHandshakeState::signon_backpressure:
     case GoldSrcHandshakeState::signon_secondary_stream_pending_m3:
+    case GoldSrcHandshakeState::pre_resource_boundary_reached:
+    case GoldSrcHandshakeState::pre_resource_timed_out:
+    case GoldSrcHandshakeState::pre_resource_unsupported_message:
+    case GoldSrcHandshakeState::pre_resource_backpressure:
+    case GoldSrcHandshakeState::pre_resource_secondary_stream_pending_m3:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -549,6 +609,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_connect_response:
     case GoldSrcHandshakeState::waiting_for_netchan:
     case GoldSrcHandshakeState::waiting_for_signon:
+    case GoldSrcHandshakeState::waiting_for_pre_resource:
         return false;
     }
     return true;
@@ -583,6 +644,18 @@ GoldSrcHandshakeCoordinator::initial_signon_error() const noexcept
     static const std::optional<InitialSignonError> empty;
     return signon_stage_ ? signon_stage_->error() : empty;
 }
+const std::optional<PreResourceSignonState>&
+GoldSrcHandshakeCoordinator::pre_resource_result() const noexcept
+{
+    static const std::optional<PreResourceSignonState> empty;
+    return pre_resource_stage_ ? pre_resource_stage_->result() : empty;
+}
+const std::optional<PreResourceSignonError>&
+GoldSrcHandshakeCoordinator::pre_resource_error() const noexcept
+{
+    static const std::optional<PreResourceSignonError> empty;
+    return pre_resource_stage_ ? pre_resource_stage_->error() : empty;
+}
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
     return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
@@ -616,6 +689,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (signon_stage_ && signon_stage_->error()) {
         return signon_stage_->error()->context;
     }
+    if (pre_resource_stage_ && pre_resource_stage_->error()) {
+        return pre_resource_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -643,7 +719,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
     if (state_ != GoldSrcHandshakeState::request_sent ||
         (stop_point_ != HandshakeStopPoint::connect_response &&
          stop_point_ != HandshakeStopPoint::netchan_bootstrap &&
-         stop_point_ != HandshakeStopPoint::signon_boundary)) {
+         stop_point_ != HandshakeStopPoint::signon_boundary &&
+         stop_point_ != HandshakeStopPoint::pre_resource)) {
         return;
     }
     if (!response_stage_) {
@@ -671,12 +748,14 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
     }
     if (state_ != GoldSrcHandshakeState::accepted ||
         (stop_point_ != HandshakeStopPoint::netchan_bootstrap &&
-         stop_point_ != HandshakeStopPoint::signon_boundary)) {
+         stop_point_ != HandshakeStopPoint::signon_boundary &&
+         stop_point_ != HandshakeStopPoint::pre_resource)) {
         return;
     }
     if (!challenge_exchange_.local_endpoint() ||
         (stop_point_ == HandshakeStopPoint::netchan_bootstrap && !netchan_stage_) ||
-        (stop_point_ == HandshakeStopPoint::signon_boundary && !signon_stage_)) {
+        (stop_point_ == HandshakeStopPoint::signon_boundary && !signon_stage_) ||
+        (stop_point_ == HandshakeStopPoint::pre_resource && !pre_resource_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
             "Post-ACCEPT mode has no transport stage or stable local endpoint";
@@ -696,6 +775,20 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
             *challenge_exchange_.local_endpoint(),
             std::move(driver_lifetime)));
         synchronize_from_netchan();
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::pre_resource) {
+        const bool pre_resource_started = pre_resource_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime));
+        synchronize_from_pre_resource();
+        if (!pre_resource_started &&
+            state_ == GoldSrcHandshakeState::waiting_for_pre_resource) {
+            // start() is transactional and intentionally leaves the stage idle
+            // on failure. Never turn that idle/error pair into a nonterminal wait.
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
         return;
     }
     const bool signon_started = signon_stage_->start(
@@ -748,6 +841,38 @@ void GoldSrcHandshakeCoordinator::synchronize_from_signon()
     state_ = map_signon_state(signon_stage_->state());
     if (signon_error &&
         signon_error->code == InitialSignonErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_pre_resource()
+{
+    if (!pre_resource_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Pre-resource mode has no pre-resource sign-on stage";
+        return;
+    }
+    const auto& pre_resource_error = pre_resource_stage_->error();
+    if (pre_resource_stage_->state() == PreResourceSignonStageState::idle &&
+        pre_resource_error) {
+        if (pre_resource_error->code ==
+                PreResourceSignonErrorCode::invalid_configuration ||
+            pre_resource_error->driver_code ==
+                NetchanDriverErrorCode::invalid_configuration) {
+            state_ = GoldSrcHandshakeState::configuration_error;
+        } else if (signon_start_network_failure(
+                       pre_resource_error->driver_code)) {
+            state_ = GoldSrcHandshakeState::network_error;
+        } else {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    state_ = map_pre_resource_state(pre_resource_stage_->state());
+    if (pre_resource_error &&
+        pre_resource_error->code ==
+            PreResourceSignonErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

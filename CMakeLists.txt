@@ -176,10 +176,14 @@ hlclient_add_library(
     hlclient_goldsrc_signon
     include/hlclient/goldsrc/client_message.hpp
     include/hlclient/goldsrc/initial_signon_stage.hpp
+    include/hlclient/goldsrc/pre_resource_signon_stage.hpp
+    include/hlclient/goldsrc/server_info.hpp
     include/hlclient/goldsrc/service_message_stream.hpp
     include/hlclient/goldsrc/service_payload_envelope.hpp
     src/goldsrc/client_message.cpp
     src/goldsrc/initial_signon_stage.cpp
+    src/goldsrc/pre_resource_signon_stage.cpp
+    src/goldsrc/server_info.cpp
     src/goldsrc/service_message_stream.cpp
     src/goldsrc/service_payload_envelope.cpp
 )

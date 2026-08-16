@@ -564,6 +564,13 @@ typed initial request, strictly decodes the captured first service envelope,
 and stops before the complex message body. See
 [Initial sign-on](GOLDSRC_INITIAL_SIGNON.md).
 
+M2.4.2 adds a distinct `pre-resource` composition above the same driver. It
+retains the same socket/session and authentication lifetime through the exact
+M2.4.1 cursor, publishes only evidence-gated server-info metadata, consumes one
+confirmed neutral control, and stops before the next complex body. This does
+not add a generic `svc_*` parser, resource send, path consumer, or world/render
+handoff. See [GoldSrc server info](GOLDSRC_SERVERINFO.md).
+
 The public M2.3.3 boundary is project-owned and typed:
 
 - `NetchanSequence`, `NetchanSequenceFlags`, and wrap-safe comparison helpers;
@@ -610,8 +617,9 @@ The following remain **pending** in this profile:
   envelope and universal compression behavior;
 - stock-client count-greater-than-one C2S fragmentation and live
   project-client-to-stock fragment interoperability;
-- service-message semantics beyond the bounded opcode-8/opcode-11 M2.4.1
-  boundary, including serverdata, resources, snapshots, commands, and gameplay.
+- service-message semantics beyond the bounded M2.4.2 opcode-14 pre-resource
+  boundary, including delta descriptions, resources, snapshots, commands, and
+  gameplay.
 
 No pending item is filled from a third-party field name or implementation.
 Capture observations have priority over secondary behavioral cross-checks.

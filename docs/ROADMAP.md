@@ -377,15 +377,52 @@ Steam authentication provider and is not implied by this status.
 
 ### M2.4.2 — Typed serverinfo and pre-resource sign-on state
 
-**Status: next.**
+**Status: implemented for the bounded single-client project/fake-HLDS profile;
+primary evidence completion remains pending a second-client slot differential.**
 
-Parse only the now-bounded complex boundary body into project-owned typed
-serverinfo/pre-resource state. Resource-list negotiation, downloads, snapshots,
-gameplay, and renderer concerns remain later milestones.
+M2.4.2 retains the exact M2.4.1 owning payload and same driver/auth lifetime,
+strictly parses the variable opcode-11 server-info body, consumes only the
+captured empty-string/zero opcode-54 control, and stops successfully at the
+confirmed category-C opcode-14 boundary with its body untouched. Public state
+contains only evidence-gated protocol, maximum-client, multi-client-mode, game,
+server-label, and map metadata; the offset-29 client-index candidate and all
+other opaque fields remain private. No resource request, command, parser,
+filesystem action, asset/world mutation, or renderer dependency was added.
+
+The differential stock set contains 16 accepted single-client runs. Two safe
+second-client attempts did not emit canonical `getchallenge`, so no
+`ClientSlot` semantic is claimed and this milestone is deliberately not marked
+fully evidence-complete. Project fake-HLDS coverage exercises the same-socket
+pre-resource composition; live project-to-stock remains pending a production
+Steam authentication provider. See
+[GoldSrc server info](GOLDSRC_SERVERINFO.md).
 
 ## M3 — Resource and precache pipeline
 
 **Goal:** negotiate, validate, and prepare the server-required resource set.
+
+### M3.1 — Resource-list discovery and bounded codec
+
+**Status: next; not started.**
+
+Discover the opcode-14 body/resource transition independently, freeze its
+bounded layout, and implement only an owning resource-list codec after the
+evidence gate. M2.4.2 does not contain this parser or a client resource command.
+
+### M3.2 — Local resource resolution and precache state
+
+**Status: planned.**
+
+Map an already validated resource model into explicitly approved user-owned
+search roots and project-owned precache state; server strings must not become
+filesystem paths directly.
+
+### M3.3 — Safe download/cache boundary
+
+**Status: planned.**
+
+Add bounded download/cache behavior only after path, overwrite, size, and
+integrity policies are independently specified and tested.
 
 Planned work:
 

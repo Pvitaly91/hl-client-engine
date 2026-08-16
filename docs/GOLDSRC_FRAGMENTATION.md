@@ -6,9 +6,11 @@ M2.3.3 implements the project-owned fragment codec, bounded incoming normal
 reassembly, persistent driver, and deterministic outgoing normal fragmentation.
 It does not make `hlclient` fully stock-compatible: stock multi-fragment
 client-to-server scheduling, slot-1/file semantics, compression conventions,
-live project-client-to-stock-HLDS operation, and general sign-on parsing remain
-pending. M2.4.1 recognizes only the separately confirmed first `BZ2\0`
-service envelope after this layer has delivered one owning normal payload.
+live project-client-to-stock-HLDS operation, and general service/resource
+parsing remain pending. M2.4.1 recognizes the separately confirmed first
+`BZ2\0` service envelope after this layer has delivered one owning normal
+payload; M2.4.2 continues only through its bounded typed server-info and
+pre-resource boundary above this layer.
 
 The labels in this document are strict:
 
@@ -33,7 +35,7 @@ The implemented profile is intentionally narrow:
 | Slot 1 or a file/download interpretation | **Pending**; bytes fail closed before retention |
 | Compression detection/decompression | **Pending in this layer**; fragment bytes remain opaque, while M2.4.1 strictly decodes only the confirmed first `BZ2\0` envelope above it |
 | Project client to stock HLDS | **Pending** |
-| Service semantics beyond the M2.4.1 opcode-8/opcode-11 boundary, resources, snapshots, or gameplay | **Pending**, beginning with M2.4.2 |
+| Service semantics beyond the M2.4.2 opcode-14 pre-resource boundary, resources, snapshots, or gameplay | **Pending**, beginning with M3.1 |
 
 The bounded project integration proof uses real loopback UDP with production
 `UdpDatagramTransport`: M1 challenge, connect, and `ACCEPT` complete before a
@@ -476,9 +478,10 @@ The following stay explicit rather than being inferred:
 - split/special packets and acknowledgement bit 30;
 - a production Steam authentication provider and live project-client-to-stock
   HLDS acceptance/channel proof;
-- M2.4.2 boundary-body/serverinfo work and every resource, snapshot, gameplay,
-  and rendering consumer. M2.4.1 now consumes only the reassembled first
-  `BZ2\0` service envelope through its typed opcode-11 stop.
+- opcode-14 body semantics and every resource, snapshot, gameplay, and
+  rendering consumer. M2.4.1 consumes the reassembled first `BZ2\0` envelope
+  through its typed opcode-11 stop; M2.4.2 parses only the confirmed
+  server-info continuation and stops before the opcode-14 body.
 
 No pending row is filled from a third-party implementation name. Fresh bounded
 capture takes priority over earlier assumptions and secondary behavioral

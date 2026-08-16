@@ -6,9 +6,11 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has completed the bounded project scope of **M2.4.1: initial
-GoldSrc sign-on request and first complex service-message boundary**.
-Implemented M1–M2.4.1 behavior includes the Protocol 48 challenge,
+The repository has implemented the bounded single-client project scope of
+**M2.4.2: typed GoldSrc server-info and a pre-resource boundary**. Full primary
+evidence completion remains pending because the local stock environment could
+not produce a second-client handshake to identify one opaque slot candidate.
+Implemented M1–M2.4.2 behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`, an explicit
 authentication-provider boundary, same-socket netchan bootstrap, the base wire
@@ -16,14 +18,17 @@ codec/transform, persistent reliable state, a strict two-slot fragment codec,
 transactional slot-0 normal reassembly, deterministic outgoing normal
 fragmentation, a bounded same-transport `NetchanDriver`, the exact typed
 client-first `new` request, strict `BZ2\0` envelope decompression, one confirmed
-bounded text-control message, and a typed stop before the body of the first
-complex sign-on message. Twelve accepted
+bounded text-control message, a strict typed opcode-11 server-info parser, one
+neutral post-serverinfo control, and an exact stop before the next complex
+pre-resource body. Twelve accepted
 signed-stock research runs confirm the supported descriptor shape and the
 per-fragment ACK/retry behavior; project outgoing multi-fragment C2S scheduling
 is deterministic/tested but remains pending stock verification. A separate
-twelve-run signed-stock sign-on set confirms the request, reliable lifecycle,
-envelope, opcode order, and boundary. Live `hlclient` to stock HLDS,
-slot-1/file semantics, general `svc_*`/serverinfo parsing, a Steam
+12-run signed-stock sign-on set confirms the request, reliable lifecycle,
+envelope, opcode order, and initial boundary. A separate 16-run differential
+set confirms the server-info grammar, exposed fields, dynamic cursor, and
+post-serverinfo order. Live `hlclient` to stock HLDS, slot-1/file semantics,
+general `svc_*` parsing, opcode-14 semantics, a Steam
 authentication provider, resources, snapshots, gameplay, and a public raw
 payload CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
@@ -246,6 +251,25 @@ NUL string, and exits successfully at opcode 11/offset 42 without consuming its
 body. No resource/spawn continuation is sent, and server text is not executed
 or printed raw.
 
+The explicit typed continuation is:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after pre-resource `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+This route retains the same driver and authentication lifetime, parses the
+variable opcode-11 server-info body transactionally, consumes only the exact
+empty-string/zero opcode-54 control, and stops successfully at the confirmed
+opcode-14 category-C boundary with its body untouched. It sends no `sendres`
+or other resource command. Server game/label/map strings remain untrusted
+owning metadata and never reach filesystem, assets, world state, or a renderer.
+The bounded success log sanitizes only confirmed game/map metadata and omits
+the server label and opaque fields. The stock second-client evidence gap leaves the offset-29 candidate
+private, so M2.4.2 is not described as fully evidence-complete.
+
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
 project client exercises request plus accept/reject behavior against
@@ -345,6 +369,25 @@ authentication/identity values, server text, decompressed bytes, and game data.
 See [GoldSrc initial sign-on](docs/GOLDSRC_INITIAL_SIGNON.md) for the stable
 request/envelope/opcode facts and the separate fake-HLDS proof.
 
+The M2.4.2 differential research uses a separate metadata verifier:
+
+```powershell
+.\scripts\verify_stock_serverinfo.ps1 `
+  -RelayPath C:\Tools\bounded-serverinfo-relay.ps1 `
+  -HalfLifePath C:\Games\Half-Life\hl.exe `
+  -HldsPath C:\Servers\Half-Life\hlds.exe `
+  -Game valve -Map boot_camp -MaxPlayers 2 -Port 27620 `
+  -Scenario baseline -TimeoutSeconds 40
+```
+
+Its allowlist covers baseline, map, maxplayers, first/second-client,
+server-restart, same-process map-change, and hostname differentials. The
+accepted primary set contains 16 bounded single-client runs; two second-client
+attempts failed before canonical `getchallenge` and are explicitly excluded.
+The wrapper accepts exactly one strict metadata document, while raw research
+projections stay ignored. See [GoldSrc server info](docs/GOLDSRC_SERVERINFO.md)
+for the exact field evidence table and pending semantics.
+
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
 they are licensed to use.
@@ -391,6 +434,7 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc netchan](docs/GOLDSRC_NETCHAN.md),
 [GoldSrc fragmentation](docs/GOLDSRC_FRAGMENTATION.md),
 [GoldSrc initial sign-on](docs/GOLDSRC_INITIAL_SIGNON.md),
+[GoldSrc server info](docs/GOLDSRC_SERVERINFO.md),
 [Authentication provider](docs/AUTHENTICATION_PROVIDER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.

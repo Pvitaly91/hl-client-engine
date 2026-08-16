@@ -258,11 +258,27 @@ sign-on against a stock server. Live project-to-stock sign-on remains pending a
 production Steam authentication provider. The stock evidence is separately the
 signed-stock-client to signed-stock-HLDS research set described above.
 
+## M2.4.2 continuation
+
+The public `--stop-after signon-boundary` behavior above is unchanged. The
+separate `--stop-after pre-resource` composition constructs
+`PreResourceSignonStage`, which is the only friend allowed to retain this
+stage's exact driver/authentication lifetime after a successful M2.4.1
+boundary. It passes the existing owning decompressed payload and its actual
+`ServiceMessageBoundary` to the strict continuation; it does not assume offset
+42, repeat BZip2, repeat opcode 8, or create another socket/session.
+
+That continuation now parses the evidence-gated opcode-11 server-info grammar,
+one neutral opcode-54 control, and stops at the confirmed category-C opcode-14
+boundary without touching its body or sending a resource command. See
+[GoldSrc server info](GOLDSRC_SERVERINFO.md). The nested retained driver closes
+and releases its lifetime exactly once on success, decode failure,
+backpressure, cancellation, timeout, network/protocol failure, or destruction.
+
 ## Deliberately pending
 
-- semantic parsing of opcode 11 and any serverinfo fields;
-- determination of whether a resource-list opcode occurs inside/after the
-  opaque boundary body;
+- opcode-14 body semantics and the resource-list layout after the bounded
+  M2.4.2 continuation;
 - a typed disconnect service control, pending primary wire evidence;
 - resource-list/delta-description parsing or resource negotiation;
 - command/stufftext execution (intentionally prohibited, not planned here);
@@ -270,4 +286,8 @@ signed-stock-client to signed-stock-HLDS research set described above.
 - slot-1/file semantics and filesystem output;
 - full stock-server live sign-on by the project client.
 
-The next milestone is M2.4.2: typed serverinfo and pre-resource sign-on state.
+M2.4.2 is implemented for the bounded single-client profile, but its primary
+evidence remains incomplete because the stock environment did not produce a
+second-client handshake for the opaque slot candidate. M3.1 resource-list
+discovery remains the next planned implementation milestone and is not part of
+this layer.
