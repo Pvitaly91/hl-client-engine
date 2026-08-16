@@ -56,10 +56,11 @@ M2.2 bounded connectionless response, and the same-socket netchan bootstrap
 composition. M2.3.2 adds persistent reliable state; M2.3.3 adds a strict
 fragment codec, bounded normal reassembly, deterministic outgoing
 fragmentation, and a reusable transport-facing driver without interpreting
-opaque bytes. The bootstrap stage/coordinator owns that driver until the
-current CLI terminates on the first complete opaque payload. Sign-on, resource
-state, snapshots, and commands remain future increments behind the same
-provider boundary. The future bridge adapts
+opaque bytes. M2.4.1 reuses that exact driver for the one captured client
+request, strict in-memory service-envelope decoding, confirmed simple early
+messages, and a typed stop before the first complex body. Resource state,
+snapshots, and commands remain future increments behind the same provider
+boundary. The future bridge adapts
 observed or exported in-process state to the same project types. It must not
 make renderer behavior depend on injected addresses or Valve private layouts.
 
@@ -73,9 +74,10 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
 | `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
 | `hlclient_goldsrc_netchan` | netchan classifier/base/fragment codec, payload transform, wrap-safe persistent session, bounded pending plus one reliable unit in flight, transactional unfragmented/fragment sends, filesystem-free slot-0 normal reassembly, bounded same-transport driver, owning events, metadata-only traces, and first-ACK compatibility primitive | transport creation/closure, authentication semantics or bytes, slot-1/file interpretation, decompression, files, `svc_*`, world/render state |
+| `hlclient_goldsrc_signon` | exact fixed initial client request, strict `BZ2\0` in-memory envelope decoder, bounded confirmed early-message decoder, owning complex-message boundary, and same-driver `InitialSignonStage` | arbitrary string commands, boundary-body/serverinfo/resource parsing, command execution, filesystem, renderer, SDL, assets, world state |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter and bounded local-file loading | discovery, caching, Steam integration, fallback search, protocol parsing |
-| `hlclient_goldsrc_client` | challenge/connect/response coordination, same-socket driver composition, driver/auth-lifetime ownership through the selected bootstrap stop, and first complete opaque-payload handoff | continued sign-on scheduling after the current stop, auth generation, wire codec duplication, arbitrary reliable payload production, `svc_*`, OpenGL, SDL, world/render state |
+| `hlclient_goldsrc_client` | challenge/connect/response coordination, same-socket bootstrap or initial-sign-on composition, and driver/auth-lifetime ownership through the selected terminal stop | auth generation, wire codec duplication, arbitrary reliable payload production, boundary-body/resources, OpenGL, SDL, world/render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_asset_api` | owning asset sources, neutral CPU assets, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
@@ -137,7 +139,7 @@ Network input is untrusted. Parsers must:
 Compatibility constants may be checked against official SDK declarations, but
 the runtime implementation remains project-owned.
 
-The current application path remains intentionally smaller than sign-on:
+The current application path reaches only the bounded initial sign-on boundary:
 
 ```text
 --connect IPv4:port
@@ -151,20 +153,26 @@ The current application path remains intentionally smaller than sign-on:
               `-> optional ConnectResponseWaitStage on that transport/socket
                   -> strict connectionless ACCEPT/REJECT
                      |-> terminal M2.2 outcome
-                     `-> optional NetchanBootstrapStage on the same socket
-                         -> coordinator/stage-owned NetchanDriver
-                         -> one unfragmented or reassembled slot-0 payload
-                         -> required transport acknowledgement(s)
-                         -> terminal CLI netchan-bootstrap outcome
+                     |-> optional NetchanBootstrapStage on the same socket
+                     |   -> coordinator/stage-owned NetchanDriver
+                     |   -> one unfragmented or reassembled slot-0 payload
+                     |   -> required transport acknowledgement(s)
+                     |   -> terminal CLI netchan-bootstrap outcome
+                     `-> optional InitialSignonStage on the same socket
+                         -> one typed reliable client request
+                         -> request ACK and normal-stream reassembly
+                         -> strict BZ2-NUL in-memory envelope
+                         -> bounded opcode-8 text control
+                         -> terminal opcode-11 boundary; body untouched
 ```
 
 The application has only an explicit user-file authentication provider; it
-does not generate tickets or integrate with Steam. The bootstrap stage composes
-the driver on the already-bound transport, validates the unchanged local and
-exact remote endpoints, and owns it until the first unfragmented or supported
-reassembled opaque payload has been acknowledged and returned. Neither the
-stage nor the CLI updates sign-on/world state or exposes raw reliable or
-fragment bytes.
+does not generate tickets or integrate with Steam. Both terminal stages compose
+the driver on the already-bound transport and validate unchanged local/exact
+remote endpoints. The sign-on branch queues only the fixed five-byte request,
+owns at most one pre-ACK payload, and closes after publishing the complex
+boundary. Neither branch exposes raw reliable/fragment bytes or updates world
+or renderer state.
 
 M2.3.3 splits netchan into pure base/fragment wire codecs and transform,
 transport-independent persistent reliable state, a transactional normal
@@ -206,8 +214,9 @@ promoted to stock-server interoperability claims.
 
 `NetchanDriver` is the reusable same-transport polling/timeout owner. The
 bootstrap stage/coordinator constructs and owns one through `--stop-after
-netchan-bootstrap`, then the CLI intentionally terminates rather than entering
-sign-on. An embedding composition can own the driver persistently. In both
+netchan-bootstrap`; `--stop-after signon-boundary` instead creates
+`InitialSignonStage` directly after `ACCEPT`, so no second driver competes for
+the socket. An embedding composition can also own the driver persistently. In both
 cases the existing transport and optional opaque `INetchanDriverLifetime` stay
 valid through the driver terminal. Timeout, cancellation, network/protocol
 failure, event backpressure, and close clear reliable/reassembly/unreliable
@@ -215,11 +224,13 @@ state and release that guard exactly once. A lower-level session caller remains
 responsible for `NetchanSession::clear_reliable_state()` on terminal failure.
 
 Challenge traces use bounded previews. Connect-request, connect-response,
-netchan, fragment, and driver traces are metadata-only and never contain raw
-packets, authentication bytes, or opaque payload bytes. Rejection text reaches
-logging only through the bounded presentation sanitizer. See
+netchan, fragment, driver, and sign-on traces are metadata-only and never
+contain raw packets, authentication bytes, server text, compressed/decompressed
+payload, or boundary remainder. Rejection text reaches logging only through the
+bounded presentation sanitizer. See
 [Connect response](GOLDSRC_CONNECT_RESPONSE.md),
-[Netchan](GOLDSRC_NETCHAN.md), [Fragmentation](GOLDSRC_FRAGMENTATION.md), and
+[Netchan](GOLDSRC_NETCHAN.md), [Fragmentation](GOLDSRC_FRAGMENTATION.md),
+[Initial sign-on](GOLDSRC_INITIAL_SIGNON.md), and
 [Authentication provider](AUTHENTICATION_PROVIDER.md).
 
 ## Filesystem and asset boundary

@@ -2,11 +2,12 @@
 
 ## Pinning policy
 
-Network-fetched source dependencies and the SDK reference are pinned to full,
-immutable Git commit IDs. Release tags are recorded for human review, but CMake
-uses commits so a moved tag cannot silently change a build. Updating a pin
-requires a dedicated review of release notes, Win32/MSVC behavior, exported
-CMake targets, and license changes.
+Network-fetched source dependencies and the SDK reference are pinned either to
+full immutable Git commit IDs or to an official release archive plus its
+published cryptographic digest. Release tags are recorded for human review,
+but CMake never trusts a movable tag alone. Updating a pin requires a dedicated
+review of release notes, Win32/MSVC behavior, exported CMake targets, and
+license changes.
 
 The following pins were verified against official upstream repositories on
 2026-08-13:
@@ -14,6 +15,7 @@ The following pins were verified against official upstream repositories on
 | Component | Release | Immutable commit | License | Integration |
 | --- | --- | --- | --- | --- |
 | SDL3 | `release-3.4.14` | `147a8ee32dbf9ac02f3794964490687b6bbda1bc` | `Zlib` | CMake `FetchContent`; shared `SDL3::SDL3-shared` target |
+| bzip2 | `1.0.8` | official Sourceware archive, published SHA-512 `083f…b9f3` | `bzip2-1.0.6` | CMake `FetchContent`; static project target with stdio API disabled |
 | Catch2 | `v3.15.3` | `8b08d4d79514f45f7e4ce2a607ac9c94e920d1bb` | BSL-1.0 | CMake `FetchContent`; `Catch2::Catch2WithMain` and `catch_discover_tests` |
 | GLAD2 | `v2.0.8` | `73db193f853e2ee079bf3ca8a64aa2eaf6459043` | generated-file expression described below | generated C source committed and built statically |
 | Valve Half-Life SDK | reference snapshot | `b1b5cf5892918535619b2937bb927e46cb097ba1` | custom Valve Half-Life 1 SDK License | Git submodule; `SYSTEM` headers/reference only |
@@ -49,6 +51,31 @@ Visual Studio F5 does not depend on `PATH` or a manually installed SDL runtime.
 SDL3 uses the permissive zlib license (SPDX identifier `Zlib`). Preserve its
 license notice in source or
 binary redistributions as required by that text; the project MIT license does
+not replace it.
+
+## bzip2
+
+- Official release directory: <https://sourceware.org/pub/bzip2/>
+- Official archive: <https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz>
+- Official digest list: <https://sourceware.org/pub/bzip2/sha512.sum>
+- Pinned SHA-512:
+  `083f5e675d73f3233c7930ebe20425a533feedeaaa9d8cc86831312a6581cefbe6ed0d08d2fa89be81082f2a5abdabca8b3c080bf97218a1bd59dc118a30b9f3`
+
+The stock Protocol 48 initial service batch is carried in a captured `BZ2\0`
+envelope followed by one standard bzip2 stream. `hlclient_bzip2`, exposed as
+`hlclient::bzip2`, compiles the official 1.0.8 decoder sources into a static
+library. `BZ_NO_STDIO` is defined for the library and its consumers, so the
+file-oriented convenience API is absent. Production sign-on code uses only the
+bounded streaming memory API, rejects bytes after `BZ_STREAM_END`, and never
+derives or opens a path from server data.
+The small project-owned `bzip2_no_stdio.c` hook implements the invariant
+callback required by upstream's no-stdio configuration as a no-output
+fail-fast abort; normal malformed-input failures still return typed decoder
+errors through the public bzip2 API.
+
+The bzip2 sources use the permissive license represented by SPDX identifier
+`bzip2-1.0.6`. Preserve the upstream license notice with source or binary
+redistributions as required by that text; the repository's MIT license does
 not replace it.
 
 ## Catch2

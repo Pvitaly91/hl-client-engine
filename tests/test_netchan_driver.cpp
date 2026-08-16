@@ -519,6 +519,88 @@ TEST_CASE("Netchan driver starts without TX and would-block update is bounded",
     CHECK(releases == 0U);
 }
 
+TEST_CASE("Netchan driver permits bounded client-first reliable data only",
+          "[goldsrc][netchan][driver][reliable][client-first]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'015U);
+    goldsrc::NetchanDriver driver{transport, remote, test_config()};
+    const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+    require_started(driver, transport, epoch);
+
+    const auto reliable = bytes("FIRST");
+    const auto held_unreliable = bytes("HELD_UNRELIABLE");
+    REQUIRE(driver.queue_reliable(reliable));
+    REQUIRE(driver.submit_unreliable(held_unreliable));
+
+    driver.update(epoch + 1ms);
+
+    REQUIRE(transport.sent.size() == 1U);
+    auto initial = goldsrc::decode_client_to_server_netchan_packet(
+        transport.sent.front().payload);
+    REQUIRE(initial);
+    REQUIRE(initial.packet);
+    CHECK(initial.packet->header.sequence.sequence == sequence(1U));
+    CHECK(initial.packet->header.sequence.flags.reliable);
+    CHECK_FALSE(initial.packet->header.sequence.flags.fragmented);
+    CHECK(initial.packet->header.acknowledgement.sequence == sequence(0U));
+    CHECK_FALSE(initial.packet->header.acknowledgement.reliable);
+    REQUIRE(initial.packet->payload.size() ==
+            goldsrc::kStockProtocol48MinimumDecodedPayloadSize);
+    CHECK(std::ranges::equal(
+        reliable,
+        std::span<const std::byte>{initial.packet->payload}.first(reliable.size())));
+    CHECK(std::ranges::all_of(
+        std::span<const std::byte>{initial.packet->payload}.subspan(reliable.size()),
+        [](const std::byte value) {
+            return value == goldsrc::kStockProtocol48NetchanPaddingByte;
+        }));
+    REQUIRE(driver.session().in_flight_reliable_payload());
+    CHECK(driver.session().in_flight_reliable_payload()->bytes == reliable);
+    CHECK_FALSE(driver.session().first_incoming_committed());
+    CHECK_FALSE(driver.session().first_acknowledgement_sent());
+
+    transport.queue(
+        remote,
+        server_packet(1U, true, 1U, true, bytes("SERVER_FIRST")));
+    driver.update(epoch + 2ms);
+
+    REQUIRE(transport.sent.size() == 2U);
+    auto first_ack = goldsrc::decode_client_to_server_netchan_packet(
+        transport.sent.back().payload);
+    REQUIRE(first_ack);
+    REQUIRE(first_ack.packet);
+    CHECK(first_ack.packet->header.sequence.sequence == sequence(2U));
+    CHECK(first_ack.packet->header.acknowledgement.sequence == sequence(1U));
+    CHECK(first_ack.packet->header.acknowledgement.reliable);
+    CHECK_FALSE(first_ack.packet->header.sequence.flags.reliable);
+    CHECK_FALSE(driver.session().in_flight_reliable_payload());
+    auto acknowledged = driver.poll_event();
+    REQUIRE(acknowledged);
+    CHECK(acknowledged->type ==
+          goldsrc::NetchanDriverEventType::reliable_payload_acknowledged);
+    auto payload = driver.poll_event();
+    REQUIRE(payload);
+    CHECK(payload->type == goldsrc::NetchanDriverEventType::payload_ready);
+    REQUIRE(payload->payload);
+    CHECK(payload->payload->bytes == bytes("SERVER_FIRST"));
+    CHECK_FALSE(driver.poll_event());
+
+    // The unrelated one-shot payload was held until the ordinary channel
+    // acknowledgement existed and is emitted only on a later bounded update.
+    driver.update(epoch + 3ms);
+    REQUIRE(transport.sent.size() == 3U);
+    auto later = goldsrc::decode_client_to_server_netchan_packet(
+        transport.sent.back().payload);
+    REQUIRE(later);
+    REQUIRE(later.packet);
+    CHECK(later.packet->header.sequence.sequence == sequence(3U));
+    CHECK(std::ranges::equal(
+        held_unreliable,
+        std::span<const std::byte>{later.packet->payload}.first(
+            held_unreliable.size())));
+}
+
 TEST_CASE("Netchan driver preserves a wildcard-bound local endpoint",
           "[goldsrc][netchan][driver][endpoint][same-socket]")
 {

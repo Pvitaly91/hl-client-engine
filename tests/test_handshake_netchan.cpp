@@ -54,6 +54,10 @@ public:
     [[nodiscard]] DatagramLocalAddressResult local_address() const override
     {
         ++local_address_calls;
+        if (changed_local_address_call &&
+            local_address_calls == *changed_local_address_call) {
+            return DatagramLocalAddressResult{changed_local, {}};
+        }
         return DatagramLocalAddressResult{local, {}};
     }
 
@@ -115,6 +119,8 @@ public:
     }
 
     NetworkAddress local{NetworkAddress::loopback(30'000)};
+    NetworkAddress changed_local{NetworkAddress::loopback(30'001)};
+    std::optional<std::size_t> changed_local_address_call;
     std::optional<std::size_t> failing_send_call;
     mutable std::size_t local_address_calls{0U};
     std::size_t receive_calls{0U};
@@ -218,6 +224,36 @@ template<std::size_t Size>
         server_header(1U, true, false, 0U, false),
         {},
         std::vector<std::byte>{payload.begin(), payload.end()},
+    });
+}
+
+[[nodiscard]] std::vector<std::byte> signon_service_envelope_fixture()
+{
+    // Independent BZ2-NUL fixture: opcode 8, forty sanitized text bytes, NUL,
+    // opcode 11, then two opaque boundary-body bytes.
+    return bytes(std::array<std::uint8_t, 87U>{
+        0x42U, 0x5AU, 0x32U, 0x00U,
+        0x42U, 0x5AU, 0x68U, 0x39U, 0x31U, 0x41U, 0x59U, 0x26U,
+        0x53U, 0x59U, 0xAFU, 0x5DU, 0x04U, 0xC7U, 0x00U, 0x00U,
+        0x00U, 0xCEU, 0x18U, 0x40U, 0x48U, 0x44U, 0x00U, 0x1AU,
+        0x6DU, 0x9CU, 0x60U, 0x80U, 0x10U, 0x00U, 0x08U, 0x20U,
+        0x00U, 0x23U, 0x1EU, 0x6AU, 0x6AU, 0x7AU, 0x04U, 0x68U,
+        0xF3U, 0x52U, 0x14U, 0x68U, 0xC8U, 0x1AU, 0x34U, 0xC8U,
+        0xD2U, 0x76U, 0xBDU, 0x0EU, 0x34U, 0x99U, 0x8EU, 0xD3U,
+        0x9CU, 0xB1U, 0x41U, 0x14U, 0x57U, 0xC6U, 0x9CU, 0x40U,
+        0x95U, 0x20U, 0x43U, 0x19U, 0xBEU, 0x0BU, 0x39U, 0xDFU,
+        0xE2U, 0xEEU, 0x48U, 0xA7U, 0x0AU, 0x12U, 0x15U, 0xEBU,
+        0xA0U, 0x98U, 0xE0U,
+    });
+}
+
+[[nodiscard]] std::vector<std::byte> signon_server_packet(
+    std::vector<std::byte> payload)
+{
+    return encode_server_packet(goldsrc::ServerToClientNetchanPacket{
+        server_header(1U, true, false, 1U, true),
+        {},
+        std::move(payload),
     });
 }
 
@@ -352,6 +388,30 @@ struct PreparedWithSession {
         {},
         std::move(prepared.session),
         std::move(bootstrap_config),
+        {},
+    };
+}
+
+[[nodiscard]] GoldSrcHandshakeCoordinator signon_coordinator(
+    FakeTransport& transport,
+    const NetworkAddress remote,
+    PreparedWithSession prepared,
+    goldsrc::InitialSignonConfig signon_config = {})
+{
+    return GoldSrcHandshakeCoordinator{
+        transport,
+        remote,
+        goldsrc::HandshakeStopPoint::signon_boundary,
+        std::move(prepared.request),
+        challenge_config(),
+        {},
+        {},
+        response_config(),
+        {},
+        std::move(prepared.session),
+        {},
+        {},
+        std::move(signon_config),
         {},
     };
 }
@@ -768,6 +828,145 @@ TEST_CASE("Connect-response stop point remains terminal after ACCEPT with netcha
 
     check_terminal_idempotence(transport, handshake, epoch + 2ms, releases);
     CHECK(transport.incoming.size() == 1U);
+}
+
+TEST_CASE("Sign-on stop point owns the same socket and authentication lifetime through boundary",
+          "[goldsrc][handshake][signon][coordinator][auth]")
+{
+    FakeTransport transport;
+    const auto remote = NetworkAddress::loopback(27'015);
+    const auto epoch = ChallengeExchangeTimePoint{};
+    std::size_t releases = 0U;
+    auto handshake = signon_coordinator(
+        transport,
+        remote,
+        prepare_with_session(releases));
+
+    reach_response_wait(transport, handshake, remote, epoch, releases);
+    transport.queue(remote, accepted_response());
+    handshake.update(epoch + 2ms);
+
+    REQUIRE(handshake.state() == GoldSrcHandshakeState::waiting_for_signon);
+    REQUIRE_FALSE(handshake.terminal());
+    CHECK(transport.sent.size() == 2U);
+    CHECK(releases == 0U);
+    CHECK_FALSE(handshake.netchan_bootstrap_result().has_value());
+    CHECK_FALSE(handshake.initial_signon_result().has_value());
+
+    handshake.update(epoch + 3ms);
+    REQUIRE(handshake.state() == GoldSrcHandshakeState::waiting_for_signon);
+    REQUIRE(transport.sent.size() == 3U);
+    const auto request = decode_client_packet(transport.sent[2U]);
+    CHECK(request.header.sequence.sequence.value() == 1U);
+    CHECK(request.header.sequence.flags.reliable);
+    CHECK_FALSE(request.header.sequence.flags.fragmented);
+    CHECK(request.header.acknowledgement.sequence.value() == 0U);
+    CHECK_FALSE(request.header.acknowledgement.reliable);
+    REQUIRE(request.payload.size() == goldsrc::kStockProtocol48MinimumDecodedPayloadSize);
+    CHECK(request.payload[0U] == std::byte{0x03U});
+    CHECK(request.payload[1U] == std::byte{'n'});
+    CHECK(request.payload[2U] == std::byte{'e'});
+    CHECK(request.payload[3U] == std::byte{'w'});
+    CHECK(request.payload[4U] == std::byte{0x00U});
+    CHECK(std::ranges::all_of(
+        std::span<const std::byte>{request.payload}.subspan(5U),
+        [](const std::byte value) {
+            return value == goldsrc::kStockProtocol48NetchanPaddingByte;
+        }));
+    CHECK(releases == 0U);
+
+    transport.queue(remote, signon_server_packet(signon_service_envelope_fixture()));
+    handshake.update(epoch + 4ms);
+
+    REQUIRE(handshake.state() == GoldSrcHandshakeState::signon_boundary_reached);
+    REQUIRE(handshake.terminal());
+    CHECK(releases == 1U);
+    REQUIRE(transport.sent.size() == 4U);
+    const auto acknowledgement = decode_client_packet(transport.sent[3U]);
+    CHECK(acknowledgement.header.sequence.sequence.value() == 2U);
+    CHECK_FALSE(acknowledgement.header.sequence.flags.reliable);
+    CHECK(acknowledgement.header.acknowledgement.sequence.value() == 1U);
+    CHECK(acknowledgement.header.acknowledgement.reliable);
+    CHECK(std::ranges::all_of(
+        acknowledgement.payload,
+        [](const std::byte value) {
+            return value == goldsrc::kStockProtocol48NetchanPaddingByte;
+        }));
+
+    REQUIRE(handshake.initial_signon_result().has_value());
+    const auto& result = *handshake.initial_signon_result();
+    REQUIRE(result.messages.size() == 1U);
+    CHECK(result.messages.front().opcode ==
+          goldsrc::ServiceMessageOpcode::text_control);
+    CHECK(result.boundary.opcode ==
+          goldsrc::ServiceMessageOpcode::complex_signon_boundary);
+    CHECK(result.boundary.byte_offset == 42U);
+    CHECK(result.boundary.remaining_byte_count == 2U);
+    CHECK(result.boundary_payload.decompressed);
+    CHECK(result.boundary_payload.bytes.size() == 45U);
+    CHECK(handshake.error_context().empty());
+
+    check_terminal_idempotence(transport, handshake, epoch + 4ms, releases);
+    CHECK(transport.sent.size() == 4U);
+}
+
+TEST_CASE("Sign-on coordinator terminalizes transactional stage-start failures",
+          "[goldsrc][handshake][signon][coordinator][auth][error]")
+{
+    const auto remote = NetworkAddress::loopback(27'015);
+    const auto epoch = ChallengeExchangeTimePoint{};
+
+    SECTION("invalid sign-on configuration")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        goldsrc::InitialSignonConfig config;
+        config.maximum_events = 0U;
+        auto handshake = signon_coordinator(
+            transport,
+            remote,
+            prepare_with_session(releases),
+            config);
+
+        reach_response_wait(transport, handshake, remote, epoch, releases);
+        transport.queue(remote, accepted_response());
+        handshake.update(epoch + 2ms);
+
+        CHECK(handshake.state() == GoldSrcHandshakeState::configuration_error);
+        CHECK(handshake.terminal());
+        REQUIRE(handshake.initial_signon_error().has_value());
+        CHECK(handshake.initial_signon_error()->code ==
+              goldsrc::InitialSignonErrorCode::invalid_configuration);
+        CHECK(transport.sent.size() == 2U);
+        CHECK(releases == 1U);
+        check_terminal_idempotence(transport, handshake, epoch + 2ms, releases);
+    }
+
+    SECTION("same-socket local endpoint changes before driver start")
+    {
+        FakeTransport transport;
+        std::size_t releases = 0U;
+        auto handshake = signon_coordinator(
+            transport,
+            remote,
+            prepare_with_session(releases));
+
+        reach_response_wait(transport, handshake, remote, epoch, releases);
+        transport.changed_local_address_call = transport.local_address_calls + 1U;
+        transport.queue(remote, accepted_response());
+        handshake.update(epoch + 2ms);
+
+        CHECK(handshake.state() == GoldSrcHandshakeState::network_error);
+        CHECK(handshake.terminal());
+        REQUIRE(handshake.initial_signon_error().has_value());
+        CHECK(handshake.initial_signon_error()->code ==
+              goldsrc::InitialSignonErrorCode::driver_start_failed);
+        CHECK(handshake.initial_signon_error()->driver_code ==
+              goldsrc::NetchanDriverErrorCode::local_endpoint_changed);
+        CHECK(transport.sent.size() == 2U);
+        CHECK(releases == 1U);
+        check_terminal_idempotence(transport, handshake, epoch + 2ms, releases);
+    }
 }
 
 TEST_CASE("Challenge and connect-request stop points keep their prior terminal boundaries",

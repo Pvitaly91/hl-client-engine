@@ -1413,21 +1413,33 @@ private:
         const NetchanDriverTimePoint now,
         std::size_t& outgoing_packets_this_update)
     {
-        if (!session_.first_acknowledgement_sent()) {
-            return;
-        }
         while (state_ == NetchanDriverState::active &&
                outgoing_packets_this_update < config_.maximum_outgoing_packets_per_update) {
             const auto& in_flight = session_.in_flight_reliable_payload();
             const bool reliable_work = !session_.pending_reliable_payload().empty() ||
                                        (in_flight && in_flight->retransmission_requested) ||
                                        session_.has_outgoing_fragment_send_work();
+            const bool before_first_acknowledgement =
+                !session_.first_acknowledgement_sent();
+            // Protocol 48 may begin with client reliable data immediately after
+            // ACCEPT. Before the first server packet is admitted, permit only
+            // that bounded reliable work; keep unrelated unreliable bytes
+            // pending until the ordinary channel acknowledgement is established.
+            // With no queued reliable data the legacy receive-first bootstrap
+            // remains byte-for-byte unchanged and sends nothing here.
+            if (before_first_acknowledgement && !reliable_work) {
+                return;
+            }
             if (!acknowledgement_pending_ && pending_unreliable_payload_.empty() &&
                 !reliable_work) {
                 return;
             }
 
-            auto prepared = session_.prepare_outgoing_packet(pending_unreliable_payload_);
+            const auto unreliable_payload = before_first_acknowledgement
+                                                ? std::span<const std::byte>{}
+                                                : std::span<const std::byte>{
+                                                      pending_unreliable_payload_};
+            auto prepared = session_.prepare_outgoing_packet(unreliable_payload);
             if (!prepared || !prepared.plan) {
                 const auto session_code = prepared.error
                                               ? std::optional{prepared.error->code}

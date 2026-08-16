@@ -501,6 +501,79 @@ void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& even
     hlclient::core::log(LogLevel::info, message);
 }
 
+void log_initial_signon_trace(
+    const hlclient::goldsrc::InitialSignonTraceEvent& event)
+{
+    using Classification = hlclient::goldsrc::InitialSignonTraceClassification;
+    std::string classification;
+    switch (event.classification) {
+    case Classification::stage_started:
+        return;
+    case Classification::initial_request_queued:
+        classification = "initial request queued";
+        break;
+    case Classification::initial_request_transmitted:
+        classification = "initial request transmitted";
+        break;
+    case Classification::initial_request_acknowledged:
+        classification = "initial request acknowledged";
+        break;
+    case Classification::service_payload_received:
+        classification = "service payload received";
+        break;
+    case Classification::service_message_decoded:
+        classification = "service message decoded";
+        break;
+    case Classification::signon_boundary_reached:
+        classification = "sign-on boundary reached";
+        break;
+    case Classification::stage_cancelled:
+        classification = "stage cancelled";
+        break;
+    case Classification::stage_timed_out:
+        classification = "stage timed out";
+        break;
+    case Classification::secondary_stream_pending_m3:
+        classification = "secondary stream pending M3";
+        break;
+    case Classification::backpressure:
+        classification = "event backpressure";
+        break;
+    case Classification::network_failure:
+        classification = "network failure";
+        break;
+    case Classification::protocol_failure:
+        classification = "protocol failure";
+        break;
+    }
+
+    std::string message = "[signon] " + classification;
+    if (event.request_size != 0U) {
+        message += ", request=" + std::to_string(event.request_size) + " bytes";
+    }
+    if (event.payload_size != 0U) {
+        message += ", payload=" + std::to_string(event.payload_size) + " bytes";
+    }
+    if (event.opcode) {
+        message += ", opcode=" +
+                   std::to_string(static_cast<unsigned int>(*event.opcode)) +
+                   " (" + std::string{hlclient::goldsrc::to_string(*event.opcode)} + ')';
+        message += ", offset=" + std::to_string(event.byte_offset);
+    }
+    if (event.byte_count != 0U) {
+        message += ", bytes=" + std::to_string(event.byte_count);
+    }
+    if (event.service_payload_count != 0U) {
+        message += ", payload-count=" +
+                   std::to_string(event.service_payload_count);
+    }
+    if (event.transmitted_packet_count != 0U) {
+        message += ", tx-count=" +
+                   std::to_string(event.transmitted_packet_count);
+    }
+    hlclient::core::log(LogLevel::info, message);
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -588,11 +661,53 @@ void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& even
                 std::to_string(payload.source_sequence.value()));
         hlclient::core::log(
             LogLevel::info,
-            "No svc_* messages were interpreted; sign-on remains M2.4");
+            "No svc_* messages were interpreted at this stop; use the explicit "
+            "signon-boundary mode for bounded M2.4.1 decoding");
         return 0;
     }
     case State::netchan_timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc netchan bootstrap timed out");
+        return 1;
+    case State::signon_boundary_reached: {
+        if (!handshake.initial_signon_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Initial sign-on completed without an owned boundary result");
+            return 1;
+        }
+        const auto& result = *handshake.initial_signon_result();
+        hlclient::core::log(LogLevel::info, "GoldSrc initial sign-on boundary reached");
+        hlclient::core::log(
+            LogLevel::info,
+            "Decoded early service messages: " +
+                std::to_string(result.messages.size()));
+        hlclient::core::log(
+            LogLevel::info,
+            "Boundary opcode: " +
+                std::to_string(static_cast<unsigned int>(result.boundary.opcode)) +
+                " (" +
+                std::string{hlclient::goldsrc::to_string(result.boundary.opcode)} +
+                "), offset=" + std::to_string(result.boundary.byte_offset) +
+                ", unconsumed-body=" +
+                std::to_string(result.boundary.remaining_byte_count) + " bytes");
+        hlclient::core::log(
+            LogLevel::info,
+            "No boundary body, resource list, or server command was executed");
+        return 0;
+    }
+    case State::signon_timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc initial sign-on timed out");
+        return 1;
+    case State::signon_unsupported_service:
+        hlclient::core::log(LogLevel::error, "Unsupported service opcode before sign-on boundary");
+        return 1;
+    case State::signon_backpressure:
+        hlclient::core::log(LogLevel::error, "Initial sign-on event queue reached its hard bound");
+        return 1;
+    case State::signon_secondary_stream_pending_m3:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unconfirmed secondary netchan stream remains pending M3");
         return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
@@ -616,6 +731,7 @@ void log_netchan_trace(const hlclient::goldsrc::NetchanBootstrapTraceEvent& even
     case State::sending_request:
     case State::waiting_for_connect_response:
     case State::waiting_for_netchan:
+    case State::waiting_for_signon:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -676,9 +792,13 @@ public:
                   : hlclient::goldsrc::ConnectResponseTraceCallback{},
               std::move(authentication_session),
               {},
-              net_trace
-                  ? hlclient::goldsrc::NetchanBootstrapTraceCallback{&log_netchan_trace}
-                  : hlclient::goldsrc::NetchanBootstrapTraceCallback{}}
+               net_trace
+                   ? hlclient::goldsrc::NetchanBootstrapTraceCallback{&log_netchan_trace}
+                   : hlclient::goldsrc::NetchanBootstrapTraceCallback{},
+               {},
+               net_trace
+                   ? hlclient::goldsrc::InitialSignonTraceCallback{&log_initial_signon_trace}
+                   : hlclient::goldsrc::InitialSignonTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -749,8 +869,8 @@ struct RuntimeConnectPreparation {
     }
     if (!options.authentication_material_file) {
         throw std::invalid_argument{
-            "Connect request, response, and netchan modes require a local authentication "
-            "material file"};
+            "Connect request, response, netchan, and sign-on modes require a local "
+            "authentication material file"};
     }
 
     const auto path = path_from_utf8(*options.authentication_material_file);
@@ -979,6 +1099,9 @@ int run(const hlclient::core::CommandLineOptions& options)
             break;
         case hlclient::core::ConnectionStopPoint::netchan_bootstrap:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::netchan_bootstrap;
+            break;
+        case hlclient::core::ConnectionStopPoint::signon_boundary:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::signon_boundary;
             break;
         }
         challenge_session = std::make_unique<HandshakeSession>(

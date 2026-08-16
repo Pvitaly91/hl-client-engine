@@ -184,7 +184,7 @@ not authentication material, and is separately escaped and presentation-capped
 before logging.
 
 The provider boundary is in-process modularity, not a security sandbox. No part
-of M2.2–M2.3.3 authorizes bypassing Steam, server policy, VAC, access control,
+of M2.2–M2.4.1 authorizes bypassing Steam, server policy, VAC, access control,
 or third-party terms. The absence of a production Steam provider is why a
 project-client-to-stock-HLDS bootstrap remains pending. A legitimate future
 provider requires its own platform, legal, storage, cancellation, and teardown
@@ -193,5 +193,8 @@ review.
 The retained provider guard does not give netchan access to authentication
 bytes. Reliable queues, retransmission, fragmentation/reassembly, and the
 persistent driver do not alter this authentication ownership boundary. The
-current CLI still stops at the first complete opaque netchan payload and does
-not enter M2.4 sign-on.
+`netchan-bootstrap` CLI mode still stops at the first complete opaque payload.
+The explicit `signon-boundary` mode transfers the same provider guard into
+`InitialSignonStage` at `ACCEPT` and releases it exactly once on boundary,
+timeout, cancellation, network/protocol error, backpressure, or secondary
+stream pending. Neither mode gives netchan/sign-on codecs access to auth bytes.

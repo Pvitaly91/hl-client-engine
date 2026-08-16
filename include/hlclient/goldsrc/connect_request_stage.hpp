@@ -4,6 +4,7 @@
 #include <hlclient/goldsrc/challenge_exchange.hpp>
 #include <hlclient/goldsrc/connect_request.hpp>
 #include <hlclient/goldsrc/connect_response_wait.hpp>
+#include <hlclient/goldsrc/initial_signon_stage.hpp>
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
@@ -24,6 +25,7 @@ enum class HandshakeStopPoint {
     connect_request,
     connect_response,
     netchan_bootstrap,
+    signon_boundary,
 };
 
 enum class ConnectRequestStageState {
@@ -129,6 +131,12 @@ enum class GoldSrcHandshakeState {
     waiting_for_netchan,
     netchan_bootstrap_complete,
     netchan_timed_out,
+    waiting_for_signon,
+    signon_boundary_reached,
+    signon_timed_out,
+    signon_unsupported_service,
+    signon_backpressure,
+    signon_secondary_stream_pending_m3,
     timed_out,
     cancelled,
     configuration_error,
@@ -150,7 +158,9 @@ public:
         ConnectResponseTraceCallback response_trace_callback = {},
         std::optional<auth::AuthenticationSession> authentication_session = std::nullopt,
         NetchanBootstrapConfig netchan_config = {},
-        NetchanBootstrapTraceCallback netchan_trace_callback = {});
+        NetchanBootstrapTraceCallback netchan_trace_callback = {},
+        InitialSignonConfig signon_config = {},
+        InitialSignonTraceCallback signon_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -168,6 +178,10 @@ public:
     [[nodiscard]] const std::optional<ConnectResponse>& connect_response() const noexcept;
     [[nodiscard]] const std::optional<NetchanBootstrapResult>&
     netchan_bootstrap_result() const noexcept;
+    [[nodiscard]] const std::optional<InitialSignonResult>&
+    initial_signon_result() const noexcept;
+    [[nodiscard]] const std::optional<InitialSignonError>&
+    initial_signon_error() const noexcept;
     // Non-null only after a successful netchan bootstrap. The returned object
     // is the same session that committed the M2.3.3 bootstrap ACKs; callers must use
     // the coordinator's original externally-owned datagram transport.
@@ -181,6 +195,7 @@ private:
     void synchronize_from_challenge(ChallengeExchangeTimePoint now);
     void synchronize_from_response(ChallengeExchangeTimePoint now);
     void synchronize_from_netchan();
+    void synchronize_from_signon();
     void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
@@ -188,6 +203,7 @@ private:
     std::optional<ConnectRequestStage> connect_stage_;
     std::optional<ConnectResponseWaitStage> response_stage_;
     std::optional<NetchanBootstrapStage> netchan_stage_;
+    std::optional<InitialSignonStage> signon_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;

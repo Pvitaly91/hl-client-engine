@@ -224,7 +224,7 @@ input, sends one connect request on the same socket, and exits:
 
 The file is not copied or logged. Success means only that one datagram was sent;
 this `connect-request` stop point does not wait for a response or create a
-netchan. Authentication generation and sign-on remain unimplemented.
+netchan. Authentication generation remains unimplemented.
 
 The M2.3.3 transport-only path waits for connectionless `ACCEPT`, preserves the
 same socket, and runs a bounded `NetchanDriver` through the selected stop. An
@@ -257,6 +257,24 @@ fragmentation/reassembly and the driver are M2.3.3. See
 [GoldSrc netchan](GOLDSRC_NETCHAN.md) and
 [GoldSrc fragmentation](GOLDSRC_FRAGMENTATION.md) for evidence labels, limits,
 and unsupported behavior.
+
+The M2.4.1 stop continues on that same socket with only the typed initial
+request and stops before the first complex service-message body:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after signon-boundary `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+Success means the fixed `03 6E 65 77 00` semantic request was acknowledged,
+the first normal payload was reassembled and strictly decompressed from its
+`BZ2\0` envelope, opcode 8 was decoded as one bounded owning NUL string, and
+opcode 11 was reached without parsing its body. No resource/spawn continuation
+is sent. Live project-to-stock sign-on remains pending a production Steam
+authentication provider; the completed project path is proved against local
+fake-HLDS fixtures.
 
 Add `--net-trace` when diagnosing the exchange:
 

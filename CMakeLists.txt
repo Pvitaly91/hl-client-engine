@@ -173,6 +173,30 @@ target_link_libraries(
 set_property(TARGET hlclient_goldsrc_netchan PROPERTY FOLDER "Engine/Network/GoldSrc")
 
 hlclient_add_library(
+    hlclient_goldsrc_signon
+    include/hlclient/goldsrc/client_message.hpp
+    include/hlclient/goldsrc/initial_signon_stage.hpp
+    include/hlclient/goldsrc/service_message_stream.hpp
+    include/hlclient/goldsrc/service_payload_envelope.hpp
+    src/goldsrc/client_message.cpp
+    src/goldsrc/initial_signon_stage.cpp
+    src/goldsrc/service_message_stream.cpp
+    src/goldsrc/service_payload_envelope.cpp
+)
+add_library(hlclient::goldsrc_signon ALIAS hlclient_goldsrc_signon)
+target_link_libraries(
+    hlclient_goldsrc_signon
+    PUBLIC
+        hlclient::goldsrc
+        hlclient::goldsrc_netchan
+        hlclient::network
+    PRIVATE
+        hlclient::bzip2
+        hlclient::core
+)
+set_property(TARGET hlclient_goldsrc_signon PROPERTY FOLDER "Engine/Network/GoldSrc")
+
+hlclient_add_library(
     hlclient_auth
     include/hlclient/auth/authentication_provider.hpp
     src/auth/authentication_provider.cpp
@@ -197,6 +221,7 @@ target_link_libraries(
         hlclient::auth
         hlclient::goldsrc
         hlclient::goldsrc_netchan
+        hlclient::goldsrc_signon
         hlclient::network
     PRIVATE hlclient::core
 )

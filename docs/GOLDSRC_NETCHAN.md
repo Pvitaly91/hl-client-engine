@@ -35,7 +35,9 @@ M2.3.3 adds a strict fragment codec, bounded slot-0 normal reassembly,
 deterministic outgoing normal fragmentation, and a persistent transport-facing
 driver. Its project scope does not turn the pending live project-to-stock path,
 stock-client multi-fragment C2S behavior, slot-1 semantics, or compression into
-compatibility claims. M2.4 sign-on remains later.
+compatibility claims. M2.4.1 now consumes the first confirmed envelope only in
+the separate sign-on layer; this netchan profile still assigns no semantic
+meaning to opaque payload bytes.
 
 ## Compatibility profile and methodology
 
@@ -554,12 +556,13 @@ remain deterministic session/driver tests rather than additional real-UDP
 claims. M2.3.3 fragment codec/reassembly/outgoing/driver cases are deterministic
 project tests unless a test explicitly states a real-UDP boundary.
 
-The opaque payload is not a `ClientWorldState` field and never reaches a
-renderer. The stock client's first reliable body and the captured fragmented
-server body remain opaque; neither is hardcoded and neither is scanned for
-`svc_*` values. The public application CLI still stops after netchan bootstrap
-and exposes no raw reliable-send option. M2.4 defines the later initial sign-on
-state machine.
+The M2.3 transport payload is not a `ClientWorldState` field and never reaches
+a renderer. `--stop-after netchan-bootstrap` still treats it as opaque and
+exposes no raw reliable-send option. M2.4.1 adds a separate explicit
+`signon-boundary` branch above the driver: it sends only the stock-confirmed
+typed initial request, strictly decodes the captured first service envelope,
+and stops before the complex message body. See
+[Initial sign-on](GOLDSRC_INITIAL_SIGNON.md).
 
 The public M2.3.3 boundary is project-owned and typed:
 
@@ -603,11 +606,12 @@ The following remain **pending** in this profile:
   replacement while an older transfer is incomplete;
 - an accepted cleanup-complete old-fragment-after-completion replay pair;
 - slot-1/file semantics, simultaneous slots, remote naming, and persistence;
-- universal stock compression framing/markers and decompression behavior;
+- compression framing beyond the stock-confirmed first `BZ2\0` sign-on
+  envelope and universal compression behavior;
 - stock-client count-greater-than-one C2S fragmentation and live
   project-client-to-stock fragment interoperability;
-- `svc_*`, serverdata, signon, resource, snapshot, command, and gameplay
-  parsing.
+- service-message semantics beyond the bounded opcode-8/opcode-11 M2.4.1
+  boundary, including serverdata, resources, snapshots, commands, and gameplay.
 
 No pending item is filled from a third-party field name or implementation.
 Capture observations have priority over secondary behavioral cross-checks.

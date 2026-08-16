@@ -140,6 +140,74 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_signon_state(
+    const InitialSignonState state) noexcept
+{
+    switch (state) {
+    case InitialSignonState::idle:
+    case InitialSignonState::waiting_for_request_transmit:
+    case InitialSignonState::waiting_for_request_ack:
+    case InitialSignonState::waiting_for_server_payload:
+    case InitialSignonState::decoding_service_stream:
+        return GoldSrcHandshakeState::waiting_for_signon;
+    case InitialSignonState::signon_boundary_reached:
+        return GoldSrcHandshakeState::signon_boundary_reached;
+    case InitialSignonState::timed_out:
+        return GoldSrcHandshakeState::signon_timed_out;
+    case InitialSignonState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case InitialSignonState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case InitialSignonState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    case InitialSignonState::unsupported_service_message:
+        return GoldSrcHandshakeState::signon_unsupported_service;
+    case InitialSignonState::backpressure:
+        return GoldSrcHandshakeState::signon_backpressure;
+    case InitialSignonState::secondary_stream_pending_m3:
+        return GoldSrcHandshakeState::signon_secondary_stream_pending_m3;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
+[[nodiscard]] bool signon_start_network_failure(
+    const std::optional<NetchanDriverErrorCode> driver_code) noexcept
+{
+    if (!driver_code) {
+        return false;
+    }
+    switch (*driver_code) {
+    case NetchanDriverErrorCode::receive_failed:
+    case NetchanDriverErrorCode::inconsistent_receive_result:
+    case NetchanDriverErrorCode::local_endpoint_unavailable:
+    case NetchanDriverErrorCode::local_endpoint_changed:
+    case NetchanDriverErrorCode::send_failed:
+        return true;
+    case NetchanDriverErrorCode::invalid_configuration:
+    case NetchanDriverErrorCode::not_active:
+    case NetchanDriverErrorCode::reentrant_operation:
+    case NetchanDriverErrorCode::time_moved_backwards:
+    case NetchanDriverErrorCode::event_backpressure:
+    case NetchanDriverErrorCode::datagram_truncated:
+    case NetchanDriverErrorCode::unexpected_connectionless_packet:
+    case NetchanDriverErrorCode::unsupported_special_packet:
+    case NetchanDriverErrorCode::malformed_packet:
+    case NetchanDriverErrorCode::invalid_sequence:
+    case NetchanDriverErrorCode::invalid_acknowledgement:
+    case NetchanDriverErrorCode::opaque_payload_too_large:
+    case NetchanDriverErrorCode::packet_encode_failed:
+    case NetchanDriverErrorCode::reliable_queue_failed:
+    case NetchanDriverErrorCode::unreliable_payload_too_large:
+    case NetchanDriverErrorCode::unreliable_payload_pending:
+    case NetchanDriverErrorCode::fragment_reassembly_failed:
+    case NetchanDriverErrorCode::secondary_stream_pending_m3:
+    case NetchanDriverErrorCode::channel_inactivity_timed_out:
+    case NetchanDriverErrorCode::fragment_transfer_timed_out:
+        return false;
+    }
+    return false;
+}
+
 } // namespace
 
 ConnectRequestStage::ConnectRequestStage(
@@ -318,7 +386,9 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     ConnectResponseTraceCallback response_trace_callback,
     std::optional<auth::AuthenticationSession> authentication_session,
     NetchanBootstrapConfig netchan_config,
-    NetchanBootstrapTraceCallback netchan_trace_callback)
+    NetchanBootstrapTraceCallback netchan_trace_callback,
+    InitialSignonConfig signon_config,
+    InitialSignonTraceCallback signon_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -339,7 +409,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 std::move(*prepared_request),
                 std::move(connect_trace_callback));
             if (stop_point_ == HandshakeStopPoint::connect_response ||
-                stop_point_ == HandshakeStopPoint::netchan_bootstrap) {
+                stop_point_ == HandshakeStopPoint::netchan_bootstrap ||
+                stop_point_ == HandshakeStopPoint::signon_boundary) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -352,6 +423,13 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                     remote_endpoint,
                     std::move(netchan_config),
                     std::move(netchan_trace_callback));
+            }
+            if (stop_point_ == HandshakeStopPoint::signon_boundary) {
+                signon_stage_.emplace(
+                    transport,
+                    remote_endpoint,
+                    std::move(signon_config),
+                    std::move(signon_trace_callback));
             }
         }
     } else if (authentication_session_) {
@@ -378,6 +456,12 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
     if (terminal()) {
         return;
     }
+    if (signon_stage_ && state_ == GoldSrcHandshakeState::waiting_for_signon) {
+        signon_stage_->update(now);
+        synchronize_from_signon();
+        release_authentication_session_if_terminal();
+        return;
+    }
     if (netchan_stage_ && state_ == GoldSrcHandshakeState::waiting_for_netchan) {
         netchan_stage_->update(now);
         synchronize_from_netchan();
@@ -399,6 +483,12 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (signon_stage_ && state_ == GoldSrcHandshakeState::waiting_for_signon) {
+        signon_stage_->cancel(now);
+        synchronize_from_signon();
+        release_authentication_session_if_terminal();
         return;
     }
     if (netchan_stage_ && state_ == GoldSrcHandshakeState::waiting_for_netchan) {
@@ -440,6 +530,11 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::connect_response_timed_out:
     case GoldSrcHandshakeState::netchan_bootstrap_complete:
     case GoldSrcHandshakeState::netchan_timed_out:
+    case GoldSrcHandshakeState::signon_boundary_reached:
+    case GoldSrcHandshakeState::signon_timed_out:
+    case GoldSrcHandshakeState::signon_unsupported_service:
+    case GoldSrcHandshakeState::signon_backpressure:
+    case GoldSrcHandshakeState::signon_secondary_stream_pending_m3:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -453,6 +548,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::sending_request:
     case GoldSrcHandshakeState::waiting_for_connect_response:
     case GoldSrcHandshakeState::waiting_for_netchan:
+    case GoldSrcHandshakeState::waiting_for_signon:
         return false;
     }
     return true;
@@ -474,6 +570,18 @@ GoldSrcHandshakeCoordinator::netchan_bootstrap_result() const noexcept
 {
     static const std::optional<NetchanBootstrapResult> empty;
     return netchan_stage_ ? netchan_stage_->result() : empty;
+}
+const std::optional<InitialSignonResult>&
+GoldSrcHandshakeCoordinator::initial_signon_result() const noexcept
+{
+    static const std::optional<InitialSignonResult> empty;
+    return signon_stage_ ? signon_stage_->result() : empty;
+}
+const std::optional<InitialSignonError>&
+GoldSrcHandshakeCoordinator::initial_signon_error() const noexcept
+{
+    static const std::optional<InitialSignonError> empty;
+    return signon_stage_ ? signon_stage_->error() : empty;
 }
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
@@ -505,6 +613,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (netchan_stage_ && netchan_stage_->error()) {
         return netchan_stage_->error()->context;
     }
+    if (signon_stage_ && signon_stage_->error()) {
+        return signon_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -531,7 +642,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
     state_ = map_connect_state(connect_stage_->state());
     if (state_ != GoldSrcHandshakeState::request_sent ||
         (stop_point_ != HandshakeStopPoint::connect_response &&
-         stop_point_ != HandshakeStopPoint::netchan_bootstrap)) {
+         stop_point_ != HandshakeStopPoint::netchan_bootstrap &&
+         stop_point_ != HandshakeStopPoint::signon_boundary)) {
         return;
     }
     if (!response_stage_) {
@@ -558,13 +670,16 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         state_ = GoldSrcHandshakeState::configuration_error;
     }
     if (state_ != GoldSrcHandshakeState::accepted ||
-        stop_point_ != HandshakeStopPoint::netchan_bootstrap) {
+        (stop_point_ != HandshakeStopPoint::netchan_bootstrap &&
+         stop_point_ != HandshakeStopPoint::signon_boundary)) {
         return;
     }
-    if (!netchan_stage_ || !challenge_exchange_.local_endpoint()) {
+    if (!challenge_exchange_.local_endpoint() ||
+        (stop_point_ == HandshakeStopPoint::netchan_bootstrap && !netchan_stage_) ||
+        (stop_point_ == HandshakeStopPoint::signon_boundary && !signon_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
-            "Netchan mode completed ACCEPT without a bootstrap stage or local endpoint";
+            "Post-ACCEPT mode has no transport stage or stable local endpoint";
         return;
     }
     std::unique_ptr<INetchanDriverLifetime> driver_lifetime;
@@ -575,11 +690,24 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         // the moved-from optional cannot release the provider guard.
         authentication_session_.reset();
     }
-    static_cast<void>(netchan_stage_->start(
+    if (stop_point_ == HandshakeStopPoint::netchan_bootstrap) {
+        static_cast<void>(netchan_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime)));
+        synchronize_from_netchan();
+        return;
+    }
+    const bool signon_started = signon_stage_->start(
         now,
         *challenge_exchange_.local_endpoint(),
-        std::move(driver_lifetime)));
-    synchronize_from_netchan();
+        std::move(driver_lifetime));
+    synchronize_from_signon();
+    if (!signon_started && state_ == GoldSrcHandshakeState::waiting_for_signon) {
+        // start() is transactional and intentionally leaves the stage idle on
+        // failure. Never turn that idle/error pair into a nonterminal wait.
+        state_ = GoldSrcHandshakeState::protocol_error;
+    }
 }
 
 void GoldSrcHandshakeCoordinator::synchronize_from_netchan()
@@ -593,6 +721,33 @@ void GoldSrcHandshakeCoordinator::synchronize_from_netchan()
     if (netchan_stage_->error() &&
         netchan_stage_->error()->code ==
             NetchanBootstrapErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_signon()
+{
+    if (!signon_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ = "Sign-on mode has no initial sign-on stage";
+        return;
+    }
+    const auto& signon_error = signon_stage_->error();
+    if (signon_stage_->state() == InitialSignonState::idle && signon_error) {
+        if (signon_error->code == InitialSignonErrorCode::invalid_configuration ||
+            signon_error->driver_code ==
+                NetchanDriverErrorCode::invalid_configuration) {
+            state_ = GoldSrcHandshakeState::configuration_error;
+        } else if (signon_start_network_failure(signon_error->driver_code)) {
+            state_ = GoldSrcHandshakeState::network_error;
+        } else {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    state_ = map_signon_state(signon_stage_->state());
+    if (signon_error &&
+        signon_error->code == InitialSignonErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

@@ -17,6 +17,7 @@ enum class ConnectionStopPoint {
     connect_request,
     connect_response,
     netchan_bootstrap,
+    signon_boundary,
 };
 
 enum class AuthenticationProviderKind {

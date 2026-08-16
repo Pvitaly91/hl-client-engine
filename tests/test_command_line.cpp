@@ -171,6 +171,25 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         CHECK(*result.options->authentication_material_file == "auth.bin");
     }
 
+    SECTION("explicit file provider supports the initial sign-on boundary")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"signon-boundary"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::signon_boundary);
+        REQUIRE(result.options->authentication_provider);
+        CHECK(*result.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::file);
+        REQUIRE(result.options->authentication_material_file);
+        CHECK(*result.options->authentication_material_file == "auth.bin");
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -212,6 +231,27 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         const std::array arguments{
             std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
             std::string_view{"--stop-after"}, std::string_view{"netchan-bootstrap"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("--auth-provider file") != std::string::npos);
+    }
+
+    SECTION("sign-on boundary requires local auth file")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"signon-boundary"},
+        };
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+
+    SECTION("sign-on boundary requires explicit file provider selection")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"signon-boundary"},
             std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
         };
         const auto result = parse_command_line(arguments);
@@ -310,12 +350,18 @@ TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
         CHECK(result.error.find("Unknown command-line argument") != std::string::npos);
     }
 
-    SECTION("raw reliable and sign-on injection options remain unavailable")
+    SECTION("raw reliable, service, and sign-on injection options remain unavailable")
     {
         constexpr std::array forbidden{
             std::string_view{"--send-reliable"},
             std::string_view{"--raw-netchan-payload"},
             std::string_view{"--inject-clc"},
+            std::string_view{"--raw-client-message"},
+            std::string_view{"--send-stringcmd"},
+            std::string_view{"--execute-stufftext"},
+            std::string_view{"--raw-svc"},
+            std::string_view{"--skip-auth"},
+            std::string_view{"--no-steam-auth"},
         };
         for (const auto option : forbidden) {
             CAPTURE(option);
@@ -358,6 +404,7 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("--stop-after") != std::string_view::npos);
     CHECK(help.find("connect-response") != std::string_view::npos);
     CHECK(help.find("netchan-bootstrap") != std::string_view::npos);
+    CHECK(help.find("signon-boundary") != std::string_view::npos);
     CHECK(help.find("--auth-provider") != std::string_view::npos);
     CHECK(help.find("file") != std::string_view::npos);
     CHECK(help.find("--auth-material-file") != std::string_view::npos);

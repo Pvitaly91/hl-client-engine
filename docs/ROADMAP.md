@@ -275,8 +275,10 @@ coordinator-owned session. It confirms one canonical outgoing reliable
 send/covering-ACK clear with no extra transmission and one owning incoming
 reliable marker with the correct ACK bit plus duplicate/older delivery once.
 Loss, lost-ACK, and pending A/B remain deterministic driver tests, not further
-real-UDP claims. Live `hlclient` to stock HLDS is still pending because no
-production Steam authentication provider or M2.4 sign-on producer exists.
+real-UDP claims. At the M2.3.2 boundary, live `hlclient` to stock HLDS was also
+blocked by the absence of both a production Steam provider and a typed initial
+sign-on producer. M2.4.1 below supplies only the latter; the live auth gate
+remains.
 
 No production post-bootstrap scheduler or timeout owner is part of M2.3.2. The
 application/coordinator intentionally terminates at
@@ -353,12 +355,32 @@ output contract before resource downloads are enabled.
 See [GoldSrc fragmentation](GOLDSRC_FRAGMENTATION.md) for exact evidence labels,
 limits, fixtures, and APIs.
 
-### M2.4 — Initial sign-on state machine
+### M2.4.1 — Initial request and service-message boundary
+
+**Status: completed for the bounded project/fake-HLDS profile.**
+
+M2.4.1 preserves the same-socket persistent driver after `ACCEPT`, queues the
+stock-confirmed five-byte client request exactly once, completes its normal
+reliable lifecycle, reassembles the first service batch, strictly decodes its
+`BZ2\0` envelope, parses only captured opcode 8 as one bounded owning NUL
+string, and stops at opcode 11/byte offset 42 without parsing its body.
+
+Primary clean-room evidence comprises 6 accepted baselines and 2 accepted runs
+each for dropped initial request, dropped request-covering ACK, and duplicated
+server batch. Deterministic project tests run 20/20 baseline, 20/20
+dropped-request under an explicit ACK-gap stimulus, and 20/20
+fragmented/out-of-order fake-HLDS paths on one UDP socket/source. No autonomous
+time retry is claimed; quiet loss reaches the bounded channel timeout. No
+server text is executed, no resource continuation is sent, and no raw/auth/game
+data is tracked. Live project-to-stock sign-on remains pending a production
+Steam authentication provider and is not implied by this status.
+
+### M2.4.2 — Typed serverinfo and pre-resource sign-on state
 
 **Status: next.**
 
-Parse the minimum serverdata/signon messages into project-owned session state
-and reach a defined pre-resource sign-on point. Resource negotiation, snapshots,
+Parse only the now-bounded complex boundary body into project-owned typed
+serverinfo/pre-resource state. Resource-list negotiation, downloads, snapshots,
 gameplay, and renderer concerns remain later milestones.
 
 ## M3 — Resource and precache pipeline

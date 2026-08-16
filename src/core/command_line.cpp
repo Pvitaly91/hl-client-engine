@@ -76,10 +76,12 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::connect_response;
             } else if (value == "netchan-bootstrap") {
                 options.stop_after = ConnectionStopPoint::netchan_bootstrap;
+            } else if (value == "signon-boundary") {
+                options.stop_after = ConnectionStopPoint::signon_boundary;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
                                " (expected challenge, connect-request, connect-response, "
-                               "or netchan-bootstrap)");
+                               "netchan-bootstrap, or signon-boundary)");
             }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
@@ -108,7 +110,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     if (options.stop_after == ConnectionStopPoint::challenge &&
         connect_request_setting_seen) {
         return failure("--auth-provider, --auth-material-file, --name, and --model require "
-                       "a connect-request, connect-response, or netchan-bootstrap stop point");
+                       "a connect-request, connect-response, netchan-bootstrap, or "
+                       "signon-boundary stop point");
     }
     if (options.authentication_provider && !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
@@ -116,12 +119,15 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     if (options.stop_after != ConnectionStopPoint::challenge &&
         !options.authentication_material_file) {
         return failure(
-            "Connect request, response, and netchan modes require --auth-material-file");
+            "Connect request, response, netchan, and sign-on modes require "
+            "--auth-material-file");
     }
-    if (options.stop_after == ConnectionStopPoint::netchan_bootstrap &&
+    if ((options.stop_after == ConnectionStopPoint::netchan_bootstrap ||
+         options.stop_after == ConnectionStopPoint::signon_boundary) &&
         !options.authentication_provider) {
         return failure(
-            "Netchan bootstrap requires the explicit --auth-provider file selection");
+            "Netchan bootstrap and sign-on require the explicit "
+            "--auth-provider file selection");
     }
     if (options.authentication_material_file && !options.authentication_provider) {
         // Preserve the M2.1/M2.2 spelling where the explicit material path
@@ -144,7 +150,7 @@ Options:
   --connect <ip:port> Start a GoldSrc handshake (challenge-only by default)
   +connect <ip:port>  GoldSrc-style alias for --connect
   --stop-after <stage> Stop after challenge, connect-request, connect-response,
-                       or netchan-bootstrap (default: challenge)
+                       netchan-bootstrap, or signon-boundary (default: challenge)
   --auth-provider <name>
                       Authentication provider for connect stages: file
   --auth-material-file <path>
@@ -156,7 +162,9 @@ Options:
 
 Connect-request mode sends once without waiting. Connect-response mode waits
 boundedly for the immediate connectionless accept/reject only. Netchan-bootstrap
-mode stops before sign-on parsing. No mode implements authentication generation.
+stops on the first owning opaque payload. Signon-boundary sends the one typed
+initial request and stops before the first confirmed complex service-message body.
+No mode implements authentication generation.
 )";
 }
 

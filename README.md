@@ -6,21 +6,26 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has completed the bounded project scope of **M2.3.3: normal
-fragmentation, reassembly, and persistent netchan driver**. Implemented
-M1–M2.3.3 behavior includes the Protocol 48 challenge,
+The repository has completed the bounded project scope of **M2.4.1: initial
+GoldSrc sign-on request and first complex service-message boundary**.
+Implemented M1–M2.4.1 behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`, an explicit
 authentication-provider boundary, same-socket netchan bootstrap, the base wire
 codec/transform, persistent reliable state, a strict two-slot fragment codec,
 transactional slot-0 normal reassembly, deterministic outgoing normal
-fragmentation, and a bounded same-transport `NetchanDriver`. Twelve accepted
+fragmentation, a bounded same-transport `NetchanDriver`, the exact typed
+client-first `new` request, strict `BZ2\0` envelope decompression, one confirmed
+bounded text-control message, and a typed stop before the body of the first
+complex sign-on message. Twelve accepted
 signed-stock research runs confirm the supported descriptor shape and the
 per-fragment ACK/retry behavior; project outgoing multi-fragment C2S scheduling
-is deterministic/tested but remains pending stock verification. Live
-`hlclient` to stock HLDS, slot-1/file semantics, universal compression behavior,
-a Steam authentication provider, `svc_*`/sign-on parsing, resources, snapshots,
-gameplay, and a public raw payload CLI remain unavailable.
+is deterministic/tested but remains pending stock verification. A separate
+twelve-run signed-stock sign-on set confirms the request, reliable lifecycle,
+envelope, opcode order, and boundary. Live `hlclient` to stock HLDS,
+slot-1/file semantics, general `svc_*`/serverinfo parsing, a Steam
+authentication provider, resources, snapshots, gameplay, and a public raw
+payload CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
 ## Reference platform
@@ -219,12 +224,27 @@ deterministic/fake-HLDS tests; live project-to-stock fragmentation remains
 pending.
 
 Stock capture established a client-first post-`ACCEPT` order. The stock
-client's first reliable body is opaque sign-on/application content, so the
-project does not reproduce or disguise it as transport data. Consequently the
-M2.3.1 deterministic bootstrap fixture starts with the server packet. The
-M2.3.2 integration queues only independently constructed test markers after
-bootstrap. Neither is a claim that project `hlclient` can continue against
-stock HLDS.
+client's first reliable semantic bytes are exactly `03 6E 65 77 00`; the
+transport appends three `01` minimum-padding bytes. M2.4.1 reproduces only this
+typed fixed request, never an arbitrary string command. Earlier M2.3.1/M2.3.2
+compatibility fixtures remain unchanged at their own stop points.
+
+The new explicit runtime stop is:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after signon-boundary `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+After `ACCEPT`, the same socket and authentication lifetime pass directly to
+`InitialSignonStage`. It queues the fixed request once, relies on persistent
+netchan retransmission/ACK state, reassembles the first normal stream, strictly
+decodes its `BZ2\0` envelope, parses captured opcode 8 as one bounded owning
+NUL string, and exits successfully at opcode 11/offset 42 without consuming its
+body. No resource/spawn continuation is sent, and server text is not executed
+or printed raw.
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -306,6 +326,25 @@ count. The strengthened wrapper permits only one metadata file with
 `raw_packet_bytes_stored=false`, validates scenario-specific action/accounting
 and cleanup, and never turns a failed cleanup into accepted evidence.
 
+The M2.4.1 sign-on research uses its own metadata-only wrapper:
+
+```powershell
+.\scripts\verify_stock_initial_signon.ps1 `
+  -RelayPath C:\Tools\bounded-signon-relay.ps1 `
+  -HalfLifePath C:\Games\Half-Life\hl.exe `
+  -HldsPath C:\Servers\Half-Life\hlds.exe `
+  -Game valve -Map boot_camp -Port 27520 `
+  -Scenario baseline -TimeoutSeconds 40
+```
+
+Its scenario allowlist is `baseline`, `drop-initial-request`,
+`drop-request-ack`, and `duplicate-server-batch`. The primary evidence contains
+six accepted baselines and two accepted runs for each perturbation. The wrapper
+allows exactly one whitelisted metadata document and forbids raw packets,
+authentication/identity values, server text, decompressed bytes, and game data.
+See [GoldSrc initial sign-on](docs/GOLDSRC_INITIAL_SIGNON.md) for the stable
+request/envelope/opcode facts and the separate fake-HLDS proof.
+
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
 they are licensed to use.
@@ -335,13 +374,13 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
 - `hlclient`;
 - `hlclient_core`, `hlclient_platform`, `hlclient_filesystem`;
 - `hlclient_network`, `hlclient_goldsrc`, `hlclient_goldsrc_netchan`,
-  `hlclient_goldsrc_client`,
+  `hlclient_goldsrc_signon`, `hlclient_goldsrc_client`,
   `hlclient_auth`, `hlclient_app_support`, `hlclient_client`;
 - `hlclient_asset_api`, `hlclient_asset_manager`, `hlclient_scene_api`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
 - `hlclient_tests`;
-- SDL3, Catch2, GLAD2, and the Half-Life SDK reference target under
+- SDL3, bzip2, Catch2, GLAD2, and the Half-Life SDK reference target under
   `ThirdParty`.
 
 See [Architecture](docs/ARCHITECTURE.md),
@@ -351,6 +390,7 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc connect response](docs/GOLDSRC_CONNECT_RESPONSE.md),
 [GoldSrc netchan](docs/GOLDSRC_NETCHAN.md),
 [GoldSrc fragmentation](docs/GOLDSRC_FRAGMENTATION.md),
+[GoldSrc initial sign-on](docs/GOLDSRC_INITIAL_SIGNON.md),
 [Authentication provider](docs/AUTHENTICATION_PROVIDER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
@@ -414,6 +454,14 @@ prove fixed missing-fragment timeout without partial delivery or extra traffic,
 and the typed secondary-stream boundary without payload delivery or persistence.
 These are bounded project tests, not stock interoperability claims. Stock-client
 multi-fragment C2S and live project-to-stock checks remain opt-in/pending.
+M2.4.1 adds strict initial-request, BZ2-envelope, service-stream, text-safety,
+stage, coordinator, and same-socket fake-HLDS coverage. The sign-on fake runs
+20/20 baseline, 20/20 dropped-request under an explicit deterministic ACK-gap
+stimulus, and 20/20 fragmented/out-of-order batch scenarios, stops at the owning
+opcode-11 boundary, and proves no extra/resource datagram after terminal
+success. This is not an autonomous time-retry claim: a quiet peer reaches the
+bounded channel timeout. Signed-stock observations and project-to-fake tests
+are reported separately; live project-to-stock sign-on remains pending.
 
 ## License
 

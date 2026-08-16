@@ -19,6 +19,9 @@ add_executable(hlclient_tests
     test_handshake_connect_response.cpp
     test_handshake_netchan.cpp
     test_info_string.cpp
+    test_initial_signon_request.cpp
+    test_initial_signon_stage.cpp
+    test_initial_signon_udp_integration.cpp
     test_network_address.cpp
     test_netchan_bootstrap.cpp
     test_netchan_driver.cpp
@@ -33,12 +36,15 @@ add_executable(hlclient_tests
     test_netchan_session.cpp
     test_netchan_udp_integration.cpp
     test_scene_source.cpp
+    test_service_message_stream.cpp
+    test_service_payload_envelope.cpp
     test_udp_socket.cpp
 )
 
 target_link_libraries(hlclient_tests
     PRIVATE
         Catch2::Catch2WithMain
+        hlclient::bzip2
         hlclient_app_support
         hlclient_auth
         hlclient_asset_api
@@ -48,6 +54,7 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc
         hlclient_goldsrc_client
         hlclient_goldsrc_netchan
+        hlclient_goldsrc_signon
         hlclient_network
         hlclient_scene_api
         hlclient_renderer_null

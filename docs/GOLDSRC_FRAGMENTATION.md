@@ -6,7 +6,9 @@ M2.3.3 implements the project-owned fragment codec, bounded incoming normal
 reassembly, persistent driver, and deterministic outgoing normal fragmentation.
 It does not make `hlclient` fully stock-compatible: stock multi-fragment
 client-to-server scheduling, slot-1/file semantics, compression conventions,
-live project-client-to-stock-HLDS operation, and sign-on parsing remain pending.
+live project-client-to-stock-HLDS operation, and general sign-on parsing remain
+pending. M2.4.1 recognizes only the separately confirmed first `BZ2\0`
+service envelope after this layer has delivered one owning normal payload.
 
 The labels in this document are strict:
 
@@ -29,9 +31,9 @@ The implemented profile is intentionally narrow:
 | Persistent same-transport `NetchanDriver` | **Project deterministic/tested** |
 | Project outgoing slot-0 fragmentation | **Project deterministic/tested** mirror; stock multi-fragment C2S verification pending |
 | Slot 1 or a file/download interpretation | **Pending**; bytes fail closed before retention |
-| Compression detection/decompression | **Pending**; fragment bytes remain opaque |
+| Compression detection/decompression | **Pending in this layer**; fragment bytes remain opaque, while M2.4.1 strictly decodes only the confirmed first `BZ2\0` envelope above it |
 | Project client to stock HLDS | **Pending** |
-| `svc_*`, sign-on, resources, snapshots, or gameplay | **Pending**, beginning with M2.4 |
+| Service semantics beyond the M2.4.1 opcode-8/opcode-11 boundary, resources, snapshots, or gameplay | **Pending**, beginning with M2.4.2 |
 
 The bounded project integration proof uses real loopback UDP with production
 `UdpDatagramTransport`: M1 challenge, connect, and `ACCEPT` complete before a
@@ -48,11 +50,11 @@ delivery, filesystem persistence, or sequence commit. These are **Project
 deterministic/tested** results, not stock-server interoperability evidence.
 
 The current application/coordinator composes a driver on the same socket and
-owns it through the explicit `--stop-after netchan-bootstrap` boundary. The stop
+owns it through the selected explicit boundary. The `netchan-bootstrap` stop
 completes only after the first unfragmented or supported reassembled slot-0
-opaque payload has been acknowledged. The CLI then terminates; it does not
-expose raw fragment/reliable bytes, enter sign-on, or claim a live stock-HLDS
-channel.
+opaque payload has been acknowledged. The separate `signon-boundary` stop keeps
+the same transport/driver semantics through the bounded M2.4.1 decoder. Neither
+mode exposes raw fragment/reliable bytes or claims a live stock-HLDS channel.
 
 ## Clean-room evidence
 
@@ -466,16 +468,17 @@ The following stay explicit rather than being inferred:
 - an accepted two-run old-after-completion replay scenario;
 - slot-1 semantics, file/download naming, file persistence, and simultaneous
   slot-0/slot-1 traffic;
-- compression markers, framing, decompression limits, and universal stock
-  compression behavior;
+- compression markers/framing beyond the stock-confirmed first M2.4.1
+  `BZ2\0` service envelope, and universal stock compression behavior;
 - stock-client multi-fragment C2S transfer shape, retry order, ACK clearing, and
   interaction with contemporaneous suffix bytes;
 - same-range/same-bytes replay under a fresh admissible sequence;
 - split/special packets and acknowledgement bit 30;
 - a production Steam authentication provider and live project-client-to-stock
   HLDS acceptance/channel proof;
-- M2.4 sign-on parsing and every resource, snapshot, gameplay, and rendering
-  consumer.
+- M2.4.2 boundary-body/serverinfo work and every resource, snapshot, gameplay,
+  and rendering consumer. M2.4.1 now consumes only the reassembled first
+  `BZ2\0` service envelope through its typed opcode-11 stop.
 
 No pending row is filled from a third-party implementation name. Fresh bounded
 capture takes priority over earlier assumptions and secondary behavioral
