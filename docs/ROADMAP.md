@@ -441,13 +441,44 @@ See
 
 **Goal:** negotiate, validate, and prepare the server-required resource set.
 
-### M3.1 — Resource-list discovery and bounded codec
+### M3.1.1 — User-info and neutral resource-transition boundary
 
-**Status: next; not started.**
+**Status: completed for the bounded opcode-13, exact request, opcode-45, and
+neutral opcode-43 boundary scope.**
 
-Discover and freeze the bounded opcode-13/later resource-transition grammar,
-then implement only an owning resource-list codec after the evidence gate.
-M2.4.4 contains neither that parser nor a client resource command.
+M3.1.1 retains the same M2.4.4 socket, driver, first service payload, exact
+endpoint, and authentication lifetime. It implements the independently
+confirmed opcode-13 grammar as ordered immutable `UserInfoUpdateState`
+messages: zero-based `u8` client index, private `u32le` user ID, dedicated
+bounded leading-backslash key/value string, NUL, and a private fixed 16-byte
+opaque suffix. The public `user-info` stop requires exact first-batch end and
+sends nothing.
+
+The transition stage queues only the exact nine-byte typed
+`03 "sendres" 00` request once and delegates retry/ACK behavior to the
+persistent netchan driver. It reassembles and decodes the bounded later
+`BZ2\0` transfer, consumes opcode 45 plus its exact eight-byte private/zero
+body, and stops at numeric opcode 43 with its body untouched. Deterministic
+project tests cover 20/20 baseline, 20/20 dropped-request, 20/20 fragmented
+second-transfer, and 20/20 repeated-user-info cases.
+
+The pinned public Valve headers do not map numeric opcode 43 to a resource-list
+service message. The strict semantic gate is therefore not passed: production
+uses `Opcode43Boundary` and `neutral_opcode43_boundary_reached`, even though
+the CLI stop spelling is `resource-list-boundary`. There is no opcode-43 body
+parser, resource response, filesystem action, download, cache, precache, asset
+load, or renderer work. See [GoldSrc user info](GOLDSRC_USERINFO.md) and
+[GoldSrc resource transition](GOLDSRC_RESOURCE_TRANSITION.md).
+
+### M3.1.2 — Opcode-43 resource-list discovery and bounded codec
+
+**Status: next; evidence and implementation pending.**
+
+Independently establish the numeric/header semantic mapping and exact
+opcode-43 body grammar before introducing a `ResourceListBoundary` or
+`ResourceListState`. The future parser must remain bounded and owning, stop at
+exact cursors, and must not send consistency/resource responses until their
+own wire evidence and policy are complete.
 
 ### M3.2 — Local resource resolution and precache state
 

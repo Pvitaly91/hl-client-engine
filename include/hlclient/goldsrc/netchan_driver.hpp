@@ -52,6 +52,12 @@ struct NetchanDriverConfig {
     std::chrono::milliseconds fragment_transfer_timeout{
         kDefaultNetchanFragmentTransferTimeout};
     std::size_t maximum_datagram_size{kDefaultNetchanDatagramSize};
+    // Optional session overrides keep existing callers' datagram-derived
+    // unfragmented limit and project hard-cap pending limit by default.
+    // Constrained embedders can lower both without changing datagram or
+    // fragment geometry.
+    std::optional<std::size_t> maximum_unfragmented_reliable_payload;
+    std::optional<std::size_t> maximum_pending_reliable_payload;
     std::size_t maximum_fragment_datagram_size{
         kDefaultNetchanFragmentDatagramSize};
     std::size_t maximum_fragment_payload_size{

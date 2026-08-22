@@ -141,10 +141,53 @@ MovementEnvironmentStage::MovementEnvironmentStage(
     PreResourceSignonTraceCallback pre_resource_trace_callback,
     DeltaDescriptionTraceCallback delta_trace_callback,
     MovementEnvironmentTraceCallback trace_callback)
+    : MovementEnvironmentStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(trace_callback),
+          false}
+{
+}
+
+MovementEnvironmentStage::MovementEnvironmentStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    MovementEnvironmentStageConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : MovementEnvironmentStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(trace_callback),
+          true}
+{
+}
+
+MovementEnvironmentStage::MovementEnvironmentStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    MovementEnvironmentStageConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback trace_callback,
+    const bool retain_connection_at_boundary)
     : config_{std::move(config)},
       trace_callback_{std::move(trace_callback)},
       configuration_valid_{
           valid_movement_environment_stage_configuration(config_)},
+      retain_connection_at_boundary_{retain_connection_at_boundary},
       delta_stage_{
           transport,
           remote_endpoint,
@@ -551,13 +594,38 @@ void MovementEnvironmentStage::decode_retained_move_vars_stream(
 
     const auto& boundary = result_->boundary();
     state_ = MovementEnvironmentStageState::post_environment_boundary_reached;
-    delta_stage_.finalize_retained_boundary(now);
+    if (!retain_connection_at_boundary_) {
+        delta_stage_.finalize_retained_boundary(now);
+    }
     emit_trace(
         trace_for_terminal_state(state_),
         0U,
         boundary.opcode(),
         boundary.byte_offset(),
         boundary.remaining_byte_count());
+}
+
+const OwnedServicePayload*
+MovementEnvironmentStage::retained_source_payload() const noexcept
+{
+    if (!retain_connection_at_boundary_) {
+        return nullptr;
+    }
+    return delta_stage_.retained_source_payload();
+}
+
+NetchanDriver* MovementEnvironmentStage::retained_driver() noexcept
+{
+    if (!retain_connection_at_boundary_) {
+        return nullptr;
+    }
+    return delta_stage_.retained_driver();
+}
+
+void MovementEnvironmentStage::finalize_retained_boundary(
+    const MovementEnvironmentStageTimePoint now) noexcept
+{
+    delta_stage_.finalize_retained_boundary(now);
 }
 
 void MovementEnvironmentStage::fail_from_delta() noexcept

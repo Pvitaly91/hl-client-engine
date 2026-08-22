@@ -546,6 +546,14 @@ DeltaDescriptionStage::retained_source_payload() const noexcept
     return pre_resource_stage_.retained_source_payload();
 }
 
+NetchanDriver* DeltaDescriptionStage::retained_driver() noexcept
+{
+    if (!retain_connection_at_boundary_) {
+        return nullptr;
+    }
+    return pre_resource_stage_.retained_driver();
+}
+
 void DeltaDescriptionStage::finalize_retained_boundary(
     const DeltaDescriptionStageTimePoint now) noexcept
 {

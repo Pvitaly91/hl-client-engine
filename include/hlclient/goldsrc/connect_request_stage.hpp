@@ -9,6 +9,8 @@
 #include <hlclient/goldsrc/movement_environment_stage.hpp>
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 #include <hlclient/goldsrc/pre_resource_signon_stage.hpp>
+#include <hlclient/goldsrc/resource_transition_stage.hpp>
+#include <hlclient/goldsrc/user_info_signon_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
 
@@ -32,6 +34,8 @@ enum class HandshakeStopPoint {
     pre_resource,
     delta_schemas,
     movevars,
+    user_info,
+    resource_list_boundary,
 };
 
 enum class ConnectRequestStageState {
@@ -161,6 +165,18 @@ enum class GoldSrcHandshakeState {
     movevars_unsupported_message,
     movevars_backpressure,
     movevars_secondary_stream_pending_m3,
+    waiting_for_user_info,
+    user_info_complete,
+    user_info_timed_out,
+    user_info_unsupported_message,
+    user_info_backpressure,
+    user_info_secondary_stream_pending,
+    waiting_for_resource_transition,
+    resource_transition_boundary_reached,
+    resource_transition_timed_out,
+    resource_transition_unsupported_message,
+    resource_transition_backpressure,
+    resource_transition_secondary_stream_pending,
     timed_out,
     cancelled,
     configuration_error,
@@ -190,7 +206,11 @@ public:
         DeltaDescriptionStageConfig delta_config = {},
         DeltaDescriptionTraceCallback delta_trace_callback = {},
         MovementEnvironmentStageConfig movement_environment_config = {},
-        MovementEnvironmentTraceCallback movement_environment_trace_callback = {});
+        MovementEnvironmentTraceCallback movement_environment_trace_callback = {},
+        UserInfoSignonStageConfig user_info_config = {},
+        UserInfoSignonTraceCallback user_info_trace_callback = {},
+        ResourceTransitionStageConfig resource_transition_config = {},
+        ResourceTransitionTraceCallback resource_transition_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -224,6 +244,14 @@ public:
     movement_environment_result() const noexcept;
     [[nodiscard]] const std::optional<MovementEnvironmentStageError>&
     movement_environment_error() const noexcept;
+    [[nodiscard]] const std::optional<UserInfoSignonState>&
+    user_info_result() const noexcept;
+    [[nodiscard]] const std::optional<UserInfoSignonStageError>&
+    user_info_error() const noexcept;
+    [[nodiscard]] const std::optional<ResourceTransitionState>&
+    resource_transition_result() const noexcept;
+    [[nodiscard]] const std::optional<ResourceTransitionStageError>&
+    resource_transition_error() const noexcept;
     // Non-null only after a successful netchan bootstrap. The returned object
     // is the same session that committed the M2.3.3 bootstrap ACKs; callers must use
     // the coordinator's original externally-owned datagram transport.
@@ -241,6 +269,8 @@ private:
     void synchronize_from_pre_resource();
     void synchronize_from_delta_description();
     void synchronize_from_movement_environment();
+    void synchronize_from_user_info();
+    void synchronize_from_resource_transition();
     void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
@@ -252,6 +282,8 @@ private:
     std::optional<PreResourceSignonStage> pre_resource_stage_;
     std::optional<DeltaDescriptionStage> delta_description_stage_;
     std::optional<MovementEnvironmentStage> movement_environment_stage_;
+    std::optional<UserInfoSignonStage> user_info_stage_;
+    std::optional<ResourceTransitionStage> resource_transition_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;

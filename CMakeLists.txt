@@ -182,9 +182,14 @@ hlclient_add_library(
     include/hlclient/goldsrc/move_vars.hpp
     include/hlclient/goldsrc/movement_environment_stage.hpp
     include/hlclient/goldsrc/pre_resource_signon_stage.hpp
+    include/hlclient/goldsrc/resource_transition_control.hpp
+    include/hlclient/goldsrc/resource_transition_request.hpp
+    include/hlclient/goldsrc/resource_transition_stage.hpp
     include/hlclient/goldsrc/server_info.hpp
     include/hlclient/goldsrc/service_message_stream.hpp
     include/hlclient/goldsrc/service_payload_envelope.hpp
+    include/hlclient/goldsrc/user_info_signon_stage.hpp
+    include/hlclient/goldsrc/user_info_update.hpp
     src/goldsrc/bit_reader.cpp
     src/goldsrc/client_message.cpp
     src/goldsrc/delta_description.cpp
@@ -193,9 +198,14 @@ hlclient_add_library(
     src/goldsrc/move_vars.cpp
     src/goldsrc/movement_environment_stage.cpp
     src/goldsrc/pre_resource_signon_stage.cpp
+    src/goldsrc/resource_transition_control.cpp
+    src/goldsrc/resource_transition_request.cpp
+    src/goldsrc/resource_transition_stage.cpp
     src/goldsrc/server_info.cpp
     src/goldsrc/service_message_stream.cpp
     src/goldsrc/service_payload_envelope.cpp
+    src/goldsrc/user_info_signon_stage.cpp
+    src/goldsrc/user_info_update.cpp
 )
 add_library(hlclient::goldsrc_signon ALIAS hlclient_goldsrc_signon)
 target_link_libraries(

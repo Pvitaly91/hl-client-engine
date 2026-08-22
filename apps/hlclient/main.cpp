@@ -807,6 +807,116 @@ void log_movement_environment_trace(
     }
 }
 
+void log_user_info_trace(
+    const hlclient::goldsrc::UserInfoSignonTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::UserInfoSignonTraceClassification;
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::movevars_boundary_reached:
+        return;
+    case Classification::user_info_message_decoded:
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] user-info message decoded: message-index=" +
+                std::to_string(event.message_index) +
+                " info-bytes=" + std::to_string(event.info_string_length) +
+                " entries=" + std::to_string(event.info_entry_count) +
+                " player-name-length=" +
+                (event.player_name_length
+                     ? std::to_string(*event.player_name_length)
+                     : std::string{"unavailable"}));
+        return;
+    case Classification::first_batch_complete:
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] user-info messages decoded: count=" +
+                std::to_string(event.message_count));
+        return;
+    case Classification::stage_cancelled:
+        hlclient::core::log(LogLevel::error, "User-info stage cancelled");
+        return;
+    case Classification::stage_timed_out:
+        hlclient::core::log(LogLevel::error, "User-info stage timed out");
+        return;
+    case Classification::unsupported_message:
+        hlclient::core::log(LogLevel::error, "Unsupported user-info continuation");
+        return;
+    case Classification::backpressure:
+        hlclient::core::log(LogLevel::error, "User-info event backpressure");
+        return;
+    case Classification::secondary_stream_pending:
+        hlclient::core::log(LogLevel::error, "Secondary stream remains pending");
+        return;
+    case Classification::network_failure:
+        hlclient::core::log(LogLevel::error, "User-info network failure");
+        return;
+    case Classification::protocol_failure:
+        hlclient::core::log(LogLevel::error, "User-info protocol failure");
+        return;
+    }
+}
+
+void log_resource_transition_trace(
+    const hlclient::goldsrc::ResourceTransitionTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::ResourceTransitionTraceClassification;
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::user_info_ready:
+        return;
+    case Classification::transition_request_queued:
+        hlclient::core::log(LogLevel::info, "[resource] transition request queued");
+        return;
+    case Classification::transition_request_transmitted:
+        return;
+    case Classification::transition_request_acknowledged:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] transition request acknowledged");
+        return;
+    case Classification::second_service_transfer_received:
+        return;
+    case Classification::transition_control_decoded:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] transition control decoded, bytes=" +
+                std::to_string(event.byte_count));
+        return;
+    case Classification::neutral_opcode43_boundary_reached:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] neutral opcode-43 boundary opcode=" +
+                std::to_string(static_cast<unsigned int>(
+                    event.opcode.value_or(0U))) +
+                " offset=" + std::to_string(event.byte_offset));
+        return;
+    case Classification::stage_cancelled:
+        hlclient::core::log(LogLevel::error, "Resource-transition stage cancelled");
+        return;
+    case Classification::stage_timed_out:
+        hlclient::core::log(LogLevel::error, "Resource-transition stage timed out");
+        return;
+    case Classification::unsupported_message:
+        hlclient::core::log(LogLevel::error, "Unsupported resource-transition message");
+        return;
+    case Classification::backpressure:
+        hlclient::core::log(LogLevel::error, "Resource-transition event backpressure");
+        return;
+    case Classification::secondary_stream_pending:
+        hlclient::core::log(LogLevel::error, "Secondary resource stream remains pending");
+        return;
+    case Classification::network_failure:
+        hlclient::core::log(LogLevel::error, "Resource-transition network failure");
+        return;
+    case Classification::protocol_failure:
+        hlclient::core::log(LogLevel::error, "Resource-transition protocol failure");
+        return;
+    }
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -1143,6 +1253,94 @@ void log_movement_environment_trace(
             LogLevel::error,
             "Unconfirmed secondary stream remains pending M3");
         return 1;
+    case State::user_info_complete:
+    {
+        if (!handshake.user_info_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "User-info sign-on completed without an owning result");
+            return 1;
+        }
+        const auto& result = *handshake.user_info_result();
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] user-info messages decoded: count=" +
+                std::to_string(result.message_count()));
+        for (const auto& message : result.messages()) {
+            hlclient::core::log(
+                LogLevel::info,
+                "[signon] user-info info-bytes=" +
+                    std::to_string(message.info_string_length()) +
+                    " entries=" + std::to_string(message.info_entry_count()) +
+                    " player-name-length=" +
+                    (message.player_name_length()
+                         ? std::to_string(*message.player_name_length())
+                         : std::string{"unavailable"}));
+        }
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] first service batch complete at offset=" +
+                std::to_string(result.completion().final_byte_offset()) +
+                "; no resource-transition request was sent");
+        return 0;
+    }
+    case State::user_info_timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc user-info stage timed out");
+        return 1;
+    case State::user_info_unsupported_message:
+        hlclient::core::log(LogLevel::error, "Unsupported user-info continuation");
+        return 1;
+    case State::user_info_backpressure:
+        hlclient::core::log(LogLevel::error, "User-info event queue reached its hard bound");
+        return 1;
+    case State::user_info_secondary_stream_pending:
+        hlclient::core::log(LogLevel::error, "Secondary stream remains pending");
+        return 1;
+    case State::resource_transition_boundary_reached:
+    {
+        if (!handshake.resource_transition_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Resource transition completed without an owning result");
+            return 1;
+        }
+        const auto& result = *handshake.resource_transition_result();
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] transition request acknowledged");
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] transition control decoded, bytes=" +
+                std::to_string(result.control().body_bytes()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] neutral opcode-43 boundary opcode=" +
+                std::to_string(static_cast<unsigned int>(
+                    result.boundary().opcode())) +
+                " offset=" + std::to_string(result.boundary().byte_offset()) +
+                " unconsumed-body=" +
+                std::to_string(result.boundary().remaining_byte_count()) +
+                " bytes");
+        hlclient::core::log(
+            LogLevel::info,
+            "Opcode-43 semantics remain evidence-gated; its body was not parsed "
+            "and no resource response was sent");
+        return 0;
+    }
+    case State::resource_transition_timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc resource transition timed out");
+        return 1;
+    case State::resource_transition_unsupported_message:
+        hlclient::core::log(LogLevel::error, "Unsupported resource-transition message");
+        return 1;
+    case State::resource_transition_backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Resource-transition event queue reached its hard bound");
+        return 1;
+    case State::resource_transition_secondary_stream_pending:
+        hlclient::core::log(LogLevel::error, "Secondary resource stream remains pending");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -1169,6 +1367,8 @@ void log_movement_environment_trace(
     case State::waiting_for_pre_resource:
     case State::waiting_for_delta_schemas:
     case State::waiting_for_movevars:
+    case State::waiting_for_user_info:
+    case State::waiting_for_resource_transition:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -1250,7 +1450,17 @@ public:
                 net_trace
                     ? hlclient::goldsrc::MovementEnvironmentTraceCallback{
                           &log_movement_environment_trace}
-                    : hlclient::goldsrc::MovementEnvironmentTraceCallback{}}
+                    : hlclient::goldsrc::MovementEnvironmentTraceCallback{},
+                {},
+                net_trace
+                    ? hlclient::goldsrc::UserInfoSignonTraceCallback{
+                          &log_user_info_trace}
+                    : hlclient::goldsrc::UserInfoSignonTraceCallback{},
+                {},
+                net_trace
+                    ? hlclient::goldsrc::ResourceTransitionTraceCallback{
+                          &log_resource_transition_trace}
+                    : hlclient::goldsrc::ResourceTransitionTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -1563,6 +1773,13 @@ int run(const hlclient::core::CommandLineOptions& options)
             break;
         case hlclient::core::ConnectionStopPoint::movevars:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::movevars;
+            break;
+        case hlclient::core::ConnectionStopPoint::user_info:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::user_info;
+            break;
+        case hlclient::core::ConnectionStopPoint::resource_list_boundary:
+            stop_point =
+                hlclient::goldsrc::HandshakeStopPoint::resource_list_boundary;
             break;
         }
         challenge_session = std::make_unique<HandshakeSession>(

@@ -332,6 +332,16 @@ TEST_CASE("Netchan driver configuration has explicit hard limits",
     at_limit.maximum_datagram_size = goldsrc::kMaximumNetchanDatagramSize;
     CHECK(goldsrc::valid_configuration(at_limit));
     at_limit = test_config();
+    at_limit.maximum_unfragmented_reliable_payload = 5U;
+    at_limit.maximum_pending_reliable_payload = 5U;
+    CHECK(goldsrc::valid_configuration(at_limit));
+    at_limit = test_config();
+    at_limit.maximum_unfragmented_reliable_payload =
+        at_limit.maximum_datagram_size - goldsrc::kNetchanHeaderSize;
+    at_limit.maximum_pending_reliable_payload =
+        goldsrc::kMaximumPendingReliablePayload;
+    CHECK(goldsrc::valid_configuration(at_limit));
+    at_limit = test_config();
     at_limit.maximum_datagram_size = goldsrc::kMaximumNetchanDatagramSize;
     at_limit.maximum_fragment_datagram_size =
         goldsrc::kMaximumNetchanFragmentDatagramSize;
@@ -396,6 +406,24 @@ TEST_CASE("Netchan driver configuration has explicit hard limits",
     invalid(config);
     config = test_config();
     config.maximum_datagram_size = goldsrc::kMaximumNetchanDatagramSize + 1U;
+    invalid(config);
+    config = test_config();
+    config.maximum_unfragmented_reliable_payload = 0U;
+    invalid(config);
+    config = test_config();
+    config.maximum_unfragmented_reliable_payload =
+        config.maximum_datagram_size - goldsrc::kNetchanHeaderSize + 1U;
+    invalid(config);
+    config = test_config();
+    config.maximum_pending_reliable_payload = 0U;
+    invalid(config);
+    config = test_config();
+    config.maximum_pending_reliable_payload =
+        goldsrc::kMaximumPendingReliablePayload + 1U;
+    invalid(config);
+    config = test_config();
+    config.maximum_unfragmented_reliable_payload = 5U;
+    config.maximum_pending_reliable_payload = 4U;
     invalid(config);
     config = test_config();
     config.maximum_fragment_datagram_size =

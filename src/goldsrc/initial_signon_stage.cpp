@@ -465,6 +465,15 @@ public:
     }
     [[nodiscard]] const NetchanDriver* driver() const noexcept { return driver_.get(); }
 
+    [[nodiscard]] NetchanDriver* retained_driver() noexcept
+    {
+        if (!retain_connection_at_boundary_ ||
+            state_ != InitialSignonState::signon_boundary_reached || cleanup_done_) {
+            return nullptr;
+        }
+        return driver_.get();
+    }
+
     void finalize_retained_boundary(const InitialSignonTimePoint now) noexcept
     {
         if (!retain_connection_at_boundary_ ||
@@ -1079,6 +1088,11 @@ std::size_t InitialSignonStage::request_queue_count() const noexcept
 const NetchanDriver* InitialSignonStage::driver() const noexcept
 {
     return implementation_->driver();
+}
+
+NetchanDriver* InitialSignonStage::retained_driver() noexcept
+{
+    return implementation_->retained_driver();
 }
 
 void InitialSignonStage::finalize_retained_boundary(

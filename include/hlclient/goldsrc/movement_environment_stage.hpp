@@ -14,6 +14,8 @@
 
 namespace hlclient::goldsrc {
 
+class UserInfoSignonStage;
+
 using MovementEnvironmentStageClock = DeltaDescriptionStageClock;
 using MovementEnvironmentStageTimePoint = DeltaDescriptionStageTimePoint;
 
@@ -197,6 +199,32 @@ public:
     [[nodiscard]] std::size_t request_queue_count() const noexcept;
 
 private:
+    friend class UserInfoSignonStage;
+
+    struct RetainConnectionAtBoundary final {};
+
+    MovementEnvironmentStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        MovementEnvironmentStageConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+    MovementEnvironmentStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        MovementEnvironmentStageConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback trace_callback,
+        bool retain_connection_at_boundary);
+
+    [[nodiscard]] const OwnedServicePayload* retained_source_payload() const noexcept;
+    [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    void finalize_retained_boundary(MovementEnvironmentStageTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count) const noexcept;
     void push_event(MovementEnvironmentStageEvent event) noexcept;
     void drain_delta_events() noexcept;
@@ -232,6 +260,7 @@ private:
     MovementEnvironmentTraceCallback trace_callback_;
     bool trace_callback_active_{false};
     bool configuration_valid_{false};
+    bool retain_connection_at_boundary_{false};
     DeltaDescriptionStage delta_stage_;
     std::vector<std::optional<MovementEnvironmentStageEvent>> event_slots_;
     std::size_t event_head_{0U};

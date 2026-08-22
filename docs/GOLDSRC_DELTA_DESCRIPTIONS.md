@@ -237,8 +237,10 @@ project-client-to-stock-server claim.
 
 - opcode-44 interpretation inside M2.4.3 (implemented only by the separate
   M2.4.4 continuation);
-- resource count/entries, consistency data, resource response, precache, or
-  download behavior;
+- opcode-13 and resource-transition interpretation inside M2.4.3 (implemented
+  only by the later M3.1.1 continuation);
+- opcode-43 body semantics, resource count/entries, consistency data, resource
+  response, precache, or download behavior;
 - runtime use of the registry for entity/clientdata/usercmd/snapshot decoding;
 - live project-client-to-stock-HLDS sign-on, pending a production Steam
   authentication provider;
@@ -246,6 +248,8 @@ project-client-to-stock-server claim.
   their transport behavior is covered by earlier accepted evidence and current
   deterministic integration, but no new raw delta projection is claimed.
 
-See [GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md) for M2.4.4. The
-next milestone after that continuation is M3.1: resource-list discovery and a
-bounded codec; neither milestone changes this layer's historical stop.
+See [GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md) for M2.4.4,
+[GoldSrc user info](GOLDSRC_USERINFO.md), and
+[GoldSrc resource transition](GOLDSRC_RESOURCE_TRANSITION.md) for M3.1.1.
+M3.1.2 resource-list body discovery remains next; none of these continuations
+changes this layer's historical stop.

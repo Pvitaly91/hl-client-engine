@@ -124,11 +124,34 @@ static_assert(std::is_nothrow_move_constructible_v<NetchanDriverEvent>);
         config.maximum_datagram_size > kMaximumNetchanDatagramSize) {
         return {};
     }
+    const auto maximum_body_size =
+        config.maximum_datagram_size - kNetchanHeaderSize;
     return NetchanSessionLimits{
         config.maximum_datagram_size,
-        config.maximum_datagram_size - kNetchanHeaderSize,
-        kMaximumPendingReliablePayload,
+        config.maximum_unfragmented_reliable_payload.value_or(
+            maximum_body_size),
+        config.maximum_pending_reliable_payload.value_or(
+            kMaximumPendingReliablePayload),
     };
+}
+
+[[nodiscard]] bool valid_session_limits_for(
+    const NetchanDriverConfig& config) noexcept
+{
+    const auto limits = session_limits_for(config);
+    if (limits.maximum_datagram_size <
+            kNetchanHeaderSize + kStockProtocol48MinimumDecodedPayloadSize ||
+        limits.maximum_datagram_size > kMaximumNetchanDatagramSize) {
+        return false;
+    }
+    const auto maximum_body_size =
+        limits.maximum_datagram_size - kNetchanHeaderSize;
+    return limits.maximum_unfragmented_reliable_payload > 0U &&
+           limits.maximum_unfragmented_reliable_payload <= maximum_body_size &&
+           limits.maximum_pending_reliable_payload >=
+               limits.maximum_unfragmented_reliable_payload &&
+           limits.maximum_pending_reliable_payload <=
+               kMaximumPendingReliablePayload;
 }
 
 [[nodiscard]] NetchanReassemblyLimits reassembly_limits_for(
@@ -179,7 +202,8 @@ static_assert(std::is_nothrow_move_constructible_v<NetchanDriverEvent>);
 
 bool valid_configuration(const NetchanDriverConfig& config) noexcept
 {
-    if (config.channel_inactivity_timeout <= std::chrono::milliseconds::zero() ||
+    if (!valid_session_limits_for(config) ||
+        config.channel_inactivity_timeout <= std::chrono::milliseconds::zero() ||
         config.channel_inactivity_timeout > kMaximumNetchanChannelInactivityTimeout ||
         config.fragment_transfer_timeout <= std::chrono::milliseconds::zero() ||
         config.fragment_transfer_timeout > kMaximumNetchanFragmentTransferTimeout ||

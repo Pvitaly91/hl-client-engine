@@ -242,7 +242,8 @@ skip/bypass, download, or arbitrary server-command CLI options.
 - opcode-14 body is not parsed, copied into typed state, or scanned;
 - server text and metadata strings are not executed or printed raw;
 - no resource command, resource-list parser, download, filesystem action,
-  renderer mutation, client world state, or M3 implementation exists;
+  renderer mutation, client world state, or later-stage state exists inside
+  the M2.4.2 parser/stage;
 - no stock binary, raw capture, auth material, opaque fixed-field value,
   map-list text, or game data is tracked.
 
@@ -253,8 +254,9 @@ skip/bypass, download, or arbitrary server-command CLI options.
   M2.4.3 delta-description sequence; M2.4.2 retains its original stop behavior;
 - the numeric opcode-44 body following delta schemas is now the independently
   confirmed M2.4.4 movement/environment metadata codec;
-- the later `sendres` tail is observed stock behavior but remains deliberately
-  absent from the project client;
+- the later `sendres` prefix is now independently confirmed and implemented
+  only by the separate M3.1.1 transition stage; this M2.4.2 stop still sends
+  nothing;
 - the map/mode-dependent `u32` and fixed 16-byte value remain opaque;
 - the fourth NUL string is cursor-bounded but not public semantic state;
 - live project-client to stock-HLDS pre-resource sign-on remains pending a
@@ -262,6 +264,8 @@ skip/bypass, download, or arbitrary server-command CLI options.
 
 See [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md) and
 [GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md) for the M2.4.3 and
-M2.4.4 continuations. The next planned implementation milestone is M3.1,
-resource-list discovery and a bounded body codec beyond the neutral
-post-movevars boundary.
+M2.4.4 continuations. [GoldSrc user info](GOLDSRC_USERINFO.md) and
+[GoldSrc resource transition](GOLDSRC_RESOURCE_TRANSITION.md) document the
+separate M3.1.1 continuation through exact first-batch end and the neutral
+opcode-43 boundary. M3.1.2 resource-list body discovery remains next; no later
+milestone changes this layer's historical stop.

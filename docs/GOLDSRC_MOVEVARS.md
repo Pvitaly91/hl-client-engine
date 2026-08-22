@@ -182,16 +182,17 @@ to recover the stream.
 
 ## Resource-list status
 
-No accepted first stock service batch contains opcode 43. A bounded stock
-relay separately completed the later six-fragment transfer: its decompressed
-payload starts with opcode 45, has eight bytes before the next exact cursor,
-and reaches opcode 43 at offset 9 with the opcode-43 body untouched. That is
-useful candidate-boundary evidence, but stock-client traffic requests this
-later continuation with `sendres`; it is not the next server message in the
-retained first batch. The pinned public Valve SDK supplies no numeric service
-constant mapping opcode 43, and its body behavior is still intentionally
-unknown, so the strict resource semantic gate is not satisfied. This project
-milestone is also explicitly forbidden from sending that request.
+No accepted first stock service batch contains opcode 43. M3.1.1 now parses the
+opcode-13 sequence after this layer and proves exact first-batch end. A bounded
+stock relay separately completed the later six-fragment transfer: its
+decompressed payload starts with opcode 45, has eight bytes before the next
+exact cursor, and reaches opcode 43 at offset 9 with the opcode-43 body
+untouched. Stock-client traffic requests that later continuation with the
+independently confirmed nine-byte `sendres` request; it is not the next server
+message in the retained first batch. The pinned public Valve SDK supplies no
+numeric service constant mapping opcode 43, so the strict resource-list
+semantic gate remains unsatisfied. The M2.4.4 stop itself is still explicitly
+forbidden from sending the request.
 
 M2.4.4 therefore exposes an honest `PostMoveVarsBoundary` at opcode 13 rather
 than pretending that the first-batch cursor is a `ResourceListBoundary`. The
@@ -204,9 +205,12 @@ parses the boundary body. The separately observed numeric opcode-43 candidate
 body also remains entirely unparsed and is not exposed as a
 `ResourceListBoundary`.
 
-Consequently M3.1 remains the resource-list discovery and bounded-codec
-milestone. No resource count, entry, consistency data, local resolution,
-download, precache, `sendres`, or resource response exists here.
+M3.1.1 therefore exposes neutral `Opcode43Boundary`, not
+`ResourceListBoundary`, after the separately typed request/control lifecycle.
+No resource count, entry, consistency data, local resolution, download,
+precache, or resource response exists there or here. See
+[GoldSrc user info](GOLDSRC_USERINFO.md) and
+[GoldSrc resource transition](GOLDSRC_RESOURCE_TRANSITION.md).
 
 ## Ownership and isolation
 
@@ -283,6 +287,18 @@ The explicit composition-root route is:
 
 There is no CLI option to set, override, apply, skip, or inject raw movevars,
 and the existing earlier stop points preserve their behavior.
+
+## M3.1.1 continuation
+
+The separate `--stop-after user-info` route retains the exact M2.4.4 payload,
+parses one or more consecutive opcode-13 messages, requires exact first-batch
+end, and sends nothing. `--stop-after resource-list-boundary` may then retain
+the same socket/driver/authentication lifetime, queue only the exact typed
+nine-byte transition request, decode the later `BZ2\0` payload and fixed
+opcode-45 control, and terminate at neutral opcode 43. The CLI spelling does
+not imply that a typed resource-list body exists. Opcode 43 is validated at
+the exact cursor and remains unconsumed; all body bytes remain unread and
+unparsed, and no response is sent.
 
 ## Deliberately absent
 

@@ -214,6 +214,7 @@ private:
         bool retain_connection_at_boundary);
 
     [[nodiscard]] const OwnedServicePayload* retained_source_payload() const noexcept;
+    [[nodiscard]] NetchanDriver* retained_driver() noexcept;
     void finalize_retained_boundary(DeltaDescriptionStageTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count) const noexcept;
     void push_event(DeltaDescriptionStageEvent event) noexcept;

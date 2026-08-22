@@ -7,34 +7,33 @@ simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
 The repository has implemented the bounded project scope of
-**M2.4.4: owning GoldSrc movement-environment sign-on metadata**. The earlier
-M2.4.2 single-client evidence gap remains: the local stock environment could not
-produce a second-client handshake to identify one opaque server-info slot
-candidate. Implemented M1–M2.4.4 behavior includes the Protocol 48 challenge,
-captured one-shot `connect` request, strict immediate connectionless
-`ACCEPT`/`REJECT`, an explicit
-authentication-provider boundary, same-socket netchan bootstrap, the base wire
-codec/transform, persistent reliable state, a strict two-slot fragment codec,
-transactional slot-0 normal reassembly, deterministic outgoing normal
-fragmentation, a bounded same-transport `NetchanDriver`, the exact typed
-client-first `new` request, strict `BZ2\0` envelope decompression, one confirmed
-bounded text-control message, a strict typed opcode-11 server-info parser, one
-neutral post-serverinfo control, seven ordered owning delta schemas, a strict
-opcode-44 movement/environment state, confirmed simple post-movevars controls,
-and an exact neutral stop before the opcode-13 body. Twelve accepted
-signed-stock research runs confirm the supported descriptor shape and the
-per-fragment ACK/retry behavior; project outgoing multi-fragment C2S scheduling
-is deterministic/tested but remains pending stock verification. A separate
-12-run signed-stock sign-on set confirms the request, reliable lifecycle,
-envelope, opcode order, and initial boundary. A separate 16-run differential
-set confirms the server-info grammar, exposed fields, dynamic cursor, and
-post-serverinfo order; the same 16 ignored canonical payloads independently
-confirm the opcode-14 delta grammar and stable 219-field registry; they also
-confirm the exact opcode-44 body geometry. The pinned public Valve SDK provides
-the independent movement-variable semantic cross-check. Live `hlclient` to
-stock HLDS, slot-1/file semantics, general `svc_*` parsing, a Steam
-authentication provider, resource-list bodies, snapshots, gameplay, and a public raw
-payload CLI remain unavailable.
+**M3.1.1: owning opcode-13 user-info metadata, the exact resource-transition
+request, strict opcode-45 control, and a neutral opcode-43 boundary**. The
+resource-list semantic/body gate is deliberately not passed: production stops
+before opcode 43's body and exposes `Opcode43Boundary`, not
+`ResourceListBoundary`.
+
+Implemented M1–M3.1.1 behavior includes the Protocol 48 challenge, captured
+one-shot `connect` request, strict immediate connectionless `ACCEPT`/`REJECT`,
+an explicit authentication-provider boundary, same-socket netchan bootstrap,
+persistent reliable state, strict fragmentation/reassembly, the fixed `new`
+request, bounded `BZ2\0` service decoding, typed server info, seven owning
+delta schemas, typed movement/environment metadata, the exact opcode-13
+sequence through first-batch end, one fixed nine-byte `sendres` request queued
+through the retained driver, and a bounded later transfer through opcode 45 to
+the unread opcode-43 body. User ID, all user-info values, the fixed 16-byte
+opaque suffix, and the first opcode-45 `u32` remain private.
+
+The earlier M2.4.2 server-info second-client evidence gap remains. Signed-stock
+sets separately confirm netchan/fragment behavior, the initial request, the
+server-info/delta/movevars grammars, opcode-13 single/repeated profiles, request
+loss/ACK/duplicate behavior, and six-fragment resource-transition transfers.
+The pinned public Valve SDK independently cross-checks confirmed field
+semantics, but it contains no numeric mapping that establishes opcode 43 as a
+resource-list service message. Live `hlclient` to stock HLDS, slot-1/file
+semantics, general `svc_*` parsing, a Steam authentication provider,
+opcode-43/resource-list bodies, filesystem resolution/downloads, snapshots,
+gameplay, and a public raw payload/command CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
 ## Reference platform
@@ -307,6 +306,39 @@ stock-observed opcode-13 body. It neither applies the values to runtime
 movement/rendering nor sends `sendres` or any resource response. See
 [GoldSrc movement-environment state](docs/GOLDSRC_MOVEVARS.md).
 
+The M3.1.1 user-info stop continues over that same retained first payload:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after user-info `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+It parses one or more exact opcode-13 messages into owning private-value
+metadata, requires exact end of the first service batch, and sends nothing.
+The public surface includes zero-based client index plus safe key presence/
+length metadata; user ID, info values, unknown/protected keys, and the opaque
+16-byte suffix have no raw getter. See
+[GoldSrc opcode-13 user info](docs/GOLDSRC_USERINFO.md).
+
+The optional transition stop is:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after resource-list-boundary `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+Only this route retains the same driver after first-batch completion, queues
+the fixed `03 73 65 6E 64 72 65 73 00` request once, delegates retry and
+covering-ACK recognition to the driver, decodes the bounded later `BZ2\0`
+transfer, consumes opcode 45 plus its eight-byte body, and stops with the exact
+next opcode 43 unconsumed. The stop-point spelling does not assert resource-list
+semantics; no opcode-43 body byte is parsed and no response/filesystem action
+occurs. See [GoldSrc resource transition](docs/GOLDSRC_RESOURCE_TRANSITION.md).
+
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
 project client exercises request plus accept/reject behavior against
@@ -455,10 +487,33 @@ PowerShell 5.1:
 ```
 
 It strict-walks the first service stream from byte zero to opcode 13, leaves
-that body untouched, and records only bounded field/cursor evidence. The later
-stock `sendres` transfer is retained only as neutral opcode-43 boundary
-evidence; the project sends no resource command. See
+that body untouched, and records only bounded field/cursor evidence. That
+M2.4.4 layer sends no resource-transition request; the separate M3.1.1 stage
+owns the exact request and stops at the neutral opcode-43 boundary. See
 [GoldSrc movement-environment state](docs/GOLDSRC_MOVEVARS.md).
+
+M3.1.1 uses a separate ignored stock corpus for opcode-13 and transition
+evidence. Six clean baselines, maxplayers first-batch variants, accepted
+same-HLDS overlap sessions, and paired request-loss, covering-ACK-loss, and
+duplicate-datagram transitions establish the exact user-info grammar, exact
+first-batch end, fixed nine-byte request, six-fragment later transfer, fixed
+opcode-45 control, and opcode-43 cursor. Raw identity and payload bytes remain
+ignored. The pinned SDK still has no numeric opcode-43 mapping, so the tracked
+API remains neutral. See [GoldSrc user info](docs/GOLDSRC_USERINFO.md) and
+[GoldSrc resource transition](docs/GOLDSRC_RESOURCE_TRANSITION.md).
+
+Project and validate the sanitized ignored metadata with:
+
+```powershell
+pwsh -File .\scripts\verify_stock_resource_transition.ps1 -ProjectEvidenceSet
+pwsh -File .\scripts\verify_stock_resource_transition.ps1 `
+  -ValidateMetadataSetRoot `
+  .\manual-artifacts\resource-transition-captures\projections
+```
+
+Both modes report 22 accepted sources, 18 complete transitions, 11 rejected
+controlled attempts whose requested values were not observed, two incomplete
+runs, and `opcode43=neutral-unconsumed`.
 
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
@@ -507,6 +562,10 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc fragmentation](docs/GOLDSRC_FRAGMENTATION.md),
 [GoldSrc initial sign-on](docs/GOLDSRC_INITIAL_SIGNON.md),
 [GoldSrc server info](docs/GOLDSRC_SERVERINFO.md),
+[GoldSrc delta descriptions](docs/GOLDSRC_DELTA_DESCRIPTIONS.md),
+[GoldSrc movement environment](docs/GOLDSRC_MOVEVARS.md),
+[GoldSrc user info](docs/GOLDSRC_USERINFO.md),
+[GoldSrc resource transition](docs/GOLDSRC_RESOURCE_TRANSITION.md),
 [Authentication provider](docs/AUTHENTICATION_PROVIDER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
@@ -587,6 +646,15 @@ same-socket fake-HLDS integration. Its deterministic suite covers 20/20
 baseline, 20/20 fragmented/reordered, and 20/20 differential fake variants,
 plus wrong-endpoint, malformed-BZ2, missing-fragment, duplicate-terminal-batch,
 timeout, cancellation, and backpressure cases with zero resource continuation.
+M3.1.1 adds exact opcode-13/private-info parsing, repeated-message and
+first-batch completion, exact fixed request and opcode-45 codecs, neutral
+opcode-43 cursor accounting, and same-driver transition composition. Its
+deterministic stage suite covers 20/20 baseline, 20/20 dropped-request retry,
+20/20 fragmented second-transfer, and 20/20 repeated-user-info runs. Negative
+coverage includes every parser truncation, malformed pairs and duplicate info
+keys, limits and limit plus one, wrong endian/reserved control values,
+missing/wrong opcode-43 boundary, wrong endpoint, and transactional malformed
+opcode 45.
 
 ## License
 

@@ -48,9 +48,15 @@ add_executable(hlclient_tests
     test_pre_resource_service_stream.cpp
     test_pre_resource_signon_stage.cpp
     test_pre_resource_udp_integration.cpp
+    test_resource_transition_control.cpp
+    test_resource_transition_request.cpp
+    test_resource_transition_stage.cpp
+    test_resource_transition_udp_integration.cpp
     test_server_info.cpp
     test_service_payload_envelope.cpp
     test_udp_socket.cpp
+    test_user_info_stream.cpp
+    test_user_info_update.cpp
 )
 
 target_link_libraries(hlclient_tests

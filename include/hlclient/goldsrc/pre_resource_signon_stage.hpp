@@ -187,6 +187,7 @@ private:
         bool retain_connection_at_boundary);
 
     [[nodiscard]] const OwnedServicePayload* retained_source_payload() const noexcept;
+    [[nodiscard]] NetchanDriver* retained_driver() noexcept;
     void finalize_retained_boundary(PreResourceSignonTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count = 1U) const noexcept;
     void push_event(PreResourceSignonEvent event) noexcept;

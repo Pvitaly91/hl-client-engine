@@ -63,10 +63,14 @@ exact owning payload through a strict typed server-info body, one confirmed
 neutral control, and a category-C stop before the next complex body. The
 M2.4.3 continuation decodes the exact ordered delta-schema registry, and M2.4.4
 decodes the confirmed opcode-44 movement/environment metadata plus only the
-confirmed simple controls before a neutral body-unconsumed boundary. The
-second-client slot field, resource state, snapshots, movement application, and
-commands remain future evidence or implementation increments behind the same
-provider boundary. The future bridge adapts
+confirmed simple controls before an exact opcode-13 boundary. M3.1.1 decodes
+the bounded opcode-13 sequence to exact first-batch end, then optionally queues
+the one fixed transition request, validates its reliable ACK lifecycle,
+decodes the fixed opcode-45 control, and stops at a neutral body-unconsumed
+opcode-43 boundary. The opcode-43 resource-list semantic/body, server-info
+second-client slot field, resource entries, snapshots, movement application,
+and commands remain future evidence or implementation increments behind the
+same provider boundary. The future bridge adapts
 observed or exported in-process state to the same project types. It must not
 make renderer behavior depend on injected addresses or Valve private layouts.
 
@@ -80,10 +84,10 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
 | `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
 | `hlclient_goldsrc_netchan` | netchan classifier/base/fragment codec, payload transform, wrap-safe persistent session, bounded pending plus one reliable unit in flight, transactional unfragmented/fragment sends, filesystem-free slot-0 normal reassembly, bounded same-transport driver, owning events, metadata-only traces, and first-ACK compatibility primitive | transport creation/closure, authentication semantics or bytes, slot-1/file interpretation, decompression, files, `svc_*`, world/render state |
-| `hlclient_goldsrc_signon` | exact fixed initial client request, strict `BZ2\0` in-memory envelope decoder, bounded confirmed service-message continuation, owning immutable server-info/pre-resource state, LSB-first bit reader, owning ordered delta-schema registry, immutable movement/environment metadata, confirmed post-movevars controls, same-driver initial/pre-resource/delta/movevars stages, and exact cursor accounting | arbitrary resource commands, neutral-boundary body parsing, runtime delta or movement application, command execution, filesystem, renderer, SDL, assets, world state |
+| `hlclient_goldsrc_signon` | exact fixed initial and transition client requests, strict `BZ2\0` in-memory envelope decoder, bounded confirmed service-message continuation, owning immutable server-info/pre-resource/delta/movement/user-info/transition state, dedicated private-value user-info grammar, fixed opcode-45 control, same-driver retained stages, neutral opcode-43 boundary, and exact cursor accounting | arbitrary commands, opcode-43/resource-list body parsing, resource responses, runtime delta or movement application, command execution, filesystem, renderer, SDL, assets, world state |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter and bounded local-file loading | discovery, caching, Steam integration, fallback search, protocol parsing |
-| `hlclient_goldsrc_client` | challenge/connect/response coordination, same-socket bootstrap/initial/pre-resource/delta/movevars composition, and driver/auth-lifetime ownership through the selected terminal stop | auth generation, wire codec duplication, arbitrary reliable payload production, resource-body negotiation, runtime delta or movement application, OpenGL, SDL, world/render state |
+| `hlclient_goldsrc_client` | challenge/connect/response coordination, same-socket bootstrap/initial/pre-resource/delta/movevars/user-info/resource-transition composition, and driver/auth-lifetime ownership through the selected terminal stop | auth generation, wire codec duplication, arbitrary reliable payload production, opcode-43 body negotiation, runtime delta or movement application, OpenGL, SDL, filesystem, world/render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_asset_api` | owning asset sources, neutral CPU assets, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
@@ -182,22 +186,37 @@ The current application path reaches the bounded post-movevars boundary:
                                   `-> optional MovementEnvironmentStage facade
                                       -> strict typed opcode-44 MoveVars state
                                       -> exact opcodes 32, 5, 39, and 9
-                                      -> terminal neutral opcode-13 boundary;
-                                         body untouched and no client continuation
+                                      -> exact opcode-13 boundary
+                                      |-> terminal `movevars`; body untouched
+                                      `-> optional UserInfoSignonStage
+                                          -> one or more exact opcode-13 messages
+                                          -> immutable private-value metadata
+                                          -> exact end of first service payload
+                                          |-> terminal `user-info`; no TX
+                                          `-> optional ResourceTransitionStage
+                                              -> one exact typed 9-byte request
+                                              -> driver-owned TX/retry/covering ACK
+                                              -> bounded later BZ2-NUL transfer
+                                              -> opcode 45 + exact 8-byte body
+                                              -> terminal neutral opcode 43;
+                                                 validated but unconsumed;
+                                                 body unread, no reply
 ```
 
 The application has only an explicit user-file authentication provider; it
 does not generate tickets or integrate with Steam. Each later terminal stage
 composes the driver on the already-bound transport and validates unchanged
 local/exact remote endpoints. The sign-on branch queues only the fixed
-five-byte request and owns at most one pre-ACK payload. Each public earlier stop
-closes after publishing its own boundary; the private pre-resource, delta, and
-movement-environment facades retain that same driver/lifetime only long enough
-to parse the already-owned payload and publish their bounded state. No route
-exposes raw reliable/fragment/delta/movevars bytes or updates filesystem, world,
-asset, or renderer state. The delta registry and MoveVars state are metadata
-for future snapshot/movement milestones and are not applied to packets,
-simulation, or world memory.
+five-byte initial request. The transition branch may later queue only the fixed
+nine-byte request and owns at most one second payload received before its
+covering ACK. Each public earlier stop closes after publishing its own
+boundary; friend-only retention carries that same driver/lifetime only through
+the selected continuation. No route exposes received raw reliable/fragment/
+delta/movevars/user-info/resource bytes or updates filesystem, world, asset,
+or renderer state; the transition request object exposes only its fixed typed
+nine-byte wire message. The delta, MoveVars, user-info, and transition states are
+metadata for future milestones and are not applied to packets, simulation,
+player entities, resource lookup, or world memory.
 
 M2.3.3 splits netchan into pure base/fragment wire codecs and transform,
 transport-independent persistent reliable state, a transactional normal
@@ -215,6 +234,15 @@ Project defaults/hard maxima include 4,096/16,384-byte datagrams,
 inactivity, 5/30-second fixed fragment deadlines, 8/64 receives and 1/8 sends
 per update, and 16/256 queued events with a minimum capacity of five. These are
 project safety limits, not stock-engine maxima.
+
+M3.1.1 adds project-only defaults/hard caps of 2,048/8,192 bytes per user-info
+message, 1,024/4,096-byte info strings, 64/256-byte keys, 256/4,096-byte values,
+64/256 entries, 32/256 messages, 32,768/262,144 total message bytes, and
+64/256 user-info stage events. The transition request and opcode-45 message
+are fixed at a 9/9-byte default/hard cap; the private opcode-45 `u32` has a
+1,000,000/`UINT32_MAX` project upper bound, the second decompressed payload is
+65,536/1,048,576 bytes, and transition events are 64/256. None is a claim
+about a stock engine buffer maximum.
 
 Session and reassembly mutations are transactional. Preparation is read-only;
 only successful send or receive commit advances sequences/generations, promotes
@@ -245,8 +273,11 @@ the socket. `--stop-after pre-resource` creates `PreResourceSignonStage`, whose
 nested private-retention mode reuses that exact initial stage, driver, socket,
 and lifetime until the synchronous server-info continuation terminates.
 `DeltaDescriptionStage` and `MovementEnvironmentStage` repeat that private,
-friend-only retention pattern for the exact delta and movevars cursors; the
-public earlier stops retain their historical close-on-success behavior. An
+friend-only retention pattern for the exact delta and movevars cursors.
+`UserInfoSignonStage` carries the same owning payload to exact first-batch end;
+`ResourceTransitionStage` alone may retain the same driver afterward for the
+fixed request/ACK/second-transfer path. The public earlier stops retain their
+historical close-on-success behavior. An
 embedding composition can also own the driver persistently. In every case the
 existing transport and optional opaque `INetchanDriverLifetime` stay valid
 through the driver terminal. Timeout, cancellation, network/protocol
@@ -256,7 +287,8 @@ responsible for `NetchanSession::clear_reliable_state()` on terminal failure.
 
 Challenge traces use bounded previews. Connect-request, connect-response,
 netchan, fragment, driver, initial-sign-on, pre-resource, delta, and
-movement-environment traces never contain raw packets, authentication bytes,
+movement-environment, user-info, and transition traces never contain raw
+packets, authentication bytes, private user-info/control values,
 compressed/decompressed payloads, or boundary remainders. Typed callbacks may
 carry confirmed owning-state string views (such as schema or sky names) only
 for the callback duration; terminal output always passes untrusted text through
@@ -266,7 +298,9 @@ the bounded presentation sanitizer. See
 [Initial sign-on](GOLDSRC_INITIAL_SIGNON.md),
 [Server info](GOLDSRC_SERVERINFO.md),
 [Delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md),
-[Movement environment](GOLDSRC_MOVEVARS.md), and
+[Movement environment](GOLDSRC_MOVEVARS.md),
+[User info](GOLDSRC_USERINFO.md),
+[Resource transition](GOLDSRC_RESOURCE_TRANSITION.md), and
 [Authentication provider](AUTHENTICATION_PROVIDER.md).
 
 ## Filesystem and asset boundary
@@ -345,13 +379,13 @@ order:
    renderer;
 8. poll events where applicable, advance the handshake coordinator, and let
    the selected stage-owned driver process the same socket until the requested
-   opaque, initial-sign-on, pre-resource, delta-schema, or movement-environment
-   boundary is
+   opaque, initial-sign-on, pre-resource, delta-schema, movement-environment,
+   user-info, or neutral opcode-43 boundary is
    acknowledged and published;
 9. derive `RenderScene` from its `ClientWorldState`, render, and present;
 10. stop after the configured terminal challenge/connect-request/
     connect-response/netchan-bootstrap/signon-boundary/pre-resource/
-    delta-schemas/movevars outcome,
+    delta-schemas/movevars/user-info/resource-list-boundary outcome,
     let driver terminal cleanup release its optional lifetime exactly once,
     then shut down renderer resources before their platform dependencies.
 

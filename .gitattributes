@@ -3,6 +3,7 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+scripts/verify_stock_resource_transition.ps1 text eol=lf
 
 *.png binary
 *.jpg binary
