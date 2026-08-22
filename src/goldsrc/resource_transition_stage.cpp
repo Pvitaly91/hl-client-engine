@@ -249,9 +249,60 @@ ResourceTransitionStage::ResourceTransitionStage(
     MovementEnvironmentTraceCallback movement_trace_callback,
     UserInfoSignonTraceCallback user_info_trace_callback,
     ResourceTransitionTraceCallback trace_callback)
+    : ResourceTransitionStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(movement_trace_callback),
+          std::move(user_info_trace_callback),
+          std::move(trace_callback),
+          false}
+{
+}
+
+ResourceTransitionStage::ResourceTransitionStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    ResourceTransitionStageConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback movement_trace_callback,
+    UserInfoSignonTraceCallback user_info_trace_callback,
+    ResourceTransitionTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : ResourceTransitionStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(movement_trace_callback),
+          std::move(user_info_trace_callback),
+          std::move(trace_callback),
+          true}
+{
+}
+
+ResourceTransitionStage::ResourceTransitionStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    ResourceTransitionStageConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback movement_trace_callback,
+    UserInfoSignonTraceCallback user_info_trace_callback,
+    ResourceTransitionTraceCallback trace_callback,
+    const bool retain_connection_at_boundary)
     : config_{std::move(config)},
       trace_callback_{std::move(trace_callback)},
       configuration_valid_{valid_resource_transition_stage_configuration(config_)},
+      retain_connection_at_boundary_{retain_connection_at_boundary},
       user_info_stage_{
           transport,
           remote_endpoint,
@@ -971,6 +1022,9 @@ void ResourceTransitionStage::decode_pending_payload(
         return;
     }
 
+    if (retain_connection_at_boundary_) {
+        retained_source_payload_.emplace(std::move(envelope.payload));
+    }
     result_.emplace(std::move(*candidate_result));
     push_event(ResourceTransitionStageEvent{
         ResourceTransitionStageEventType::second_service_transfer_received,
@@ -1003,12 +1057,38 @@ void ResourceTransitionStage::decode_pending_payload(
         result_->control().message_bytes(),
         result_->control().opcode());
     state_ = ResourceTransitionStageState::neutral_opcode43_boundary_reached;
-    cleanup(now);
+    if (!retain_connection_at_boundary_) {
+        cleanup(now);
+    }
     emit_trace(
         ResourceTransitionTraceClassification::neutral_opcode43_boundary_reached,
         result_->boundary().byte_offset(),
         result_->boundary().remaining_byte_count(),
         result_->boundary().opcode());
+}
+
+const OwnedServicePayload*
+ResourceTransitionStage::retained_source_payload() const noexcept
+{
+    if (!retain_connection_at_boundary_ ||
+        state_ != ResourceTransitionStageState::neutral_opcode43_boundary_reached) {
+        return nullptr;
+    }
+    return retained_source_payload_ ? &*retained_source_payload_ : nullptr;
+}
+
+NetchanDriver* ResourceTransitionStage::retained_driver() noexcept
+{
+    if (!retain_connection_at_boundary_) {
+        return nullptr;
+    }
+    return user_info_stage_.retained_driver();
+}
+
+void ResourceTransitionStage::finalize_retained_boundary(
+    const ResourceTransitionStageTimePoint now) noexcept
+{
+    cleanup(now);
 }
 
 void ResourceTransitionStage::fail_from_user_info() noexcept
@@ -1142,6 +1222,7 @@ void ResourceTransitionStage::cleanup(
     user_info_stage_.finalize_retained_boundary(now);
     pre_ack_payload_.reset();
     pending_decode_payload_.reset();
+    retained_source_payload_.reset();
 }
 
 void ResourceTransitionStage::emit_trace(

@@ -3,10 +3,14 @@
 M3.1.1 implements the exact client transition request, its persistent reliable
 lifecycle, the bounded second service transfer, strict opcode-45 control, and
 an exact neutral stop at numeric opcode 43. It deliberately does not parse or
-name the opcode-43 body as a resource list.
+name the opcode-43 body as a resource list. That historical stop remains
+unchanged after M3.1.2.
 
 Status: completed for the bounded transition and neutral opcode-43 boundary
-scope. The resource-list semantic/body gate is not passed and remains M3.1.2.
+scope. The M3.1.1 evidence alone did not pass the resource-list semantic/body
+gate; the separate M3.1.2 continuation now passes it for the standard stock
+profile and is documented in
+[GoldSrc opcode-43 resource list](GOLDSRC_RESOURCE_LIST.md).
 
 ## Evidence and compatibility profile
 
@@ -125,7 +129,7 @@ Representative accepted sizes were:
 | --- | ---: | ---: |
 | fresh `boot_camp` | 5,225 | 10,713 |
 | fresh `crossfire` | 6,008 | 12,169 |
-| fresh `stalkyard`/night | 5,330 | 10,815 |
+| fresh `stalkyard` | 5,330 | 10,815 |
 | same-process second map observation | 5,239 | 10,713 |
 
 All begin with opcode 45. These are observed profile sizes, not universal
@@ -159,22 +163,37 @@ does not consume that opcode, read a body length/count, or scan for a later
 candidate. Success reports `bytes_consumed == 9` and a next cursor that still
 points at 43.
 
-## Why the boundary remains neutral
+## Why the historical boundary remains neutral
 
 Stock behavior strongly places numeric opcode 43 after the exact transition
 request, and its untouched body size varies with the map. Baseline,
-`crossfire`, and night profiles retained respectively 10,703, 12,159, and
-10,805 bytes after the boundary opcode. The pinned public Valve `custom.h`
-contains resource-related structures/functions, but no numeric service-opcode
-mapping that independently equates 43 with a resource-list message.
+`crossfire`, and `stalkyard` profiles retained respectively 10,703, 12,159,
+and 10,805 bytes after the boundary opcode. Historical run IDs containing
+`m244-sky-night-*` identify `stalkyard` in their captured configuration
+metadata; they are not evidence for a stock map named `night`. The pinned
+public Valve `custom.h` contains resource-related structures/functions, but
+no numeric service-opcode mapping that independently equates 43 with a
+resource-list message.
 
-The project evidence rule requires that independent numeric/header mapping
-before the public semantic name `ResourceListBoundary` is allowed. The gate
-therefore is **not passed**. Production exposes only `Opcode43Boundary`,
-containing the numeric opcode, exact offset, remaining byte count, source
-payload size, and compatibility/evidence profile. `ResourceTransitionState`
-and the terminal stage state likewise use
-`neutral_opcode43_boundary_reached`.
+That transition evidence by itself could not name the body, so the M3.1.1 API
+continues to expose only `Opcode43Boundary`, containing the numeric opcode,
+exact offset, remaining byte count, source payload size, and compatibility/
+evidence profile. `ResourceTransitionState` and the terminal stage state
+likewise retain `neutral_opcode43_boundary_reached`.
+
+M3.1.2 supplies the previously missing evidence at the next layer: 54 exact
+LSB-first parses, coherent count/entry/map differentials, exact endpoints, and
+the public Valve resource-category cross-check. That combination passes the
+`ResourceListMessage` gate for the bounded standard profile without changing
+the meaning of the older pre-body boundary or pretending that the SDK contains
+an opcode constant.
+
+Two later safe isolated `maxplayers 1` controls ended boundedly after the
+7,395-byte first service payload and never produced `sendres`, a second
+resource payload, or opcode 43. That stable no-transition outcome is not a
+transition/parser failure and contributes no list grammar or count; it is kept
+outside the 54 parseable-list set. At least two `maxplayers 8` runs reached the
+complete standard list.
 
 The CLI spelling `--stop-after resource-list-boundary` selects this exact
 historical/product stop point; it does not upgrade the typed boundary to a
@@ -275,15 +294,19 @@ errors, and runs version/help/null-renderer smoke checks. Automated tests need
 no stock binaries, Steam, real authentication, public server, GPU, Internet,
 or installed game assets.
 
-## Explicitly absent and next milestone
+## Explicitly absent and continuation
 
-M3.1.1 adds no opcode-43 body parser, resource count, entries, filenames,
+M3.1.1 itself adds no opcode-43 body parser, resource count, entries, filenames,
 flags, hashes, consistency response, filesystem lookup, VFS mount, download,
 cache, precache, map load, asset load, renderer work, or graphics change. It
 does not expose raw user-info or received resource-body bytes. The only public
 request bytes are the fixed typed nine-byte message, and no CLI can inject an
 arbitrary transition command.
 
-The next milestone is M3.1.2: independently establish the opcode-43 body and
-numeric semantic gate, then implement a bounded owning codec. M3.2 local
-resolution and M3.3 safe download/cache remain later work.
+The separate M3.1.2 `--stop-after resource-list` route now decodes the bounded
+standard body into owning metadata and stops at an exact metadata-only
+required-response boundary. It still sends no post-list response and performs
+no resolution or file action. Custom/player-resource entries remain typed
+unsupported and pending. The next milestone is M3.1.3 client resource/
+consistency response work; M3.2 local resolution and M3.3 safe download/cache
+remain later.

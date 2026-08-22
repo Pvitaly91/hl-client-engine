@@ -88,12 +88,14 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::user_info;
             } else if (value == "resource-list-boundary") {
                 options.stop_after = ConnectionStopPoint::resource_list_boundary;
+            } else if (value == "resource-list") {
+                options.stop_after = ConnectionStopPoint::resource_list;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
                                " (expected challenge, connect-request, connect-response, "
                                "netchan-bootstrap, signon-boundary, pre-resource, "
                                "delta-schemas, movevars, user-info, or "
-                               "resource-list-boundary)");
+                               "resource-list-boundary, or resource-list)");
             }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
@@ -124,7 +126,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         return failure("--auth-provider, --auth-material-file, --name, and --model require "
                        "a connect-request, connect-response, netchan-bootstrap, or "
                        "signon-boundary/pre-resource/delta-schemas/movevars/"
-                       "user-info/resource-list-boundary stop point");
+                       "user-info/resource-list-boundary/resource-list stop point");
     }
     if (options.authentication_provider && !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
@@ -141,7 +143,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::delta_schemas ||
          options.stop_after == ConnectionStopPoint::movevars ||
          options.stop_after == ConnectionStopPoint::user_info ||
-         options.stop_after == ConnectionStopPoint::resource_list_boundary) &&
+         options.stop_after == ConnectionStopPoint::resource_list_boundary ||
+         options.stop_after == ConnectionStopPoint::resource_list) &&
         !options.authentication_provider) {
         return failure(
             "Netchan bootstrap and sign-on require the explicit "
@@ -170,7 +173,7 @@ Options:
   --stop-after <stage> Stop after challenge, connect-request, connect-response,
                        netchan-bootstrap, signon-boundary, pre-resource,
                        delta-schemas, movevars, user-info, or
-                       resource-list-boundary
+                       resource-list-boundary, or resource-list
                        (default: challenge)
   --auth-provider <name>
                       Authentication provider for connect stages: file
@@ -196,9 +199,10 @@ confirmed simple controls, then stops at the exact neutral post-movevars
 boundary without consuming its body or sending a resource response.
 User-info decodes the bounded opcode-13 sequence and stops at the exact end of
 the first service batch without sending a transition request.
-Resource-list-boundary queues only the fixed typed transition request, waits
-for its netchan ACK, decodes the fixed opcode-45 control, and stops at the
-neutral opcode-43 boundary without reading its body or sending a response.
+Resource-list-boundary: queue only the fixed transition request, wait for its
+ACK, decode opcode 45, and stop before parsing opcode-43 body.
+Resource-list: parse the bounded owning standard list and stop before the
+required client response or any resource resolution; no response is sent.
 No mode implements authentication generation.
 )";
 }

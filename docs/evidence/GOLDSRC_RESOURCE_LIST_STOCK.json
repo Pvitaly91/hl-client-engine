@@ -1,0 +1,369 @@
+{
+  "schema": "hlclient.stock-resource-list-evidence.v1",
+  "profile": "stock-hl-1.1.1.1-to-stock-hlds-protocol48-build10210",
+  "verifier_normalized_sha256": "CCC1411CCC1FF5549170914A45D283072D38D5AE6178B747F1F3DC0C66FF9D10",
+  "methodology": {
+    "mode": "offline-existing-ignored-artifacts",
+    "tracked_sanitized_projection": true,
+    "ignored_raw_sources": true,
+    "transport": "private-ipv4-loopback-udp",
+    "byte_preserving_relay": true,
+    "one_upstream_socket": true,
+    "exact_endpoint_validation": true,
+    "packet_byte_time_bounds": true,
+    "stock_processes_started_by_verifier": false,
+    "source_payload_count": 54,
+    "no_opcode_scanning": true
+  },
+  "research_root_policy": {
+    "accepted_capture_mode": "user-supplied-isolated-copy-only",
+    "primary_steam_install": "rejected-no-override",
+    "explicit_preflight_parameter": "ResearchHalfLifeRoot",
+    "isolation_marker": ".hlclient-research-isolated",
+    "mutable_state_minimum": [
+      "config.cfg",
+      "userconfig.cfg",
+      "autoexec.cfg",
+      "custom.hpk",
+      "server.cfg",
+      "listenserver.cfg",
+      "server-cfg-and-log-files"
+    ],
+    "external_file_drift": "none",
+    "drift_basis": "offline-verifier-launched-no-process"
+  },
+  "public_header_crosscheck": {
+    "source": "third_party/halflife-sdk/engine/custom.h",
+    "pinned_sdk_commit": "b1b5cf5892918535619b2937bb927e46cb097ba1",
+    "header_sha256": "63ACE5ED6BC60867CE033B429C50EBCEAD683A85AD656688F3EBB3553FA974C1",
+    "type_categories_present": true,
+    "max_qpath_64_present": true,
+    "resource_struct_present": true,
+    "digest_array_16_present": true,
+    "resource_list_size_declaration_present": true,
+    "numeric_opcode43_constant_present": false,
+    "wire_layout_used_from_struct": false
+  },
+  "semantic_gate": {
+    "opcode": 43,
+    "semantic_name": "ResourceListMessage",
+    "standard_profile": "completed",
+    "custom_profile": "unsupported-pending",
+    "evidence": "54-exact-parses-three-coherent-map-profiles"
+  },
+  "corpus_notes": {
+    "historical_run_label_mismatch": "m244-sky-night-run-ids-capture-config-identifies-stalkyard",
+    "accepted_map_profiles": [
+      "boot_camp",
+      "crossfire",
+      "stalkyard"
+    ]
+  },
+  "differential_outcomes": {
+    "maxplayers1": {
+      "profile": "maxplayers-1-bounded-pre-resource-outcome",
+      "bounded_runs": 2,
+      "source_metadata_schema": "hlclient.stock-initial-signon-failure.v1",
+      "first_service_payload_bytes": 7395,
+      "first_service_payload_sha256": "4B471507120A85056658E05B2422488A1B478759203795BF7C5ADBED060F7A2C",
+      "resource_service_payloads": 0,
+      "post_list_client_bodies": 0,
+      "result": "no-resource-transition-or-list-observed",
+      "grammar_and_count": "not-applicable-list-not-reached",
+      "parser_failure": false,
+      "live_hl_hlds_processes_at_projection": 0
+    },
+    "maxplayers8": {
+      "full_list_runs_minimum": 2,
+      "result": "standard-resource-list-observed",
+      "grammar_gate_effect": "supports-standard-multiplayer-profile"
+    }
+  },
+  "wire_grammar": {
+    "bit_order": "least-significant-bit-first",
+    "opcode43_absolute_byte_offset": 9,
+    "body_absolute_bit_offset": 80,
+    "count_width_bits": 12,
+    "entry_type_slot_bits": 4,
+    "name_encoding": "nul-terminated-8-bit-units-at-current-bit-cursor",
+    "index_width_bits": 12,
+    "raw_size_code_width_bits": 24,
+    "flags_profile_slot_bits": 4,
+    "per_entry_alignment": "none-entry-starts-alternate-bit0-bit4",
+    "terminal_fill": "1-to-8-zero-bits-exact-end-of-payload",
+    "exact_post_list_condition": "end-of-payload"
+  },
+  "field_evidence": [
+    {
+      "field": "count",
+      "width_bits": 12,
+      "confidence": "confirmed",
+      "public": true
+    },
+    {
+      "field": "type_slot",
+      "width_bits": 4,
+      "confidence": "confirmed-slot-known-values",
+      "public": true
+    },
+    {
+      "field": "name",
+      "width_bits": 8,
+      "confidence": "confirmed",
+      "public": true
+    },
+    {
+      "field": "index",
+      "width_bits": 12,
+      "confidence": "confirmed",
+      "public": true
+    },
+    {
+      "field": "raw_size_code",
+      "width_bits": 24,
+      "confidence": "confirmed-width-semantics-bounded",
+      "public": true
+    },
+    {
+      "field": "flags_profile_slot",
+      "width_bits": 4,
+      "confidence": "confirmed-slot-bit-semantics-opaque",
+      "public": true
+    },
+    {
+      "field": "optional_custom_metadata",
+      "width_bits": 0,
+      "confidence": "pending-unobserved",
+      "public": false
+    },
+    {
+      "field": "terminal_zero_fill",
+      "width_bits": 0,
+      "confidence": "confirmed-values-padding-vs-marker-strongly-inferred",
+      "public": true
+    }
+  ],
+  "resource_types": [
+    {
+      "value": 0,
+      "name": "sound",
+      "confidence": "confirmed",
+      "observed": true
+    },
+    {
+      "value": 1,
+      "name": "skin",
+      "confidence": "public-header-unobserved",
+      "observed": false
+    },
+    {
+      "value": 2,
+      "name": "model",
+      "confidence": "confirmed-includes-map-model-profile",
+      "observed": true
+    },
+    {
+      "value": 3,
+      "name": "decal",
+      "confidence": "confirmed",
+      "observed": true
+    },
+    {
+      "value": 4,
+      "name": "generic",
+      "confidence": "confirmed",
+      "observed": true
+    },
+    {
+      "value": 5,
+      "name": "event_script",
+      "confidence": "confirmed",
+      "observed": true
+    },
+    {
+      "value": 6,
+      "name": "world",
+      "confidence": "public-header-unobserved",
+      "observed": false
+    }
+  ],
+  "standard_profiles": [
+    {
+      "name": "boot_camp-standard",
+      "accepted_runs": 50,
+      "payload_bytes": 10713,
+      "resource_count": 540,
+      "entry_end_absolute_bit": 85700,
+      "terminal_zero_fill_bits": 4,
+      "opcode43_bits_consumed": 85632,
+      "opcode43_bytes_covered": 10704,
+      "ordered_body_sha256": "BA4318498B7A49FFCE648611538975B075EE9320B88D7A2EB51F450499997197",
+      "ordered_structure_sha256": "DFA7FC53207805F55073B37AFFB6D5EBF36F931E865C6688B6BC04DD1F5B2D21",
+      "type_counts": {
+        "0": 171,
+        "2": 129,
+        "3": 222,
+        "5": 18
+      },
+      "filename_category_counts": {
+        "event-script": 18,
+        "map-bsp": 1,
+        "model-mdl": 69,
+        "other-standard": 265,
+        "sound-wav": 171,
+        "sprite": 16
+      },
+      "flags_profile_counts": {
+        "0": 393,
+        "1": 147
+      },
+      "name_length_min": 2,
+      "name_length_max": 26,
+      "total_name_bytes": 7191,
+      "index_min": 0,
+      "index_max": 221,
+      "raw_size_code_min": 0,
+      "raw_size_code_max": 2705704,
+      "known_size_min": 0,
+      "known_size_max": 2705704,
+      "raw_size_code_total": 8557630,
+      "known_size_total": 8557630,
+      "opaque_0xffffff_count": 0,
+      "duplicate_type_index_count": 0,
+      "duplicate_exact_name_count": 0
+    },
+    {
+      "name": "crossfire-standard",
+      "accepted_runs": 2,
+      "payload_bytes": 12169,
+      "resource_count": 607,
+      "entry_end_absolute_bit": 97344,
+      "terminal_zero_fill_bits": 8,
+      "opcode43_bits_consumed": 97280,
+      "opcode43_bytes_covered": 12160,
+      "ordered_body_sha256": "D434E105020E7A214B67DA731620D09644697756DFE6C05D6C17743FF37F7456",
+      "ordered_structure_sha256": "6A540D80E66DF5A440ACF15C3B73413A3FA1EFDDAEBC28523E0E864C4D794779",
+      "type_counts": {
+        "0": 184,
+        "2": 158,
+        "3": 222,
+        "4": 25,
+        "5": 18
+      },
+      "filename_category_counts": {
+        "event-script": 18,
+        "map-bsp": 1,
+        "model-mdl": 80,
+        "other-standard": 307,
+        "sound-wav": 184,
+        "sprite": 17
+      },
+      "flags_profile_counts": {
+        "0": 406,
+        "1": 201
+      },
+      "name_length_min": 2,
+      "name_length_max": 37,
+      "total_name_bytes": 8211,
+      "index_min": 0,
+      "index_max": 221,
+      "raw_size_code_min": 0,
+      "raw_size_code_max": 16777215,
+      "known_size_min": 0,
+      "known_size_max": 1241704,
+      "raw_size_code_total": 129258167,
+      "known_size_total": 11817662,
+      "opaque_0xffffff_count": 7,
+      "duplicate_type_index_count": 0,
+      "duplicate_exact_name_count": 0
+    },
+    {
+      "name": "stalkyard-standard",
+      "accepted_runs": 2,
+      "payload_bytes": 10815,
+      "resource_count": 532,
+      "entry_end_absolute_bit": 86516,
+      "terminal_zero_fill_bits": 4,
+      "opcode43_bits_consumed": 86448,
+      "opcode43_bytes_covered": 10806,
+      "ordered_body_sha256": "CE74503D20B9A49AA5F3243BFA05EBDA25C4421F25BD45F0FA2EDB39FB90473B",
+      "ordered_structure_sha256": "A4AF9531606E0D5FD908164EA132F4E645E0CEFB6D67678519B83E6FFA975806",
+      "type_counts": {
+        "0": 180,
+        "2": 112,
+        "3": 222,
+        "5": 18
+      },
+      "filename_category_counts": {
+        "event-script": 18,
+        "map-bsp": 1,
+        "model-mdl": 69,
+        "other-standard": 246,
+        "sound-wav": 180,
+        "sprite": 18
+      },
+      "flags_profile_counts": {
+        "0": 402,
+        "1": 130
+      },
+      "name_length_min": 2,
+      "name_length_max": 26,
+      "total_name_bytes": 7345,
+      "index_min": 0,
+      "index_max": 221,
+      "raw_size_code_min": 0,
+      "raw_size_code_max": 700408,
+      "known_size_min": 0,
+      "known_size_max": 700408,
+      "raw_size_code_total": 6718544,
+      "known_size_total": 6718544,
+      "opaque_0xffffff_count": 0,
+      "duplicate_type_index_count": 0,
+      "duplicate_exact_name_count": 0
+    }
+  ],
+  "client_response_boundary": {
+    "action_kind": "neutral-required-resource-response",
+    "semantic_name": "pending-no-official-opcode-mapping",
+    "normal_runs": 51,
+    "coalesced_runs": 3,
+    "normal_reliable_body_bytes": 62,
+    "normal_fragment_descriptor_bytes": 10,
+    "normal_semantic_fragment_bytes": 41,
+    "normal_semantic_candidate_opcode": 5,
+    "normal_semantic_fragment_sha256": "451A85ADDBF2B6B2D05E9F424BDFCF711655803706EF6D59B116299D7B5D17C9",
+    "contemporaneous_tail_bytes": 11,
+    "coalesced_reliable_body_bytes": [
+      64,
+      66,
+      68
+    ],
+    "builder_generated": false
+  },
+  "aggregate": {
+    "parseable_payloads": 54,
+    "boot_camp_runs": 50,
+    "crossfire_runs": 2,
+    "stalkyard_runs": 2,
+    "resource_count_min": 532,
+    "resource_count_max": 607,
+    "observed_type_values": [
+      0,
+      2,
+      3,
+      4,
+      5
+    ],
+    "observed_flags_profile_values": [
+      0,
+      1
+    ],
+    "custom_entries_observed": 0,
+    "maxplayers1_runs": 2,
+    "maxplayers1_result": "no-resource-transition-or-list-observed",
+    "maxplayers8_full_list_runs_minimum": 2,
+    "raw_names_projected": false,
+    "digest_bytes_projected": false,
+    "payload_bytes_projected": false
+  }
+}

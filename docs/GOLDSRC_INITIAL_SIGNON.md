@@ -278,12 +278,17 @@ stops before opcode 13. M3.1.1 then decodes the exact opcode-13 sequence to
 first-batch end. Its public `user-info` stop sends nothing; only the separate
 resource-transition stage may retain the same driver, queue the exact typed
 nine-byte request, decode opcode 45, and stop at neutral opcode 43 with its
-body untouched. The public M2.4.1/M2.4.2 stop behavior is unchanged. See
+body untouched. M3.1.2 adds a further private continuation that starts at that
+exact cursor, decodes the confirmed standard `ResourceListMessage` into an
+owning ordered list, requires exact end-of-payload, and stops before the
+metadata-only required client response. It sends no response and performs no
+filesystem action. The public M2.4.1/M2.4.2 stop behavior is unchanged. See
 [GoldSrc server info](GOLDSRC_SERVERINFO.md),
 [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md),
 [GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md),
 [GoldSrc user info](GOLDSRC_USERINFO.md), and
-[GoldSrc resource transition](GOLDSRC_RESOURCE_TRANSITION.md). The nested
+[GoldSrc resource transition](GOLDSRC_RESOURCE_TRANSITION.md), and
+[GoldSrc opcode-43 resource list](GOLDSRC_RESOURCE_LIST.md). The nested
 retained driver closes and releases its lifetime exactly once on success,
 decode failure,
 backpressure, cancellation, timeout, network/protocol failure, or destruction.
@@ -292,10 +297,11 @@ backpressure, cancellation, timeout, network/protocol failure, or destruction.
 
 - opcode-13 interpretation inside M2.4.1 itself (implemented only by the
   separate bounded M3.1.1 continuation);
-- the numeric opcode-43 body and its resource-list semantic, which remain
-  wholly unparsed/unconfirmed after the neutral M3.1.1 boundary;
+- opcode-43 interpretation inside M2.4.1 itself (implemented only by the
+  separate bounded M3.1.2 standard-profile continuation);
 - a typed disconnect service control, pending primary wire evidence;
-- resource-list parsing/negotiation and runtime delta application;
+- custom/player-resource list grammar, post-list response/negotiation, and
+  runtime delta application;
 - command/stufftext execution (intentionally prohibited, not planned here);
 - spawn/resource replies, snapshots, gameplay, or renderer state;
 - slot-1/file semantics and filesystem output;
@@ -305,4 +311,6 @@ M2.4.2 is implemented for the bounded single-client profile, but its primary
 evidence remains incomplete because the stock environment did not produce a
 second-client handshake for the opaque slot candidate. M2.4.3/M2.4.4 do not
 change that field. M3.1.1 adds later user-info/transition state without
-changing this layer; M3.1.2 resource-list body discovery remains next.
+changing this layer; M3.1.2 adds the bounded standard resource-list
+continuation without changing it. M3.1.3 client resource/consistency response
+work is next.

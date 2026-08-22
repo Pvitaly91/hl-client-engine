@@ -238,3 +238,10 @@ Internet during tests, GPU, authentication ticket, or Half-Life assets.
 The separate [resource-transition boundary](GOLDSRC_RESOURCE_TRANSITION.md)
 continues only after exact first-batch completion. The `user-info` stop itself
 retains zero transition requests and zero resource responses.
+
+M3.1.2 then continues from that transition boundary in a separate
+[bounded opcode-43 resource-list stage](GOLDSRC_RESOURCE_LIST.md). Its standard
+profile publishes owning resource metadata and an exact response boundary but
+sends no post-list response and performs no filesystem action. This downstream
+continuation does not reinterpret, expose, or change any M3.1.1 user-info
+field; the custom/player-resource profile remains unsupported and pending.

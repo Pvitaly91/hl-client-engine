@@ -16,6 +16,8 @@
 
 namespace hlclient::goldsrc {
 
+class ResourceListStage;
+
 using ResourceTransitionStageClock = UserInfoSignonStageClock;
 using ResourceTransitionStageTimePoint = UserInfoSignonStageTimePoint;
 
@@ -261,6 +263,36 @@ public:
     [[nodiscard]] bool transition_request_acknowledged() const noexcept;
 
 private:
+    friend class ResourceListStage;
+
+    struct RetainConnectionAtBoundary final {};
+
+    ResourceTransitionStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        ResourceTransitionStageConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback movement_trace_callback,
+        UserInfoSignonTraceCallback user_info_trace_callback,
+        ResourceTransitionTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+    ResourceTransitionStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        ResourceTransitionStageConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback movement_trace_callback,
+        UserInfoSignonTraceCallback user_info_trace_callback,
+        ResourceTransitionTraceCallback trace_callback,
+        bool retain_connection_at_boundary);
+
+    [[nodiscard]] const OwnedServicePayload* retained_source_payload() const noexcept;
+    [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    void finalize_retained_boundary(ResourceTransitionStageTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count = 1U) const noexcept;
     void push_event(ResourceTransitionStageEvent event) noexcept;
     void drain_user_info_events() noexcept;
@@ -301,6 +333,7 @@ private:
     ResourceTransitionTraceCallback trace_callback_;
     bool trace_callback_active_{false};
     bool configuration_valid_{false};
+    bool retain_connection_at_boundary_{false};
     UserInfoSignonStage user_info_stage_;
     std::vector<std::optional<ResourceTransitionStageEvent>> event_slots_;
     std::size_t event_head_{0U};
@@ -311,6 +344,7 @@ private:
     std::optional<ResourceTransitionStageError> error_;
     std::optional<OwnedNetchanPayload> pre_ack_payload_;
     std::optional<OwnedNetchanPayload> pending_decode_payload_;
+    std::optional<OwnedServicePayload> retained_source_payload_;
     std::optional<ResourceTransitionStageTimePoint> last_update_;
     std::size_t transition_request_queue_count_{0U};
     bool request_transmitted_{false};

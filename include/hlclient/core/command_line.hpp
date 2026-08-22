@@ -23,6 +23,7 @@ enum class ConnectionStopPoint {
     movevars,
     user_info,
     resource_list_boundary,
+    resource_list,
 };
 
 enum class AuthenticationProviderKind {

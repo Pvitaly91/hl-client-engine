@@ -917,6 +917,86 @@ void log_resource_transition_trace(
     }
 }
 
+void log_resource_list_trace(
+    const hlclient::goldsrc::ResourceListTraceEvent& event)
+{
+    using Classification = hlclient::goldsrc::ResourceListTraceClassification;
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::transition_boundary_reached:
+    case Classification::post_resource_control:
+        return;
+    case Classification::resource_list_decoded:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] list decoded: entries=" +
+                std::to_string(event.resource_count));
+        return;
+    case Classification::resource_entry_metadata:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] entry=" + std::to_string(event.entry_ordinal) +
+                " type=" +
+                std::string{event.resource_type
+                                ? hlclient::goldsrc::to_string(
+                                      *event.resource_type)
+                                : std::string_view{"unknown"}} +
+                " index=" +
+                (event.resource_index
+                     ? std::to_string(*event.resource_index)
+                     : std::string{"unavailable"}) +
+                " name-bytes=" +
+                std::to_string(event.resource_name_byte_count) +
+                " size-code=" +
+                (event.resource_size_code
+                     ? std::to_string(*event.resource_size_code)
+                     : std::string{"unavailable"}) +
+                " flags=" +
+                (event.resource_flags
+                     ? std::to_string(static_cast<unsigned int>(
+                           *event.resource_flags))
+                     : std::string{"unavailable"}) +
+                " offset=" + std::to_string(event.byte_offset) + ":" +
+                std::to_string(event.bit_offset));
+        return;
+    case Classification::post_resource_boundary_reached:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] exact post-list boundary offset=" +
+                std::to_string(event.byte_offset) + ":" +
+                std::to_string(event.bit_offset));
+        return;
+    case Classification::client_response_required:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] stock client response required; metadata only, no response queued");
+        return;
+    case Classification::unsupported_resource_profile:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unobserved resource-list flags/profile slot is unsupported");
+        return;
+    case Classification::stage_timed_out:
+        hlclient::core::log(LogLevel::error, "Resource-list stage timed out");
+        return;
+    case Classification::stage_cancelled:
+        hlclient::core::log(LogLevel::error, "Resource-list stage cancelled");
+        return;
+    case Classification::backpressure:
+        hlclient::core::log(LogLevel::error, "Resource-list event backpressure");
+        return;
+    case Classification::secondary_stream_pending:
+        hlclient::core::log(LogLevel::error, "Secondary resource stream remains pending");
+        return;
+    case Classification::network_failure:
+        hlclient::core::log(LogLevel::error, "Resource-list network failure");
+        return;
+    case Classification::protocol_failure:
+        hlclient::core::log(LogLevel::error, "Resource-list protocol failure");
+        return;
+    }
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -1341,6 +1421,79 @@ void log_resource_transition_trace(
     case State::resource_transition_secondary_stream_pending:
         hlclient::core::log(LogLevel::error, "Secondary resource stream remains pending");
         return 1;
+    case State::resource_list_client_response_required:
+    {
+        if (!handshake.resource_list_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Resource-list stage completed without an owning result");
+            return 1;
+        }
+        const auto& result = *handshake.resource_list_result();
+        const auto& list = result.resource_list();
+        std::size_t sound_count = 0U;
+        std::size_t model_count = 0U;
+        std::size_t decal_count = 0U;
+        std::size_t generic_count = 0U;
+        std::size_t event_count = 0U;
+        for (const auto& entry : list.entries()) {
+            switch (entry.type()) {
+            case hlclient::goldsrc::ResourceType::sound: ++sound_count; break;
+            case hlclient::goldsrc::ResourceType::model: ++model_count; break;
+            case hlclient::goldsrc::ResourceType::decal: ++decal_count; break;
+            case hlclient::goldsrc::ResourceType::generic: ++generic_count; break;
+            case hlclient::goldsrc::ResourceType::event_script: ++event_count; break;
+            }
+        }
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] list decoded: entries=" +
+                std::to_string(list.resource_count()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] raw size-code sum=" +
+                std::to_string(list.total_size_code_sum()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] types=sound:" + std::to_string(sound_count) +
+                ",model:" + std::to_string(model_count) +
+                ",decal:" + std::to_string(decal_count) +
+                ",generic:" + std::to_string(generic_count) +
+                ",event_script:" + std::to_string(event_count));
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] consumed bits=" +
+                std::to_string(list.bits_consumed()) + " bytes=" +
+                std::to_string(list.bytes_consumed()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] next boundary=end-of-payload offset=" +
+                std::to_string(result.boundary().byte_offset()) + ":" +
+                std::to_string(result.boundary().bit_offset()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] required stock client response recorded as metadata; "
+            "no response was built, queued, or sent");
+        return 0;
+    }
+    case State::resource_list_unsupported_profile:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unobserved resource-list flags/profile slot is unsupported");
+        return 1;
+    case State::resource_list_timed_out:
+        hlclient::core::log(LogLevel::error, "GoldSrc resource-list stage timed out");
+        return 1;
+    case State::resource_list_backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Resource-list event queue reached its hard bound");
+        return 1;
+    case State::resource_list_secondary_stream_pending:
+        hlclient::core::log(
+            LogLevel::error,
+            "Secondary resource-list stream remains pending");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -1369,6 +1522,7 @@ void log_resource_transition_trace(
     case State::waiting_for_movevars:
     case State::waiting_for_user_info:
     case State::waiting_for_resource_transition:
+    case State::waiting_for_resource_list:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -1460,7 +1614,12 @@ public:
                 net_trace
                     ? hlclient::goldsrc::ResourceTransitionTraceCallback{
                           &log_resource_transition_trace}
-                    : hlclient::goldsrc::ResourceTransitionTraceCallback{}}
+                    : hlclient::goldsrc::ResourceTransitionTraceCallback{},
+                {},
+                net_trace
+                    ? hlclient::goldsrc::ResourceListTraceCallback{
+                          &log_resource_list_trace}
+                    : hlclient::goldsrc::ResourceListTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -1780,6 +1939,9 @@ int run(const hlclient::core::CommandLineOptions& options)
         case hlclient::core::ConnectionStopPoint::resource_list_boundary:
             stop_point =
                 hlclient::goldsrc::HandshakeStopPoint::resource_list_boundary;
+            break;
+        case hlclient::core::ConnectionStopPoint::resource_list:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::resource_list;
             break;
         }
         challenge_session = std::make_unique<HandshakeSession>(

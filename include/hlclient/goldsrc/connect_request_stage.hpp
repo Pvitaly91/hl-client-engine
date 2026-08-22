@@ -9,6 +9,7 @@
 #include <hlclient/goldsrc/movement_environment_stage.hpp>
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 #include <hlclient/goldsrc/pre_resource_signon_stage.hpp>
+#include <hlclient/goldsrc/resource_list_stage.hpp>
 #include <hlclient/goldsrc/resource_transition_stage.hpp>
 #include <hlclient/goldsrc/user_info_signon_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
@@ -36,6 +37,7 @@ enum class HandshakeStopPoint {
     movevars,
     user_info,
     resource_list_boundary,
+    resource_list,
 };
 
 enum class ConnectRequestStageState {
@@ -177,6 +179,12 @@ enum class GoldSrcHandshakeState {
     resource_transition_unsupported_message,
     resource_transition_backpressure,
     resource_transition_secondary_stream_pending,
+    waiting_for_resource_list,
+    resource_list_client_response_required,
+    resource_list_unsupported_profile,
+    resource_list_timed_out,
+    resource_list_backpressure,
+    resource_list_secondary_stream_pending,
     timed_out,
     cancelled,
     configuration_error,
@@ -210,7 +218,9 @@ public:
         UserInfoSignonStageConfig user_info_config = {},
         UserInfoSignonTraceCallback user_info_trace_callback = {},
         ResourceTransitionStageConfig resource_transition_config = {},
-        ResourceTransitionTraceCallback resource_transition_trace_callback = {});
+        ResourceTransitionTraceCallback resource_transition_trace_callback = {},
+        ResourceListStageConfig resource_list_config = {},
+        ResourceListTraceCallback resource_list_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -252,6 +262,10 @@ public:
     resource_transition_result() const noexcept;
     [[nodiscard]] const std::optional<ResourceTransitionStageError>&
     resource_transition_error() const noexcept;
+    [[nodiscard]] const std::optional<ResourceListSignonState>&
+    resource_list_result() const noexcept;
+    [[nodiscard]] const std::optional<ResourceListStageError>&
+    resource_list_error() const noexcept;
     // Non-null only after a successful netchan bootstrap. The returned object
     // is the same session that committed the M2.3.3 bootstrap ACKs; callers must use
     // the coordinator's original externally-owned datagram transport.
@@ -271,6 +285,7 @@ private:
     void synchronize_from_movement_environment();
     void synchronize_from_user_info();
     void synchronize_from_resource_transition();
+    void synchronize_from_resource_list();
     void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
@@ -284,6 +299,7 @@ private:
     std::optional<MovementEnvironmentStage> movement_environment_stage_;
     std::optional<UserInfoSignonStage> user_info_stage_;
     std::optional<ResourceTransitionStage> resource_transition_stage_;
+    std::optional<ResourceListStage> resource_list_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;

@@ -6,34 +6,38 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented the bounded project scope of
-**M3.1.1: owning opcode-13 user-info metadata, the exact resource-transition
-request, strict opcode-45 control, and a neutral opcode-43 boundary**. The
-resource-list semantic/body gate is deliberately not passed: production stops
-before opcode 43's body and exposes `Opcode43Boundary`, not
-`ResourceListBoundary`.
+The repository has implemented the bounded standard-profile scope of
+**M3.1.2: identifying opcode 43 as `ResourceListMessage`, decoding its exact
+LSB-first entry grammar into an owning ordered `ResourceListState`, and
+stopping at a metadata-only client-response boundary**. The standard semantic
+gate is passed across 54 exact signed-stock parses and three coherent map
+profiles. Custom/player-resource entries remain typed unsupported and pending.
 
-Implemented M1–M3.1.1 behavior includes the Protocol 48 challenge, captured
+Implemented M1–M3.1.2 behavior includes the Protocol 48 challenge, captured
 one-shot `connect` request, strict immediate connectionless `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
 persistent reliable state, strict fragmentation/reassembly, the fixed `new`
 request, bounded `BZ2\0` service decoding, typed server info, seven owning
 delta schemas, typed movement/environment metadata, the exact opcode-13
 sequence through first-batch end, one fixed nine-byte `sendres` request queued
-through the retained driver, and a bounded later transfer through opcode 45 to
-the unread opcode-43 body. User ID, all user-info values, the fixed 16-byte
-opaque suffix, and the first opcode-45 `u32` remain private.
+through the retained driver, a bounded later transfer through opcode 45, and
+strict parsing of the standard opcode-43 list through exact end-of-payload.
+User ID, all user-info values, the fixed 16-byte opaque suffix, and the first
+opcode-45 `u32` remain private. Resource names remain owning untrusted metadata
+and are never resolved as paths.
 
 The earlier M2.4.2 server-info second-client evidence gap remains. Signed-stock
 sets separately confirm netchan/fragment behavior, the initial request, the
 server-info/delta/movevars grammars, opcode-13 single/repeated profiles, request
-loss/ACK/duplicate behavior, and six-fragment resource-transition transfers.
-The pinned public Valve SDK independently cross-checks confirmed field
-semantics, but it contains no numeric mapping that establishes opcode 43 as a
-resource-list service message. Live `hlclient` to stock HLDS, slot-1/file
-semantics, general `svc_*` parsing, a Steam authentication provider,
-opcode-43/resource-list bodies, filesystem resolution/downloads, snapshots,
-gameplay, and a public raw payload/command CLI remain unavailable.
+loss/ACK/duplicate behavior, six-fragment resource-transition transfers, and
+54 stable resource-list bodies. The pinned public Valve SDK independently
+cross-checks resource categories and fields but contains no numeric opcode-43
+constant or wire serializer; the semantic gate instead also relies on exact
+repeated grammar, coherent map differentials, and exact list endpoints. Live
+`hlclient` to stock HLDS, slot-1/file semantics, general `svc_*` parsing, a
+Steam authentication provider, custom-resource bodies, the post-list response
+builder, filesystem resolution/downloads, snapshots, gameplay, and a public
+raw payload/command CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
 ## Reference platform
@@ -339,6 +343,24 @@ next opcode 43 unconsumed. The stop-point spelling does not assert resource-list
 semantics; no opcode-43 body byte is parsed and no response/filesystem action
 occurs. See [GoldSrc resource transition](docs/GOLDSRC_RESOURCE_TRANSITION.md).
 
+The M3.1.2 standard resource-list stop continues from that historical
+boundary:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after resource-list `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+It decodes opcode 43 at the exact retained cursor into an ordered owning list,
+requires the exact terminal zero fill and end-of-payload, and publishes a
+metadata-only required-response boundary. It sends no post-list response and
+performs no path normalization, filesystem access, download, cache, precache,
+asset, or renderer action. Custom/player-resource flag profiles fail closed as
+typed unsupported. See
+[GoldSrc opcode-43 resource list](docs/GOLDSRC_RESOURCE_LIST.md).
+
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
 project client exercises request plus accept/reject behavior against
@@ -499,7 +521,8 @@ duplicate-datagram transitions establish the exact user-info grammar, exact
 first-batch end, fixed nine-byte request, six-fragment later transfer, fixed
 opcode-45 control, and opcode-43 cursor. Raw identity and payload bytes remain
 ignored. The pinned SDK still has no numeric opcode-43 mapping, so the tracked
-API remains neutral. See [GoldSrc user info](docs/GOLDSRC_USERINFO.md) and
+M3.1.1 pre-body API remains neutral. See
+[GoldSrc user info](docs/GOLDSRC_USERINFO.md) and
 [GoldSrc resource transition](docs/GOLDSRC_RESOURCE_TRANSITION.md).
 
 Project and validate the sanitized ignored metadata with:
@@ -514,6 +537,31 @@ pwsh -File .\scripts\verify_stock_resource_transition.ps1 `
 Both modes report 22 accepted sources, 18 complete transitions, 11 rejected
 controlled attempts whose requested values were not observed, two incomplete
 runs, and `opcode43=neutral-unconsumed`.
+
+M3.1.2 uses an offline, bounded projector over the existing ignored canonical
+second-service payloads. It starts no stock or project process, rejects a
+primary or managed Steam research root with no override, and projects no raw
+names, payload bytes, or digests:
+
+```powershell
+.\scripts\verify_stock_resource_list.ps1 -ProjectEvidenceSet
+.\scripts\verify_stock_resource_list.ps1 `
+  -ValidateMetadataPath `
+  .\docs\evidence\GOLDSRC_RESOURCE_LIST_STOCK.json
+```
+
+The exact result is 54 parseable standard payloads: 50 `boot_camp` lists with
+540 entries, two `crossfire` lists with 607 entries, and two `stalkyard` lists
+with 532 entries. Historical `m244-sky-night-*` run IDs describe captures whose
+configuration metadata identifies `stalkyard`; no stock map named `night` is
+claimed. Two additional isolated `maxplayers 1` runs ended boundedly before
+`sendres` with no resource payload/list; their grammar/count result is N/A and
+they are not added to the 54-list denominator. At least two `maxplayers 8`
+runs contain the full standard list. The standard gate is completed, custom
+entries remain pending, and the offline run reports
+`external-file-drift=none`. See
+[GoldSrc opcode-43 resource list](docs/GOLDSRC_RESOURCE_LIST.md) and the
+[tracked sanitized stock projection](docs/evidence/GOLDSRC_RESOURCE_LIST_STOCK.json).
 
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
@@ -655,6 +703,12 @@ coverage includes every parser truncation, malformed pairs and duplicate info
 keys, limits and limit plus one, wrong endian/reserved control values,
 missing/wrong opcode-43 boundary, wrong endpoint, and transactional malformed
 opcode 45.
+M3.1.2 adds the exact independent resource-list fixture, LSB bit boundaries,
+all byte and bit truncations, count/name/size/flag limits, duplicate identity,
+terminal-fill/EOP, byte-preserving malicious-name isolation, immutable owning
+state, post-list response metadata with zero TX, transactional stage events,
+and same-socket fake-HLDS continuation. The historical pre-body stop retains
+its M3.1.1 behavior.
 
 ## License
 

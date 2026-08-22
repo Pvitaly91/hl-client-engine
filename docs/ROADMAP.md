@@ -463,22 +463,56 @@ project tests cover 20/20 baseline, 20/20 dropped-request, 20/20 fragmented
 second-transfer, and 20/20 repeated-user-info cases.
 
 The pinned public Valve headers do not map numeric opcode 43 to a resource-list
-service message. The strict semantic gate is therefore not passed: production
-uses `Opcode43Boundary` and `neutral_opcode43_boundary_reached`, even though
-the CLI stop spelling is `resource-list-boundary`. There is no opcode-43 body
-parser, resource response, filesystem action, download, cache, precache, asset
-load, or renderer work. See [GoldSrc user info](GOLDSRC_USERINFO.md) and
+service message. The M3.1.1 evidence alone therefore does not pass the semantic
+gate: its historical stop still uses `Opcode43Boundary` and
+`neutral_opcode43_boundary_reached`, even though the CLI spelling is
+`resource-list-boundary`. M3.1.1 itself has no opcode-43 body parser, resource
+response, filesystem action, download, cache, precache, asset load, or renderer
+work. See [GoldSrc user info](GOLDSRC_USERINFO.md) and
 [GoldSrc resource transition](GOLDSRC_RESOURCE_TRANSITION.md).
 
 ### M3.1.2 — Opcode-43 resource-list discovery and bounded codec
 
-**Status: next; evidence and implementation pending.**
+**Status: completed for the bounded standard stock profile; custom/player
+resource profile remains typed unsupported and pending.**
 
-Independently establish the numeric/header semantic mapping and exact
-opcode-43 body grammar before introducing a `ResourceListBoundary` or
-`ResourceListState`. The future parser must remain bounded and owning, stop at
-exact cursors, and must not send consistency/resource responses until their
-own wire evidence and policy are complete.
+Fifty-four exact ignored signed-stock payloads across `boot_camp` (50),
+`crossfire` (2), and `stalkyard` (2) establish numeric opcode 43 as
+`ResourceListMessage` for the standard profile. They confirm one LSB-first
+grammar: 12-bit count; repeated 4-bit type, unaligned NUL-terminated 8-bit
+name, 12-bit index, 24-bit raw size code, and 4-bit flags/profile slot; then
+1..8 zero bits to exact end-of-payload. Historical `m244-sky-night-*` IDs are
+classified as `stalkyard` from their captured configuration metadata.
+
+Two additional safe isolated `maxplayers 1` controls reached only the stable
+7,395-byte first service payload and produced no resource transition or list.
+Grammar/count is N/A for those runs, so they do not increase the 54 parseable
+lists and do not represent parser failures. At least two `maxplayers 8` runs
+reach a complete standard list; the supported multiplayer standard gate is
+unchanged.
+
+`ResourceListState` owns exact wire order, untrusted byte-preserving names,
+checked raw-code sums, field/entry cursors, and `(type,index)` identity. The
+parser and stage are bounded and transactional, do not scan opcodes, and
+perform no filesystem operation. The pinned public Valve header cross-checks
+resource categories but is not used as a packed wire layout and still supplies
+no numeric opcode constant.
+
+All accepted standard lists end exactly at their owning service-payload EOP.
+M3.1.2 publishes only metadata for the stock client's required response: 51
+normal reliable carriers and three coalesced same-process/reconnect variants.
+The leading raw byte is a fragment descriptor, not a semantic opcode; the
+semantic fragment begins with neutral opcode candidate 5. No response builder
+or TX exists. See
+[GoldSrc opcode-43 resource list](GOLDSRC_RESOURCE_LIST.md).
+
+### M3.1.3 — Client resource/consistency response boundary
+
+**Status: next; exact response semantics and implementation pending.**
+
+Establish the required post-list client response, reliable lifecycle, and
+consistency/resource-negotiation boundary. Do not introduce filesystem
+resolution, download, cache, or precache as part of that protocol work.
 
 ### M3.2 — Local resource resolution and precache state
 
@@ -497,13 +531,13 @@ integrity policies are independently specified and tested.
 
 Planned work:
 
-- parse resource lists and consistency metadata;
+- consume the already validated owning resource-list metadata;
 - map approved resources into sandboxed game/search paths;
 - consume the bounded M2.3.3 fragment transport for downloads where protocol
   compatibility requires them, with traversal and overwrite protection;
 - verify sizes and available checksums before accepting content;
 - represent precache entries with engine-owned handles;
-- cache behavior and synthetic resource-list tests.
+- cache behavior and resolution-policy tests.
 
 Exit criteria: required resources resolve deterministically from a user-owned
 installation or a safe download cache, and remote names cannot escape approved

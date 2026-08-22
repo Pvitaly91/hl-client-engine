@@ -182,6 +182,8 @@ hlclient_add_library(
     include/hlclient/goldsrc/move_vars.hpp
     include/hlclient/goldsrc/movement_environment_stage.hpp
     include/hlclient/goldsrc/pre_resource_signon_stage.hpp
+    include/hlclient/goldsrc/resource_list.hpp
+    include/hlclient/goldsrc/resource_list_stage.hpp
     include/hlclient/goldsrc/resource_transition_control.hpp
     include/hlclient/goldsrc/resource_transition_request.hpp
     include/hlclient/goldsrc/resource_transition_stage.hpp
@@ -198,6 +200,8 @@ hlclient_add_library(
     src/goldsrc/move_vars.cpp
     src/goldsrc/movement_environment_stage.cpp
     src/goldsrc/pre_resource_signon_stage.cpp
+    src/goldsrc/resource_list.cpp
+    src/goldsrc/resource_list_stage.cpp
     src/goldsrc/resource_transition_control.cpp
     src/goldsrc/resource_transition_request.cpp
     src/goldsrc/resource_transition_stage.cpp

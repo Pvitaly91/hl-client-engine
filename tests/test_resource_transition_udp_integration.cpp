@@ -1,5 +1,6 @@
 #include "delta_test_fixture.hpp"
 #include "move_vars_test_fixture.hpp"
+#include "resource_list_test_fixture.hpp"
 #include "user_info_test_fixture.hpp"
 
 #include <hlclient/auth/authentication_provider.hpp>
@@ -24,6 +25,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -41,6 +43,7 @@ namespace delta_fixture = hlclient::test::delta_fixture;
 namespace goldsrc = hlclient::goldsrc;
 namespace move_fixture = hlclient::test::move_vars_fixture;
 namespace network = hlclient::network;
+namespace resource_fixture = resource_list_test_fixture;
 namespace user_fixture = hlclient::test::user_info_fixture;
 
 inline constexpr std::string_view kAuthenticationMarker =
@@ -242,6 +245,14 @@ void send_server_datagram(
     return config;
 }
 
+[[nodiscard]] goldsrc::ResourceListStageConfig resource_list_config()
+{
+    goldsrc::ResourceListStageConfig config;
+    config.transition = transition_config();
+    config.maximum_stage_events = 512U;
+    return config;
+}
+
 [[nodiscard]] std::vector<std::vector<std::byte>> delta_schemas()
 {
     return {
@@ -406,6 +417,196 @@ enum class MalformedUserInfoScenario {
     return output;
 }
 
+enum class ResourceListIntegrationScenario {
+    baseline,
+    reordered_fragments,
+    differential_map,
+    malicious_names,
+    wrong_endpoint,
+    duplicate_completed_batch,
+    invalid_type,
+    excessive_count,
+    duplicate_identity,
+    unobserved_flags_profile,
+    nonzero_padding,
+    trailing_data,
+    truncated_entry,
+    truncated_count,
+    unterminated_name,
+    resource_size_limit,
+    resource_total_size_limit,
+    missing_fragment,
+    malformed_bzip2,
+    timeout,
+    cancellation,
+    event_backpressure,
+};
+
+[[nodiscard]] std::vector<std::byte> second_resource_list_payload(
+    const ResourceListIntegrationScenario scenario,
+    const std::size_t run)
+{
+    constexpr std::string_view alphabet =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    std::vector<resource_fixture::EntrySpec> entries;
+    entries.reserve(128U);
+    std::array<std::uint16_t, 16U> next_index{};
+    next_index[0U] = 1U;
+    next_index[2U] = 1U;
+    next_index[3U] = 0U;
+    next_index[4U] = 1U;
+    next_index[5U] = 1U;
+    constexpr std::array<std::uint8_t, 5U> types{0U, 2U, 3U, 4U, 5U};
+    std::uint32_t random = 0x9e37'79b9U;
+    for (std::size_t ordinal = 0U; ordinal < 128U; ++ordinal) {
+        const auto type = types[ordinal % types.size()];
+        std::string name;
+        switch (type) {
+        case 0U: name = "sound/synthetic_"; break;
+        case 2U: name = "models/synthetic_"; break;
+        case 3U: name = "decals/synthetic_"; break;
+        case 4U: name = "generic/synthetic_"; break;
+        case 5U: name = "events/synthetic_"; break;
+        default: FAIL("Unexpected synthetic resource type");
+        }
+        name += std::to_string(ordinal);
+        name.push_back('_');
+        for (std::size_t character = 0U; character < 40U; ++character) {
+            random ^= random << 13U;
+            random ^= random >> 17U;
+            random ^= random << 5U;
+            name.push_back(alphabet[random % alphabet.size()]);
+        }
+        switch (type) {
+        case 0U: name += ".wav"; break;
+        case 2U: name += ".mdl"; break;
+        case 3U: name += ".wad"; break;
+        case 4U: name += ".dat"; break;
+        case 5U: name += ".sc"; break;
+        default: FAIL("Unexpected synthetic resource type");
+        }
+        entries.push_back(resource_fixture::EntrySpec{
+            type,
+            std::move(name),
+            next_index[type]++,
+            static_cast<std::uint32_t>(1'000U + ordinal * 37U),
+            static_cast<std::uint8_t>(ordinal % 7U == 0U ? 1U : 0U),
+        });
+    }
+
+    if (scenario == ResourceListIntegrationScenario::duplicate_identity) {
+        entries[1U].type = entries[0U].type;
+        entries[1U].index = entries[0U].index;
+    } else if (scenario == ResourceListIntegrationScenario::invalid_type) {
+        entries[0U].type = 1U;
+    } else if (scenario ==
+               ResourceListIntegrationScenario::unobserved_flags_profile) {
+        entries[0U].flags = 4U;
+    } else if (scenario == ResourceListIntegrationScenario::differential_map) {
+        constexpr std::array<std::string_view, 3U> map_names{
+            "maps/differential_alpha.bsp",
+            "maps/differential_bravo.bsp",
+            "maps/differential_charlie.bsp",
+        };
+        const auto variant = run % map_names.size();
+        entries[1U].name = map_names[variant];
+        entries[1U].size_code =
+            static_cast<std::uint32_t>(98'765U + variant);
+    } else if (scenario == ResourceListIntegrationScenario::malicious_names) {
+        const std::array<std::string, 10U> names{
+            "../evil",
+            "..\\evil",
+            "C:\\evil",
+            "\\\\server\\share",
+            "/absolute",
+            "maps//double.bsp",
+            "maps/./dot.bsp",
+            "maps/%2e%2e/encoded",
+            std::string{"control_\x1b", 9U},
+            std::string{"non_ascii_\x80", 11U},
+        };
+        for (std::size_t index = 0U; index < names.size(); ++index) {
+            entries[index].name = names[index];
+        }
+    }
+
+    auto message = resource_fixture::make_message(entries);
+    if (scenario == ResourceListIntegrationScenario::excessive_count) {
+        message.bytes[1U] = std::byte{0x01U};
+        const auto type_nibble =
+            std::to_integer<std::uint8_t>(message.bytes[2U]) & 0xf0U;
+        message.bytes[2U] = static_cast<std::byte>(type_nibble | 0x04U);
+    } else if (scenario == ResourceListIntegrationScenario::nonzero_padding) {
+        resource_fixture::set_bit(
+            message.bytes,
+            message.padding_start_bit,
+            true);
+    } else if (scenario == ResourceListIntegrationScenario::trailing_data) {
+        message.bytes.push_back(std::byte{5U});
+    } else if (scenario == ResourceListIntegrationScenario::truncated_entry) {
+        REQUIRE(message.bytes.size() > 3U);
+        message.bytes.resize(message.bytes.size() - 3U);
+    } else if (scenario == ResourceListIntegrationScenario::truncated_count) {
+        // Retain opcode 43 and one body byte: the transition boundary is valid,
+        // while the resource parser has only 8 of the required 12 count bits.
+        message.bytes.resize(2U);
+    } else if (scenario == ResourceListIntegrationScenario::unterminated_name) {
+        // Opcode, count, type, and five name bytes with no NUL terminator.
+        message.bytes.resize(8U);
+    }
+    std::vector<std::byte> output{
+        std::byte{45U},
+        std::byte{1U}, std::byte{0U}, std::byte{0U}, std::byte{0U},
+        std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{0U},
+    };
+    output.insert(output.end(), message.bytes.begin(), message.bytes.end());
+    return output;
+}
+
+[[nodiscard]] std::optional<goldsrc::ResourceListErrorCode>
+expected_resource_list_error(const ResourceListIntegrationScenario scenario)
+{
+    switch (scenario) {
+    case ResourceListIntegrationScenario::baseline:
+    case ResourceListIntegrationScenario::reordered_fragments:
+    case ResourceListIntegrationScenario::differential_map:
+    case ResourceListIntegrationScenario::malicious_names:
+    case ResourceListIntegrationScenario::wrong_endpoint:
+    case ResourceListIntegrationScenario::duplicate_completed_batch:
+    case ResourceListIntegrationScenario::missing_fragment:
+    case ResourceListIntegrationScenario::malformed_bzip2:
+    case ResourceListIntegrationScenario::timeout:
+    case ResourceListIntegrationScenario::cancellation:
+    case ResourceListIntegrationScenario::event_backpressure:
+        return std::nullopt;
+    case ResourceListIntegrationScenario::invalid_type:
+        return goldsrc::ResourceListErrorCode::unsupported_resource_type;
+    case ResourceListIntegrationScenario::excessive_count:
+        return goldsrc::ResourceListErrorCode::resource_count_limit_exceeded;
+    case ResourceListIntegrationScenario::duplicate_identity:
+        return goldsrc::ResourceListErrorCode::duplicate_resource_identity;
+    case ResourceListIntegrationScenario::unobserved_flags_profile:
+        return goldsrc::ResourceListErrorCode::unsupported_resource_profile;
+    case ResourceListIntegrationScenario::nonzero_padding:
+        return goldsrc::ResourceListErrorCode::nonzero_padding;
+    case ResourceListIntegrationScenario::trailing_data:
+        return goldsrc::ResourceListErrorCode::unexpected_trailing_data;
+    case ResourceListIntegrationScenario::truncated_entry:
+        return goldsrc::ResourceListErrorCode::truncated_entry;
+    case ResourceListIntegrationScenario::truncated_count:
+        return goldsrc::ResourceListErrorCode::truncated_count;
+    case ResourceListIntegrationScenario::unterminated_name:
+        return goldsrc::ResourceListErrorCode::unterminated_resource_name;
+    case ResourceListIntegrationScenario::resource_size_limit:
+        return goldsrc::ResourceListErrorCode::
+            resource_declared_size_limit_exceeded;
+    case ResourceListIntegrationScenario::resource_total_size_limit:
+        return goldsrc::ResourceListErrorCode::
+            total_declared_size_limit_exceeded;
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] std::vector<std::byte> service_envelope(
     const std::span<const std::byte> semantic)
 {
@@ -546,6 +747,10 @@ struct TraceCounts {
     std::size_t requests_acknowledged{0U};
     std::size_t controls{0U};
     std::size_t boundaries{0U};
+    std::size_t resource_lists{0U};
+    std::size_t resource_entries{0U};
+    std::size_t post_list_boundaries{0U};
+    std::size_t client_response_boundaries{0U};
 };
 
 enum class IntegrationScenario {
@@ -1138,6 +1343,466 @@ void run_resource_transition(
     require_no_datagram(*server);
 }
 
+void run_resource_list(
+    const std::size_t run,
+    const ResourceListIntegrationScenario scenario)
+{
+    INFO("fake-HLDS resource-list run " << run + 1U);
+    network::NetworkRuntime runtime;
+    INFO(runtime.error_message());
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto server = network::UdpSocket::open_ipv4(runtime, error);
+    INFO(error);
+    REQUIRE(server);
+    REQUIRE(server->bind(network::NetworkAddress::loopback(0U), error));
+    const auto server_endpoint = server->local_address(error);
+    REQUIRE(server_endpoint);
+    auto client = network::UdpSocket::open_ipv4(runtime, error);
+    REQUIRE(client);
+    REQUIRE(client->bind(network::NetworkAddress::loopback(0U), error));
+    network::UdpDatagramTransport transport{std::move(*client)};
+
+    std::size_t releases = 0U;
+    TraceCounts traces;
+    auto prepared = prepared_request_with_session(releases);
+    auto list_config = resource_list_config();
+    if (scenario == ResourceListIntegrationScenario::resource_size_limit) {
+        list_config.resource_list.maximum_resource_declared_size = 999U;
+    } else if (scenario ==
+               ResourceListIntegrationScenario::resource_total_size_limit) {
+        list_config.resource_list.maximum_resource_declared_size = 6'000U;
+        list_config.resource_list.maximum_resource_total_declared_size = 6'000U;
+    } else if (scenario == ResourceListIntegrationScenario::missing_fragment) {
+        list_config.transition.user_info.movement_environment.delta.pre_resource
+            .initial_signon.driver.fragment_transfer_timeout = 20ms;
+    } else if (scenario == ResourceListIntegrationScenario::timeout) {
+        list_config.transition.user_info.movement_environment.delta.pre_resource
+            .initial_signon.driver.channel_inactivity_timeout = 20ms;
+    } else if (scenario == ResourceListIntegrationScenario::event_backpressure) {
+        list_config.maximum_stage_events = 2U;
+    }
+    goldsrc::GoldSrcHandshakeCoordinator handshake{
+        transport,
+        *server_endpoint,
+        goldsrc::HandshakeStopPoint::resource_list,
+        std::move(prepared.request),
+        challenge_config(),
+        {},
+        {},
+        response_config(),
+        {},
+        std::move(prepared.session),
+        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+        [&traces](const goldsrc::UserInfoSignonTraceEvent& event) {
+            if (event.classification ==
+                goldsrc::UserInfoSignonTraceClassification::
+                    user_info_message_decoded) {
+                ++traces.user_info_messages;
+            }
+            if (event.classification ==
+                goldsrc::UserInfoSignonTraceClassification::
+                    first_batch_complete) {
+                ++traces.first_batch_completions;
+            }
+        },
+        transition_config(),
+        [&traces](const goldsrc::ResourceTransitionTraceEvent& event) {
+            using Classification =
+                goldsrc::ResourceTransitionTraceClassification;
+            if (event.classification ==
+                Classification::transition_request_queued) {
+                ++traces.requests_queued;
+            }
+            if (event.classification ==
+                Classification::transition_request_acknowledged) {
+                ++traces.requests_acknowledged;
+            }
+            if (event.classification ==
+                Classification::transition_control_decoded) {
+                ++traces.controls;
+            }
+            if (event.classification ==
+                Classification::neutral_opcode43_boundary_reached) {
+                ++traces.boundaries;
+            }
+        },
+        list_config,
+        [&traces](const goldsrc::ResourceListTraceEvent& event) {
+            using Classification = goldsrc::ResourceListTraceClassification;
+            if (event.classification == Classification::resource_list_decoded) {
+                ++traces.resource_lists;
+            }
+            if (event.classification ==
+                Classification::resource_entry_metadata) {
+                ++traces.resource_entries;
+            }
+            if (event.classification ==
+                Classification::post_resource_boundary_reached) {
+                ++traces.post_list_boundaries;
+            }
+            if (event.classification ==
+                Classification::client_response_required) {
+                ++traces.client_response_boundaries;
+            }
+        }};
+
+    const auto epoch = goldsrc::ChallengeExchangeTimePoint{} +
+        std::chrono::milliseconds{30'000 + static_cast<std::int64_t>(run)};
+    const auto started = reach_first_service_request(
+        *server, handshake, epoch, error);
+    CHECK(handshake.state() ==
+          goldsrc::GoldSrcHandshakeState::waiting_for_resource_list);
+    const auto first_batch = send_first_service_batch(
+        *server,
+        handshake,
+        started,
+        epoch + 4ms,
+        false,
+        error);
+    CHECK_FALSE(handshake.terminal());
+    CHECK(traces.first_batch_completions == 1U);
+
+    handshake.update(first_batch.next_update);
+    const auto transition = decode_client_packet(
+        receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+        started.client_endpoint);
+    REQUIRE(is_exact_transition_request(transition));
+    CHECK(transition.header.sequence.flags.reliable);
+    auto last_client_sequence = transition.header.sequence.sequence.value();
+    auto server_sequence = first_batch.next_server_sequence;
+    send_server_datagram(
+        *server,
+        started.client_endpoint,
+        server_packet(
+            server_sequence++,
+            false,
+            last_client_sequence,
+            false,
+            {}),
+        error);
+    handshake.update(first_batch.next_update + 1ms);
+    CHECK_FALSE(handshake.terminal());
+    CHECK(traces.requests_acknowledged == 1U);
+
+    if (scenario == ResourceListIntegrationScenario::timeout) {
+        handshake.update(first_batch.next_update + 25ms);
+        REQUIRE(handshake.terminal());
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::resource_list_timed_out);
+        CHECK_FALSE(handshake.resource_list_result());
+        REQUIRE(handshake.resource_list_error());
+        CHECK(handshake.resource_list_error()->code ==
+              goldsrc::ResourceListStageErrorCode::transition_stage_failed);
+        CHECK(handshake.resource_list_error()->driver_code ==
+              goldsrc::NetchanDriverErrorCode::channel_inactivity_timed_out);
+        CHECK(traces.resource_lists == 0U);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        handshake.update(first_batch.next_update + 30ms);
+        handshake.cancel(first_batch.next_update + 31ms);
+        CHECK(releases == 1U);
+        return;
+    }
+
+    if (scenario == ResourceListIntegrationScenario::cancellation) {
+        handshake.cancel(first_batch.next_update + 2ms);
+        REQUIRE(handshake.terminal());
+        CHECK(handshake.state() == goldsrc::GoldSrcHandshakeState::cancelled);
+        CHECK_FALSE(handshake.resource_list_result());
+        CHECK_FALSE(handshake.resource_list_error());
+        CHECK(traces.resource_lists == 0U);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        handshake.cancel(first_batch.next_update + 3ms);
+        CHECK(releases == 1U);
+        return;
+    }
+
+    const auto semantic = second_resource_list_payload(scenario, run);
+    auto envelope = service_envelope(semantic);
+    if (scenario == ResourceListIntegrationScenario::malformed_bzip2) {
+        REQUIRE(envelope.size() > goldsrc::kServicePayloadEnvelopeHeaderSize);
+        std::fill(
+            envelope.begin() + static_cast<std::ptrdiff_t>(
+                goldsrc::kServicePayloadEnvelopeHeaderSize),
+            envelope.end(),
+            std::byte{0U});
+    }
+    const auto count_size =
+        (envelope.size() + goldsrc::kStockProtocol48NormalFragmentChunkSize - 1U) /
+        goldsrc::kStockProtocol48NormalFragmentChunkSize;
+    REQUIRE(count_size >= 1U);
+    if (scenario != ResourceListIntegrationScenario::truncated_count &&
+        scenario != ResourceListIntegrationScenario::unterminated_name) {
+        REQUIRE(count_size >= 3U);
+    }
+    REQUIRE(count_size <= (std::numeric_limits<std::uint16_t>::max)());
+    const auto fragment_count = static_cast<std::uint16_t>(count_size);
+    std::vector<std::uint16_t> fragment_order;
+    fragment_order.reserve(fragment_count);
+    for (std::uint16_t index = 1U; index <= fragment_count; ++index) {
+        fragment_order.push_back(index);
+    }
+    if (scenario ==
+        ResourceListIntegrationScenario::reordered_fragments) {
+        std::reverse(fragment_order.begin() + 1, fragment_order.end());
+    }
+
+    if (scenario == ResourceListIntegrationScenario::missing_fragment) {
+        REQUIRE(fragment_order.size() >= 2U);
+        fragment_order.pop_back();
+    }
+
+    auto now = first_batch.next_update + 2ms;
+    if (scenario == ResourceListIntegrationScenario::wrong_endpoint) {
+        auto intruder = network::UdpSocket::open_ipv4(runtime, error);
+        REQUIRE(intruder);
+        REQUIRE(intruder->bind(network::NetworkAddress::loopback(0U), error));
+        const auto first_length = (std::min)(
+            goldsrc::kStockProtocol48NormalFragmentChunkSize,
+            envelope.size());
+        send_server_datagram(
+            *intruder,
+            started.client_endpoint,
+            server_fragment(
+                server_sequence + 100U,
+                last_client_sequence,
+                false,
+                1U,
+                fragment_count,
+                std::span<const std::byte>{envelope}.first(first_length)),
+            error);
+        handshake.update(now);
+        CHECK_FALSE(handshake.terminal());
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::waiting_for_resource_list);
+        require_no_datagram(*server);
+        require_no_datagram(*intruder);
+        now += 1ms;
+    }
+    for (const auto index : fragment_order) {
+        const auto offset = static_cast<std::size_t>(index - 1U) *
+            goldsrc::kStockProtocol48NormalFragmentChunkSize;
+        const auto length = (std::min)(
+            goldsrc::kStockProtocol48NormalFragmentChunkSize,
+            envelope.size() - offset);
+        send_server_datagram(
+            *server,
+            started.client_endpoint,
+            server_fragment(
+                server_sequence++,
+                last_client_sequence,
+                false,
+                index,
+                fragment_count,
+                std::span<const std::byte>{envelope}.subspan(offset, length)),
+            error);
+        handshake.update(now);
+        const auto acknowledgement = decode_client_packet(
+            receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+            started.client_endpoint);
+        check_transport_only_packet(acknowledgement);
+        last_client_sequence = acknowledgement.header.sequence.sequence.value();
+        now += 1ms;
+    }
+
+    if (scenario == ResourceListIntegrationScenario::missing_fragment) {
+        REQUIRE_FALSE(handshake.terminal());
+        handshake.update(first_batch.next_update + 30ms);
+        REQUIRE(handshake.terminal());
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::resource_list_timed_out);
+        CHECK_FALSE(handshake.resource_list_result());
+        REQUIRE(handshake.resource_list_error());
+        CHECK(handshake.resource_list_error()->code ==
+              goldsrc::ResourceListStageErrorCode::transition_stage_failed);
+        CHECK(handshake.resource_list_error()->driver_code ==
+              goldsrc::NetchanDriverErrorCode::fragment_transfer_timed_out);
+        CHECK(traces.resource_lists == 0U);
+        CHECK(traces.resource_entries == 0U);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        handshake.update(first_batch.next_update + 31ms);
+        handshake.cancel(first_batch.next_update + 32ms);
+        CHECK(releases == 1U);
+        return;
+    }
+
+    if (scenario == ResourceListIntegrationScenario::malformed_bzip2) {
+        REQUIRE(handshake.terminal());
+        CHECK(handshake.state() == goldsrc::GoldSrcHandshakeState::protocol_error);
+        CHECK_FALSE(handshake.resource_list_result());
+        REQUIRE(handshake.resource_list_error());
+        CHECK(handshake.resource_list_error()->code ==
+              goldsrc::ResourceListStageErrorCode::transition_stage_failed);
+        CHECK(handshake.resource_list_error()->transition_code ==
+              goldsrc::ResourceTransitionStageErrorCode::
+                  second_payload_envelope_decode_failed);
+        CHECK(traces.resource_lists == 0U);
+        CHECK(traces.resource_entries == 0U);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        handshake.update(now + 1ms);
+        handshake.cancel(now + 2ms);
+        CHECK(releases == 1U);
+        return;
+    }
+
+    if (scenario == ResourceListIntegrationScenario::event_backpressure) {
+        REQUIRE(handshake.terminal());
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::resource_list_backpressure);
+        CHECK_FALSE(handshake.resource_list_result());
+        REQUIRE(handshake.resource_list_error());
+        CHECK(handshake.resource_list_error()->code ==
+              goldsrc::ResourceListStageErrorCode::event_backpressure);
+        CHECK_FALSE(handshake.resource_list_error()->resource_list_code);
+        CHECK(traces.resource_lists == 0U);
+        CHECK(traces.resource_entries == 0U);
+        CHECK(traces.post_list_boundaries == 0U);
+        CHECK(traces.client_response_boundaries == 0U);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        handshake.update(now + 1ms);
+        handshake.cancel(now + 2ms);
+        CHECK(releases == 1U);
+        return;
+    }
+
+    const auto expected_error = expected_resource_list_error(scenario);
+    if (expected_error) {
+        REQUIRE(handshake.terminal());
+        const auto expected_state =
+            *expected_error ==
+                    goldsrc::ResourceListErrorCode::unsupported_resource_profile
+                ? goldsrc::GoldSrcHandshakeState::
+                      resource_list_unsupported_profile
+                : goldsrc::GoldSrcHandshakeState::protocol_error;
+        CHECK(handshake.state() == expected_state);
+        CHECK_FALSE(handshake.resource_list_result());
+        REQUIRE(handshake.resource_list_error());
+        CHECK(handshake.resource_list_error()->code ==
+              goldsrc::ResourceListStageErrorCode::resource_list_decode_failed);
+        CHECK(handshake.resource_list_error()->resource_list_code ==
+              expected_error);
+        CHECK(traces.user_info_messages == 1U);
+        CHECK(traces.first_batch_completions == 1U);
+        CHECK(traces.requests_queued == 1U);
+        CHECK(traces.requests_acknowledged == 1U);
+        CHECK(traces.controls == 1U);
+        CHECK(traces.boundaries == 1U);
+        CHECK(traces.resource_lists == 0U);
+        CHECK(traces.resource_entries == 0U);
+        CHECK(traces.post_list_boundaries == 0U);
+        CHECK(traces.client_response_boundaries == 0U);
+        CHECK_FALSE(handshake.error_context().empty());
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        handshake.update(now + 100ms);
+        handshake.cancel(now + 200ms);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        return;
+    }
+
+    REQUIRE(handshake.terminal());
+    CHECK(handshake.state() ==
+          goldsrc::GoldSrcHandshakeState::
+              resource_list_client_response_required);
+    REQUIRE(handshake.resource_list_result());
+    const auto& result = *handshake.resource_list_result();
+    const auto& list = result.resource_list();
+    CHECK(result.transition().request().message_bytes() ==
+          kExactTransitionRequest.size());
+    CHECK(result.transition().control().body_bytes() == 8U);
+    CHECK(result.transition().boundary().opcode() == 43U);
+    CHECK(result.transition().boundary().byte_offset() == 9U);
+    CHECK(result.transition().source_payload().reassembled());
+    CHECK(result.transition().source_payload().decompressed());
+    CHECK(list.resource_count() == 128U);
+    CHECK(list.source_opcode_byte_offset() == 9U);
+    CHECK(list.source_payload_bit_length() == semantic.size() * 8U);
+    CHECK(list.bits_consumed() == (semantic.size() - 9U) * 8U);
+    CHECK(list.bytes_consumed() == semantic.size() - 9U);
+    CHECK(list.next_byte_offset() == semantic.size());
+    CHECK(list.next_bit_offset() == 0U);
+    CHECK(result.boundary().byte_offset() == semantic.size());
+    CHECK(result.boundary().bit_offset() == 0U);
+    CHECK(result.boundary().remaining_byte_count() == 0U);
+    CHECK_FALSE(result.client_response().response_builder_available());
+    CHECK_FALSE(result.client_response().response_queued());
+    if (scenario == ResourceListIntegrationScenario::differential_map) {
+        constexpr std::array<std::string_view, 3U> map_names{
+            "maps/differential_alpha.bsp",
+            "maps/differential_bravo.bsp",
+            "maps/differential_charlie.bsp",
+        };
+        const auto variant = run % map_names.size();
+        CHECK(list.entries()[1U].name().bytes() ==
+              map_names[variant]);
+        CHECK(list.entries()[1U].type() == goldsrc::ResourceType::model);
+        CHECK(list.entries()[1U].declared_size().raw_code() ==
+              98'765U + variant);
+    }
+    if (scenario == ResourceListIntegrationScenario::malicious_names) {
+        CHECK(list.entries()[0U].name().bytes() == "../evil");
+        CHECK(list.entries()[1U].name().bytes() == "..\\evil");
+        CHECK(list.entries()[2U].name().bytes() == "C:\\evil");
+        CHECK(list.entries()[3U].name().bytes() == "\\\\server\\share");
+        CHECK(list.entries()[4U].name().bytes() == "/absolute");
+    }
+    CHECK(traces.user_info_messages == 1U);
+    CHECK(traces.first_batch_completions == 1U);
+    CHECK(traces.requests_queued == 1U);
+    CHECK(traces.requests_acknowledged == 1U);
+    CHECK(traces.controls == 1U);
+    CHECK(traces.boundaries == 1U);
+    CHECK(traces.resource_lists == 1U);
+    CHECK(traces.resource_entries == 128U);
+    CHECK(traces.post_list_boundaries == 1U);
+    CHECK(traces.client_response_boundaries == 1U);
+    CHECK(handshake.error_context().empty());
+    CHECK(releases == 1U);
+
+    if (scenario ==
+        ResourceListIntegrationScenario::duplicate_completed_batch) {
+        const auto published_count = list.resource_count();
+        for (std::uint16_t index = 1U; index <= fragment_count; ++index) {
+            const auto offset = static_cast<std::size_t>(index - 1U) *
+                goldsrc::kStockProtocol48NormalFragmentChunkSize;
+            const auto length = (std::min)(
+                goldsrc::kStockProtocol48NormalFragmentChunkSize,
+                envelope.size() - offset);
+            send_server_datagram(
+                *server,
+                started.client_endpoint,
+                server_fragment(
+                    server_sequence++,
+                    last_client_sequence,
+                    false,
+                    index,
+                    fragment_count,
+                    std::span<const std::byte>{envelope}.subspan(offset, length)),
+                error);
+        }
+        handshake.update(now + 1ms);
+        REQUIRE(handshake.resource_list_result());
+        CHECK(handshake.resource_list_result()->resource_list().resource_count() ==
+              published_count);
+        CHECK(traces.resource_lists == 1U);
+        CHECK(traces.resource_entries == 128U);
+        CHECK(traces.post_list_boundaries == 1U);
+        CHECK(traces.client_response_boundaries == 1U);
+    }
+
+    require_no_datagram(*server);
+    handshake.update(now + 100ms);
+    handshake.cancel(now + 200ms);
+    CHECK(releases == 1U);
+    require_no_datagram(*server);
+}
+
 } // namespace
 
 TEST_CASE("Fake HLDS user-info stop point sends no transition request",
@@ -1205,4 +1870,139 @@ TEST_CASE("Fake HLDS multi-userinfo differential repeats 20 of 20",
     for (std::size_t run = 0U; run < 20U; ++run) {
         run_resource_transition(run, IntegrationScenario::multiple_user_info);
     }
+}
+
+TEST_CASE("Fake HLDS full resource-list baseline repeats 20 of 20",
+          "[goldsrc][resource-list][udp][baseline][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_list(run, ResourceListIntegrationScenario::baseline);
+    }
+}
+
+TEST_CASE("Fake HLDS reordered resource-list fragments repeat 20 of 20",
+          "[goldsrc][resource-list][udp][fragment][reordered][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_list(
+            run,
+            ResourceListIntegrationScenario::reordered_fragments);
+    }
+}
+
+TEST_CASE("Fake HLDS resource-list map differential repeats 20 of 20",
+          "[goldsrc][resource-list][udp][differential][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_list(
+            run,
+            ResourceListIntegrationScenario::differential_map);
+    }
+}
+
+TEST_CASE("Fake HLDS malicious resource names remain metadata for 20 of 20",
+          "[goldsrc][resource-list][udp][security][no-filesystem][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_list(
+            run,
+            ResourceListIntegrationScenario::malicious_names);
+    }
+}
+
+TEST_CASE("Fake HLDS malformed resource lists fail atomically after transition",
+          "[goldsrc][resource-list][udp][negative][transactional]")
+{
+    SECTION("invalid type") {
+        run_resource_list(0U, ResourceListIntegrationScenario::invalid_type);
+    }
+    SECTION("excessive count") {
+        run_resource_list(0U, ResourceListIntegrationScenario::excessive_count);
+    }
+    SECTION("duplicate identity") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::duplicate_identity);
+    }
+    SECTION("unobserved flags profile") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::unobserved_flags_profile);
+    }
+    SECTION("nonzero terminal fill") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::nonzero_padding);
+    }
+    SECTION("trailing message is never scanned") {
+        run_resource_list(0U, ResourceListIntegrationScenario::trailing_data);
+    }
+    SECTION("truncated final entry") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::truncated_entry);
+    }
+    SECTION("truncated count") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::truncated_count);
+    }
+    SECTION("unterminated name") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::unterminated_name);
+    }
+    SECTION("per-entry raw size-code limit") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::resource_size_limit);
+    }
+    SECTION("checked total raw size-code bound") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::resource_total_size_limit);
+    }
+
+    // A uint64_t arithmetic overflow is not representable with a u12 count
+    // and u24 size codes; the configured total bound exercises the same
+    // checked, fail-closed accumulation path at production-flow level.
+}
+
+TEST_CASE("Fake HLDS resource-list transport and lifecycle negatives remain atomic",
+          "[goldsrc][resource-list][udp][negative][transport][lifecycle]")
+{
+    SECTION("wrong endpoint is ignored before the valid transfer") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::wrong_endpoint);
+    }
+    SECTION("missing fragment reaches the fixed transfer timeout") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::missing_fragment);
+    }
+    SECTION("malformed BZip2 completes transport but publishes no list") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::malformed_bzip2);
+    }
+    SECTION("duplicate completed batch cannot republish terminal state") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::duplicate_completed_batch);
+    }
+    SECTION("channel timeout uses the manual clock") {
+        run_resource_list(0U, ResourceListIntegrationScenario::timeout);
+    }
+    SECTION("cancellation is terminal and idempotent") {
+        run_resource_list(0U, ResourceListIntegrationScenario::cancellation);
+    }
+    SECTION("resource-list event backpressure publishes no candidate") {
+        run_resource_list(
+            0U,
+            ResourceListIntegrationScenario::event_backpressure);
+    }
+
+    // A u12 index has no out-of-range wire encoding. Optional/profile layout
+    // remains typed unsupported above; this integration does not fabricate it.
 }
