@@ -718,6 +718,95 @@ void log_delta_description_trace(
     }
 }
 
+void log_movement_environment_trace(
+    const hlclient::goldsrc::MovementEnvironmentTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::MovementEnvironmentTraceClassification;
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::delta_boundary_reached:
+        return;
+    case Classification::movement_environment_ready: {
+        std::string message =
+            "[signon] movement/environment state decoded";
+        if (event.gravity) {
+            message += ", gravity=" + std::to_string(*event.gravity);
+        }
+        if (event.maximum_speed) {
+            message += ", max-speed=" + std::to_string(*event.maximum_speed);
+        }
+        if (event.footsteps) {
+            message += std::string{", footsteps="} +
+                       (*event.footsteps ? "yes" : "no");
+        }
+        message += ", sky-name=" +
+                   hlclient::goldsrc::sanitize_service_text_for_presentation(
+                       event.sky_name);
+        message += ", bytes=" + std::to_string(event.byte_count);
+        message += ", controls=" + std::to_string(event.control_count);
+        hlclient::core::log(LogLevel::info, message);
+        return;
+    }
+    case Classification::post_environment_control:
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] post-movevars control opcode=" +
+                std::to_string(static_cast<unsigned int>(
+                    event.opcode.value_or(0U))) +
+                " index=" + std::to_string(event.control_index) +
+                " offset=" + std::to_string(event.byte_offset) +
+                " bytes=" + std::to_string(event.byte_count) +
+                " string-length=" + std::to_string(event.string_length));
+        return;
+    case Classification::post_environment_boundary_reached:
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] post-movevars boundary opcode=" +
+                std::to_string(static_cast<unsigned int>(
+                    event.opcode.value_or(0U))) +
+                " offset=" + std::to_string(event.byte_offset) +
+                " unconsumed-body=" + std::to_string(event.byte_count) +
+                " bytes");
+        return;
+    case Classification::stage_cancelled:
+        hlclient::core::log(
+            LogLevel::error,
+            "Movement/environment stage cancelled");
+        return;
+    case Classification::stage_timed_out:
+        hlclient::core::log(
+            LogLevel::error,
+            "Movement/environment stage timed out");
+        return;
+    case Classification::unsupported_message:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unsupported post-movevars service message");
+        return;
+    case Classification::backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Movement/environment event backpressure");
+        return;
+    case Classification::secondary_stream_pending_m3:
+        hlclient::core::log(
+            LogLevel::error,
+            "Secondary stream remains pending M3");
+        return;
+    case Classification::network_failure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Movement/environment network failure");
+        return;
+    case Classification::protocol_failure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Movement/environment protocol failure");
+        return;
+    }
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -975,6 +1064,85 @@ void log_delta_description_trace(
     case State::delta_secondary_stream_pending_m3:
         hlclient::core::log(LogLevel::error, "Unconfirmed secondary stream remains pending M3");
         return 1;
+    case State::movement_environment_boundary_reached:
+    {
+        if (!handshake.movement_environment_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Movement/environment sign-on completed without an owning result");
+            return 1;
+        }
+        const auto& result = *handshake.movement_environment_result();
+        const auto& move_vars = result.move_vars();
+        const auto& boundary = result.boundary();
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] movement/environment state decoded");
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] gravity=" + std::to_string(move_vars.gravity()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] max-speed=" +
+                std::to_string(move_vars.maximum_speed()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] acceleration=" +
+                std::to_string(move_vars.acceleration()) +
+                " air-acceleration=" +
+                std::to_string(move_vars.air_acceleration()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] friction=" + std::to_string(move_vars.friction()) +
+                " step-size=" + std::to_string(move_vars.step_size()) +
+                " max-velocity=" +
+                std::to_string(move_vars.maximum_velocity()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] footsteps=" +
+                std::string{move_vars.footsteps() ? "yes" : "no"});
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] sky-name=" +
+                hlclient::goldsrc::sanitize_service_text_for_presentation(
+                    move_vars.sky_name()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] confirmed-post-movevars-controls=" +
+                std::to_string(result.control_count()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[signon] next neutral boundary opcode=" +
+                std::to_string(static_cast<unsigned int>(boundary.opcode())) +
+                " offset=" + std::to_string(boundary.byte_offset()) +
+                " unconsumed-body=" +
+                std::to_string(boundary.remaining_byte_count()) + " bytes");
+        hlclient::core::log(
+            LogLevel::info,
+            "Move variables were not applied; the boundary body remains untouched "
+            "and no resource response was sent");
+        return 0;
+    }
+    case State::movevars_timed_out:
+        hlclient::core::log(
+            LogLevel::error,
+            "GoldSrc movement/environment sign-on timed out");
+        return 1;
+    case State::movevars_unsupported_message:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unsupported post-movevars service message");
+        return 1;
+    case State::movevars_backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Movement/environment event queue reached its hard bound");
+        return 1;
+    case State::movevars_secondary_stream_pending_m3:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unconfirmed secondary stream remains pending M3");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -1000,6 +1168,7 @@ void log_delta_description_trace(
     case State::waiting_for_signon:
     case State::waiting_for_pre_resource:
     case State::waiting_for_delta_schemas:
+    case State::waiting_for_movevars:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -1073,10 +1242,15 @@ public:
                          &log_pre_resource_signon_trace}
                    : hlclient::goldsrc::PreResourceSignonTraceCallback{},
                {},
-               net_trace
-                   ? hlclient::goldsrc::DeltaDescriptionTraceCallback{
-                         &log_delta_description_trace}
-                   : hlclient::goldsrc::DeltaDescriptionTraceCallback{}}
+                net_trace
+                    ? hlclient::goldsrc::DeltaDescriptionTraceCallback{
+                          &log_delta_description_trace}
+                    : hlclient::goldsrc::DeltaDescriptionTraceCallback{},
+                {},
+                net_trace
+                    ? hlclient::goldsrc::MovementEnvironmentTraceCallback{
+                          &log_movement_environment_trace}
+                    : hlclient::goldsrc::MovementEnvironmentTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -1386,6 +1560,9 @@ int run(const hlclient::core::CommandLineOptions& options)
             break;
         case hlclient::core::ConnectionStopPoint::delta_schemas:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::delta_schemas;
+            break;
+        case hlclient::core::ConnectionStopPoint::movevars:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::movevars;
             break;
         }
         challenge_session = std::make_unique<HandshakeSession>(

@@ -1,4 +1,5 @@
 #include "delta_test_fixture.hpp"
+#include "move_vars_test_fixture.hpp"
 
 #include <hlclient/auth/authentication_provider.hpp>
 #include <hlclient/goldsrc/challenge_protocol.hpp>
@@ -36,6 +37,7 @@ namespace auth = hlclient::auth;
 namespace goldsrc = hlclient::goldsrc;
 namespace network = hlclient::network;
 namespace delta_fixture = hlclient::test::delta_fixture;
+namespace move_fixture = hlclient::test::move_vars_fixture;
 
 inline constexpr std::string_view kAuthenticationMarker =
     "TEST_AUTH_MATERIAL";
@@ -386,6 +388,15 @@ void send_server_datagram(
     return config;
 }
 
+[[nodiscard]] goldsrc::MovementEnvironmentStageConfig
+movement_environment_integration_config()
+{
+    goldsrc::MovementEnvironmentStageConfig config;
+    config.delta = delta_integration_config();
+    config.maximum_events = 64U;
+    return config;
+}
+
 [[nodiscard]] goldsrc::ClientToServerNetchanPacket require_initial_request(
     const network::Datagram& datagram,
     const network::NetworkAddress client_endpoint)
@@ -443,10 +454,19 @@ struct DeltaTraceCounts {
     std::size_t boundaries{0U};
 };
 
+struct MovementTraceCounts {
+    std::size_t ready{0U};
+    std::size_t controls{0U};
+    std::size_t boundaries{0U};
+};
+
 enum class Scenario {
     baseline,
     fragmented_reordered,
     differential,
+    movement_wrong_endpoint,
+    movement_invalid_bzip2,
+    movement_missing_fragment,
 };
 
 void run_fake_hlds(const std::size_t run, const Scenario scenario)
@@ -994,6 +1014,462 @@ void run_fake_hlds_delta(const std::size_t run, const Scenario scenario)
     require_no_datagram(*server);
 }
 
+[[nodiscard]] move_fixture::Values differential_move_vars_values(
+    const std::size_t run)
+{
+    move_fixture::Values values;
+    switch (run % 7U) {
+    case 0U:
+        values.gravity = 400.0F;
+        break;
+    case 1U:
+        values.maximum_speed = 250.0F;
+        break;
+    case 2U:
+        values.acceleration = 12.0F;
+        break;
+    case 3U:
+        values.friction = 6.0F;
+        break;
+    case 4U:
+        values.step_size = 24.0F;
+        break;
+    case 5U:
+        values.footsteps = 0U;
+        break;
+    case 6U:
+        values.sky_name = "night";
+        break;
+    default:
+        break;
+    }
+    return values;
+}
+
+[[nodiscard]] std::vector<std::vector<std::byte>> movement_delta_schemas()
+{
+    return {
+        delta_fixture::schema("alpha_t", delta_fixture::kSchemaAlphaFields),
+        delta_fixture::schema("bravo_t", delta_fixture::kSchemaBravoFields),
+        delta_fixture::schema("charlie_t", delta_fixture::kSchemaAlphaFields),
+        delta_fixture::schema("delta_t", delta_fixture::kSchemaBravoFields),
+        delta_fixture::schema("echo_t", delta_fixture::kSchemaAlphaFields),
+        delta_fixture::schema("foxtrot_t", delta_fixture::kSchemaBravoFields),
+        delta_fixture::schema("golf_t", delta_fixture::kSchemaAlphaFields),
+    };
+}
+
+[[nodiscard]] std::vector<std::byte> movement_post_delta_body(
+    const std::size_t run,
+    const Scenario scenario)
+{
+    const auto values = scenario == Scenario::differential
+        ? differential_move_vars_values(run)
+        : move_fixture::Values{};
+    if (scenario != Scenario::fragmented_reordered) {
+        return move_fixture::move_vars_body_and_post_stream(values);
+    }
+
+    std::vector<std::byte> body;
+    move_fixture::append_move_vars_body(body, values);
+    move_fixture::append_opcode_32_control(body);
+    move_fixture::append_opcode_5_control(body);
+    std::uint32_t state = 0x9e37'79b9U;
+    for (std::size_t control = 0U; control < 40U; ++control) {
+        std::string text;
+        text.reserve(256U);
+        for (std::size_t index = 0U; index < 256U; ++index) {
+            state = state * 1'664'525U + 1'013'904'223U;
+            text.push_back(static_cast<char>(33U + state % 94U));
+        }
+        move_fixture::append_opcode_9_control(body, text);
+    }
+    move_fixture::append_opcode_13_boundary(body);
+    return body;
+}
+
+void run_fake_hlds_movement_environment(
+    const std::size_t run,
+    const Scenario scenario)
+{
+    INFO("fake-HLDS movement-environment run " << run + 1U << "/20");
+    network::NetworkRuntime runtime;
+    INFO(runtime.error_message());
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto server = network::UdpSocket::open_ipv4(runtime, error);
+    INFO(error);
+    REQUIRE(server);
+    REQUIRE(server->bind(network::NetworkAddress::loopback(0U), error));
+    const auto server_endpoint = server->local_address(error);
+    INFO(error);
+    REQUIRE(server_endpoint);
+
+    auto client_socket = network::UdpSocket::open_ipv4(runtime, error);
+    INFO(error);
+    REQUIRE(client_socket);
+    REQUIRE(client_socket->bind(network::NetworkAddress::loopback(0U), error));
+    network::UdpDatagramTransport transport{std::move(*client_socket)};
+
+    std::size_t releases = 0U;
+    DeltaTraceCounts delta_traces;
+    MovementTraceCounts movement_traces;
+    auto prepared = prepared_request_with_session(releases);
+    goldsrc::GoldSrcHandshakeCoordinator handshake{
+        transport,
+        *server_endpoint,
+        goldsrc::HandshakeStopPoint::movevars,
+        std::move(prepared.request),
+        challenge_config(),
+        {},
+        {},
+        response_config(),
+        {},
+        std::move(prepared.session),
+        {},
+        {},
+        {},
+        {},
+        {},
+        {},
+        {},
+        [&delta_traces](const goldsrc::DeltaDescriptionTraceEvent& event) {
+            using Classification = goldsrc::DeltaDescriptionTraceClassification;
+            switch (event.classification) {
+            case Classification::delta_schema_decoded:
+                ++delta_traces.schemas;
+                break;
+            case Classification::delta_registry_ready:
+                ++delta_traces.registries;
+                break;
+            case Classification::post_delta_boundary_reached:
+                ++delta_traces.boundaries;
+                break;
+            case Classification::stage_started:
+            case Classification::pre_resource_boundary_reached:
+            case Classification::stage_cancelled:
+            case Classification::stage_timed_out:
+            case Classification::unsupported_message:
+            case Classification::backpressure:
+            case Classification::secondary_stream_pending_m3:
+            case Classification::network_failure:
+            case Classification::protocol_failure:
+                break;
+            }
+        },
+        movement_environment_integration_config(),
+        [&movement_traces](const goldsrc::MovementEnvironmentTraceEvent& event) {
+            using Classification =
+                goldsrc::MovementEnvironmentTraceClassification;
+            switch (event.classification) {
+            case Classification::movement_environment_ready:
+                ++movement_traces.ready;
+                break;
+            case Classification::post_environment_control:
+                ++movement_traces.controls;
+                break;
+            case Classification::post_environment_boundary_reached:
+                ++movement_traces.boundaries;
+                break;
+            case Classification::stage_started:
+            case Classification::delta_boundary_reached:
+            case Classification::stage_cancelled:
+            case Classification::stage_timed_out:
+            case Classification::unsupported_message:
+            case Classification::backpressure:
+            case Classification::secondary_stream_pending_m3:
+            case Classification::network_failure:
+            case Classification::protocol_failure:
+                break;
+            }
+        }};
+
+    const auto scenario_offset = 2'000U +
+        static_cast<std::size_t>(scenario) * 100U;
+    const auto epoch = goldsrc::ChallengeExchangeTimePoint{} +
+        std::chrono::milliseconds{static_cast<std::int64_t>(
+            scenario_offset + run + 1U)};
+    REQUIRE(handshake.start(epoch));
+    const auto challenge_request = receive_bounded(
+        *server,
+        goldsrc::kMaximumConnectionlessChallengeDatagramSize);
+    const auto expected_challenge = goldsrc::build_getchallenge_request();
+    REQUIRE(expected_challenge);
+    CHECK(challenge_request.payload == *expected_challenge.datagram);
+    const auto client_endpoint = challenge_request.source;
+
+    constexpr std::uint32_t challenge = 0x7f00'2511U;
+    send_server_datagram(
+        *server,
+        client_endpoint,
+        challenge_response(challenge),
+        error);
+    handshake.update(epoch + 1ms);
+    REQUIRE(handshake.state() ==
+            goldsrc::GoldSrcHandshakeState::waiting_for_connect_response);
+    const auto connect = receive_bounded(
+        *server,
+        goldsrc::kMaximumConnectDatagramSize);
+    CHECK(connect.source == client_endpoint);
+    const auto parsed = goldsrc::parse_connect_request(connect.payload, [] {
+        auto profile = goldsrc::ConnectCompatibilityProfile{};
+        profile.protected_authentication_is_ascii_hex = false;
+        return profile;
+    }());
+    REQUIRE(parsed);
+    CHECK(parsed.request->challenge() == challenge);
+
+    send_server_datagram(
+        *server,
+        client_endpoint,
+        accept_response(client_endpoint),
+        error);
+    handshake.update(epoch + 2ms);
+    REQUIRE(handshake.state() ==
+            goldsrc::GoldSrcHandshakeState::waiting_for_movevars);
+    CHECK_FALSE(handshake.terminal());
+    REQUIRE(handshake.local_endpoint());
+    CHECK(*handshake.local_endpoint() == client_endpoint);
+    CHECK(handshake.connect_send_attempts() == 1U);
+    CHECK_FALSE(handshake.movement_environment_result());
+    CHECK(releases == 0U);
+    require_no_datagram(*server);
+
+    handshake.update(epoch + 3ms);
+    const auto request_datagram = receive_bounded(
+        *server,
+        goldsrc::kMaximumNetchanDatagramSize);
+    const auto request = require_initial_request(request_datagram, client_endpoint);
+    CHECK(request.header.acknowledgement.sequence == sequence(0U));
+    CHECK_FALSE(request.header.acknowledgement.reliable);
+
+    const auto schemas = movement_delta_schemas();
+    const auto post_delta_body = movement_post_delta_body(run, scenario);
+    const auto semantic = delta_fixture::service_payload(
+        schemas,
+        goldsrc::kMoveVarsOpcode,
+        post_delta_body);
+    const auto envelope = service_envelope(semantic);
+
+    if (scenario == Scenario::movement_wrong_endpoint) {
+        auto rogue = network::UdpSocket::open_ipv4(runtime, error);
+        INFO(error);
+        REQUIRE(rogue);
+        REQUIRE(rogue->bind(network::NetworkAddress::loopback(0U), error));
+        send_server_datagram(
+            *rogue,
+            client_endpoint,
+            encode_server_packet(
+                request.header.sequence.sequence.value(),
+                envelope),
+            error);
+        handshake.update(epoch + 3'500us);
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::waiting_for_movevars);
+        CHECK_FALSE(handshake.terminal());
+        CHECK_FALSE(handshake.movement_environment_result());
+        CHECK(movement_traces.ready == 0U);
+        CHECK(movement_traces.boundaries == 0U);
+        CHECK(releases == 0U);
+        require_no_datagram(*rogue);
+        require_no_datagram(*server);
+    }
+
+    if (scenario == Scenario::movement_invalid_bzip2) {
+        send_server_datagram(
+            *server,
+            client_endpoint,
+            encode_server_packet(
+                request.header.sequence.sequence.value(),
+                bytes({0x42U, 0x5aU, 0x32U, 0x00U, 0x42U, 0x5aU})),
+            error);
+        handshake.update(epoch + 4ms);
+        require_transport_ack(*server, client_endpoint);
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::protocol_error);
+        CHECK(handshake.terminal());
+        CHECK_FALSE(handshake.movement_environment_result());
+        REQUIRE(handshake.movement_environment_error());
+        CHECK(movement_traces.ready == 0U);
+        CHECK(movement_traces.boundaries == 0U);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        handshake.cancel(epoch + 1s);
+        CHECK(releases == 1U);
+        return;
+    }
+
+    if (scenario == Scenario::movement_missing_fragment) {
+        std::vector<std::byte> first_fragment(
+            goldsrc::kStockProtocol48NormalFragmentChunkSize,
+            std::byte{0U});
+        std::copy_n(
+            envelope.begin(),
+            (std::min)(envelope.size(), first_fragment.size()),
+            first_fragment.begin());
+        send_server_datagram(
+            *server,
+            client_endpoint,
+            independent_server_fragment(
+                1U,
+                request.header.sequence.sequence.value(),
+                1U,
+                2U,
+                std::span<const std::byte>{first_fragment}),
+            error);
+        handshake.update(epoch + 4ms);
+        require_transport_ack(*server, client_endpoint);
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::waiting_for_movevars);
+        CHECK_FALSE(handshake.movement_environment_result());
+        CHECK(releases == 0U);
+        handshake.update(epoch + 505ms);
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::movevars_timed_out);
+        CHECK(handshake.terminal());
+        CHECK_FALSE(handshake.movement_environment_result());
+        REQUIRE(handshake.movement_environment_error());
+        CHECK(movement_traces.ready == 0U);
+        CHECK(movement_traces.boundaries == 0U);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+        handshake.cancel(epoch + 1s);
+        CHECK(releases == 1U);
+        return;
+    }
+
+    if (scenario != Scenario::fragmented_reordered) {
+        REQUIRE(envelope.size() <=
+                goldsrc::kStockProtocol48NormalFragmentChunkSize);
+        send_server_datagram(
+            *server,
+            client_endpoint,
+            encode_server_packet(
+                request.header.sequence.sequence.value(),
+                envelope),
+            error);
+        handshake.update(epoch + 4ms);
+        require_transport_ack(*server, client_endpoint);
+    } else {
+        REQUIRE(envelope.size() >
+                goldsrc::kStockProtocol48NormalFragmentChunkSize);
+        const auto count_size =
+            (envelope.size() +
+             goldsrc::kStockProtocol48NormalFragmentChunkSize - 1U) /
+            goldsrc::kStockProtocol48NormalFragmentChunkSize;
+        REQUIRE(count_size >= 3U);
+        REQUIRE(count_size <= (std::numeric_limits<std::uint16_t>::max)());
+        const auto count = static_cast<std::uint16_t>(count_size);
+        const auto final_offset = static_cast<std::size_t>(count - 1U) *
+            goldsrc::kStockProtocol48NormalFragmentChunkSize;
+        const auto final_datagram = independent_server_fragment(
+            1U,
+            request.header.sequence.sequence.value(),
+            count,
+            count,
+            std::span<const std::byte>{envelope}.subspan(final_offset));
+
+        send_server_datagram(*server, client_endpoint, final_datagram, error);
+        handshake.update(epoch + 4ms);
+        require_transport_ack(*server, client_endpoint);
+        send_server_datagram(*server, client_endpoint, final_datagram, error);
+        handshake.update(epoch + 5ms);
+        require_no_datagram(*server);
+
+        auto now = epoch + 6ms;
+        std::uint32_t packet_sequence = 2U;
+        for (std::uint16_t index = 1U; index < count; ++index) {
+            const auto offset = static_cast<std::size_t>(index - 1U) *
+                goldsrc::kStockProtocol48NormalFragmentChunkSize;
+            const auto length = (std::min)(
+                goldsrc::kStockProtocol48NormalFragmentChunkSize,
+                envelope.size() - offset);
+            send_server_datagram(
+                *server,
+                client_endpoint,
+                independent_server_fragment(
+                    packet_sequence,
+                    request.header.sequence.sequence.value(),
+                    index,
+                    count,
+                    std::span<const std::byte>{envelope}.subspan(offset, length)),
+                error);
+            handshake.update(now);
+            require_transport_ack(*server, client_endpoint);
+            ++packet_sequence;
+            now += 1ms;
+        }
+    }
+
+    REQUIRE(handshake.state() ==
+            goldsrc::GoldSrcHandshakeState::
+                movement_environment_boundary_reached);
+    REQUIRE(handshake.terminal());
+    REQUIRE(handshake.movement_environment_result());
+    const auto& result = *handshake.movement_environment_result();
+    CHECK(result.delta_description().registry().schema_count() == 7U);
+    CHECK(result.delta_description().registry().total_field_count() == 14U);
+    CHECK(result.delta_description().registry().schemas().front().name() == "alpha_t");
+    CHECK(result.delta_description().registry().schemas().back().name() == "golf_t");
+    const auto expected_values = scenario == Scenario::differential
+        ? differential_move_vars_values(run)
+        : move_fixture::Values{};
+    CHECK(result.move_vars().gravity() == expected_values.gravity);
+    CHECK(result.move_vars().maximum_speed() == expected_values.maximum_speed);
+    CHECK(result.move_vars().acceleration() == expected_values.acceleration);
+    CHECK(result.move_vars().friction() == expected_values.friction);
+    CHECK(result.move_vars().step_size() == expected_values.step_size);
+    CHECK(result.move_vars().footsteps() == (expected_values.footsteps == 1U));
+    CHECK(result.move_vars().sky_name() == expected_values.sky_name);
+    const auto expected_control_count =
+        scenario == Scenario::fragmented_reordered ? 42U : 6U;
+    CHECK(result.control_count() == expected_control_count);
+    CHECK(result.boundary().opcode() ==
+          goldsrc::kStockPostMoveVarsBoundaryOpcode);
+    CHECK(result.boundary().category() ==
+          goldsrc::PostMoveVarsBoundaryCategory::stock_observed_opcode_13);
+    CHECK(result.boundary().remaining_byte_count() == 1U);
+    CHECK(result.delta_description().pre_resource().source_payload().reassembled() ==
+          (scenario == Scenario::fragmented_reordered));
+    CHECK(delta_traces.schemas == 7U);
+    CHECK(delta_traces.registries == 1U);
+    CHECK(delta_traces.boundaries == 1U);
+    CHECK(movement_traces.ready == 1U);
+    CHECK(movement_traces.controls == expected_control_count);
+    CHECK(movement_traces.boundaries == 1U);
+    CHECK(handshake.error_context().empty());
+    CHECK(releases == 1U);
+    require_no_datagram(*server);
+
+    if (scenario == Scenario::baseline) {
+        send_server_datagram(
+            *server,
+            client_endpoint,
+            encode_server_packet(
+                request.header.sequence.sequence.value(),
+                envelope),
+            error);
+        handshake.update(epoch + 500ms);
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::
+                  movement_environment_boundary_reached);
+        CHECK(movement_traces.ready == 1U);
+        CHECK(movement_traces.boundaries == 1U);
+        CHECK(releases == 1U);
+        require_no_datagram(*server);
+    }
+
+    handshake.update(epoch + 1s);
+    handshake.cancel(epoch + 2s);
+    CHECK(handshake.state() ==
+          goldsrc::GoldSrcHandshakeState::
+              movement_environment_boundary_reached);
+    CHECK(movement_traces.ready == 1U);
+    CHECK(movement_traces.boundaries == 1U);
+    CHECK(releases == 1U);
+    require_no_datagram(*server);
+}
+
 } // namespace
 
 TEST_CASE("Fake HLDS pre-resource baseline repeats 20 of 20",
@@ -1041,5 +1517,51 @@ TEST_CASE("Fake HLDS delta-schema multi-schema differential repeats 20 of 20",
 {
     for (std::size_t run = 0U; run < 20U; ++run) {
         run_fake_hlds_delta(run, Scenario::differential);
+    }
+}
+
+TEST_CASE("Fake HLDS movement-environment baseline repeats 20 of 20",
+          "[goldsrc][movevars][udp][baseline][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_fake_hlds_movement_environment(run, Scenario::baseline);
+    }
+}
+
+TEST_CASE("Fake HLDS movement-environment fragmented reordered duplicate repeats 20 of 20",
+          "[goldsrc][movevars][udp][fragment][reordered][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_fake_hlds_movement_environment(
+            run,
+            Scenario::fragmented_reordered);
+    }
+}
+
+TEST_CASE("Fake HLDS movement-environment differential variants repeat 20 of 20",
+          "[goldsrc][movevars][udp][differential][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_fake_hlds_movement_environment(run, Scenario::differential);
+    }
+}
+
+TEST_CASE("Fake HLDS movement route rejects hostile transport conditions transactionally",
+          "[goldsrc][movevars][udp][negative][security]")
+{
+    SECTION("wrong source endpoint is ignored before a valid batch") {
+        run_fake_hlds_movement_environment(
+            0U,
+            Scenario::movement_wrong_endpoint);
+    }
+    SECTION("invalid BZip2 service envelope fails without publication") {
+        run_fake_hlds_movement_environment(
+            0U,
+            Scenario::movement_invalid_bzip2);
+    }
+    SECTION("missing normal fragment reaches the fixed transfer timeout") {
+        run_fake_hlds_movement_environment(
+            0U,
+            Scenario::movement_missing_fragment);
     }
 }

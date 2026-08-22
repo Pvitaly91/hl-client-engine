@@ -171,16 +171,16 @@ server-info/opcode-8 prefix (for example 6,393 in the first-client reference
 and 6,388 in the common short-prefix baseline), but it is always exactly 6,194
 bytes after the first opcode 14.
 
-Neither the accepted stock capture nor a public Valve numeric service-message
-constant independently proves that opcode 44 is the resource list. The public
-API therefore deliberately retains `PostDeltaBoundary` with category
+Opcode 44 is not the resource list. At this layer the public API deliberately
+retains `PostDeltaBoundary` with category
 `stock_observed_opcode_44` and evidence status
 `stock_confirmed_opcode_44_body_unconsumed`. Its opcode, exact byte/bit offset,
 remaining byte count, and direction are typed; its body is neither copied into
 the registry nor consumed. No `ResourceListBoundary` name is exposed.
 
-M3.1 must independently discover and bound this body before assigning a public
-resource-list semantic. M2.4.3 sends no `sendres` or other client continuation.
+M2.4.4 independently decodes that retained body as movement/environment
+metadata and continues only through confirmed simple controls. The M2.4.3 stop
+itself remains unchanged and sends no `sendres` or other client continuation.
 
 ## Stage, coordinator, and CLI boundary
 
@@ -233,9 +233,10 @@ wrong endpoint, timeout, cancellation, callback reentry, and terminal
 idempotence. These are deterministic project-to-fake-HLDS results, not a live
 project-client-to-stock-server claim.
 
-## Deliberately pending
+## Deliberately pending at this layer
 
-- opcode-44 semantic name and complete body grammar;
+- opcode-44 interpretation inside M2.4.3 (implemented only by the separate
+  M2.4.4 continuation);
 - resource count/entries, consistency data, resource response, precache, or
   download behavior;
 - runtime use of the registry for entity/clientdata/usercmd/snapshot decoding;
@@ -245,5 +246,6 @@ project-client-to-stock-server claim.
   their transport behavior is covered by earlier accepted evidence and current
   deterministic integration, but no new raw delta projection is claimed.
 
-The next milestone is M3.1: resource-list discovery and a bounded codec. It is
-not part of M2.4.3.
+See [GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md) for M2.4.4. The
+next milestone after that continuation is M3.1: resource-list discovery and a
+bounded codec; neither milestone changes this layer's historical stop.

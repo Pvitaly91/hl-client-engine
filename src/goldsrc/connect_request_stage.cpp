@@ -229,6 +229,36 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_movement_environment_state(
+    const MovementEnvironmentStageState state) noexcept
+{
+    switch (state) {
+    case MovementEnvironmentStageState::idle:
+    case MovementEnvironmentStageState::waiting_for_delta_state:
+    case MovementEnvironmentStageState::decoding_move_vars:
+    case MovementEnvironmentStageState::environment_state_ready:
+    case MovementEnvironmentStageState::decoding_post_environment_messages:
+        return GoldSrcHandshakeState::waiting_for_movevars;
+    case MovementEnvironmentStageState::post_environment_boundary_reached:
+        return GoldSrcHandshakeState::movement_environment_boundary_reached;
+    case MovementEnvironmentStageState::unsupported_message:
+        return GoldSrcHandshakeState::movevars_unsupported_message;
+    case MovementEnvironmentStageState::timed_out:
+        return GoldSrcHandshakeState::movevars_timed_out;
+    case MovementEnvironmentStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case MovementEnvironmentStageState::backpressure:
+        return GoldSrcHandshakeState::movevars_backpressure;
+    case MovementEnvironmentStageState::secondary_stream_pending_m3:
+        return GoldSrcHandshakeState::movevars_secondary_stream_pending_m3;
+    case MovementEnvironmentStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case MovementEnvironmentStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] bool signon_start_network_failure(
     const std::optional<NetchanDriverErrorCode> driver_code) noexcept
 {
@@ -451,7 +481,9 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     PreResourceSignonConfig pre_resource_config,
     PreResourceSignonTraceCallback pre_resource_trace_callback,
     DeltaDescriptionStageConfig delta_config,
-    DeltaDescriptionTraceCallback delta_trace_callback)
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentStageConfig movement_environment_config,
+    MovementEnvironmentTraceCallback movement_environment_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -475,7 +507,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::netchan_bootstrap ||
                 stop_point_ == HandshakeStopPoint::signon_boundary ||
                 stop_point_ == HandshakeStopPoint::pre_resource ||
-                stop_point_ == HandshakeStopPoint::delta_schemas) {
+                stop_point_ == HandshakeStopPoint::delta_schemas ||
+                stop_point_ == HandshakeStopPoint::movevars) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -513,6 +546,16 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                     std::move(pre_resource_trace_callback),
                     std::move(delta_trace_callback));
             }
+            if (stop_point_ == HandshakeStopPoint::movevars) {
+                movement_environment_stage_.emplace(
+                    transport,
+                    remote_endpoint,
+                    std::move(movement_environment_config),
+                    std::move(signon_trace_callback),
+                    std::move(pre_resource_trace_callback),
+                    std::move(delta_trace_callback),
+                    std::move(movement_environment_trace_callback));
+            }
         }
     } else if (authentication_session_) {
         configuration_error_ =
@@ -536,6 +579,13 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (movement_environment_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_movevars) {
+        movement_environment_stage_->update(now);
+        synchronize_from_movement_environment();
+        release_authentication_session_if_terminal();
         return;
     }
     if (delta_description_stage_ &&
@@ -579,6 +629,13 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (movement_environment_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_movevars) {
+        movement_environment_stage_->cancel(now);
+        synchronize_from_movement_environment();
+        release_authentication_session_if_terminal();
         return;
     }
     if (delta_description_stage_ &&
@@ -655,6 +712,11 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::delta_unsupported_message:
     case GoldSrcHandshakeState::delta_backpressure:
     case GoldSrcHandshakeState::delta_secondary_stream_pending_m3:
+    case GoldSrcHandshakeState::movement_environment_boundary_reached:
+    case GoldSrcHandshakeState::movevars_timed_out:
+    case GoldSrcHandshakeState::movevars_unsupported_message:
+    case GoldSrcHandshakeState::movevars_backpressure:
+    case GoldSrcHandshakeState::movevars_secondary_stream_pending_m3:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -671,6 +733,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_signon:
     case GoldSrcHandshakeState::waiting_for_pre_resource:
     case GoldSrcHandshakeState::waiting_for_delta_schemas:
+    case GoldSrcHandshakeState::waiting_for_movevars:
         return false;
     }
     return true;
@@ -729,6 +792,18 @@ GoldSrcHandshakeCoordinator::delta_description_error() const noexcept
     static const std::optional<DeltaDescriptionStageError> empty;
     return delta_description_stage_ ? delta_description_stage_->error() : empty;
 }
+const std::optional<MovementEnvironmentSignonState>&
+GoldSrcHandshakeCoordinator::movement_environment_result() const noexcept
+{
+    static const std::optional<MovementEnvironmentSignonState> empty;
+    return movement_environment_stage_ ? movement_environment_stage_->result() : empty;
+}
+const std::optional<MovementEnvironmentStageError>&
+GoldSrcHandshakeCoordinator::movement_environment_error() const noexcept
+{
+    static const std::optional<MovementEnvironmentStageError> empty;
+    return movement_environment_stage_ ? movement_environment_stage_->error() : empty;
+}
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
     return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
@@ -768,6 +843,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (delta_description_stage_ && delta_description_stage_->error()) {
         return delta_description_stage_->error()->context;
     }
+    if (movement_environment_stage_ && movement_environment_stage_->error()) {
+        return movement_environment_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -797,7 +875,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::netchan_bootstrap &&
          stop_point_ != HandshakeStopPoint::signon_boundary &&
          stop_point_ != HandshakeStopPoint::pre_resource &&
-         stop_point_ != HandshakeStopPoint::delta_schemas)) {
+         stop_point_ != HandshakeStopPoint::delta_schemas &&
+         stop_point_ != HandshakeStopPoint::movevars)) {
         return;
     }
     if (!response_stage_) {
@@ -827,7 +906,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         (stop_point_ != HandshakeStopPoint::netchan_bootstrap &&
          stop_point_ != HandshakeStopPoint::signon_boundary &&
          stop_point_ != HandshakeStopPoint::pre_resource &&
-         stop_point_ != HandshakeStopPoint::delta_schemas)) {
+         stop_point_ != HandshakeStopPoint::delta_schemas &&
+         stop_point_ != HandshakeStopPoint::movevars)) {
         return;
     }
     if (!challenge_exchange_.local_endpoint() ||
@@ -835,7 +915,9 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         (stop_point_ == HandshakeStopPoint::signon_boundary && !signon_stage_) ||
         (stop_point_ == HandshakeStopPoint::pre_resource && !pre_resource_stage_) ||
         (stop_point_ == HandshakeStopPoint::delta_schemas &&
-         !delta_description_stage_)) {
+         !delta_description_stage_) ||
+        (stop_point_ == HandshakeStopPoint::movevars &&
+         !movement_environment_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
             "Post-ACCEPT mode has no transport stage or stable local endpoint";
@@ -879,6 +961,18 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         synchronize_from_delta_description();
         if (!delta_started &&
             state_ == GoldSrcHandshakeState::waiting_for_delta_schemas) {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::movevars) {
+        const bool movement_started = movement_environment_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime));
+        synchronize_from_movement_environment();
+        if (!movement_started &&
+            state_ == GoldSrcHandshakeState::waiting_for_movevars) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -996,6 +1090,39 @@ void GoldSrcHandshakeCoordinator::synchronize_from_delta_description()
     if (delta_error &&
         delta_error->code ==
             DeltaDescriptionStageErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_movement_environment()
+{
+    if (!movement_environment_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Movevars mode has no movement/environment stage";
+        return;
+    }
+    const auto& movement_error = movement_environment_stage_->error();
+    if (movement_environment_stage_->state() ==
+            MovementEnvironmentStageState::idle &&
+        movement_error) {
+        if (movement_error->code ==
+                MovementEnvironmentStageErrorCode::invalid_configuration ||
+            movement_error->driver_code ==
+                NetchanDriverErrorCode::invalid_configuration) {
+            state_ = GoldSrcHandshakeState::configuration_error;
+        } else if (signon_start_network_failure(movement_error->driver_code)) {
+            state_ = GoldSrcHandshakeState::network_error;
+        } else {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    state_ = map_movement_environment_state(
+        movement_environment_stage_->state());
+    if (movement_error &&
+        movement_error->code ==
+            MovementEnvironmentStageErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

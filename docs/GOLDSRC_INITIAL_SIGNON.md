@@ -272,16 +272,20 @@ That continuation now parses the evidence-gated opcode-11 server-info grammar,
 one neutral opcode-54 control, and stops at the confirmed category-C opcode-14
 boundary without touching its body or sending a resource command. M2.4.3 adds
 a separate private continuation that parses the exact delta-description stream
-and stops at numeric opcode 44; the public M2.4.1/M2.4.2 stop behavior is
-unchanged. See [GoldSrc server info](GOLDSRC_SERVERINFO.md) and
-[GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md). The nested retained driver closes
+and stops at numeric opcode 44. M2.4.4 adds the next private continuation,
+decodes the confirmed movement/environment profile and simple controls, and
+stops before the neutral opcode-13 body. The public M2.4.1/M2.4.2 stop behavior
+is unchanged. See [GoldSrc server info](GOLDSRC_SERVERINFO.md),
+[GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md), and
+[GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md). The nested retained driver closes
 and releases its lifetime exactly once on success, decode failure,
 backpressure, cancellation, timeout, network/protocol failure, or destruction.
 
 ## Deliberately pending
 
-- opcode-44 semantics and the resource-list layout after the bounded M2.4.3
-  delta-description continuation;
+- the opcode-13 body after the bounded M2.4.4 continuation and the later
+  response-gated numeric opcode-43 candidate body, whose resource semantic is
+  still unconfirmed;
 - a typed disconnect service control, pending primary wire evidence;
 - resource-list parsing/negotiation and runtime delta application;
 - command/stufftext execution (intentionally prohibited, not planned here);
@@ -291,6 +295,6 @@ backpressure, cancellation, timeout, network/protocol failure, or destruction.
 
 M2.4.2 is implemented for the bounded single-client profile, but its primary
 evidence remains incomplete because the stock environment did not produce a
-second-client handshake for the opaque slot candidate. M2.4.3 does not change
-that field. M3.1 resource-list discovery remains the next planned
+second-client handshake for the opaque slot candidate. M2.4.3/M2.4.4 do not
+change that field. M3.1 resource-list discovery remains the next planned
 implementation milestone and is not part of this layer.

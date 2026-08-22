@@ -7,10 +7,10 @@ simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
 The repository has implemented the bounded project scope of
-**M2.4.3: owning GoldSrc delta-description schemas**. The earlier M2.4.2
-single-client evidence gap remains: the local stock environment could not
+**M2.4.4: owning GoldSrc movement-environment sign-on metadata**. The earlier
+M2.4.2 single-client evidence gap remains: the local stock environment could not
 produce a second-client handshake to identify one opaque server-info slot
-candidate. Implemented M1–M2.4.3 behavior includes the Protocol 48 challenge,
+candidate. Implemented M1–M2.4.4 behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`, an explicit
 authentication-provider boundary, same-socket netchan bootstrap, the base wire
@@ -19,8 +19,9 @@ transactional slot-0 normal reassembly, deterministic outgoing normal
 fragmentation, a bounded same-transport `NetchanDriver`, the exact typed
 client-first `new` request, strict `BZ2\0` envelope decompression, one confirmed
 bounded text-control message, a strict typed opcode-11 server-info parser, one
-neutral post-serverinfo control, seven ordered owning delta schemas, and an
-exact stop at the numeric opcode-44 post-delta boundary. Twelve accepted
+neutral post-serverinfo control, seven ordered owning delta schemas, a strict
+opcode-44 movement/environment state, confirmed simple post-movevars controls,
+and an exact neutral stop before the opcode-13 body. Twelve accepted
 signed-stock research runs confirm the supported descriptor shape and the
 per-fragment ACK/retry behavior; project outgoing multi-fragment C2S scheduling
 is deterministic/tested but remains pending stock verification. A separate
@@ -28,10 +29,11 @@ is deterministic/tested but remains pending stock verification. A separate
 envelope, opcode order, and initial boundary. A separate 16-run differential
 set confirms the server-info grammar, exposed fields, dynamic cursor, and
 post-serverinfo order; the same 16 ignored canonical payloads independently
-confirm the opcode-14 delta grammar and stable 219-field registry. Live
-`hlclient` to stock HLDS, slot-1/file semantics, general `svc_*` parsing,
-opcode-44 semantics/body, a Steam
-authentication provider, resources, snapshots, gameplay, and a public raw
+confirm the opcode-14 delta grammar and stable 219-field registry; they also
+confirm the exact opcode-44 body geometry. The pinned public Valve SDK provides
+the independent movement-variable semantic cross-check. Live `hlclient` to
+stock HLDS, slot-1/file semantics, general `svc_*` parsing, a Steam
+authentication provider, resource-list bodies, snapshots, gameplay, and a public raw
 payload CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
@@ -285,8 +287,25 @@ It retains that same driver/payload/authentication lifetime, decodes all seven
 opcode-14 messages transactionally into an immutable ordered registry, and
 stops at numeric opcode 44 without consuming its body or sending a resource
 response. Opcode 44 deliberately remains `PostDeltaBoundary`: available
-evidence does not independently establish its resource-list semantic. See
+evidence at the M2.4.3 layer did not yet establish its semantic. See
 [GoldSrc delta descriptions](docs/GOLDSRC_DELTA_DESCRIPTIONS.md).
+
+The explicit M2.4.4 movement-environment continuation is:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after movevars `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+It reuses that exact retained socket, driver, payload, endpoint, and
+authentication lifetime. Opcode 44 is decoded field-by-field as the confirmed
+movement/environment metadata profile; the stage then consumes only the
+confirmed opcodes 32, 5, 39, and 9 at the returned cursor and stops before the
+stock-observed opcode-13 body. It neither applies the values to runtime
+movement/rendering nor sends `sendres` or any resource response. See
+[GoldSrc movement-environment state](docs/GOLDSRC_MOVEVARS.md).
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -423,6 +442,24 @@ definition hashes. Raw payloads, full field lists, authentication values, and
 the opcode-44 body remain ignored/untracked. See
 [GoldSrc delta descriptions](docs/GOLDSRC_DELTA_DESCRIPTIONS.md).
 
+The M2.4.4 verifier projects one ignored signed-stock run or validates the
+complete metadata-only 28-run evidence set under PowerShell 7 or Windows
+PowerShell 5.1:
+
+```powershell
+.\scripts\verify_stock_movevars.ps1 `
+  -SourceRunDirectory .\manual-artifacts\movevars-captures\<accepted-run>
+
+.\scripts\verify_stock_movevars.ps1 `
+  -ValidateMetadataSetRoot .\manual-artifacts\movevars-captures\projections
+```
+
+It strict-walks the first service stream from byte zero to opcode 13, leaves
+that body untouched, and records only bounded field/cursor evidence. The later
+stock `sendres` transfer is retained only as neutral opcode-43 boundary
+evidence; the project sends no resource command. See
+[GoldSrc movement-environment state](docs/GOLDSRC_MOVEVARS.md).
+
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
 they are licensed to use.
@@ -541,6 +578,15 @@ opcode-11 boundary, and proves no extra/resource datagram after terminal
 success. This is not an autonomous time-retry claim: a quiet peer reaches the
 bounded channel timeout. Signed-stock observations and project-to-fake tests
 are reported separately; live project-to-stock sign-on remains pending.
+M2.4.2 adds typed server-info and exact pre-resource continuation coverage;
+M2.4.3 adds seven-schema/219-field delta registry, bit-order, padding, and exact
+post-delta cursor coverage. M2.4.4 adds exact 24-float/boolean/string parsing,
+all truncation prefixes, finite-value and bounds checks, signed opcode-39
+sizes, no-scan post-message continuation, transactional stage publication, and
+same-socket fake-HLDS integration. Its deterministic suite covers 20/20
+baseline, 20/20 fragmented/reordered, and 20/20 differential fake variants,
+plus wrong-endpoint, malformed-BZ2, missing-fragment, duplicate-terminal-batch,
+timeout, cancellation, and backpressure cases with zero resource continuation.
 
 ## License
 

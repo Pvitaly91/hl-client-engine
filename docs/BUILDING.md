@@ -293,6 +293,28 @@ values are untrusted metadata; they are never used as filesystem paths. The
 second-client slot candidate remains evidence-gated and private. See
 [GoldSrc server info](GOLDSRC_SERVERINFO.md).
 
+The M2.4.3 and M2.4.4 continuations use the same retained transport and
+authentication lifetime:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after delta-schemas `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after movevars `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+`delta-schemas` publishes the seven-schema registry and stops before opcode
+44. `movevars` additionally decodes the confirmed movement/environment state
+and simple controls, then stops before the neutral opcode-13 body. Neither mode
+sends `sendres`, parses resource entries, applies movement values, or opens a
+server-provided path. See [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md)
+and [GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md).
+
 Add `--net-trace` when diagnosing the exchange:
 
 ```powershell

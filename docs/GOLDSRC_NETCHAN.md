@@ -574,6 +574,13 @@ handoff. See [GoldSrc server info](GOLDSRC_SERVERINFO.md).
 M2.4.3 adds a distinct `delta-schemas` continuation above that retained
 payload. It publishes an owning ordered opcode-14 metadata registry and stops
 at numeric opcode 44 without applying schemas or consuming the following body.
+
+M2.4.4 adds the distinct `movevars` continuation on the same retained driver,
+socket, payload, endpoint, and authentication lifetime. It publishes the
+confirmed typed opcode-44 movement/environment metadata, consumes only exact
+bounded opcodes 32, 5, 39, and 9, and stops before the neutral opcode-13 body.
+It applies no movement values and sends no resource command or response. See
+[GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md).
 See [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md).
 
 The public M2.3.3 boundary is project-owned and typed:
@@ -622,9 +629,10 @@ The following remain **pending** in this profile:
   envelope and universal compression behavior;
 - stock-client count-greater-than-one C2S fragmentation and live
   project-client-to-stock fragment interoperability;
-- service-message semantics beyond the bounded M2.4.3 opcode-44 post-delta
-  boundary, including resources, snapshots, commands, and gameplay; runtime
-  application of the metadata-only delta registry also remains pending.
+- service-message semantics beyond the bounded M2.4.4 neutral opcode-13
+  post-movevars boundary, including resources, snapshots, commands, and
+  gameplay; runtime application of both the metadata-only delta registry and
+  movement/environment state also remains pending.
 
 No pending item is filled from a third-party field name or implementation.
 Capture observations have priority over secondary behavioral cross-checks.

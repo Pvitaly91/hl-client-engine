@@ -412,9 +412,30 @@ maps, maxplayers 1/2/8, label changes, clean restarts, and one same-process map
 change. Deterministic same-socket fake-HLDS tests exercise 20/20 baseline,
 20/20 fragmented/reordered/duplicate, and 20/20 multi-schema differential
 runs. Numeric opcode 44 is the exact next boundary, but its semantic/body is
-not independently confirmed, so it remains a neutral `PostDeltaBoundary` and
-is wholly unconsumed. See
+intentionally left to the next retained continuation, so it remains a neutral
+`PostDeltaBoundary` and is wholly unconsumed at this stop. See
 [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md).
+
+### M2.4.4 — GoldSrc movement-environment state
+
+**Status: completed for the bounded metadata and neutral first-batch boundary
+scope.**
+
+M2.4.4 retains the exact M2.4.3 payload, socket, driver, and authentication
+lifetime. Stock capture plus the pinned public Valve SDK independently confirm
+opcode 44 as the movement/environment profile. A strict field-by-field parser
+owns 24 finite `f32le` values, the one-byte footstep flag, and the bounded sky
+name; no SDK memory-layout cast is used and no value reaches movement,
+prediction, rendering, audio, assets, or the filesystem.
+
+The exact cursor then consumes only confirmed simple opcodes 32, 5, 39, and 9
+and stops before opcode 13 with its body unconsumed. The first stock batch has
+no opcode 43. A later stock transfer independently reaches opcode 43 only after
+stock-client `sendres`, but the pinned public SDK has no numeric constant that
+independently assigns its resource semantic. Because project resource TX is
+prohibited here, the runtime result remains an honest `PostMoveVarsBoundary`.
+See
+[GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md).
 
 ## M3 — Resource and precache pipeline
 
@@ -424,10 +445,9 @@ is wholly unconsumed. See
 
 **Status: next; not started.**
 
-Discover the numeric opcode-44 body/resource transition independently, freeze
-its bounded layout, and implement only an owning resource-list codec after the
-evidence gate. M2.4.3 does not contain this parser or a client resource
-command.
+Discover and freeze the bounded opcode-13/later resource-transition grammar,
+then implement only an owning resource-list codec after the evidence gate.
+M2.4.4 contains neither that parser nor a client resource command.
 
 ### M3.2 — Local resource resolution and precache state
 

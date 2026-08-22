@@ -27,6 +27,9 @@ add_executable(hlclient_tests
     test_initial_signon_request.cpp
     test_initial_signon_stage.cpp
     test_initial_signon_udp_integration.cpp
+    test_move_vars.cpp
+    test_movement_environment_stage.cpp
+    test_post_movevars_stream.cpp
     test_network_address.cpp
     test_netchan_bootstrap.cpp
     test_netchan_driver.cpp

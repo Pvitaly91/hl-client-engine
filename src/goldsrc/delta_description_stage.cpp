@@ -127,9 +127,48 @@ DeltaDescriptionStage::DeltaDescriptionStage(
     InitialSignonTraceCallback initial_trace_callback,
     PreResourceSignonTraceCallback pre_resource_trace_callback,
     DeltaDescriptionTraceCallback trace_callback)
+    : DeltaDescriptionStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(trace_callback),
+          false}
+{
+}
+
+DeltaDescriptionStage::DeltaDescriptionStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    DeltaDescriptionStageConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : DeltaDescriptionStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(trace_callback),
+          true}
+{
+}
+
+DeltaDescriptionStage::DeltaDescriptionStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    DeltaDescriptionStageConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback trace_callback,
+    const bool retain_connection_at_boundary)
     : config_{std::move(config)},
       trace_callback_{std::move(trace_callback)},
       configuration_valid_{valid_delta_description_stage_configuration(config_)},
+      retain_connection_at_boundary_{retain_connection_at_boundary},
       pre_resource_stage_{
           transport,
           remote_endpoint,
@@ -483,7 +522,9 @@ void DeltaDescriptionStage::decode_retained_delta_stream(
 
     const auto& boundary = result_->boundary();
     state_ = DeltaDescriptionStageState::post_delta_boundary_reached;
-    pre_resource_stage_.finalize_retained_boundary(now);
+    if (!retain_connection_at_boundary_) {
+        pre_resource_stage_.finalize_retained_boundary(now);
+    }
     emit_trace(
         trace_for_terminal_state(state_),
         0U,
@@ -494,6 +535,21 @@ void DeltaDescriptionStage::decode_retained_delta_stream(
         0U,
         boundary.opcode(),
         boundary.category());
+}
+
+const OwnedServicePayload*
+DeltaDescriptionStage::retained_source_payload() const noexcept
+{
+    if (!retain_connection_at_boundary_) {
+        return nullptr;
+    }
+    return pre_resource_stage_.retained_source_payload();
+}
+
+void DeltaDescriptionStage::finalize_retained_boundary(
+    const DeltaDescriptionStageTimePoint now) noexcept
+{
+    pre_resource_stage_.finalize_retained_boundary(now);
 }
 
 void DeltaDescriptionStage::fail_from_pre_resource() noexcept

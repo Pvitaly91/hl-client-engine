@@ -14,6 +14,8 @@
 
 namespace hlclient::goldsrc {
 
+class MovementEnvironmentStage;
+
 using DeltaDescriptionStageClock = PreResourceSignonClock;
 using DeltaDescriptionStageTimePoint = PreResourceSignonTimePoint;
 
@@ -190,6 +192,29 @@ public:
     [[nodiscard]] std::size_t request_queue_count() const noexcept;
 
 private:
+    friend class MovementEnvironmentStage;
+
+    struct RetainConnectionAtBoundary final {};
+
+    DeltaDescriptionStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        DeltaDescriptionStageConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+    DeltaDescriptionStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        DeltaDescriptionStageConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback trace_callback,
+        bool retain_connection_at_boundary);
+
+    [[nodiscard]] const OwnedServicePayload* retained_source_payload() const noexcept;
+    void finalize_retained_boundary(DeltaDescriptionStageTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count) const noexcept;
     void push_event(DeltaDescriptionStageEvent event) noexcept;
     void drain_pre_resource_events() noexcept;
@@ -228,6 +253,7 @@ private:
     DeltaDescriptionTraceCallback trace_callback_;
     bool trace_callback_active_{false};
     bool configuration_valid_{false};
+    bool retain_connection_at_boundary_{false};
     PreResourceSignonStage pre_resource_stage_;
     std::vector<std::optional<DeltaDescriptionStageEvent>> event_slots_;
     std::size_t event_head_{0U};

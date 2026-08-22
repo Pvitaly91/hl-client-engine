@@ -20,8 +20,9 @@ second signed stock client never emitted the canonical `getchallenge`, so the
 one-byte field at body offset 29 remains an opaque slot candidate and is not a
 public `ClientSlot`. M2.4.3 subsequently confirms opcode 14 as the bounded
 delta-description sequence; this M2.4.2 boundary and stop behavior remain
-unchanged. The numeric opcode-44 body after those schemas remains pending, and
-M3.1 resource-list discovery has not begun.
+unchanged. M2.4.4 subsequently decodes the numeric opcode-44
+movement/environment body and stops at a later neutral boundary; M3.1
+resource-list discovery remains separate.
 
 Evidence labels in this document are:
 
@@ -250,15 +251,17 @@ skip/bypass, download, or arbitrary server-command CLI options.
 - body offset 29 has no accepted second-client differential and stays opaque;
 - opcode 14 is now independently confirmed and implemented as the bounded
   M2.4.3 delta-description sequence; M2.4.2 retains its original stop behavior;
-- the numeric opcode-44 body following delta schemas has no confirmed public
-  semantic/body codec;
-- the later `sendres` tail and its immediate triggering condition are pending;
+- the numeric opcode-44 body following delta schemas is now the independently
+  confirmed M2.4.4 movement/environment metadata codec;
+- the later `sendres` tail is observed stock behavior but remains deliberately
+  absent from the project client;
 - the map/mode-dependent `u32` and fixed 16-byte value remain opaque;
 - the fourth NUL string is cursor-bounded but not public semantic state;
 - live project-client to stock-HLDS pre-resource sign-on remains pending a
   production Steam authentication provider.
 
-See [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md) for the
-M2.4.3 continuation. The next planned implementation milestone is M3.1,
-resource-list discovery and a bounded codec for the still-neutral opcode-44
-body.
+See [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md) and
+[GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md) for the M2.4.3 and
+M2.4.4 continuations. The next planned implementation milestone is M3.1,
+resource-list discovery and a bounded body codec beyond the neutral
+post-movevars boundary.

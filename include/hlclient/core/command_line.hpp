@@ -20,6 +20,7 @@ enum class ConnectionStopPoint {
     signon_boundary,
     pre_resource,
     delta_schemas,
+    movevars,
 };
 
 enum class AuthenticationProviderKind {

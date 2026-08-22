@@ -179,6 +179,8 @@ hlclient_add_library(
     include/hlclient/goldsrc/delta_description.hpp
     include/hlclient/goldsrc/delta_description_stage.hpp
     include/hlclient/goldsrc/initial_signon_stage.hpp
+    include/hlclient/goldsrc/move_vars.hpp
+    include/hlclient/goldsrc/movement_environment_stage.hpp
     include/hlclient/goldsrc/pre_resource_signon_stage.hpp
     include/hlclient/goldsrc/server_info.hpp
     include/hlclient/goldsrc/service_message_stream.hpp
@@ -188,6 +190,8 @@ hlclient_add_library(
     src/goldsrc/delta_description.cpp
     src/goldsrc/delta_description_stage.cpp
     src/goldsrc/initial_signon_stage.cpp
+    src/goldsrc/move_vars.cpp
+    src/goldsrc/movement_environment_stage.cpp
     src/goldsrc/pre_resource_signon_stage.cpp
     src/goldsrc/server_info.cpp
     src/goldsrc/service_message_stream.cpp

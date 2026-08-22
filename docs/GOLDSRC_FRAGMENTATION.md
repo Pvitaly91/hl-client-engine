@@ -11,7 +11,9 @@ parsing remain pending. M2.4.1 recognizes the separately confirmed first
 `BZ2\0` service envelope after this layer has delivered one owning normal
 payload; M2.4.2 continues only through its bounded typed server-info and
 pre-resource boundary above this layer; M2.4.3 continues that owning payload
-through its bounded delta-description registry and numeric opcode-44 stop.
+through its bounded delta-description registry and numeric opcode-44 stop;
+M2.4.4 decodes the confirmed movement/environment state and simple controls,
+then stops before the neutral opcode-13 body.
 
 The labels in this document are strict:
 
@@ -37,7 +39,8 @@ The implemented profile is intentionally narrow:
 | Compression detection/decompression | **Pending in this layer**; fragment bytes remain opaque, while M2.4.1 strictly decodes only the confirmed first `BZ2\0` envelope above it |
 | Project client to stock HLDS | **Pending** |
 | Opcode-14 delta-description registry above this layer | **Implemented/tested in M2.4.3** |
-| Opcode-44 body, resources, snapshots, or gameplay | **Pending**, beginning with M3.1 |
+| Opcode-44 movement/environment metadata above this layer | **Implemented/tested in M2.4.4** |
+| Resource bodies, snapshots, or gameplay | **Pending**, beginning with M3.1 |
 
 The bounded project integration proof uses real loopback UDP with production
 `UdpDatagramTransport`: M1 challenge, connect, and `ACCEPT` complete before a
@@ -57,8 +60,12 @@ The current application/coordinator composes a driver on the same socket and
 owns it through the selected explicit boundary. The `netchan-bootstrap` stop
 completes only after the first unfragmented or supported reassembled slot-0
 opaque payload has been acknowledged. The separate `signon-boundary` stop keeps
-the same transport/driver semantics through the bounded M2.4.1 decoder. Neither
-mode exposes raw fragment/reliable bytes or claims a live stock-HLDS channel.
+the same transport/driver semantics through the bounded M2.4.1 decoder. The
+`pre-resource`, `delta-schemas`, and `movevars` stops retain that same
+transport/driver only through their exact bounded continuations; the last
+publishes typed movement/environment metadata and leaves opcode 13 wholly
+unconsumed. No mode exposes raw fragment/reliable bytes or claims a live
+stock-HLDS channel.
 
 ## Clean-room evidence
 
@@ -480,11 +487,12 @@ The following stay explicit rather than being inferred:
 - split/special packets and acknowledgement bit 30;
 - a production Steam authentication provider and live project-client-to-stock
   HLDS acceptance/channel proof;
-- opcode-44 body semantics and every resource, snapshot, gameplay, and
-  rendering consumer. M2.4.1 consumes the reassembled first `BZ2\0` envelope
-  through its typed opcode-11 stop; M2.4.2 parses the confirmed server-info
-  continuation; M2.4.3 publishes the bounded delta registry and stops before
-  the opcode-44 body.
+- every service semantic beyond the neutral opcode-13 boundary and every
+  resource, snapshot, gameplay, and rendering consumer. M2.4.1 consumes the
+  reassembled first `BZ2\0` envelope through its typed opcode-11 stop; M2.4.2
+  parses the confirmed server-info continuation; M2.4.3 publishes the bounded
+  delta registry; M2.4.4 publishes the typed opcode-44 movement/environment
+  state and leaves the later complex body untouched.
 
 No pending row is filled from a third-party implementation name. Fresh bounded
 capture takes priority over earlier assumptions and secondary behavioral
