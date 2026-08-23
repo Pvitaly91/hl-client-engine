@@ -63,6 +63,37 @@ hlclient_add_library(
 add_library(hlclient::core ALIAS hlclient_core)
 
 hlclient_add_library(
+    hlclient_hash_md5
+    include/hlclient/hash/md5.hpp
+    src/hash/md5.cpp
+)
+add_library(hlclient::hash_md5 ALIAS hlclient_hash_md5)
+target_link_libraries(hlclient_hash_md5 PUBLIC hlclient::core)
+set_property(TARGET hlclient_hash_md5 PROPERTY FOLDER "Engine/Core/Hash")
+
+hlclient_add_library(
+    hlclient_local_resources
+    include/hlclient/local_resources/local_resource_identity.hpp
+    include/hlclient/local_resources/local_resource_search_roots.hpp
+    include/hlclient/local_resources/local_virtual_resource_name.hpp
+    include/hlclient/local_resources/local_read_only_file.hpp
+    include/hlclient/local_resources/local_resource_resolver.hpp
+    src/local_resources/win32_local_resource_detail.hpp
+    src/local_resources/local_resource_search_roots.cpp
+    src/local_resources/local_virtual_resource_name.cpp
+    src/local_resources/local_read_only_file.cpp
+    src/local_resources/local_resource_resolver.cpp
+)
+add_library(hlclient::local_resources ALIAS hlclient_local_resources)
+target_link_libraries(hlclient_local_resources PUBLIC hlclient::core)
+set_property(
+    TARGET hlclient_local_resources PROPERTY FOLDER "Engine/Resources/Local")
+if(WIN32)
+    target_compile_definitions(
+        hlclient_local_resources PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+
+hlclient_add_library(
     hlclient_platform
     include/hlclient/platform/sdl_runtime.hpp
     include/hlclient/platform/sdl_window.hpp
@@ -184,6 +215,27 @@ set_property(
     PROPERTY FOLDER "Engine/Resource Consistency")
 
 hlclient_add_library(
+    hlclient_resource_consistency_local
+    include/hlclient/local_resources/local_resource_file_inspection.hpp
+    include/hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp
+    src/local_resources/local_resource_file_inspection.cpp
+    src/resource_consistency/prepared_local_resource_consistency_provider.cpp
+)
+add_library(
+    hlclient::resource_consistency_local ALIAS
+    hlclient_resource_consistency_local)
+target_link_libraries(
+    hlclient_resource_consistency_local
+    PUBLIC
+        hlclient::resource_consistency_api
+        hlclient::local_resources
+        hlclient::hash_md5
+)
+set_property(
+    TARGET hlclient_resource_consistency_local
+    PROPERTY FOLDER "Engine/Resource Consistency")
+
+hlclient_add_library(
     hlclient_goldsrc_signon
     include/hlclient/goldsrc/bit_reader.hpp
     include/hlclient/goldsrc/client_message.hpp
@@ -239,6 +291,25 @@ target_link_libraries(
         hlclient::core
 )
 set_property(TARGET hlclient_goldsrc_signon PROPERTY FOLDER "Engine/Network/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_local_resources
+    include/hlclient/goldsrc/local_resource_mapping.hpp
+    include/hlclient/goldsrc/local_resource_inventory.hpp
+    src/goldsrc/local_resource_mapping.cpp
+    src/goldsrc/local_resource_inventory.cpp
+)
+add_library(
+    hlclient::goldsrc_local_resources ALIAS hlclient_goldsrc_local_resources)
+target_link_libraries(
+    hlclient_goldsrc_local_resources
+    PUBLIC
+        hlclient::goldsrc_signon
+        hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_goldsrc_local_resources
+    PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
     hlclient_auth
@@ -354,12 +425,25 @@ target_link_libraries(
         hlclient::network
         hlclient::goldsrc
         hlclient::goldsrc_client
+        hlclient::goldsrc_local_resources
+        hlclient::resource_consistency_local
         hlclient::client
         hlclient::scene_api
         hlclient::renderer_api
         hlclient::renderer_null
         hlclient::renderer_opengl
 )
+
+add_executable(
+    hlclient_local_resource_check
+    apps/hlclient_local_resource_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_local_resource_check)
+target_link_libraries(
+    hlclient_local_resource_check
+    PRIVATE hlclient::resource_consistency_local)
+set_property(
+    TARGET hlclient_local_resource_check PROPERTY FOLDER "Tools/Resources")
 set_target_properties(
     hlclient
     PROPERTIES

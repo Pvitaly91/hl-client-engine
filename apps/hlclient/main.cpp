@@ -9,6 +9,10 @@
 #include <hlclient/filesystem/game_paths.hpp>
 #include <hlclient/filesystem/rooted_file_system.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
+#include <hlclient/goldsrc/local_resource_inventory.hpp>
+#include <hlclient/goldsrc/local_resource_mapping.hpp>
+#include <hlclient/local_resources/local_resource_resolver.hpp>
+#include <hlclient/local_resources/local_resource_search_roots.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
 #include <hlclient/network/network_runtime.hpp>
@@ -17,6 +21,7 @@
 #include <hlclient/platform/sdl_window.hpp>
 #include <hlclient/renderer/null/null_renderer.hpp>
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
+#include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
 
 #include <charconv>
 #include <chrono>
@@ -1700,6 +1705,79 @@ void log_resource_client_response_trace(
     return 1;
 }
 
+struct LocalResourceInventoryConfiguration {
+    std::filesystem::path base_directory;
+    std::string game_directory;
+};
+
+[[nodiscard]] int report_local_resource_inventory(
+    const hlclient::goldsrc::ResourceClientResponseSignonState& response,
+    const LocalResourceInventoryConfiguration& configuration)
+{
+    auto roots = hlclient::local_resources::LocalResourceSearchRoots::create(
+        configuration.base_directory,
+        configuration.game_directory);
+    if (!roots) {
+        const auto code =
+            roots.error
+                ? hlclient::local_resources::to_string(roots.error->code)
+                : std::string_view{"io_error"};
+        hlclient::core::log(
+            LogLevel::error,
+            "[local-resource] inventory root validation failed: " +
+                std::string{code});
+        return 1;
+    }
+    auto resolver = hlclient::local_resources::LocalResourceResolver::create(
+        std::move(*roots.roots));
+    if (!resolver) {
+        const auto code =
+            resolver.error
+                ? hlclient::local_resources::to_string(resolver.error->code)
+                : std::string_view{"io_error"};
+        hlclient::core::log(
+            LogLevel::error,
+            "[local-resource] inventory resolver creation failed: " +
+                std::string{code});
+        return 1;
+    }
+
+    auto built = hlclient::goldsrc::LocalResourceInventoryBuilder{}.build(
+        response.resource_list().resource_list(),
+        hlclient::goldsrc::GoldSrcResourceNameMapper{},
+        *resolver.resolver);
+    if (!built) {
+        const auto code =
+            built.error
+                ? hlclient::goldsrc::to_string(built.error->code)
+                : std::string_view{"unable_to_retain_inventory"};
+        hlclient::core::log(
+            LogLevel::error,
+            "[local-resource] inventory build failed: " +
+                std::string{code});
+        return 1;
+    }
+
+    const auto& summary = built.state->summary();
+    using Status = hlclient::goldsrc::LocalResourceInventoryStatus;
+    const auto unsupported =
+        summary.count(Status::unsupported_name_encoding) +
+        summary.count(Status::unsupported_mapping);
+    hlclient::core::log(
+        LogLevel::info,
+        "[local-resource] inventory: resolved=" +
+            std::to_string(summary.count(Status::resolved)) +
+            ", missing=" + std::to_string(summary.count(Status::missing)) +
+            ", unsafe=" +
+            std::to_string(summary.count(Status::unsafe_name)) +
+            ", unsupported=" + std::to_string(unsupported) +
+            ", ambiguous=" +
+            std::to_string(summary.count(Status::ambiguous)) +
+            ", io-error=" +
+            std::to_string(summary.count(Status::io_error)));
+    return 0;
+}
+
 [[nodiscard]] hlclient::network::UdpSocket open_challenge_socket(
     const hlclient::network::NetworkRuntime& runtime,
     const hlclient::network::NetworkAddress& remote_endpoint)
@@ -1735,8 +1813,14 @@ public:
         const hlclient::goldsrc::HandshakeStopPoint stop_point,
         std::optional<hlclient::goldsrc::PreparedConnectRequest> prepared_request,
         std::optional<hlclient::auth::AuthenticationSession> authentication_session,
+        hlclient::resource_consistency::IResourceConsistencyProvider*
+            resource_consistency_provider,
+        std::optional<LocalResourceInventoryConfiguration>
+            local_inventory_configuration,
         const bool net_trace)
-        : network_runtime_{},
+        : local_inventory_configuration_{
+              std::move(local_inventory_configuration)},
+          network_runtime_{},
           transport_{open_challenge_socket(network_runtime_, remote_endpoint)},
           handshake_{
               transport_,
@@ -1792,7 +1876,7 @@ public:
                           &log_resource_list_trace}
                     : hlclient::goldsrc::ResourceListTraceCallback{},
                 {},
-                nullptr,
+                resource_consistency_provider,
                 hlclient::goldsrc::ResourceClientResponseTraceCallback{
                     &log_resource_client_response_trace}}
     {
@@ -1824,10 +1908,19 @@ public:
 
     [[nodiscard]] int report_result() const
     {
-        return report_handshake_result(handshake_);
+        const int handshake_result = report_handshake_result(handshake_);
+        if (handshake_result != 0 || !local_inventory_configuration_ ||
+            !handshake_.resource_client_response_result()) {
+            return handshake_result;
+        }
+        return report_local_resource_inventory(
+            *handshake_.resource_client_response_result(),
+            *local_inventory_configuration_);
     }
 
 private:
+    std::optional<LocalResourceInventoryConfiguration>
+        local_inventory_configuration_;
     hlclient::network::NetworkRuntime network_runtime_;
     hlclient::network::UdpDatagramTransport transport_;
     hlclient::goldsrc::GoldSrcHandshakeCoordinator handshake_;
@@ -2035,7 +2128,7 @@ int run(const hlclient::core::CommandLineOptions& options)
     hlclient::assets::AssetImporterRegistries asset_importers;
     std::unique_ptr<hlclient::filesystem::RootedFileSystem> asset_file_system;
     [[maybe_unused]] std::unique_ptr<hlclient::assets::AssetManager> asset_manager;
-    if (options.base_directory) {
+    if (options.base_directory && !options.resource_consistency_provider) {
         const auto paths = hlclient::filesystem::validate_game_paths(
             path_from_utf8(*options.base_directory),
             path_from_utf8(options.game_directory));
@@ -2063,6 +2156,10 @@ int run(const hlclient::core::CommandLineOptions& options)
         hlclient::core::log(
             LogLevel::info,
             "Asset pipeline initialized; no production format importers are registered in M0.1");
+    } else if (options.resource_consistency_provider) {
+        hlclient::core::log(
+            LogLevel::info,
+            "Asset pipeline remains separate from local resource-consistency mode");
     } else {
         hlclient::core::log(
             LogLevel::info,
@@ -2070,6 +2167,11 @@ int run(const hlclient::core::CommandLineOptions& options)
     }
 
     BootstrapSceneSource scene_source;
+    std::unique_ptr<
+        hlclient::resource_consistency::PreparedLocalResourceConsistencyProvider>
+        resource_consistency_provider;
+    std::optional<LocalResourceInventoryConfiguration>
+        local_inventory_configuration;
     std::unique_ptr<HandshakeSession> challenge_session;
     if (options.connect_endpoint) {
         const auto address = hlclient::network::NetworkAddress::parse(*options.connect_endpoint);
@@ -2081,6 +2183,59 @@ int run(const hlclient::core::CommandLineOptions& options)
         }
 
         scene_source.mutable_world_state().set_connection_requested(true);
+        if (hlclient::core::requires_local_resource_consistency_preparation(
+                options)) {
+            const auto base_directory =
+                path_from_utf8(*options.base_directory);
+            auto roots = hlclient::local_resources::LocalResourceSearchRoots::create(
+                base_directory,
+                options.game_directory);
+            if (!roots) {
+                const auto code =
+                    roots.error
+                        ? hlclient::local_resources::to_string(roots.error->code)
+                        : std::string_view{"io_error"};
+                hlclient::core::log(
+                    LogLevel::error,
+                    "[local-resource] root validation failed: " +
+                        std::string{code});
+                return 1;
+            }
+
+            const auto root_count = roots.roots->size();
+            auto provider = hlclient::resource_consistency::
+                PreparedLocalResourceConsistencyProvider::prepare(
+                    std::move(*roots.roots));
+            if (!provider) {
+                const auto code =
+                    provider.error
+                        ? hlclient::resource_consistency::to_string(
+                              provider.error->code)
+                        : std::string_view{"provider_error"};
+                hlclient::core::log(
+                    LogLevel::error,
+                    "[local-resource] consistency provider preparation failed: " +
+                        std::string{code});
+                return 1;
+            }
+
+            resource_consistency_provider = std::move(provider.provider);
+            local_inventory_configuration =
+                LocalResourceInventoryConfiguration{
+                    base_directory, options.game_directory};
+            hlclient::core::log(
+                LogLevel::info,
+                "[local-resource] roots validated: count=" +
+                    std::to_string(root_count));
+            hlclient::core::log(
+                LogLevel::info,
+                "[local-resource] consistency material ready: byte-count=" +
+                    std::to_string(resource_consistency_provider->byte_count()) +
+                    ", opaque-bytes=" +
+                    std::to_string(
+                        resource_consistency_provider->opaque_byte_count()));
+        }
+
         auto preparation = prepare_runtime_connect_request(options, *address);
         hlclient::goldsrc::HandshakeStopPoint stop_point =
             hlclient::goldsrc::HandshakeStopPoint::challenge;
@@ -2128,6 +2283,8 @@ int run(const hlclient::core::CommandLineOptions& options)
             stop_point,
             std::move(preparation.request),
             std::move(preparation.authentication_session),
+            resource_consistency_provider.get(),
+            std::move(local_inventory_configuration),
             options.net_trace);
     }
 

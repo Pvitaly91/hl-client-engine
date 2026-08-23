@@ -1,5 +1,6 @@
 #include "delta_test_fixture.hpp"
 #include "move_vars_test_fixture.hpp"
+#include "local_resource_test_fixture.hpp"
 #include "resource_client_response_test_fixture.hpp"
 #include "resource_list_test_fixture.hpp"
 #include "user_info_test_fixture.hpp"
@@ -8,11 +9,14 @@
 #include <hlclient/goldsrc/challenge_protocol.hpp>
 #include <hlclient/goldsrc/connect_request.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
+#include <hlclient/goldsrc/local_resource_mapping.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
 #include <hlclient/goldsrc/netchan_payload_transform.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_runtime.hpp>
 #include <hlclient/network/udp_socket.hpp>
+#include <hlclient/local_resources/local_resource_search_roots.hpp>
+#include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
 #include <hlclient/resource_consistency/provider.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -24,6 +28,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -34,6 +40,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -78,6 +85,25 @@ inline constexpr std::array<std::byte, 41U> kExactResourceResponse{
     std::byte{0xa4U}, std::byte{0xa5U}, std::byte{0xa6U}, std::byte{0xa7U},
     std::byte{0xa8U}, std::byte{0xa9U}, std::byte{0xaaU}, std::byte{0xabU},
     std::byte{0xacU}, std::byte{0xadU}, std::byte{0xaeU}, std::byte{0xafU},
+};
+
+// Independently authored from the standard MD5("abc") vector. Production
+// encoder and production hasher code do not contribute bytes to this fixture.
+inline constexpr std::array<std::byte, 41U> kExactLocalProviderResponse{
+    std::byte{0x05U},
+    std::byte{0x01U}, std::byte{0x00U},
+    std::byte{'t'}, std::byte{'e'}, std::byte{'m'}, std::byte{'p'},
+    std::byte{'d'}, std::byte{'e'}, std::byte{'c'}, std::byte{'a'},
+    std::byte{'l'}, std::byte{'.'}, std::byte{'w'}, std::byte{'a'},
+    std::byte{'d'}, std::byte{0x00U},
+    std::byte{0x03U},
+    std::byte{0x00U}, std::byte{0x00U},
+    std::byte{0x03U}, std::byte{0x00U}, std::byte{0x00U}, std::byte{0x00U},
+    std::byte{0x04U},
+    std::byte{0x90U}, std::byte{0x01U}, std::byte{0x50U}, std::byte{0x98U},
+    std::byte{0x3cU}, std::byte{0xd2U}, std::byte{0x4fU}, std::byte{0xb0U},
+    std::byte{0xd6U}, std::byte{0x96U}, std::byte{0x3fU}, std::byte{0x7dU},
+    std::byte{0x28U}, std::byte{0xe1U}, std::byte{0x7fU}, std::byte{0x72U},
 };
 
 class CountingAuthenticationLifetime final
@@ -571,6 +597,7 @@ enum class ResourceResponseIntegrationScenario {
     dropped_acknowledgement,
     coalesced_tail,
     differential_map,
+    malicious_resource_names,
 };
 
 [[nodiscard]] std::vector<std::byte> second_resource_list_payload(
@@ -872,7 +899,8 @@ void check_transport_only_packet(
 }
 
 void check_exact_resource_response_packet(
-    const goldsrc::ClientToServerNetchanPacket& packet)
+    const goldsrc::ClientToServerNetchanPacket& packet,
+    const std::span<const std::byte, 41U> expected = kExactResourceResponse)
 {
     REQUIRE(packet.header.sequence.flags.reliable);
     REQUIRE(packet.header.sequence.flags.fragmented);
@@ -882,9 +910,9 @@ void check_exact_resource_response_packet(
     CHECK(packet.fragments[0U]->packed_id()->fragment_index() == 1U);
     CHECK(packet.fragments[0U]->packed_id()->fragment_count() == 1U);
     CHECK(packet.fragments[0U]->offset == 0U);
-    CHECK(packet.fragments[0U]->length == kExactResourceResponse.size());
-    CHECK(packet.fragment_payload_size == kExactResourceResponse.size());
-    CHECK(std::ranges::equal(packet.payload, kExactResourceResponse));
+    CHECK(packet.fragments[0U]->length == expected.size());
+    CHECK(packet.fragment_payload_size == expected.size());
+    CHECK(std::ranges::equal(packet.payload, expected));
 }
 
 void check_coalesced_response_carrier(
@@ -2020,9 +2048,13 @@ void run_resource_list(
     require_no_datagram(*server);
 }
 
-void run_resource_response(
+void run_resource_response_with_provider(
     const std::size_t run,
-    const ResourceResponseIntegrationScenario scenario)
+    const ResourceResponseIntegrationScenario scenario,
+    consistency::IResourceConsistencyProvider& provider,
+    const std::span<const std::byte, 41U> expected_response,
+    const std::uint32_t expected_byte_count,
+    IntegrationResourceConsistencyProvider* synthetic_provider)
 {
     INFO("fake-HLDS resource-response run " << run + 1U);
     network::NetworkRuntime runtime;
@@ -2042,7 +2074,6 @@ void run_resource_response(
 
     std::size_t authentication_releases = 0U;
     TraceCounts traces;
-    IntegrationResourceConsistencyProvider provider;
     auto prepared = prepared_request_with_session(authentication_releases);
     auto stage_config = resource_client_response_config();
     goldsrc::GoldSrcHandshakeCoordinator handshake{
@@ -2185,6 +2216,9 @@ void run_resource_response(
     const auto list_scenario =
         scenario == ResourceResponseIntegrationScenario::differential_map
             ? ResourceListIntegrationScenario::differential_map
+        : scenario ==
+                ResourceResponseIntegrationScenario::malicious_resource_names
+            ? ResourceListIntegrationScenario::malicious_names
             : ResourceListIntegrationScenario::baseline;
     const auto semantic = second_resource_list_payload(list_scenario, run);
     const auto envelope = service_envelope(semantic);
@@ -2231,10 +2265,12 @@ void run_resource_response(
     auto response = decode_client_packet(
         receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
         started.client_endpoint);
-    check_exact_resource_response_packet(response);
+    check_exact_resource_response_packet(response, expected_response);
     std::size_t response_datagrams = 1U;
     CHECK_FALSE(handshake.terminal());
-    CHECK(provider.lifetime_releases == 0U);
+    if (synthetic_provider != nullptr) {
+        CHECK(synthetic_provider->lifetime_releases == 0U);
+    }
 
     if (scenario == ResourceResponseIntegrationScenario::coalesced_tail) {
         check_coalesced_response_carrier(response, run);
@@ -2291,7 +2327,7 @@ void run_resource_response(
         auto retry = decode_client_packet(
             receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
             started.client_endpoint);
-        check_exact_resource_response_packet(retry);
+        check_exact_resource_response_packet(retry, expected_response);
         REQUIRE(response.fragments[0U]);
         REQUIRE(retry.fragments[0U]);
         CHECK(retry.fragments[0U]->packed_id() ==
@@ -2328,7 +2364,7 @@ void run_resource_response(
     const auto& list = result.resource_list().resource_list();
     CHECK(list.resource_count() == 128U);
     CHECK(result.response().wire_name() == "tempdecal.wad");
-    CHECK(result.response().byte_count() == 0x01020304U);
+    CHECK(result.response().byte_count() == expected_byte_count);
     CHECK_FALSE(result.source_carrier_geometry());
     CHECK_FALSE(result.concurrent_tail());
     CHECK(result.reliable_lifecycle().fragmented());
@@ -2354,6 +2390,23 @@ void run_resource_response(
         CHECK(list.entries()[1U].declared_size().raw_code() ==
               98'765U + variant);
     }
+    if (scenario ==
+        ResourceResponseIntegrationScenario::malicious_resource_names) {
+        CHECK(list.entries()[0U].name().bytes() == "../evil");
+        CHECK(list.entries()[1U].name().bytes() == "..\\evil");
+        CHECK(list.entries()[2U].name().bytes() == "C:\\evil");
+        CHECK(list.entries()[3U].name().bytes() == "\\\\server\\share");
+        CHECK(list.entries()[4U].name().bytes() == "/absolute");
+        const goldsrc::GoldSrcResourceNameMapper mapper;
+        for (std::size_t index = 0U; index < 5U; ++index) {
+            const auto classification = mapper.classify(
+                list.entries()[index].type(),
+                list.entries()[index].name());
+            CHECK(classification.kind() ==
+                  goldsrc::GoldSrcResourceNameClassificationKind::unsafe_name);
+            CHECK_FALSE(classification.safe_virtual_name());
+        }
+    }
 
     CHECK(traces.user_info_messages == 1U);
     CHECK(traces.first_batch_completions == 1U);
@@ -2371,13 +2424,15 @@ void run_resource_response(
     CHECK(traces.responses_transmitted == 1U);
     CHECK(traces.responses_acknowledged == 1U);
     CHECK(traces.response_boundaries == 1U);
-    CHECK(provider.begins == 1U);
-    CHECK(provider.updates == 1U);
-    CHECK(provider.cancellations == 0U);
-    CHECK(provider.material_count == 1U);
-    CHECK(provider.opaque_byte_count == 16U);
-    CHECK(provider.filesystem_calls == 0U);
-    CHECK(provider.lifetime_releases == 1U);
+    if (synthetic_provider != nullptr) {
+        CHECK(synthetic_provider->begins == 1U);
+        CHECK(synthetic_provider->updates == 1U);
+        CHECK(synthetic_provider->cancellations == 0U);
+        CHECK(synthetic_provider->material_count == 1U);
+        CHECK(synthetic_provider->opaque_byte_count == 16U);
+        CHECK(synthetic_provider->filesystem_calls == 0U);
+        CHECK(synthetic_provider->lifetime_releases == 1U);
+    }
     CHECK(authentication_releases == 1U);
     CHECK(handshake.error_context().empty());
     REQUIRE(handshake.local_endpoint());
@@ -2386,9 +2441,238 @@ void run_resource_response(
     require_no_datagram(*server);
     handshake.update(now + 100ms);
     handshake.cancel(now + 200ms);
-    CHECK(provider.lifetime_releases == 1U);
+    if (synthetic_provider != nullptr) {
+        CHECK(synthetic_provider->lifetime_releases == 1U);
+    }
     CHECK(authentication_releases == 1U);
     require_no_datagram(*server);
+}
+
+void run_resource_response(
+    const std::size_t run,
+    const ResourceResponseIntegrationScenario scenario)
+{
+    IntegrationResourceConsistencyProvider provider;
+    run_resource_response_with_provider(
+        run,
+        scenario,
+        provider,
+        kExactResourceResponse,
+        0x01020304U,
+        &provider);
+}
+
+struct SyntheticRootSnapshotEntry {
+    std::string relative_name;
+    std::uintmax_t byte_count{0U};
+    std::filesystem::file_time_type write_time{};
+    std::string contents;
+    bool directory{false};
+
+    friend bool operator==(
+        const SyntheticRootSnapshotEntry&,
+        const SyntheticRootSnapshotEntry&) = default;
+};
+
+[[nodiscard]] std::vector<SyntheticRootSnapshotEntry> snapshot_synthetic_root(
+    const std::filesystem::path& root)
+{
+    std::vector<SyntheticRootSnapshotEntry> snapshot;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator{root}) {
+        std::error_code error;
+        const bool directory = entry.is_directory(error);
+        REQUIRE_FALSE(error);
+        const bool regular = entry.is_regular_file(error);
+        REQUIRE_FALSE(error);
+
+        SyntheticRootSnapshotEntry item;
+        item.relative_name =
+            std::filesystem::relative(entry.path(), root).generic_string();
+        item.directory = directory;
+        if (regular) {
+            item.write_time = entry.last_write_time(error);
+            REQUIRE_FALSE(error);
+            item.byte_count = entry.file_size(error);
+            REQUIRE_FALSE(error);
+            std::ifstream stream{entry.path(), std::ios::binary};
+            REQUIRE(stream);
+            item.contents.assign(
+                std::istreambuf_iterator<char>{stream},
+                std::istreambuf_iterator<char>{});
+            REQUIRE_FALSE(stream.bad());
+        }
+        snapshot.push_back(std::move(item));
+    }
+    std::ranges::sort(
+        snapshot,
+        {},
+        &SyntheticRootSnapshotEntry::relative_name);
+    return snapshot;
+}
+
+[[nodiscard]] bool can_open_synthetic_writer(
+    const std::filesystem::path& path)
+{
+    const HANDLE writer = ::CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (writer == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    static_cast<void>(::CloseHandle(writer));
+    return true;
+}
+
+class ScopedChildProcess final {
+public:
+    ~ScopedChildProcess()
+    {
+        if (information_.hProcess != nullptr) {
+            if (::WaitForSingleObject(information_.hProcess, 0U) == WAIT_TIMEOUT) {
+                static_cast<void>(::TerminateProcess(information_.hProcess, 255U));
+                static_cast<void>(::WaitForSingleObject(
+                    information_.hProcess,
+                    5'000U));
+            }
+            static_cast<void>(::CloseHandle(information_.hProcess));
+        }
+        if (information_.hThread != nullptr) {
+            static_cast<void>(::CloseHandle(information_.hThread));
+        }
+    }
+
+    ScopedChildProcess(const ScopedChildProcess&) = delete;
+    ScopedChildProcess& operator=(const ScopedChildProcess&) = delete;
+    ScopedChildProcess() = default;
+
+    [[nodiscard]] PROCESS_INFORMATION* information() noexcept
+    {
+        return &information_;
+    }
+
+private:
+    PROCESS_INFORMATION information_{};
+};
+
+[[nodiscard]] std::filesystem::path sibling_hlclient_executable()
+{
+    std::wstring module(32'768U, L'\0');
+    const DWORD length = ::GetModuleFileNameW(
+        nullptr,
+        module.data(),
+        static_cast<DWORD>(module.size()));
+    REQUIRE(length > 0U);
+    REQUIRE(length < module.size());
+    module.resize(length);
+    return std::filesystem::path{module}.parent_path() / L"hlclient.exe";
+}
+
+[[nodiscard]] DWORD run_local_provider_client(
+    const std::filesystem::path& root,
+    const std::string_view game,
+    const std::uint16_t server_port)
+{
+    const auto executable = sibling_hlclient_executable();
+    REQUIRE(std::filesystem::is_regular_file(executable));
+    const auto unused_auth = root / L"absent-auth-material.bin";
+    std::wstring command =
+        L"\"" + executable.wstring() +
+        L"\" --renderer null --connect 127.0.0.1:" +
+        std::to_wstring(server_port) +
+        L" --stop-after resource-response-boundary --auth-provider file "
+        L"--auth-material-file \"" + unused_auth.wstring() +
+        L"\" --resource-consistency-provider local --basedir \"" +
+        root.wstring() + L"\" --game " +
+        std::wstring{game.begin(), game.end()};
+    std::vector<wchar_t> mutable_command{command.begin(), command.end()};
+    mutable_command.push_back(L'\0');
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    ScopedChildProcess child;
+    REQUIRE(::CreateProcessW(
+                executable.c_str(),
+                mutable_command.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                CREATE_NO_WINDOW,
+                nullptr,
+                nullptr,
+                &startup,
+                child.information()) != FALSE);
+    REQUIRE(::WaitForSingleObject(
+                child.information()->hProcess,
+                5'000U) == WAIT_OBJECT_0);
+    DWORD exit_code = STILL_ACTIVE;
+    REQUIRE(::GetExitCodeProcess(
+                child.information()->hProcess,
+                &exit_code) != FALSE);
+    return exit_code;
+}
+
+void run_local_provider_resource_response(
+    const std::size_t run,
+    const ResourceResponseIntegrationScenario scenario,
+    const bool exercise_game_and_fallback)
+{
+    INFO("production local-provider fake-HLDS run " << run + 1U);
+    hlclient::tests::ScopedLocalResourceTestRoot root;
+
+    std::string game{"valve"};
+    std::uint32_t expected_root_id = 0U;
+    if (exercise_game_and_fallback) {
+        game = "mymod";
+        root.create_game(game);
+        if ((run % 2U) == 0U) {
+            root.write("valve", "tempdecal.wad", "decoy");
+            root.write(game, "tempdecal.wad", "abc");
+        } else {
+            root.write("valve", "tempdecal.wad", "abc");
+            expected_root_id = 1U;
+        }
+    } else {
+        root.write("valve", "tempdecal.wad", "abc");
+    }
+
+    const auto before = snapshot_synthetic_root(root.path());
+    auto roots = hlclient::local_resources::LocalResourceSearchRoots::create(
+        root.path(),
+        game);
+    REQUIRE(roots);
+    const auto expected_root_count = exercise_game_and_fallback ? 2U : 1U;
+    CHECK(roots.roots->size() == expected_root_count);
+
+    auto prepared = consistency::PreparedLocalResourceConsistencyProvider::prepare(
+        std::move(*roots.roots));
+    REQUIRE(prepared);
+    CHECK(prepared.provider->validated_root_count() == expected_root_count);
+    CHECK(prepared.provider->selected_root_id().value() == expected_root_id);
+    CHECK(prepared.provider->byte_count() == 3U);
+    CHECK(prepared.provider->opaque_byte_count() == 16U);
+    CHECK_FALSE(prepared.provider->consumed());
+    const auto selected_target =
+        root.game_path(expected_root_id == 0U ? game : "valve") /
+        "tempdecal.wad";
+    CHECK_FALSE(can_open_synthetic_writer(selected_target));
+
+    run_resource_response_with_provider(
+        run,
+        scenario,
+        *prepared.provider,
+        kExactLocalProviderResponse,
+        3U,
+        nullptr);
+
+    CHECK(prepared.provider->consumed());
+    CHECK(can_open_synthetic_writer(selected_target));
+    const auto after = snapshot_synthetic_root(root.path());
+    CHECK(after == before);
 }
 
 } // namespace
@@ -2545,6 +2829,143 @@ TEST_CASE("Fake HLDS map and resource-list differentials preserve response for 2
         run_resource_response(
             run,
             ResourceResponseIntegrationScenario::differential_map);
+    }
+}
+
+TEST_CASE("Production local provider fake HLDS baseline repeats 20 of 20",
+          "[goldsrc][resource-response][local-provider][udp][baseline][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_local_provider_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::baseline,
+            false);
+    }
+}
+
+TEST_CASE("Production local provider game priority and fallback repeat 20 of 20",
+          "[goldsrc][resource-response][local-provider][roots][udp][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_local_provider_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::baseline,
+            true);
+    }
+}
+
+TEST_CASE("Production local provider dropped response repeats 20 of 20",
+          "[goldsrc][resource-response][local-provider][drop-response][udp][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_local_provider_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::dropped_response,
+            false);
+    }
+}
+
+TEST_CASE("Production local provider dropped ACK repeats 20 of 20",
+          "[goldsrc][resource-response][local-provider][drop-ack][udp][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_local_provider_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::dropped_acknowledgement,
+            false);
+    }
+}
+
+TEST_CASE("Production local provider rejects malicious server paths for 20 of 20",
+          "[goldsrc][resource-response][local-provider][security][udp][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_local_provider_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::malicious_resource_names,
+            false);
+    }
+}
+
+TEST_CASE("Local provider preparation failures emit zero UDP packets",
+          "[goldsrc][resource-response][local-provider][pre-network][negative]")
+{
+    network::NetworkRuntime runtime;
+    INFO(runtime.error_message());
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto server = network::UdpSocket::open_ipv4(runtime, error);
+    REQUIRE(server);
+    REQUIRE(server->bind(network::NetworkAddress::loopback(0U), error));
+    const auto server_endpoint = server->local_address(error);
+    REQUIRE(server_endpoint);
+
+    const auto require_pre_network_failure = [&](const auto& root,
+                                                 const std::string_view game) {
+        const auto before = snapshot_synthetic_root(root.path());
+        CHECK(run_local_provider_client(
+                  root.path(), game, server_endpoint->port()) == 1U);
+        require_no_datagram(*server);
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+    };
+
+    SECTION("missing target")
+    {
+        hlclient::tests::ScopedLocalResourceTestRoot root;
+        require_pre_network_failure(root, "valve");
+    }
+
+    SECTION("missing explicit game root")
+    {
+        hlclient::tests::ScopedLocalResourceTestRoot root;
+        require_pre_network_failure(root, "missingmod");
+    }
+
+    SECTION("empty target")
+    {
+        hlclient::tests::ScopedLocalResourceTestRoot root;
+        root.write("valve", "tempdecal.wad", "");
+        require_pre_network_failure(root, "valve");
+    }
+
+    SECTION("target exceeds the default consistency limit")
+    {
+        hlclient::tests::ScopedLocalResourceTestRoot root;
+        root.write_repeated(
+            "valve",
+            "tempdecal.wad",
+            static_cast<std::size_t>(
+                hlclient::local_resources::
+                    kDefaultMaximumLocalResourceFileSize +
+                1U));
+        require_pre_network_failure(root, "valve");
+    }
+
+    SECTION("final reparse target")
+    {
+        hlclient::tests::ScopedLocalResourceTestRoot root;
+        root.write("valve", "real.wad", "real");
+        std::error_code link_error;
+        std::filesystem::create_symlink(
+            root.game_path("valve") / "real.wad",
+            root.game_path("valve") / "tempdecal.wad",
+            link_error);
+        if (link_error) {
+            SKIP("File symlinks are unavailable: " << link_error.message());
+        }
+        require_pre_network_failure(root, "valve");
+    }
+
+    SECTION("ambiguous ASCII case")
+    {
+        hlclient::tests::ScopedLocalResourceTestRoot root;
+        if (!hlclient::tests::enable_case_sensitive_directory(
+                root.game_path("valve"))) {
+            SKIP("Case-sensitive directory mode is unavailable");
+        }
+        root.write("valve", "TempDecal.wad", "one");
+        root.write("valve", "TEMPDECAL.WAD", "two");
+        require_pre_network_failure(root, "valve");
     }
 }
 

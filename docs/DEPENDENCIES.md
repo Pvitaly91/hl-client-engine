@@ -24,6 +24,33 @@ The project also links the Windows SDK/OpenGL system import library through
 CMake's `OpenGL::GL` target and links Winsock2 where required. Those operating
 system components are not vendored or redistributed by this repository.
 
+M3.2.1 adds no third-party dependency. `hlclient_hash_md5` is an independently
+authored C++20 incremental compatibility module and does not use OpenSSL,
+Windows CryptoAPI, or another crypto package. MD5 is present only to reproduce
+GoldSrc compatibility material; it is not approved for security, authenticity,
+integrity, or trust decisions. `hlclient_local_resources` uses private Windows
+SDK file-handle APIs (`CreateFileW` and handle metadata/final-path queries) for
+the Win32 read-only sandbox. Those APIs do not add a redistributed runtime.
+
+The local-resource target direction remains project-owned and acyclic:
+
+```text
+hlclient_hash_md5 -> hlclient_core
+hlclient_local_resources -> hlclient_core + private Win32 system APIs
+hlclient_resource_consistency_local
+    -> hlclient_resource_consistency_api
+    -> hlclient_local_resources
+    -> hlclient_hash_md5
+hlclient_goldsrc_local_resources
+    -> hlclient_goldsrc_signon
+    -> hlclient_local_resources
+hlclient_goldsrc_signon -> hlclient_resource_consistency_api
+```
+
+In particular, the sign-on target does not link the filesystem or concrete
+local-provider implementation, the resolver does not link the netchan driver,
+and the MD5 target does not depend on GoldSrc protocol types.
+
 The bootstrap intentionally does not add Boost, Asio, Qt, ImGui, GLM, OpenAL,
 FMOD, Vulkan, DirectX renderer code, protobuf, or a JSON framework. UDP remains
 a small project-owned abstraction over Winsock2 on Windows and BSD sockets on a
@@ -191,6 +218,20 @@ CMake, and none may be committed merely to make a test pass. BSP, WAD, MDL,
 sprites, sounds, textures, `client.dll`, and other game files remain supplied by
 the user under the terms governing their copy. Automated tests must use small,
 original test fixtures or synthetic byte sequences.
+
+For normal M3.2.1 runtime, the local consistency provider may read an explicit
+user-owned installation supplied through `--basedir` and `--game`. That is an
+opt-in, read-only runtime input, not a build dependency: there is no Steam
+library/registry/environment auto-discovery, stock executable launch,
+configuration mutation, download, cache write, asset import, or renderer use.
+The fixed target remains `tempdecal.wad`, selected by the compatibility profile
+rather than by server bytes or an arbitrary CLI path.
+
+This runtime policy is distinct from active stock-client/HLDS research. Research
+verifiers continue to require their isolated marked copy and reject primary or
+registered Steam roots where their existing contracts specify that behavior.
+Allowing explicit read-only runtime access does not relax research isolation,
+and a local provider check does not by itself establish stock interoperability.
 
 ## Updating a dependency
 

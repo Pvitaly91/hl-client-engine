@@ -27,6 +27,14 @@ add_executable(hlclient_tests
     test_initial_signon_request.cpp
     test_initial_signon_stage.cpp
     test_initial_signon_udp_integration.cpp
+    test_md5.cpp
+    test_local_resource_paths.cpp
+    test_local_resource_search_roots.cpp
+    test_local_read_only_file.cpp
+    test_local_resource_md5.cpp
+    test_goldsrc_local_resource_mapping.cpp
+    test_local_resource_inventory.cpp
+    test_local_resource_consistency_provider.cpp
     test_move_vars.cpp
     test_movement_environment_stage.cpp
     test_post_movevars_stream.cpp
@@ -78,16 +86,21 @@ target_link_libraries(hlclient_tests
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_goldsrc_client
+        hlclient_goldsrc_local_resources
         hlclient_goldsrc_netchan
         hlclient_goldsrc_signon
+        hlclient_hash_md5
+        hlclient_local_resources
         hlclient_network
         hlclient_scene_api
         hlclient_renderer_null
         hlclient_resource_consistency_api
+        hlclient_resource_consistency_local
 )
 
 target_compile_features(hlclient_tests PRIVATE cxx_std_20)
 hlclient_enable_warnings(hlclient_tests)
+add_dependencies(hlclient_tests hlclient)
 
 set_target_properties(hlclient_tests PROPERTIES FOLDER "Tests")
 

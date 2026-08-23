@@ -75,9 +75,12 @@ M3.1.3 continuation then separates descriptor/41-byte semantic/tail geometry,
 uses the neutral `Opcode5ResourceResponse` codec, obtains private local-derived
 fields only through `hlclient_resource_consistency_api`, queues semantics once
 through the retained driver, and stops at the first opcode of the next complete
-server payload. No production consistency provider exists, so production ends
-as `provider_required` without TX. Custom/player-resource grammar,
-server-info second-client slot evidence, resource resolution, snapshots,
+server payload. M3.2.1 adds an opt-in, pre-network
+`PreparedLocalResourceConsistencyProvider`, a handle-sandboxed local resolver,
+an evidence-gated GoldSrc name mapper, and an ordered metadata-only inventory.
+The sign-on target still sees only the path-free API; without explicit provider
+selection it ends as `provider_required` without TX. Custom/player-resource
+grammar, server-info second-client slot evidence, readiness/precache, snapshots,
 movement application, and commands remain future increments behind the same
 boundaries. The future bridge adapts
 observed or exported in-process state to the same project types. It must not
@@ -93,8 +96,12 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
 | `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
 | `hlclient_goldsrc_netchan` | netchan classifier/base/fragment codec, payload transform, wrap-safe persistent session, bounded pending plus one reliable unit in flight, transactional unfragmented/fragment sends, filesystem-free slot-0 normal reassembly, bounded same-transport driver, owning events, metadata-only traces, and first-ACK compatibility primitive | transport creation/closure, authentication semantics or bytes, slot-1/file interpretation, decompression, files, `svc_*`, world/render state |
+| `hlclient_hash_md5` | project-owned incremental MD5 required only for GoldSrc compatibility material | filesystem, external crypto libraries, trust/security policy, GoldSrc wire types |
+| `hlclient_local_resources` | explicit validated local search roots, byte-exact virtual names, Win32 read-only handle sandbox, final-handle containment, stable equality-only identity, bounded resolution and streaming inspection | sockets, server messages, downloads, cache/precache, assets, renderer |
 | `hlclient_resource_consistency_api` | path-free bounded provider requirements, move-only asynchronous operation/session/material ownership, cancellation, and private opaque-material handoff | filesystem/path policy, local lookup, checksum calculation, sockets, GoldSrc list types, assets, renderer |
+| `hlclient_resource_consistency_local` | pre-network preparation of the fixed `tempdecal.wad` compatibility target and one-shot nonblocking provider operation | server-derived paths, response codec/layout, network creation, writes, downloads, cache, assets |
 | `hlclient_goldsrc_signon` | exact fixed initial/transition requests, strict `BZ2\0` decoding, owning immutable sign-on/list/response states, historical neutral opcode-43 and zero-TX resource-list stop, exact standard list and neutral 41-byte opcode-5 codecs, carrier/tail separation, provider-required response stage, same-driver semantic-once lifecycle, and next-payload opcode boundary | arbitrary commands, custom/player-resource bodies, production consistency material, resource resolution, runtime application, command execution, filesystem, renderer, SDL, assets, world state |
+| `hlclient_goldsrc_local_resources` | evidence-gated resource-type/name classification and ordered metadata-only `LocalResourceInventoryState` adapter | sign-on transport, readiness/precache decisions, downloads/cache, file contents, asset loading |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter and bounded local-file loading | discovery, caching, Steam integration, fallback search, protocol parsing |
 | `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/initial/pre-resource/delta/movevars/user-info/transition/list/response composition, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, runtime application, OpenGL, SDL, filesystem, world/render state |
@@ -105,12 +112,34 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_renderer_api` | neutral render scene and renderer contract | SDL or GoldSrc headers in its public API |
 | `hlclient_renderer_opengl` | OpenGL 3.3 Core implementation using GLAD | packet parsing or client connection state |
 | `hlclient_renderer_null` | headless renderer lifecycle and frame statistics | SDL, OpenGL, GLAD, Winsock, SDK types |
+| `hlclient_local_resource_check` | network-free, read-only diagnostic composition for an explicit user-owned root | stock process launch, path/digest output, file mutation, protocol transport |
 | `hlclient` | composition root and frame loop | reusable subsystem implementation |
 | `hlclient_tests` | deterministic unit/integration tests with local resources | public Internet or installed-game requirements |
 
 Public dependencies should point inward toward stable project-owned contracts.
 Private implementation dependencies may point outward to SDL, GLAD, OpenGL,
 Winsock, or SDK headers without exposing them to unrelated consumers.
+
+The M3.2.1 target direction is deliberately acyclic:
+
+```text
+hlclient_hash_md5 -> hlclient_core
+hlclient_local_resources -> hlclient_core + private Win32 APIs
+hlclient_resource_consistency_local
+    -> hlclient_resource_consistency_api
+    -> hlclient_local_resources
+    -> hlclient_hash_md5
+hlclient_goldsrc_local_resources
+    -> hlclient_goldsrc_signon
+    -> hlclient_local_resources
+hlclient_goldsrc_signon -> hlclient_resource_consistency_api
+```
+
+The corresponding Visual Studio folders are `Engine/Core/Hash`,
+`Engine/Resources/Local`, `Engine/Resource Consistency`, and
+`Engine/Resources/GoldSrc`; the diagnostic belongs under `Tools/Resources`.
+In particular, `hlclient_goldsrc_signon` does not acquire a filesystem or
+concrete local-provider dependency.
 
 ## Platform boundary
 
@@ -224,9 +253,9 @@ provider-gated post-resource response boundary:
                                                    `-> optional ResourceClientResponseStage
                                                        -> descriptor/41-byte/tail split
                                                        -> typed provider requirements
-                                                       |-> no production provider:
+                                                       |-> no selected provider:
                                                        |   `provider_required`, no TX
-                                                       `-> provider material available:
+                                                       `-> prepared local material:
                                                            -> queue semantic bytes once
                                                            -> driver retry/covering ACK
                                                            -> first complete next payload
@@ -235,8 +264,10 @@ provider-gated post-resource response boundary:
 ```
 
 The application has only an explicit user-file authentication provider; it
-does not generate tickets or integrate with Steam. Each later terminal stage
-composes the driver on the already-bound transport and validates unchanged
+does not generate tickets or integrate with Steam. The local consistency
+provider is likewise explicit and is fully prepared before network creation.
+Each later terminal stage composes the driver on the already-bound transport
+and validates unchanged
 local/exact remote endpoints. The sign-on branch queues only the fixed
 five-byte initial request. The transition branch queues only the fixed
 nine-byte request and owns at most one second payload received before its
@@ -244,8 +275,8 @@ covering ACK. The resource-list continuation queues nothing. Each public
 earlier stop closes after publishing its own
 boundary; friend-only retention carries that same driver/lifetime only through
 the selected continuation. The separate response continuation can queue one
-typed semantic unit only after a provider succeeds; without the absent
-production provider it publishes `provider_required` and sends nothing. No
+typed semantic unit only after a provider succeeds; without explicit local
+selection it publishes `provider_required` and sends nothing. No
 route exposes received raw reliable/fragment/
 delta/movevars/user-info/resource bytes or updates filesystem, world, asset,
 or renderer state; the transition request object exposes only its fixed typed
@@ -257,9 +288,9 @@ The active stock verifier has no completed restoration-attested M3.1.3 runs,
 and therefore no tracked response projection exists. Historical reconstructed
 carrier evidence and deterministic fake-HLDS tests justify the bounded API and
 test behavior, but are not an active project-client-to-stock response success
-claim. If the first confirmed complex next-server message needs a substantial
-codec, M3.1.4 is inserted before M3.2; otherwise M3.2 supplies the first
-approved production local-resource provider behind the path-free API.
+claim. M3.2.1 implements the local provider independently of that pending stock
+evidence. M3.2.2 is next for readiness/precache state; M3.1.4 remains
+conditional on sufficient evidence for the next complex server message.
 
 M2.3.3 splits netchan into pure base/fragment wire codecs and transform,
 transport-independent persistent reliable state, a transactional normal
@@ -343,16 +374,46 @@ the bounded presentation sanitizer. See
 [Delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md),
 [Movement environment](GOLDSRC_MOVEVARS.md),
 [User info](GOLDSRC_USERINFO.md),
-[Resource transition](GOLDSRC_RESOURCE_TRANSITION.md), and
+[Resource transition](GOLDSRC_RESOURCE_TRANSITION.md),
+[Resource list](GOLDSRC_RESOURCE_LIST.md),
+[Resource response](GOLDSRC_RESOURCE_CLIENT_RESPONSE.md),
+[Local resource resolution](LOCAL_RESOURCE_RESOLUTION.md),
+[Local consistency provider](LOCAL_RESOURCE_CONSISTENCY_PROVIDER.md), and
 [Authentication provider](AUTHENTICATION_PROVIDER.md).
 
 ## Filesystem and asset boundary
 
 The repository contains no game data. A user explicitly supplies `--basedir`
-and optionally `--game` (default `valve`). Path resolution must prevent a game
-or server-supplied relative path from escaping its approved roots. Downloaded
-content, when implemented, will be validated before becoming visible to asset
-loaders.
+and optionally `--game` (default `valve`). The M3.2.1 local provider additionally
+requires explicit `--resource-consistency-provider local`; basedir alone does
+not enable it. A non-Valve game produces an ordered game root followed by a
+`valve` fallback, while `valve` produces one deduplicated root. There is no CWD,
+registry, Steam-library, environment, repository, or build-directory discovery.
+
+Normal project runtime may read an explicitly supplied, user-owned Steam
+Half-Life installation. It does so with zero writes, launches no stock process,
+and does not mutate configuration. Active stock `hl.exe`/HLDS research remains
+subject to the stricter isolated-copy marker and root preflight. Runtime access
+does not relax that research policy, and neither path proves stock
+interoperability by itself.
+
+Server resource-name bytes never become native paths directly. The pure
+GoldSrc mapper accepts printable ASCII and `/` only, rejects traversal,
+absolute/drive/UNC/device/ADS/backslash/reserved-device and bounded-name
+violations, and does no decoding or repair. The backend then converts the safe
+virtual name component-by-component. It opens with Win32 read-only
+`CreateFileW`/`GENERIC_READ`/`OPEN_EXISTING`, rejects every intermediate and
+final reparse point, requires a regular local disk file, and validates the
+opened handle's final target, volume, and root containment. Metadata and bounded
+streaming bytes come from that same handle; initial/final identity, size, and
+write/change metadata detect concurrent modification.
+
+The production provider resolves only profile-fixed `tempdecal.wad`, never a
+server- or CLI-selected filename. The general ordered resource inventory stores
+correlation metadata and typed resolution status only. It is not a readiness,
+precache, download, cache, asset, or renderer state. Downloaded content, if a
+later milestone implements it, must be validated before becoming visible to
+asset loaders.
 
 Asset formats (BSP, WAD, MDL, sprites, sounds) should have parser libraries that
 do not depend on SDL, the renderer, or a live network session. This makes them
@@ -373,7 +434,8 @@ selection and extension contract.
 
 There is no global registry, global constructor registration, renderer-side
 file parsing, or GPU handle in a neutral asset. Real GoldSrc format targets are
-deferred until their parsers are implemented.
+deferred until their parsers are implemented. The M3.2.1 resolver and provider
+do not feed `AssetManager` or either renderer.
 
 ## Clean-room and SDK boundary
 
@@ -409,27 +471,31 @@ architecture and license review.
 order:
 
 1. parse command-line inputs and validate paths/endpoints;
-2. create the filesystem, `AssetImporterRegistries`, and `AssetManager` when a
-   game root is available;
+2. independently create the asset-facing filesystem,
+   `AssetImporterRegistries`, and `AssetManager` only when that existing asset
+   path is requested; the consistency provider does not feed them;
 3. explicitly register compiled-in format implementations (none exist in
    M0.1);
 4. when a later stop point is explicit, acquire bounded authentication material
    through the configured provider and retain its optional session lifetime;
-5. create one nonblocking UDP transport and the M1/M2 coordinator for the
+5. only for the response-boundary route with explicit local selection, validate
+   `--basedir`/`--game`, prepare fixed-target consistency material through one
+   sandboxed handle, close the file, and retain the one-shot provider;
+6. create one nonblocking UDP transport and the M1/M2 coordinator for the
    validated endpoint;
-6. select the built-in OpenGL or null renderer;
-7. for OpenGL only, initialize SDL and create the window/context before the
+7. select the built-in OpenGL or null renderer;
+8. for OpenGL only, initialize SDL and create the window/context before the
    renderer;
-8. poll events where applicable, advance the handshake coordinator, and let
+9. poll events where applicable, advance the handshake coordinator, and let
    the selected stage-owned driver process the same socket until the requested
    opaque, initial-sign-on, pre-resource, delta-schema, movement-environment,
    user-info, neutral opcode-43, or standard resource-list/response boundary is
    acknowledged and published;
-9. derive `RenderScene` from its `ClientWorldState`, render, and present;
-10. stop after the configured terminal challenge/connect-request/
+10. derive `RenderScene` from its `ClientWorldState`, render, and present;
+11. stop after the configured terminal challenge/connect-request/
     connect-response/netchan-bootstrap/signon-boundary/pre-resource/
-    delta-schemas/movevars/user-info/resource-list-boundary/resource-list
-    outcome,
+    delta-schemas/movevars/user-info/resource-list-boundary/resource-list or
+    resource-response-boundary outcome,
     let driver terminal cleanup release its optional lifetime exactly once,
     then shut down renderer resources before their platform dependencies.
 

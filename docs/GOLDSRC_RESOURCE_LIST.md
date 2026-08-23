@@ -9,9 +9,10 @@ boundary. It does not send that response or touch the filesystem.
 
 Status: **standard profile completed; custom/player-resource profile typed
 unsupported and pending**. The separate M3.1.3 continuation now provides a
-bounded neutral response codec and provider boundary, but it does not alter
-this stage or its historical zero-response stop. Production provider work,
-resolution/precache, and download/cache remain outside M3.1.2.
+bounded neutral response codec and provider boundary, while M3.2.1 adds an
+explicit production local provider plus a separate metadata-only resolution
+foundation. Neither addition alters this stage or its historical zero-response
+stop. Readiness/precache and download/cache remain outside M3.2.1.
 
 ## Stock evidence and isolation
 
@@ -311,10 +312,58 @@ M3.1.3 handles the later step in a distinct `ResourceClientResponseStage`: it
 keeps the 10-byte descriptor and 11/13/15/17-byte contemporaneous tail outside
 the selected 41-byte semantic unit, names the wire message neutrally
 `Opcode5ResourceResponse`, and requires path-free provider material for the
-local byte-count and fixed 16-byte opaque fields. With no production provider,
-the continuation returns typed `provider_required` and sends nothing. See
+local byte-count and fixed 16-byte opaque fields. M3.2.1 can supply that
+material from an explicitly selected, prepared local provider whose fixed target
+is `tempdecal.wad`; it is not derived from a list entry. Without provider
+selection, the continuation still returns typed `provider_required` and sends
+nothing. See
 [GoldSrc post-resource client response](GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
 and [resource-consistency provider boundary](RESOURCE_CONSISTENCY_PROVIDER.md).
+
+## M3.2.1 local-resolution projection
+
+`ResourceListState` remains owning untrusted wire metadata. A separate
+`GoldSrcResourceNameMapper` applies an evidence-gated, byte-exact mapping before
+any open:
+
+| Resource type | M3.2.1 result |
+| --- | --- |
+| sound | file-backed virtual name `sound/` plus the wire name |
+| model | file-backed wire name |
+| generic | file-backed wire name |
+| event script | file-backed wire name |
+| decal | metadata-only; no local-file mapping claimed |
+| unsupported type/profile | typed `unsupported_mapping` |
+
+These mappings are limited to the supported standard profile. Their evidence is
+repeated stock resource-name shape plus a user-owned installation layout, with
+the pinned public Valve headers used only as a secondary category cross-check.
+They are not a universal mapping inferred from filename extensions.
+
+The supported name encoding is printable ASCII with `/` separators. The mapper
+does not decode, normalize, expand, repair, or convert bytes through a Windows
+code page. It rejects empty names, NUL, absolute/drive/UNC/device forms,
+backslashes, `.`/`..`/empty components, ADS colons, control/DEL/non-ASCII bytes,
+trailing dot/space, reserved Windows device components, and configured
+component/path/count limits before the resolver is called.
+
+Resolution tries exact ASCII spelling first. Only when no exact directory entry
+exists may it perform a bounded ASCII-only case-insensitive lookup. One match is
+accepted with its actual spelling; multiple matches are `ambiguous`. There is no
+locale-dependent, Unicode, or Windows-current-code-page case folding.
+
+`LocalResourceInventoryBuilder` walks the list in wire order and transactionally
+publishes an immutable `LocalResourceInventoryState`. Each entry retains only
+correlation metadata and one of `resolved`, `missing`, `unsafe_name`,
+`unsupported_name_encoding`, `unsupported_mapping`, `ambiguous`, or `io_error`.
+A resolved entry may retain an equality-only file identity, root ID, and handle
+size, but no handle, absolute path, raw bytes, digest, or interpreted `u24`
+declared-size value. Fatal configuration or allocation failure publishes no
+partial inventory.
+
+This inventory is deliberately not readiness, precache, download, cache, asset,
+or renderer state. It neither decides whether sign-on may proceed nor generates
+the fixed provider response. M3.2.2 owns readiness and precache semantics.
 
 ## Deterministic verification and CI
 
@@ -363,6 +412,11 @@ fake-HLDS tests require no Steam client, `hl.exe`, `hlds.exe`, authentication
 ticket, Internet, GPU, or Half-Life assets. The ignored stock projector is a
 manual evidence verifier and is not needed by CI.
 
+M3.2.1 resolver, mapper, inventory, MD5, and production-provider tests use only
+temporary synthetic roots and original literal file bytes. They do not turn
+those project tests into stock interoperability evidence or claim that an
+optional user-owned installation check has been completed.
+
 ## Public Valve header cross-check
 
 The pinned SDK commit
@@ -405,11 +459,10 @@ work. The historical `--stop-after resource-list-boundary` still stops before
 opcode-43 body parsing; `--stop-after resource-list` decodes the bounded list
 and stops before the required response or any resolution.
 
-M3.1.3 is bounded/provider-pending: its codec, carrier/tail split, provider API,
-reliable lifecycle, and next-payload boundary exist, while production local
-material remains unavailable and therefore cannot be transmitted. The active
-stock verifier currently refuses projection because no completed
-restoration-attested M3.1.3 runs exist; no active scenario success is implied.
-If the first confirmed complex post-response server message needs a substantial
-codec, M3.1.4 precedes M3.2. Otherwise M3.2 owns approved local-resource
-resolution/precache, and M3.3 remains the safe download/cache boundary.
+M3.2.1 supplies production local material only when the user explicitly selects
+the local provider and supplies a validated root. The active stock verifier
+still refuses projection because no completed restoration-attested M3.1.3 runs
+exist; production implementation and deterministic fake-HLDS coverage do not
+imply active project-client-to-stock success. M3.2.2 is next for readiness and
+precache state. M3.3 remains the safe download/cache boundary, and M3.1.4
+remains conditional on sufficient next-message stock evidence.

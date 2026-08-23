@@ -31,6 +31,10 @@ enum class AuthenticationProviderKind {
     file,
 };
 
+enum class ResourceConsistencyProviderKind {
+    local,
+};
+
 struct CommandLineOptions {
     bool show_help{false};
     bool show_version{false};
@@ -41,6 +45,8 @@ struct CommandLineOptions {
     ConnectionStopPoint stop_after{ConnectionStopPoint::challenge};
     std::optional<AuthenticationProviderKind> authentication_provider;
     std::optional<std::string> authentication_material_file;
+    std::optional<ResourceConsistencyProviderKind>
+        resource_consistency_provider;
     std::string player_name{"Player"};
     std::string player_model{"ivan"};
     RendererBackend renderer{RendererBackend::opengl};
@@ -58,6 +64,8 @@ struct CommandLineParseResult {
 
 [[nodiscard]] CommandLineParseResult parse_command_line(
     std::span<const std::string_view> arguments);
+[[nodiscard]] bool requires_local_resource_consistency_preparation(
+    const CommandLineOptions& options) noexcept;
 [[nodiscard]] std::string_view command_line_help() noexcept;
 
 } // namespace hlclient::core

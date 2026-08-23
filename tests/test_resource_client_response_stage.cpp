@@ -1,4 +1,5 @@
 #include "delta_test_fixture.hpp"
+#include "local_resource_test_fixture.hpp"
 #include "move_vars_test_fixture.hpp"
 #include "resource_client_response_test_fixture.hpp"
 #include "resource_list_test_fixture.hpp"
@@ -7,6 +8,7 @@
 #include <hlclient/goldsrc/netchan_packet.hpp>
 #include <hlclient/goldsrc/resource_client_response_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
+#include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
 #include <hlclient/resource_consistency/provider.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -19,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -40,6 +43,7 @@ namespace response_fixture =
     hlclient::test::resource_client_response_fixture;
 namespace user_fixture = hlclient::test::user_info_fixture;
 namespace goldsrc = hlclient::goldsrc;
+namespace local = hlclient::local_resources;
 namespace network = hlclient::network;
 
 // Independently authored stage fixture. It deliberately names the stage's
@@ -60,6 +64,23 @@ inline constexpr std::array<std::byte, 41U> kExactTempdecalResponse{
     std::byte{0xa4U}, std::byte{0xa5U}, std::byte{0xa6U}, std::byte{0xa7U},
     std::byte{0xa8U}, std::byte{0xa9U}, std::byte{0xaaU}, std::byte{0xabU},
     std::byte{0xacU}, std::byte{0xadU}, std::byte{0xaeU}, std::byte{0xafU},
+};
+
+inline constexpr std::array<std::byte, 41U> kExactPreparedLocalResponse{
+    std::byte{0x05U},
+    std::byte{0x01U}, std::byte{0x00U},
+    std::byte{'t'}, std::byte{'e'}, std::byte{'m'}, std::byte{'p'},
+    std::byte{'d'}, std::byte{'e'}, std::byte{'c'}, std::byte{'a'},
+    std::byte{'l'}, std::byte{'.'}, std::byte{'w'}, std::byte{'a'},
+    std::byte{'d'}, std::byte{0x00U},
+    std::byte{0x03U},
+    std::byte{0x00U}, std::byte{0x00U},
+    std::byte{0x03U}, std::byte{0x00U}, std::byte{0x00U}, std::byte{0x00U},
+    std::byte{0x04U},
+    std::byte{0x90U}, std::byte{0x01U}, std::byte{0x50U}, std::byte{0x98U},
+    std::byte{0x3cU}, std::byte{0xd2U}, std::byte{0x4fU}, std::byte{0xb0U},
+    std::byte{0xd6U}, std::byte{0x96U}, std::byte{0x3fU}, std::byte{0x7dU},
+    std::byte{0x28U}, std::byte{0xe1U}, std::byte{0x7fU}, std::byte{0x72U},
 };
 
 struct SentDatagram {
@@ -516,7 +537,8 @@ void deliver_resource_payload(
 }
 
 [[nodiscard]] goldsrc::ClientToServerNetchanPacket require_response_packet(
-    const FakeTransport& transport)
+    const FakeTransport& transport,
+    const std::span<const std::byte> expected)
 {
     REQUIRE_FALSE(transport.sent.empty());
     const auto response = decode_sent(transport.sent.back());
@@ -527,10 +549,34 @@ void deliver_resource_payload(
     REQUIRE(response.fragments[0U]->packed_id());
     CHECK(response.fragments[0U]->packed_id()->fragment_index() == 1U);
     CHECK(response.fragments[0U]->packed_id()->fragment_count() == 1U);
-    CHECK(response.fragments[0U]->length == kExactTempdecalResponse.size());
-    CHECK(response.fragment_payload_size == kExactTempdecalResponse.size());
-    CHECK(std::ranges::equal(response.payload, kExactTempdecalResponse));
+    CHECK(response.fragments[0U]->length == expected.size());
+    CHECK(response.fragment_payload_size == expected.size());
+    CHECK(std::ranges::equal(response.payload, expected));
     return response;
+}
+
+[[nodiscard]] goldsrc::ClientToServerNetchanPacket require_response_packet(
+    const FakeTransport& transport)
+{
+    return require_response_packet(transport, kExactTempdecalResponse);
+}
+
+[[nodiscard]] bool can_open_local_writer(
+    const std::filesystem::path& path)
+{
+    const HANDLE writer = ::CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (writer == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    static_cast<void>(::CloseHandle(writer));
+    return true;
 }
 
 [[nodiscard]] std::vector<goldsrc::ResourceClientResponseStageEvent>
@@ -1071,6 +1117,62 @@ TEST_CASE("Cancellation is idempotent across provider and owning-session states"
         CHECK(stage.response_build_count() == 1U);
         CHECK(stage.response_queue_count() == 1U);
     }
+}
+
+TEST_CASE("Prepared local provider releases its real handle on stage cancellation",
+          "[goldsrc][resource-response][stage][local-provider][cancel][lifetime]")
+{
+    hlclient::tests::ScopedLocalResourceTestRoot temporary;
+    const auto target =
+        temporary.game_path("valve") / "tempdecal.wad";
+    temporary.write("valve", "tempdecal.wad", "stale");
+    temporary.write("valve", "tempdecal.wad", "abc");
+    auto roots = local::LocalResourceSearchRoots::create(
+        temporary.path(), "valve");
+    REQUIRE(roots);
+    auto prepared =
+        consistency::PreparedLocalResourceConsistencyProvider::prepare(
+            std::move(*roots.roots));
+    REQUIRE(prepared);
+    CHECK_FALSE(can_open_local_writer(target));
+
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'837U);
+    const auto epoch =
+        goldsrc::ResourceClientResponseStageTimePoint{} + 13s;
+    goldsrc::ResourceClientResponseStage stage{
+        transport,
+        remote,
+        test_config(),
+        prepared.provider.get()};
+    const auto driven =
+        drive_to_transition_request(stage, transport, remote, epoch);
+    deliver_resource_payload(
+        stage, transport, remote, driven, epoch + 4ms);
+    static_cast<void>(require_response_packet(
+        transport, kExactPreparedLocalResponse));
+
+    CHECK(prepared.provider->consumed());
+    CHECK_FALSE(can_open_local_writer(target));
+    CHECK(stage.response_build_count() == 1U);
+    CHECK(stage.response_queue_count() == 1U);
+
+    stage.cancel(epoch + 5ms);
+    stage.cancel(epoch + 6ms);
+    CHECK(stage.state() ==
+          goldsrc::ResourceClientResponseStageState::cancelled);
+    CHECK(stage.cleanup_count() == 1U);
+    CHECK(can_open_local_writer(target));
+
+    const auto requirements =
+        consistency::ResourceConsistencyRequirements::
+            stock_opcode5_single_resource();
+    REQUIRE(requirements);
+    const auto second = prepared.provider->begin(*requirements);
+    REQUIRE_FALSE(second);
+    REQUIRE(second.error);
+    CHECK(second.error->code ==
+          consistency::ResourceConsistencyErrorCode::unavailable);
 }
 
 TEST_CASE("Provider wait and synchronous failure remain bounded and redacted",

@@ -4,7 +4,9 @@ M3.1.3 continues from the exact M3.1.2 end-of-payload boundary. It separates
 one reliable semantic unit from a contemporaneous suffix, builds the semantic
 unit from typed provider material, queues it once through the persistent
 `NetchanDriver`, waits for its covering acknowledgement, and stops at the first
-opcode of the next complete server payload.
+opcode of the next complete server payload. M3.2.1 supplies an explicitly
+selected production local provider without changing this wire codec, stage, or
+path-free provider API.
 
 The public wire name is intentionally neutral: `Opcode5ResourceResponse`.
 Evidence strongly supports a client custom-resource advertisement, but the
@@ -112,6 +114,14 @@ Field dependency classification:
 | map/resource list/session/user-info | no observed field dependency in the 54-session corpus |
 | tail | separate opaque transport-time metadata |
 
+The M3.2.1 local implementation maps the supported provider profile—not any
+server resource name—to the fixed virtual target `tempdecal.wad`. It streams
+that file through one sandboxed read-only handle and supplies the exact handle
+byte count plus 16-byte MD5-compatible material. MD5 here is a GoldSrc
+compatibility primitive only, not security or trust evidence. The wire name
+remains the existing neutral compatibility-profile constant; M3.2.1 does not
+promote a new opcode semantic claim.
+
 The parser accepts the semantic fragment only plus an explicit evidence
 profile. It validates exact opcode, length, little-endian fields, constants,
 terminator, widths, and end of input; it returns exact bytes consumed and never
@@ -145,6 +155,15 @@ The continuation performs this bounded sequence:
 9. reassemble and decode the first following `BZ2\0` service envelope;
 10. read byte 0 only and publish `PostResourceResponseBoundary`.
 
+When `--resource-consistency-provider local` is selected for
+`--stop-after resource-response-boundary`, the application validates explicit
+`--basedir`/`--game` roots and fully prepares the one-shot provider before
+creating the network runtime or UDP socket. Invalid roots or provider material
+therefore cause zero packets. The default `--game` remains `valve`; a non-Valve
+game searches its root before the `valve` fallback. Without the provider option,
+the historical typed `provider_required`/zero-TX route remains unchanged.
+Earlier stop points neither prepare nor consult the local provider.
+
 The stage has no retry timer. A dropped response datagram is retransmitted by
 the existing ACK-gap policy with a new packet sequence and transform key but
 the same canonical semantic bytes and reliable generation. A dropped covering
@@ -167,7 +186,8 @@ Stock observations show a separate padding-only covering packet before the
 next client reliable unit in the reconstructed corpus. Progress can then branch:
 most sessions send a distinct `spawn` string command, while direct crossfire
 sessions first send a bounded `BZ2\0` batch of `dlfile` commands for unresolved
-entries. Those branches belong to M3.2/M3.3 and are not implemented here.
+entries. Readiness/precache belongs to M3.2.2 and download/cache behavior belongs
+to M3.3; neither branch is implemented in M3.2.1.
 They also mean the exact following stock server opcode remains active-evidence
 pending; fake-server boundary tests do not promote a synthetic opcode to stock
 evidence.
@@ -205,8 +225,12 @@ authentication identity.
 
 ## Explicit scope boundary
 
-This milestone adds no production provider, file open/stat/read, path handling,
-resource resolution, download, cache, precache, BSP/WAD/MDL/SPR parsing,
-renderer change, client world state, or captured-response replay. A separate
-M3.1.4 is required if the confirmed next complex server message needs a large
-codec; M3.2 owns future approved local-resource resolution.
+M3.2.1 adds the production local provider behind the unchanged API and a
+general sandboxed resolution foundation. It does not add download/cache writes,
+readiness or precache state, resource request generation, `dlfile`,
+BSP/WAD/MDL/SPR parsing, asset loading, renderer changes, client world state, or
+captured-response replay. The `hlclient_goldsrc_signon` target remains free of
+filesystem and local-provider implementation dependencies. A separate M3.1.4
+is required only if sufficient active stock evidence establishes that the next
+complex server message needs a substantial codec; M3.2.2 is the next planned
+local-resource milestone.

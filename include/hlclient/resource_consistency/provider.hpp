@@ -38,9 +38,9 @@ enum class ResourceConsistencyCompatibilityProfile {
     stock_protocol_48_opcode5_single_resource,
 };
 
-// Path-free requirements only. A future M3.2 provider maps this profile to an
-// approved local-resource policy; sign-on never passes ResourceName bytes or a
-// filesystem path into the provider boundary.
+// Path-free requirements only. Provider implementations map this profile to
+// an approved local-resource policy; sign-on never passes ResourceName bytes
+// or a filesystem path into the provider boundary.
 class ResourceConsistencyRequirements final {
 public:
     [[nodiscard]] ResourceConsistencyCompatibilityProfile

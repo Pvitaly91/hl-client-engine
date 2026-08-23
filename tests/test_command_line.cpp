@@ -27,6 +27,7 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     CHECK(result.options->stop_after == hlclient::core::ConnectionStopPoint::challenge);
     CHECK_FALSE(result.options->authentication_provider.has_value());
     CHECK_FALSE(result.options->authentication_material_file.has_value());
+    CHECK_FALSE(result.options->resource_consistency_provider.has_value());
     CHECK(result.options->player_name == "Player");
     CHECK(result.options->player_model == "ivan");
     CHECK(result.options->renderer == RendererBackend::opengl);
@@ -301,6 +302,28 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
               hlclient::core::ConnectionStopPoint::resource_response_boundary);
     }
 
+    SECTION("explicit local consistency provider supports the response boundary")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"resource-response-boundary"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        REQUIRE(result.options->resource_consistency_provider);
+        CHECK(*result.options->resource_consistency_provider ==
+              hlclient::core::ResourceConsistencyProviderKind::local);
+        CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -469,6 +492,11 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             std::string_view{"--send-opcode5"},
             std::string_view{"--skip-resource-response"},
             std::string_view{"--resource-root"},
+            std::string_view{"--consistency-file"},
+            std::string_view{"--tempdecal-path"},
+            std::string_view{"--hash-file"},
+            std::string_view{"--opaque-material-file"},
+            std::string_view{"--download-resource"},
         };
         for (const auto argument : rejected) {
             CAPTURE(argument);
@@ -511,6 +539,76 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             CHECK_FALSE(result);
             CHECK(result.error.find("Unsupported authentication provider") !=
                   std::string::npos);
+        }
+    }
+
+    SECTION("local consistency provider requires an explicit basedir")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+        };
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("--basedir") != std::string::npos);
+    }
+
+    SECTION("unsupported consistency provider is rejected")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"captured"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("Unsupported resource-consistency provider") !=
+              std::string::npos);
+    }
+
+    SECTION("early stop accepts selection without scheduling provider preparation")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK_FALSE(
+            hlclient::core::requires_local_resource_consistency_preparation(
+                *result.options));
+    }
+
+    SECTION("every pre-response stop leaves local provider preparation dormant")
+    {
+        constexpr std::array pre_response_stop_points{
+            hlclient::core::ConnectionStopPoint::challenge,
+            hlclient::core::ConnectionStopPoint::connect_request,
+            hlclient::core::ConnectionStopPoint::connect_response,
+            hlclient::core::ConnectionStopPoint::netchan_bootstrap,
+            hlclient::core::ConnectionStopPoint::signon_boundary,
+            hlclient::core::ConnectionStopPoint::pre_resource,
+            hlclient::core::ConnectionStopPoint::delta_schemas,
+            hlclient::core::ConnectionStopPoint::movevars,
+            hlclient::core::ConnectionStopPoint::user_info,
+            hlclient::core::ConnectionStopPoint::resource_list_boundary,
+            hlclient::core::ConnectionStopPoint::resource_list,
+        };
+        for (const auto stop_point : pre_response_stop_points) {
+            hlclient::core::CommandLineOptions options;
+            options.connect_endpoint = "127.0.0.1:27015";
+            options.base_directory = "C:/Games/Half-Life";
+            options.resource_consistency_provider =
+                hlclient::core::ResourceConsistencyProviderKind::local;
+            options.stop_after = stop_point;
+            CAPTURE(static_cast<int>(stop_point));
+            CHECK_FALSE(
+                hlclient::core::requires_local_resource_consistency_preparation(
+                    options));
         }
     }
 
@@ -571,7 +669,7 @@ TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
         CHECK(result.error.find("Unknown command-line argument") != std::string::npos);
     }
 
-    SECTION("raw reliable, service, and sign-on injection options remain unavailable")
+    SECTION("raw protocol and consistency-file options remain unavailable")
     {
         constexpr std::array forbidden{
             std::string_view{"--send-reliable"},
@@ -583,6 +681,10 @@ TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
             std::string_view{"--raw-svc"},
             std::string_view{"--skip-auth"},
             std::string_view{"--no-steam-auth"},
+            std::string_view{"--consistency-file"},
+            std::string_view{"--tempdecal-path"},
+            std::string_view{"--hash-file"},
+            std::string_view{"--opaque-material-file"},
         };
         for (const auto option : forbidden) {
             CAPTURE(option);
@@ -640,6 +742,10 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("--auth-provider") != std::string_view::npos);
     CHECK(help.find("file") != std::string_view::npos);
     CHECK(help.find("--auth-material-file") != std::string_view::npos);
+    CHECK(help.find("--resource-consistency-provider") !=
+          std::string_view::npos);
+    CHECK(help.find("Explicit read-only response provider") !=
+          std::string_view::npos);
     CHECK(help.find("--name") != std::string_view::npos);
     CHECK(help.find("--model") != std::string_view::npos);
     CHECK(help.find("--renderer") != std::string_view::npos);

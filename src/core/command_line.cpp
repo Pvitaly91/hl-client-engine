@@ -16,6 +16,7 @@ namespace {
            argument == "+connect" || argument == "--renderer" ||
            argument == "--stop-after" || argument == "--auth-provider" ||
            argument == "--auth-material-file" ||
+           argument == "--resource-consistency-provider" ||
            argument == "--name" || argument == "--model";
 }
 
@@ -26,6 +27,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     CommandLineOptions options;
     bool stop_after_seen = false;
     bool connect_request_setting_seen = false;
+    bool resource_consistency_provider_seen = false;
 
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
@@ -110,6 +112,15 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         } else if (argument == "--auth-material-file") {
             connect_request_setting_seen = true;
             options.authentication_material_file = std::string{value};
+        } else if (argument == "--resource-consistency-provider") {
+            resource_consistency_provider_seen = true;
+            if (value != "local") {
+                return failure(
+                    "Unsupported resource-consistency provider: " +
+                    std::string{value} + " (expected local)");
+            }
+            options.resource_consistency_provider =
+                ResourceConsistencyProviderKind::local;
         } else if (argument == "--name") {
             connect_request_setting_seen = true;
             options.player_name = std::string{value};
@@ -123,6 +134,15 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
 
     if ((stop_after_seen || connect_request_setting_seen) && !options.connect_endpoint) {
         return failure("Connect-request options require --connect <ip:port>");
+    }
+    if (resource_consistency_provider_seen && !options.connect_endpoint) {
+        return failure(
+            "--resource-consistency-provider requires --connect <ip:port>");
+    }
+    if (options.resource_consistency_provider && !options.base_directory) {
+        return failure(
+            "The local resource-consistency provider requires explicit "
+            "--basedir <Half-Life root>");
     }
     if (options.stop_after == ConnectionStopPoint::challenge &&
         connect_request_setting_seen) {
@@ -164,6 +184,15 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     return CommandLineParseResult{std::move(options), {}};
 }
 
+bool requires_local_resource_consistency_preparation(
+    const CommandLineOptions& options) noexcept
+{
+    return options.resource_consistency_provider ==
+               ResourceConsistencyProviderKind::local &&
+           options.stop_after ==
+               ConnectionStopPoint::resource_response_boundary;
+}
+
 std::string_view command_line_help() noexcept
 {
     return R"(Usage: hlclient [options]
@@ -185,6 +214,9 @@ Options:
                       Authentication provider for connect stages: file
   --auth-material-file <path>
                       Local 245-byte auth input for file provider; never logged
+  --resource-consistency-provider <name>
+                      Explicit read-only response provider: local; requires
+                      --basedir and is prepared only for resource-response-boundary
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
@@ -212,8 +244,9 @@ required client response or any resource resolution; no response is sent.
 Resource-response-boundary: continue on the same retained channel through the
 typed opcode-5 response and its covering ACK when path-free provider material is
 available, then stop at the first opcode of the following complete server
-payload. Without a production material provider it exits with a typed
-provider-required outcome and sends no incomplete or captured response.
+payload. The local provider validates explicit roots and prepares fixed-target
+material read-only before networking. Without provider selection it exits with
+a typed provider-required outcome and sends no incomplete or captured response.
 No mode implements authentication generation.
 )";
 }

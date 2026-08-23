@@ -6,18 +6,18 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M3.1.2's bounded standard resource-list profile
-and M3.1.3's bounded response codec/provider boundary. Opcode 43 is decoded as
-`ResourceListMessage` into an owning ordered `ResourceListState`; the separate
-continuation models the selected 41-byte client response as neutral
-`Opcode5ResourceResponse`, keeps its fragment descriptor and contemporaneous
-tail outside the semantic bytes, and stops at the first opcode of the next
-complete server payload. M3.1.3 is **provider-pending**: no production
-local-resource provider exists, so a production continuation reports typed
-`provider_required` and sends nothing.
+The repository has implemented M3.2.1's sandboxed local-resource foundation and
+production resource-consistency provider on top of the completed M3.1.2 list
+and M3.1.3 response boundaries. Opcode 43 is decoded into an owning ordered
+`ResourceListState`; the response continuation still models the selected
+41-byte client response neutrally as `Opcode5ResourceResponse`. An explicitly
+selected, pre-network local provider now derives the fixed profile material from
+read-only `tempdecal.wad`. Without that selection, the historical typed
+`provider_required`/zero-TX behavior remains.
 
-Implemented M1–M3.1.3 bounded behavior includes the Protocol 48 challenge, captured
-one-shot `connect` request, strict immediate connectionless `ACCEPT`/`REJECT`,
+Implemented M1–M3.2.1 bounded behavior includes the Protocol 48 challenge,
+captured one-shot `connect` request, strict immediate connectionless
+`ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
 persistent reliable state, strict fragmentation/reassembly, the fixed `new`
 request, bounded `BZ2\0` service decoding, typed server info, seven owning
@@ -26,8 +26,9 @@ sequence through first-batch end, one fixed nine-byte `sendres` request queued
 through the retained driver, a bounded later transfer through opcode 45, and
 strict parsing of the standard opcode-43 list through exact end-of-payload.
 User ID, all user-info values, the fixed 16-byte opaque suffix, and the first
-opcode-45 `u32` remain private. Resource names remain owning untrusted metadata
-and are never resolved as paths.
+opcode-45 `u32` remain private. Resource names remain owning untrusted metadata:
+an evidence-gated classifier must first produce a bounded virtual name, so no
+server byte string becomes a native path directly.
 
 The earlier M2.4.2 server-info second-client evidence gap remains. Signed-stock
 sets separately confirm netchan/fragment behavior, the initial request, the
@@ -39,9 +40,8 @@ cross-checks resource categories and fields but contains no numeric opcode-43
 constant or wire serializer; the semantic gate instead also relies on exact
 repeated grammar, coherent map differentials, and exact list endpoints. Live
 `hlclient` to stock HLDS, slot-1/file semantics, general `svc_*` parsing, a
-Steam authentication provider, custom-resource list bodies, a production
-resource-consistency provider, filesystem resolution/downloads, snapshots,
-gameplay, and a public
+Steam authentication provider, custom-resource list bodies, readiness/precache,
+resource downloads/cache, snapshots, gameplay, and a public
 raw payload/command CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
@@ -366,7 +366,7 @@ asset, or renderer action. Custom/player-resource flag profiles fail closed as
 typed unsupported. See
 [GoldSrc opcode-43 resource list](docs/GOLDSRC_RESOURCE_LIST.md).
 
-The separate M3.1.3 continuation is selected with:
+The response continuation without a consistency provider is selected with:
 
 ```powershell
 .\build\bin\Debug\hlclient.exe --renderer null `
@@ -381,11 +381,39 @@ and no provider is consulted. `ResourceClientResponseStage` is a distinct
 continuation. It requires path-free typed consistency material, builds and
 queues the 41-byte semantic unit exactly once, lets the retained driver own
 retransmission and covering-ACK handling, and publishes only the first opcode
-of the next complete server payload with its complex body unconsumed. There is
-no production provider in this milestone, so the production route currently
-terminates as `provider_required` before TX; synthetic providers are test-only.
+of the next complete server payload with its complex body unconsumed. The
+command above intentionally terminates as `provider_required` before TX.
+
+M3.2.1 opts into the production local implementation explicitly:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after resource-response-boundary `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve --net-trace
+```
+
+`--basedir` is required for the local provider and `--game` defaults to
+`valve`. For a mod, the validated game root is searched before the `valve`
+fallback. There is no current-directory, registry, Steam-library, environment,
+repository, or build-tree discovery. The provider resolves only the
+profile-fixed `tempdecal.wad`; no server name or CLI option can substitute a
+different target. Root validation and one-handle streaming preparation complete
+before network initialization, so provider preparation failures send zero
+packets. Earlier stop points perform no provider filesystem work.
+
+Normal runtime may read an explicitly supplied user-owned Steam installation
+with zero writes and no stock process launch. Active stock `hl.exe`/HLDS
+research remains restricted to an isolated marked copy. The local provider and
+deterministic fake-HLDS tests are not a claim of completed stock
+interoperability or manual installation validation.
+
 See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
-and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md).
+and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
+[local resource resolution](docs/LOCAL_RESOURCE_RESOLUTION.md), and the
+[local consistency provider](docs/LOCAL_RESOURCE_CONSISTENCY_PROVIDER.md).
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -608,6 +636,21 @@ does not substitute for the required active baseline/map/restart/reconnect,
 loss/duplicate, local-resource differential, and next-payload scenarios. No
 active-stock scenario success or project-to-stock response TX is claimed.
 
+An independent M3.2.1 wrapper can check the fixed local provider against an
+explicit user-owned root without starting a network or stock process:
+
+```powershell
+.\scripts\verify_local_resource_provider.ps1 `
+  -ToolPath .\build\bin\Debug\hlclient_local_resource_check.exe `
+  -Basedir "D:\Steam\steamapps\common\Half-Life" -Game valve
+```
+
+The wrapper snapshots the fixed target and fail-closed root metadata (at most
+200,000 entries and 64 components deep) before and after the network-free
+checker and reports `external-file-drift`. It prints no
+absolute path or raw MD5. This is optional local verification; this README does
+not assert that it has been run successfully on an installed game.
+
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
 they are licensed to use.
@@ -635,13 +678,17 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
 `ThirdParty`, and `CMake` folders. The principal targets are:
 
 - `hlclient`;
-- `hlclient_core`, `hlclient_platform`, `hlclient_filesystem`;
+- `hlclient_core`, `hlclient_platform`, `hlclient_filesystem`,
+  `hlclient_hash_md5`, `hlclient_local_resources`;
 - `hlclient_network`, `hlclient_goldsrc`, `hlclient_goldsrc_netchan`,
   `hlclient_goldsrc_signon`, `hlclient_goldsrc_client`,
-  `hlclient_auth`, `hlclient_app_support`, `hlclient_client`;
+  `hlclient_goldsrc_local_resources`, `hlclient_resource_consistency_api`,
+  `hlclient_resource_consistency_local`, `hlclient_auth`,
+  `hlclient_app_support`, `hlclient_client`;
 - `hlclient_asset_api`, `hlclient_asset_manager`, `hlclient_scene_api`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
+- `hlclient_local_resource_check` (network-free read-only diagnostic);
 - `hlclient_tests`;
 - SDL3, bzip2, Catch2, GLAD2, and the Half-Life SDK reference target under
   `ThirdParty`.
@@ -659,6 +706,11 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc movement environment](docs/GOLDSRC_MOVEVARS.md),
 [GoldSrc user info](docs/GOLDSRC_USERINFO.md),
 [GoldSrc resource transition](docs/GOLDSRC_RESOURCE_TRANSITION.md),
+[GoldSrc resource list](docs/GOLDSRC_RESOURCE_LIST.md),
+[GoldSrc resource response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md),
+[Local resource resolution](docs/LOCAL_RESOURCE_RESOLUTION.md),
+[Local consistency provider](docs/LOCAL_RESOURCE_CONSISTENCY_PROVIDER.md),
+[Resource-consistency provider API](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
 [Authentication provider](docs/AUTHENTICATION_PROVIDER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
@@ -760,6 +812,15 @@ move-only provider API, semantic-once reliable lifecycle, covering-ACK and
 next-payload boundaries, and deterministic provider/loss/duplicate tests.
 These project tests are not promoted to active-stock evidence; the stock
 projection remains blocked as described above.
+M3.2.1 adds independent standard MD5 vectors and chunk/lifecycle cases;
+virtual-name and GoldSrc type-mapping matrices; game-before-`valve`, exact-case,
+case-fold ambiguity, traversal/absolute/ADS/device/non-ASCII/reparse/remote-file
+resolver failures; one-handle size/read/change checks; ordered transactional
+metadata-only inventory; fixed-target provider success/failure; and full
+production-provider fake-HLDS response, retransmission, lost-ACK, and next-boundary
+coverage. Test roots and file bytes are synthetic and temporary. No test writes
+to an installed game, creates a download/cache/precache entry, loads an asset,
+or touches a renderer. M3.2.2 is next for resource readiness and precache state.
 
 ## License
 

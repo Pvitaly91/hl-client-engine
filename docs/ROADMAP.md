@@ -508,8 +508,9 @@ or TX exists. See
 
 ### M3.1.3 — Client resource/consistency response boundary
 
-**Status: bounded codec and provider boundary completed; production provider
-and active-stock TX evidence pending.**
+**Status: bounded codec and provider boundary completed; production local
+implementation delivered separately by M3.2.1; active-stock TX evidence
+pending.**
 
 M3.1.3 preserves the historical M3.1.2 `ResourceListStage` and
 `--stop-after resource-list` behavior: response queue count remains zero and
@@ -522,10 +523,11 @@ of canonical reliable bytes, and exposes
 The response codec is exact and byte-aligned. Compatibility-profile constants
 fill opcode/count/identifier/type/index/flags; local byte count and the private
 fixed 16-byte field must arrive through the path-free
-`IResourceConsistencyProvider`. No production provider is registered, so the
-production stage returns typed `provider_required` and sends no incomplete,
-fallback, or captured response. Synthetic providers exist only in tests. When
-material is available, semantics queue once through the retained
+`IResourceConsistencyProvider`. At the M3.1.3 boundary, the production stage
+had no implementation, returned typed `provider_required`, and sent no
+incomplete, fallback, or captured response. M3.2.1 now provides an explicitly
+selected implementation behind that unchanged boundary. When material is
+available, semantics queue once through the retained
 `NetchanDriver`; transport owns fresh-sequence retransmission, and completion
 requires numeric ACK coverage plus exact reliable-generation equality. The
 stage then reads only opcode byte zero of the first complete following server
@@ -543,21 +545,53 @@ and [resource-consistency provider boundary](RESOURCE_CONSISTENCY_PROVIDER.md).
 
 ### M3.1.4 — Next complex post-response server message codec
 
-**Status: conditional planned milestone before M3.2.**
+**Status: conditional; not the current next milestone.**
 
 Add this milestone only if completed active evidence shows that the first
 post-response opcode begins a separate substantial message grammar. M3.1.3
 already owns the exact opcode/body-unconsumed boundary; M3.1.4 must not scan or
-permissively parse the remaining payload. If no separate large codec is
-required, proceed directly to M3.2.
+permissively parse the remaining payload. No such codec or evidence claim is
+part of M3.2.1.
 
-### M3.2 — Local resource resolution and precache state
+### M3.2.1 — Sandboxed local resources and production consistency provider
 
-**Status: planned.**
+**Status: completed.**
 
-Map an already validated resource model into explicitly approved user-owned
-search roots and project-owned precache state; server strings must not become
-filesystem paths directly.
+M3.2.1 adds explicit `--basedir`/`--game` search roots, game-before-`valve`
+fallback, a printable-ASCII byte-exact GoldSrc resource-name mapper, and a
+Win32 read-only handle sandbox. Unsafe server names fail before open; root,
+intermediate, and final reparse points are rejected; final-handle path/volume
+containment is checked; and the same handle supplies initial/final identity,
+metadata, and bounded streaming bytes.
+
+The opt-in `--resource-consistency-provider local` prepares the profile-fixed
+`tempdecal.wad` target before network initialization. It publishes its exact
+`uint32_t` size and incremental project-owned MD5-compatible 16-byte material
+through the existing path-free one-shot provider. MD5 is compatibility-only,
+not a security or trust primitive. Without explicit selection, the historical
+`provider_required`/zero-TX behavior remains.
+
+The general `LocalResourceInventoryState` is ordered, immutable, transactional,
+handle-free, path-free metadata with resolved/missing/unsafe/unsupported/
+ambiguous/I/O status counts. It is not readiness, precache, download, cache,
+asset, or renderer state. Normal runtime may read an explicit user-owned Steam
+installation with zero writes, while active stock research continues to require
+an isolated copy. Deterministic fake-HLDS and synthetic-root coverage does not
+claim live project-to-stock interoperability or completed manual installation
+validation.
+
+See [local resource resolution](LOCAL_RESOURCE_RESOLUTION.md),
+[local consistency provider](LOCAL_RESOURCE_CONSISTENCY_PROVIDER.md), and
+[resource-consistency provider boundary](RESOURCE_CONSISTENCY_PROVIDER.md).
+
+### M3.2.2 — Local resource readiness and precache state
+
+**Status: next.**
+
+Interpret the M3.2.1 metadata-only inventory through separately specified
+readiness policy, approved local locators, and engine-owned precache state. Do
+not treat existence, resolver success, resource-list `u24` metadata, or provider
+material as an implicit readiness decision.
 
 ### M3.3 — Safe download/cache boundary
 
@@ -568,17 +602,14 @@ integrity policies are independently specified and tested.
 
 Planned work:
 
-- consume the already validated owning resource-list metadata;
-- map approved resources into sandboxed game/search paths;
 - consume the bounded M2.3.3 fragment transport for downloads where protocol
   compatibility requires them, with traversal and overwrite protection;
 - verify sizes and available checksums before accepting content;
-- represent precache entries with engine-owned handles;
 - cache behavior and resolution-policy tests.
 
-Exit criteria: required resources resolve deterministically from a user-owned
-installation or a safe download cache, and remote names cannot escape approved
-roots.
+Exit criteria: downloaded resources enter an explicit write/cache sandbox under
+independently specified path, overwrite, size, and integrity policies; remote
+names cannot escape approved roots.
 
 ## M4 — BSP and WAD world rendering
 
