@@ -13,6 +13,8 @@
 
 namespace hlclient::local_resources {
 
+class LocalResourceEnvironment;
+
 inline constexpr std::uint64_t kDefaultMaximumLocalResourceFileSize =
     16U * 1024U * 1024U;
 inline constexpr std::uint64_t kHardMaximumLocalResourceFileSize =
@@ -81,9 +83,20 @@ public:
     [[nodiscard]] const LocalResourceResolverLimits& limits() const noexcept;
 
 private:
+    friend class LocalResourceEnvironment;
+
     LocalResourceResolver(
         LocalResourceSearchRoots roots,
         LocalResourceResolverLimits limits) noexcept;
+
+    // Exact-root variant used only by verified path-free locators. Unlike the
+    // public search API, a miss never advances to another configured root.
+    [[nodiscard]] LocalResourceResolutionResult resolve_exact_root(
+        const LocalVirtualResourceName& name,
+        LocalResourceRootId root_id) const;
+    [[nodiscard]] LocalResourceResolutionResult resolve_from_roots(
+        const LocalVirtualResourceName& name,
+        std::optional<LocalResourceRootId> exact_root_id) const;
 
     LocalResourceSearchRoots roots_;
     LocalResourceResolverLimits limits_;

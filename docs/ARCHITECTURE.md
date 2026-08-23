@@ -78,11 +78,13 @@ through the retained driver, and stops at the first opcode of the next complete
 server payload. M3.2.1 adds an opt-in, pre-network
 `PreparedLocalResourceConsistencyProvider`, a handle-sandboxed local resolver,
 an evidence-gated GoldSrc name mapper, and an ordered metadata-only inventory.
-The sign-on target still sees only the path-free API; without explicit provider
-selection it ends as `provider_required` without TX. Custom/player-resource
-grammar, server-info second-client slot evidence, readiness/precache, snapshots,
-movement application, and commands remain future increments behind the same
-boundaries. The future bridge adapts
+M3.2.2 retains that same validated local environment after the response, strictly
+correlates inventory/list metadata, selects the exact ServerInfo map entry, and
+publishes an immutable metadata-only manifest with type-local sparse slots. The
+sign-on target still sees only the path-free provider API. Custom/player-resource
+grammar, server-info second-client slot evidence, snapshots, movement
+application, and commands remain future increments behind the same boundaries.
+The future bridge adapts
 observed or exported in-process state to the same project types. It must not
 make renderer behavior depend on injected addresses or Valve private layouts.
 
@@ -97,13 +99,14 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
 | `hlclient_goldsrc_netchan` | netchan classifier/base/fragment codec, payload transform, wrap-safe persistent session, bounded pending plus one reliable unit in flight, transactional unfragmented/fragment sends, filesystem-free slot-0 normal reassembly, bounded same-transport driver, owning events, metadata-only traces, and first-ACK compatibility primitive | transport creation/closure, authentication semantics or bytes, slot-1/file interpretation, decompression, files, `svc_*`, world/render state |
 | `hlclient_hash_md5` | project-owned incremental MD5 required only for GoldSrc compatibility material | filesystem, external crypto libraries, trust/security policy, GoldSrc wire types |
-| `hlclient_local_resources` | explicit validated local search roots, byte-exact virtual names, Win32 read-only handle sandbox, final-handle containment, stable equality-only identity, bounded resolution and streaming inspection | sockets, server messages, downloads, cache/precache, assets, renderer |
+| `hlclient_local_resources` | explicit validated local environment/search roots, byte-exact virtual names, path-safe locators, exact-root verified reopen, Win32 read-only handle sandbox, final-handle containment, stable equality-only identity, bounded resolution and streaming inspection | sockets, server messages, downloads, cache/assets, renderer |
 | `hlclient_resource_consistency_api` | path-free bounded provider requirements, move-only asynchronous operation/session/material ownership, cancellation, and private opaque-material handoff | filesystem/path policy, local lookup, checksum calculation, sockets, GoldSrc list types, assets, renderer |
 | `hlclient_resource_consistency_local` | pre-network preparation of the fixed `tempdecal.wad` compatibility target and one-shot nonblocking provider operation | server-derived paths, response codec/layout, network creation, writes, downloads, cache, assets |
 | `hlclient_goldsrc_signon` | exact fixed initial/transition requests, strict `BZ2\0` decoding, owning immutable sign-on/list/response states, historical neutral opcode-43 and zero-TX resource-list stop, exact standard list and neutral 41-byte opcode-5 codecs, carrier/tail separation, provider-required response stage, same-driver semantic-once lifecycle, and next-payload opcode boundary | arbitrary commands, custom/player-resource bodies, production consistency material, resource resolution, runtime application, command execution, filesystem, renderer, SDL, assets, world state |
 | `hlclient_goldsrc_local_resources` | evidence-gated resource-type/name classification and ordered metadata-only `LocalResourceInventoryState` adapter | sign-on transport, readiness/precache decisions, downloads/cache, file contents, asset loading |
+| `hlclient_goldsrc_resource_readiness` | strict list/inventory correlation, per-entry readiness and aggregate impact, exact map selection, immutable ordered manifest, and bounded type-local sparse slots | downloads/cache, file-content parsing, assets, renderer, OpenGL |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
-| `hlclient_app_support` | explicit user-file auth adapter and bounded local-file loading | discovery, caching, Steam integration, fallback search, protocol parsing |
+| `hlclient_app_support` | explicit user-file auth adapter, bounded local-file loading, and metadata-manifest CLI exit policy | discovery, caching, Steam integration, fallback search, protocol parsing |
 | `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/initial/pre-resource/delta/movevars/user-info/transition/list/response composition, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, runtime application, OpenGL, SDL, filesystem, world/render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_asset_api` | owning asset sources, neutral CPU assets, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
@@ -120,7 +123,7 @@ Public dependencies should point inward toward stable project-owned contracts.
 Private implementation dependencies may point outward to SDL, GLAD, OpenGL,
 Winsock, or SDK headers without exposing them to unrelated consumers.
 
-The M3.2.1 target direction is deliberately acyclic:
+The M3.2.2 target direction is deliberately acyclic:
 
 ```text
 hlclient_hash_md5 -> hlclient_core
@@ -131,6 +134,10 @@ hlclient_resource_consistency_local
     -> hlclient_hash_md5
 hlclient_goldsrc_local_resources
     -> hlclient_goldsrc_signon
+    -> hlclient_local_resources
+hlclient_goldsrc_resource_readiness
+    -> hlclient_goldsrc_signon
+    -> hlclient_goldsrc_local_resources
     -> hlclient_local_resources
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
 ```
@@ -289,8 +296,9 @@ and therefore no tracked response projection exists. Historical reconstructed
 carrier evidence and deterministic fake-HLDS tests justify the bounded API and
 test behavior, but are not an active project-client-to-stock response success
 claim. M3.2.1 implements the local provider independently of that pending stock
-evidence. M3.2.2 is next for readiness/precache state; M3.1.4 remains
-conditional on sufficient evidence for the next complex server message.
+evidence, and M3.2.2 builds only local metadata readiness/manifest state on top
+of it. M3.1.4 remains conditional on sufficient evidence for the next complex
+server message; M3.2.3 is the next local asset-source boundary.
 
 M2.3.3 splits netchan into pure base/fragment wire codecs and transform,
 transport-independent persistent reliable state, a transactional normal
@@ -489,13 +497,13 @@ order:
 9. poll events where applicable, advance the handshake coordinator, and let
    the selected stage-owned driver process the same socket until the requested
    opaque, initial-sign-on, pre-resource, delta-schema, movement-environment,
-   user-info, neutral opcode-43, or standard resource-list/response boundary is
-   acknowledged and published;
+    user-info, neutral opcode-43, standard resource-list/response boundary, or
+    metadata-only precache-manifest boundary is acknowledged and published;
 10. derive `RenderScene` from its `ClientWorldState`, render, and present;
 11. stop after the configured terminal challenge/connect-request/
     connect-response/netchan-bootstrap/signon-boundary/pre-resource/
     delta-schemas/movevars/user-info/resource-list-boundary/resource-list or
-    resource-response-boundary outcome,
+    resource-response-boundary or precache-manifest outcome,
     let driver terminal cleanup release its optional lifetime exactly once,
     then shut down renderer resources before their platform dependencies.
 

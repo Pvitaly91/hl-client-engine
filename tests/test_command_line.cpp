@@ -324,6 +324,44 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             *result.options));
     }
 
+    SECTION("precache manifest requires and schedules the local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"precache-manifest"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::precache_manifest);
+        CHECK(result.options->game_directory == "valve");
+        CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
+    SECTION("precache manifest rejects a missing local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"precache-manifest"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("requires --resource-consistency-provider local") !=
+              std::string::npos);
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -696,6 +734,31 @@ TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
         }
     }
 
+    SECTION("asset loading and download options remain unavailable")
+    {
+        constexpr std::array forbidden{
+            std::string_view{"--load-map"},
+            std::string_view{"--parse-bsp"},
+            std::string_view{"--parse-mdl"},
+            std::string_view{"--load-resource"},
+            std::string_view{"--precache-file"},
+            std::string_view{"--download-missing"},
+            std::string_view{"--ignore-missing"},
+            std::string_view{"--mount-resource"},
+            std::string_view{"--resource-cache"},
+            std::string_view{"--trust-resource-size"},
+            std::string_view{"--skip-resource-safety"},
+        };
+        for (const auto option : forbidden) {
+            CAPTURE(option);
+            const std::array arguments{option};
+            const auto result = parse_command_line(arguments);
+            CHECK_FALSE(result);
+            CHECK(result.error.find("Unknown command-line argument") !=
+                  std::string::npos);
+        }
+    }
+
     SECTION("missing value")
     {
         const std::array arguments{std::string_view{"--game"}};
@@ -735,6 +798,9 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("resource-list-boundary") != std::string_view::npos);
     CHECK(help.find("resource-list") != std::string_view::npos);
     CHECK(help.find("resource-response-boundary") != std::string_view::npos);
+    CHECK(help.find("precache-manifest") != std::string_view::npos);
+    CHECK(help.find("metadata-only manifest") != std::string_view::npos);
+    CHECK(help.find("does not") != std::string_view::npos);
     CHECK(help.find("stop before parsing opcode-43 body") != std::string_view::npos);
     CHECK(help.find("required client response") !=
           std::string_view::npos);

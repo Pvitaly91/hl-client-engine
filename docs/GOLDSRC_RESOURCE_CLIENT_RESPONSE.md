@@ -223,14 +223,25 @@ generation, sequence/ACK numbers, and error codes. They never contain raw
 response/tail bytes, opaque provider material, local paths, resource names, or
 authentication identity.
 
+## M3.2.2 retained continuation
+
+`PrecacheManifestStage` privately retains the completed response stage instead
+of cleaning its driver at the response stop. It carries the same transport,
+netchan driver, authentication lifetime, owning response state, and shared
+local-resource environment through local inventory/readiness/manifest work.
+The public historical response-boundary stop still cleans up exactly once.
+The manifest continuation queues no reliable unit and emits no additional
+semantic network message.
+
 ## Explicit scope boundary
 
-M3.2.1 adds the production local provider behind the unchanged API and a
-general sandboxed resolution foundation. It does not add download/cache writes,
-readiness or precache state, resource request generation, `dlfile`,
-BSP/WAD/MDL/SPR parsing, asset loading, renderer changes, client world state, or
-captured-response replay. The `hlclient_goldsrc_signon` target remains free of
-filesystem and local-provider implementation dependencies. A separate M3.1.4
-is required only if sufficient active stock evidence establishes that the next
-complex server message needs a substantial codec; M3.2.2 is the next planned
-local-resource milestone.
+M3.2.1 adds the production local provider and sandboxed resolution foundation;
+M3.2.2 adds only strict readiness and immutable manifest metadata. Neither adds
+download/cache writes, resource request generation, `dlfile`, BSP/WAD/MDL/SPR
+parsing, asset loading, renderer changes, client world state, or captured
+response replay. The `hlclient_goldsrc_signon` target remains free of filesystem
+and local-provider implementation dependencies. A separate M3.1.4 is required
+only if sufficient active stock evidence establishes a substantial next-message
+codec. See [local readiness](LOCAL_RESOURCE_READINESS.md) and
+[precache manifest](PRECACHE_MANIFEST.md); M3.2.3 is the next asset-source
+boundary.

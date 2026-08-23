@@ -25,7 +25,9 @@ opcode's semantic category or active stock interoperability.
 ## Prepare before networking
 
 `PreparedLocalResourceConsistencyProvider` is prepared synchronously in the
-application composition root before the UDP runtime/socket is created:
+application composition root before the UDP runtime/socket is created. In the
+M3.2.2 continuation it borrows the same retained `LocalResourceEnvironment`
+later used for inventory, manifest construction, and locator reopening:
 
 1. validate explicit `--basedir` and `--game` roots;
 2. resolve the fixed target through `LocalResourceResolver`;
@@ -109,4 +111,7 @@ hlclient_goldsrc_signon ---> hlclient_resource_consistency_api
 The sign-on target does not link the local resolver, Win32 backend, hash
 implementation, or production provider. No provider cache, sidecar, registry
 value, temporary manifest, file write, download, precache, asset load, or
-renderer dependency is introduced.
+renderer dependency is introduced. The provider's response bytes and one-shot
+behavior are unchanged by the shared-environment overload. See
+[local readiness](LOCAL_RESOURCE_READINESS.md) and the
+[metadata-only manifest](PRECACHE_MANIFEST.md).

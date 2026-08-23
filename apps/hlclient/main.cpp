@@ -1,4 +1,5 @@
 #include <hlclient/app/explicit_file_authentication_provider.hpp>
+#include <hlclient/app/precache_manifest_exit_policy.hpp>
 #include <hlclient/assets/asset_importer_registry.hpp>
 #include <hlclient/assets/asset_manager.hpp>
 #include <hlclient/client/client_scene_source.hpp>
@@ -11,6 +12,9 @@
 #include <hlclient/goldsrc/connect_request_stage.hpp>
 #include <hlclient/goldsrc/local_resource_inventory.hpp>
 #include <hlclient/goldsrc/local_resource_mapping.hpp>
+#include <hlclient/goldsrc/precache_manifest.hpp>
+#include <hlclient/goldsrc/precache_manifest_stage.hpp>
+#include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_resolver.hpp>
 #include <hlclient/local_resources/local_resource_search_roots.hpp>
 #include <hlclient/network/datagram_transport.hpp>
@@ -1108,6 +1112,53 @@ void log_resource_client_response_trace(
     }
 }
 
+void log_precache_manifest_trace(
+    const hlclient::goldsrc::PrecacheManifestTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::PrecacheManifestTraceClassification;
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::resource_response_boundary_reached:
+        return;
+    case Classification::local_inventory_ready:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[local-resource] inventory retained for manifest: entries=" +
+                std::to_string(event.entry_count));
+        return;
+    case Classification::precache_manifest_ready:
+    case Classification::local_resources_incomplete:
+    case Classification::unsafe_local_resources:
+    case Classification::unsupported_local_profile:
+    case Classification::local_resource_io_error:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[precache] metadata snapshot: entries=" +
+                std::to_string(event.entry_count) +
+                ", ready=" + std::to_string(event.ready_count) +
+                ", metadata-only=" +
+                std::to_string(event.metadata_only_count) +
+                ", missing=" + std::to_string(event.missing_count) +
+                ", unsafe=" + std::to_string(event.unsafe_count) +
+                ", unsupported=" +
+                std::to_string(event.unsupported_count) +
+                ", ambiguous=" + std::to_string(event.ambiguous_count) +
+                ", io-error=" + std::to_string(event.io_error_count));
+        return;
+    case Classification::stage_timed_out:
+    case Classification::stage_cancelled:
+    case Classification::backpressure:
+    case Classification::secondary_stream_pending:
+    case Classification::network_failure:
+    case Classification::protocol_failure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Precache-manifest stage ended before publication");
+        return;
+    }
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -1639,8 +1690,8 @@ void log_resource_client_response_trace(
                 std::to_string(boundary.remaining_byte_count()) + " bytes");
         hlclient::core::log(
             LogLevel::info,
-            "The next complex body remains unparsed; no filesystem, download, "
-            "cache, or precache action was performed");
+            "The next complex body remains unparsed; no download, cache, "
+            "manifest, or asset-loading action was performed");
         return 0;
     }
     case State::resource_response_provider_required:
@@ -1668,6 +1719,37 @@ void log_resource_client_response_trace(
         hlclient::core::log(
             LogLevel::error,
             "Secondary post-resource response stream remains pending");
+        return 1;
+    case State::precache_manifest_ready:
+        if (!handshake.precache_manifest_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Precache-manifest stage completed without an owning result");
+            return 1;
+        }
+        hlclient::core::log(
+            LogLevel::info,
+            "[precache] same-session metadata-only manifest ready");
+        return 0;
+    case State::local_resources_incomplete:
+        hlclient::core::log(
+            LogLevel::error,
+            "[precache] manifest published with incomplete local candidates");
+        return 1;
+    case State::unsafe_local_resources:
+        hlclient::core::log(
+            LogLevel::error,
+            "[precache] manifest published with security-blocked resources");
+        return 1;
+    case State::unsupported_local_profile:
+        hlclient::core::log(
+            LogLevel::error,
+            "[precache] manifest published with an unsupported local profile");
+        return 1;
+    case State::local_resource_io_error:
+        hlclient::core::log(
+            LogLevel::error,
+            "[precache] manifest published with local lookup failures");
         return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
@@ -1699,53 +1781,21 @@ void log_resource_client_response_trace(
     case State::waiting_for_resource_transition:
     case State::waiting_for_resource_list:
     case State::waiting_for_resource_response:
+    case State::waiting_for_precache_manifest:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
     return 1;
 }
 
-struct LocalResourceInventoryConfiguration {
-    std::filesystem::path base_directory;
-    std::string game_directory;
-};
-
 [[nodiscard]] int report_local_resource_inventory(
     const hlclient::goldsrc::ResourceClientResponseSignonState& response,
-    const LocalResourceInventoryConfiguration& configuration)
+    const hlclient::local_resources::LocalResourceEnvironment& environment)
 {
-    auto roots = hlclient::local_resources::LocalResourceSearchRoots::create(
-        configuration.base_directory,
-        configuration.game_directory);
-    if (!roots) {
-        const auto code =
-            roots.error
-                ? hlclient::local_resources::to_string(roots.error->code)
-                : std::string_view{"io_error"};
-        hlclient::core::log(
-            LogLevel::error,
-            "[local-resource] inventory root validation failed: " +
-                std::string{code});
-        return 1;
-    }
-    auto resolver = hlclient::local_resources::LocalResourceResolver::create(
-        std::move(*roots.roots));
-    if (!resolver) {
-        const auto code =
-            resolver.error
-                ? hlclient::local_resources::to_string(resolver.error->code)
-                : std::string_view{"io_error"};
-        hlclient::core::log(
-            LogLevel::error,
-            "[local-resource] inventory resolver creation failed: " +
-                std::string{code});
-        return 1;
-    }
-
     auto built = hlclient::goldsrc::LocalResourceInventoryBuilder{}.build(
         response.resource_list().resource_list(),
         hlclient::goldsrc::GoldSrcResourceNameMapper{},
-        *resolver.resolver);
+        environment.resolver());
     if (!built) {
         const auto code =
             built.error
@@ -1776,6 +1826,62 @@ struct LocalResourceInventoryConfiguration {
             ", io-error=" +
             std::to_string(summary.count(Status::io_error)));
     return 0;
+}
+
+[[nodiscard]] int report_precache_manifest(
+    const hlclient::goldsrc::PrecacheManifestSignonState& result)
+{
+    const auto& manifest = result.manifest();
+    const auto& summary = manifest.readiness_summary();
+    using Status = hlclient::goldsrc::LocalResourceReadinessStatus;
+    const auto unsupported =
+        summary.count(Status::unsupported_name_encoding) +
+        summary.count(Status::unsupported_mapping);
+
+    hlclient::core::log(
+        LogLevel::info,
+        "[local-resource] readiness: ready=" +
+            std::to_string(summary.count(Status::ready_local_file)) +
+            ", metadata-only=" +
+            std::to_string(summary.count(Status::metadata_only)) +
+            ", missing=" +
+            std::to_string(summary.count(Status::missing_local_file)) +
+            ", unsafe=" + std::to_string(summary.count(Status::unsafe_name)) +
+            ", unsupported=" + std::to_string(unsupported) +
+            ", ambiguous=" +
+            std::to_string(summary.count(Status::ambiguous_local_match)) +
+            ", io-error=" +
+            std::to_string(summary.count(Status::local_io_error)));
+    hlclient::core::log(
+        LogLevel::info,
+        "[precache] manifest: entries=" +
+            std::to_string(manifest.entry_count()) +
+            ", sound-slots=" +
+            std::to_string(manifest.sound_slots().slot_count()) +
+            ", model-slots=" +
+            std::to_string(manifest.model_slots().slot_count()) +
+            ", generic-slots=" +
+            std::to_string(manifest.generic_slots().slot_count()) +
+            ", event-slots=" +
+            std::to_string(manifest.event_script_slots().slot_count()) +
+            ", decal-slots=" +
+            std::to_string(manifest.decal_slots().slot_count()));
+    hlclient::core::log(
+        LogLevel::info,
+        "[precache] world: status=" +
+            std::string{hlclient::goldsrc::to_string(
+                manifest.world_selection().status())} +
+            ", resource-index=" +
+            (manifest.world_selection().resource_index()
+                 ? std::to_string(
+                       *manifest.world_selection().resource_index())
+                 : std::string{"unavailable"}));
+    hlclient::core::log(
+        LogLevel::info,
+        "[precache] completeness=" +
+            std::string{hlclient::goldsrc::to_string(
+                manifest.completeness())});
+    return hlclient::app::precache_manifest_exit_code(manifest.completeness());
 }
 
 [[nodiscard]] hlclient::network::UdpSocket open_challenge_socket(
@@ -1815,11 +1921,11 @@ public:
         std::optional<hlclient::auth::AuthenticationSession> authentication_session,
         hlclient::resource_consistency::IResourceConsistencyProvider*
             resource_consistency_provider,
-        std::optional<LocalResourceInventoryConfiguration>
-            local_inventory_configuration,
+        std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment>
+            local_resource_environment,
         const bool net_trace)
-        : local_inventory_configuration_{
-              std::move(local_inventory_configuration)},
+        : local_resource_environment_{
+              std::move(local_resource_environment)},
           network_runtime_{},
           transport_{open_challenge_socket(network_runtime_, remote_endpoint)},
           handshake_{
@@ -1876,9 +1982,15 @@ public:
                           &log_resource_list_trace}
                     : hlclient::goldsrc::ResourceListTraceCallback{},
                 {},
-                resource_consistency_provider,
-                hlclient::goldsrc::ResourceClientResponseTraceCallback{
-                    &log_resource_client_response_trace}}
+                 resource_consistency_provider,
+                 hlclient::goldsrc::ResourceClientResponseTraceCallback{
+                     &log_resource_client_response_trace},
+                 local_resource_environment_,
+                 {},
+                 net_trace
+                     ? hlclient::goldsrc::PrecacheManifestTraceCallback{
+                           &log_precache_manifest_trace}
+                     : hlclient::goldsrc::PrecacheManifestTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -1909,18 +2021,23 @@ public:
     [[nodiscard]] int report_result() const
     {
         const int handshake_result = report_handshake_result(handshake_);
-        if (handshake_result != 0 || !local_inventory_configuration_ ||
+        if (handshake_.precache_manifest_result()) {
+            const int manifest_result = report_precache_manifest(
+                *handshake_.precache_manifest_result());
+            return handshake_result != 0 ? handshake_result : manifest_result;
+        }
+        if (handshake_result != 0 || !local_resource_environment_ ||
             !handshake_.resource_client_response_result()) {
             return handshake_result;
         }
         return report_local_resource_inventory(
             *handshake_.resource_client_response_result(),
-            *local_inventory_configuration_);
+            *local_resource_environment_);
     }
 
 private:
-    std::optional<LocalResourceInventoryConfiguration>
-        local_inventory_configuration_;
+    std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment>
+        local_resource_environment_;
     hlclient::network::NetworkRuntime network_runtime_;
     hlclient::network::UdpDatagramTransport transport_;
     hlclient::goldsrc::GoldSrcHandshakeCoordinator handshake_;
@@ -2167,11 +2284,11 @@ int run(const hlclient::core::CommandLineOptions& options)
     }
 
     BootstrapSceneSource scene_source;
+    std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment>
+        local_resource_environment;
     std::unique_ptr<
         hlclient::resource_consistency::PreparedLocalResourceConsistencyProvider>
         resource_consistency_provider;
-    std::optional<LocalResourceInventoryConfiguration>
-        local_inventory_configuration;
     std::unique_ptr<HandshakeSession> challenge_session;
     if (options.connect_endpoint) {
         const auto address = hlclient::network::NetworkAddress::parse(*options.connect_endpoint);
@@ -2202,10 +2319,28 @@ int run(const hlclient::core::CommandLineOptions& options)
                 return 1;
             }
 
-            const auto root_count = roots.roots->size();
+            auto environment =
+                hlclient::local_resources::LocalResourceEnvironment::create(
+                    std::move(*roots.roots));
+            if (!environment || !environment.environment) {
+                const auto code =
+                    environment.error
+                        ? hlclient::local_resources::to_string(
+                              environment.error->code)
+                        : std::string_view{"unable_to_retain_environment"};
+                hlclient::core::log(
+                    LogLevel::error,
+                    "[local-resource] environment creation failed: " +
+                        std::string{code});
+                return 1;
+            }
+            local_resource_environment = std::shared_ptr<
+                const hlclient::local_resources::LocalResourceEnvironment>{
+                std::move(environment.environment)};
+            const auto root_count = local_resource_environment->root_count();
             auto provider = hlclient::resource_consistency::
                 PreparedLocalResourceConsistencyProvider::prepare(
-                    std::move(*roots.roots));
+                    *local_resource_environment);
             if (!provider) {
                 const auto code =
                     provider.error
@@ -2220,9 +2355,6 @@ int run(const hlclient::core::CommandLineOptions& options)
             }
 
             resource_consistency_provider = std::move(provider.provider);
-            local_inventory_configuration =
-                LocalResourceInventoryConfiguration{
-                    base_directory, options.game_directory};
             hlclient::core::log(
                 LogLevel::info,
                 "[local-resource] roots validated: count=" +
@@ -2277,6 +2409,9 @@ int run(const hlclient::core::CommandLineOptions& options)
             stop_point =
                 hlclient::goldsrc::HandshakeStopPoint::resource_response_boundary;
             break;
+        case hlclient::core::ConnectionStopPoint::precache_manifest:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::precache_manifest;
+            break;
         }
         challenge_session = std::make_unique<HandshakeSession>(
             *address,
@@ -2284,7 +2419,7 @@ int run(const hlclient::core::CommandLineOptions& options)
             std::move(preparation.request),
             std::move(preparation.authentication_session),
             resource_consistency_provider.get(),
-            std::move(local_inventory_configuration),
+            local_resource_environment,
             options.net_trace);
     }
 

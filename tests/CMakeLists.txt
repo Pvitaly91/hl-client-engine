@@ -31,9 +31,17 @@ add_executable(hlclient_tests
     test_local_resource_paths.cpp
     test_local_resource_search_roots.cpp
     test_local_read_only_file.cpp
+    test_local_resource_locator.cpp
     test_local_resource_md5.cpp
     test_goldsrc_local_resource_mapping.cpp
     test_local_resource_inventory.cpp
+    test_local_resource_readiness.cpp
+    test_local_resource_correlation.cpp
+    test_world_resource_selection.cpp
+    test_precache_slot_tables.cpp
+    test_precache_manifest.cpp
+    test_precache_manifest_exit_policy.cpp
+    test_precache_manifest_stage.cpp
     test_local_resource_consistency_provider.cpp
     test_move_vars.cpp
     test_movement_environment_stage.cpp
@@ -86,6 +94,7 @@ target_link_libraries(hlclient_tests
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_goldsrc_client
+        hlclient_goldsrc_resource_readiness
         hlclient_goldsrc_local_resources
         hlclient_goldsrc_netchan
         hlclient_goldsrc_signon

@@ -10,6 +10,11 @@
 #include <utility>
 
 namespace hlclient::local_resources {
+
+namespace detail {
+struct LocalResourceRootSetToken final {};
+} // namespace detail
+
 namespace {
 
 [[nodiscard]] LocalResourceSearchRootsCreateResult failure(
@@ -273,7 +278,16 @@ LocalResourceSearchRootsCreateResult LocalResourceSearchRoots::create(
     }
 
     std::vector<std::unique_ptr<detail::LocalResourceRootStorage>> roots;
-    roots.reserve(2U);
+    std::shared_ptr<const detail::LocalResourceRootSetToken> root_set_token;
+    try {
+        roots.reserve(2U);
+        root_set_token =
+            std::make_shared<const detail::LocalResourceRootSetToken>();
+    } catch (...) {
+        return failure(
+            LocalResourceSearchRootsErrorCode::io_error,
+            root_error_context(LocalResourceSearchRootsErrorCode::io_error));
+    }
     for (const auto& [directory, kind] : requests) {
         const auto candidate = base_directory / widen_ascii(directory);
         auto opened = open_local_directory(candidate);
@@ -305,7 +319,7 @@ LocalResourceSearchRootsCreateResult LocalResourceSearchRoots::create(
 
         try {
             const auto id = LocalResourceRootId{
-                static_cast<std::uint32_t>(roots.size())};
+                static_cast<std::uint32_t>(roots.size()), root_set_token};
             roots.push_back(
                 std::make_unique<detail::LocalResourceRootStorage>(
                     id,

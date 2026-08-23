@@ -77,11 +77,15 @@ hlclient_add_library(
     include/hlclient/local_resources/local_resource_search_roots.hpp
     include/hlclient/local_resources/local_virtual_resource_name.hpp
     include/hlclient/local_resources/local_read_only_file.hpp
+    include/hlclient/local_resources/local_resource_locator.hpp
+    include/hlclient/local_resources/local_resource_environment.hpp
     include/hlclient/local_resources/local_resource_resolver.hpp
     src/local_resources/win32_local_resource_detail.hpp
     src/local_resources/local_resource_search_roots.cpp
     src/local_resources/local_virtual_resource_name.cpp
     src/local_resources/local_read_only_file.cpp
+    src/local_resources/local_resource_locator.cpp
+    src/local_resources/local_resource_environment.cpp
     src/local_resources/local_resource_resolver.cpp
 )
 add_library(hlclient::local_resources ALIAS hlclient_local_resources)
@@ -312,6 +316,28 @@ set_property(
     PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
+    hlclient_goldsrc_resource_readiness
+    include/hlclient/goldsrc/local_resource_readiness.hpp
+    include/hlclient/goldsrc/precache_manifest.hpp
+    include/hlclient/goldsrc/precache_manifest_stage.hpp
+    src/goldsrc/local_resource_readiness.cpp
+    src/goldsrc/precache_manifest.cpp
+    src/goldsrc/precache_manifest_stage.cpp
+)
+add_library(
+    hlclient::goldsrc_resource_readiness ALIAS
+    hlclient_goldsrc_resource_readiness)
+target_link_libraries(
+    hlclient_goldsrc_resource_readiness
+    PUBLIC
+        hlclient::goldsrc_local_resources
+        hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_goldsrc_resource_readiness
+    PROPERTY FOLDER "Engine/Resources/GoldSrc")
+
+hlclient_add_library(
     hlclient_auth
     include/hlclient/auth/authentication_provider.hpp
     src/auth/authentication_provider.cpp
@@ -336,6 +362,7 @@ target_link_libraries(
         hlclient::auth
         hlclient::goldsrc
         hlclient::goldsrc_netchan
+        hlclient::goldsrc_resource_readiness
         hlclient::goldsrc_signon
         hlclient::network
     PRIVATE hlclient::core
@@ -346,11 +373,14 @@ hlclient_add_library(
     hlclient_app_support
     include/hlclient/app/authentication_material_file.hpp
     include/hlclient/app/explicit_file_authentication_provider.hpp
+    include/hlclient/app/precache_manifest_exit_policy.hpp
     src/app/authentication_material_file.cpp
     src/app/explicit_file_authentication_provider.cpp
 )
 add_library(hlclient::app_support ALIAS hlclient_app_support)
-target_link_libraries(hlclient_app_support PUBLIC hlclient::auth)
+target_link_libraries(
+    hlclient_app_support
+    PUBLIC hlclient::auth hlclient::goldsrc_resource_readiness)
 set_property(TARGET hlclient_app_support PROPERTY FOLDER "Apps")
 
 hlclient_add_library(
@@ -425,6 +455,7 @@ target_link_libraries(
         hlclient::network
         hlclient::goldsrc
         hlclient::goldsrc_client
+        hlclient::goldsrc_resource_readiness
         hlclient::goldsrc_local_resources
         hlclient::resource_consistency_local
         hlclient::client

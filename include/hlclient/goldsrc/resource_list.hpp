@@ -11,6 +11,10 @@
 
 namespace hlclient::goldsrc {
 
+namespace detail {
+class ResourceListCorruptionTestAccess;
+}
+
 inline constexpr std::uint8_t kResourceListOpcode = 43U;
 inline constexpr std::size_t kResourceListCountBitWidth = 12U;
 inline constexpr std::size_t kResourceTypeBitWidth = 4U;
@@ -164,6 +168,7 @@ public:
 
 private:
     friend class ResourceListParser;
+    friend class detail::ResourceListCorruptionTestAccess;
 
     ResourceEntry(
         ResourceType type,
@@ -258,6 +263,7 @@ public:
 
 private:
     friend class ResourceListParser;
+    friend class detail::ResourceListCorruptionTestAccess;
 
     ResourceListState(
         std::vector<ResourceEntry> entries,

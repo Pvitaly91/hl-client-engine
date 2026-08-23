@@ -25,6 +25,7 @@ enum class ConnectionStopPoint {
     resource_list_boundary,
     resource_list,
     resource_response_boundary,
+    precache_manifest,
 };
 
 enum class AuthenticationProviderKind {

@@ -463,6 +463,9 @@ M3.2.1 supplies production local material only when the user explicitly selects
 the local provider and supplies a validated root. The active stock verifier
 still refuses projection because no completed restoration-attested M3.1.3 runs
 exist; production implementation and deterministic fake-HLDS coverage do not
-imply active project-client-to-stock success. M3.2.2 is next for readiness and
-precache state. M3.3 remains the safe download/cache boundary, and M3.1.4
-remains conditional on sufficient next-message stock evidence.
+imply active project-client-to-stock success. M3.2.2 now correlates this owning
+list with the independent inventory, without using its opaque `u24` size code
+or flags as readiness policy, and builds the separate metadata-only manifest.
+See [local readiness](LOCAL_RESOURCE_READINESS.md) and
+[precache manifest](PRECACHE_MANIFEST.md). M3.3 remains the safe download/cache
+boundary, and M3.1.4 remains conditional on sufficient next-message evidence.

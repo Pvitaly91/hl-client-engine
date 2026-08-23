@@ -15,6 +15,7 @@
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_runtime.hpp>
 #include <hlclient/network/udp_socket.hpp>
+#include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_search_roots.hpp>
 #include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
 #include <hlclient/resource_consistency/provider.hpp>
@@ -599,6 +600,152 @@ enum class ResourceResponseIntegrationScenario {
     differential_map,
     malicious_resource_names,
 };
+
+enum class PrecacheManifestIntegrationScenario {
+    complete,
+    world_ready_missing_sound,
+    local_map_missing,
+    sparse_slots,
+    malicious_name,
+    missing_model,
+    unsupported_non_ascii,
+    ambiguous_sound,
+    duplicate_map_match,
+};
+
+enum class PrecacheManifestTransportScenario {
+    baseline,
+    dropped_response,
+    dropped_acknowledgement,
+};
+
+[[nodiscard]] std::vector<std::byte> manifest_first_semantic_payload()
+{
+    auto output = first_semantic_payload(false);
+    const auto old_map = bytes("maps/test_alpha.bsp");
+    const auto new_map = bytes("maps/test_map.bsp");
+    const auto match = std::search(
+        output.begin(),
+        output.end(),
+        old_map.begin(),
+        old_map.end());
+    REQUIRE(match != output.end());
+    const auto offset = static_cast<std::size_t>(
+        std::distance(output.begin(), match));
+    output.erase(
+        output.begin() + static_cast<std::ptrdiff_t>(offset),
+        output.begin() + static_cast<std::ptrdiff_t>(
+                             offset + old_map.size()));
+    output.insert(
+        output.begin() + static_cast<std::ptrdiff_t>(offset),
+        new_map.begin(),
+        new_map.end());
+    return output;
+}
+
+[[nodiscard]] std::vector<resource_fixture::EntrySpec>
+manifest_resource_entries(const PrecacheManifestIntegrationScenario scenario)
+{
+    const bool sparse =
+        scenario == PrecacheManifestIntegrationScenario::sparse_slots;
+    const auto shared_sparse_index = static_cast<std::uint16_t>(
+        sparse ? 4'095U : 0U);
+
+    std::vector<resource_fixture::EntrySpec> entries{
+        resource_fixture::EntrySpec{
+            4U,
+            "generic/test.dat",
+            sparse ? shared_sparse_index : std::uint16_t{7U},
+            101U,
+            0U,
+        },
+        resource_fixture::EntrySpec{
+            0U,
+            "test_sound.wav",
+            sparse ? shared_sparse_index : std::uint16_t{41U},
+            202U,
+            0U,
+        },
+        resource_fixture::EntrySpec{
+            2U,
+            "models/test_model.mdl",
+            17U,
+            303U,
+            0U,
+        },
+        resource_fixture::EntrySpec{
+            5U,
+            "events/test_event.sc",
+            sparse ? shared_sparse_index : std::uint16_t{19U},
+            404U,
+            0U,
+        },
+        resource_fixture::EntrySpec{
+            3U,
+            "decals/test_decal.wad",
+            sparse ? shared_sparse_index : std::uint16_t{3U},
+            505U,
+            0U,
+        },
+        resource_fixture::EntrySpec{
+            2U,
+            "maps/test_map.bsp",
+            sparse ? shared_sparse_index : std::uint16_t{137U},
+            606U,
+            0U,
+        },
+    };
+    if (scenario == PrecacheManifestIntegrationScenario::malicious_name) {
+        entries.push_back(resource_fixture::EntrySpec{
+            4U,
+            "../evil.dat",
+            73U,
+            707U,
+            0U,
+        });
+    }
+    if (scenario ==
+        PrecacheManifestIntegrationScenario::unsupported_non_ascii) {
+        std::string name{"unsupported_"};
+        name.push_back(static_cast<char>(0x80U));
+        name.append(".dat");
+        entries.push_back(resource_fixture::EntrySpec{
+            4U,
+            std::move(name),
+            73U,
+            707U,
+            0U,
+        });
+    }
+    if (scenario == PrecacheManifestIntegrationScenario::ambiguous_sound) {
+        entries[1U].name = "Test_Sound.wav";
+    }
+    if (scenario ==
+        PrecacheManifestIntegrationScenario::duplicate_map_match) {
+        entries.push_back(resource_fixture::EntrySpec{
+            2U,
+            "maps/test_map.bsp",
+            138U,
+            808U,
+            0U,
+        });
+    }
+    return entries;
+}
+
+[[nodiscard]] std::vector<std::byte> manifest_resource_list_payload(
+    const PrecacheManifestIntegrationScenario scenario)
+{
+    const auto entries = manifest_resource_entries(scenario);
+    const auto message = resource_fixture::make_message(entries);
+    std::vector<std::byte> output{
+        std::byte{45U},
+        std::byte{1U}, std::byte{0U}, std::byte{0U}, std::byte{0U},
+        std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{0U},
+    };
+    output.insert(output.end(), message.bytes.begin(), message.bytes.end());
+    return output;
+}
 
 [[nodiscard]] std::vector<std::byte> second_resource_list_payload(
     const ResourceListIntegrationScenario scenario,
@@ -2528,6 +2675,647 @@ struct SyntheticRootSnapshotEntry {
     return true;
 }
 
+struct PrecacheManifestIntegrationTraceCounts {
+    std::size_t initial_requests_queued{0U};
+    std::size_t transition_requests_queued{0U};
+    std::size_t resource_lists_decoded{0U};
+    std::size_t resource_responses_queued{0U};
+    std::size_t response_boundaries{0U};
+    std::size_t manifest_publications{0U};
+    std::size_t manifest_terminal_outcomes{0U};
+    std::size_t endpoint_mismatches{0U};
+    std::optional<std::size_t> transmitted_at_response_boundary;
+    std::optional<std::size_t> transmitted_at_manifest_publication;
+    std::optional<std::size_t> transmitted_at_manifest_terminal;
+    std::optional<std::size_t> authentication_releases_at_manifest_terminal;
+};
+
+void write_manifest_integration_files(
+    const hlclient::tests::ScopedLocalResourceTestRoot& root,
+    const std::string_view game,
+    const PrecacheManifestIntegrationScenario scenario)
+{
+    root.write(game, "tempdecal.wad", "abc");
+    if (scenario !=
+        PrecacheManifestIntegrationScenario::local_map_missing) {
+        root.write(game, "maps/test_map.bsp", "synthetic bsp metadata");
+    }
+    if (scenario != PrecacheManifestIntegrationScenario::missing_model) {
+        root.write(game, "models/test_model.mdl", "synthetic model metadata");
+    }
+    if (scenario !=
+            PrecacheManifestIntegrationScenario::world_ready_missing_sound &&
+        scenario != PrecacheManifestIntegrationScenario::ambiguous_sound) {
+        root.write(game, "sound/test_sound.wav", "synthetic sound metadata");
+    }
+    if (scenario == PrecacheManifestIntegrationScenario::ambiguous_sound) {
+        const auto sound_directory = root.game_path(game) / "sound";
+        std::error_code error;
+        std::filesystem::create_directories(sound_directory, error);
+        REQUIRE_FALSE(error);
+        if (!hlclient::tests::enable_case_sensitive_directory(
+                sound_directory)) {
+            SKIP("Case-sensitive directories are unavailable for the bounded ambiguous-path integration");
+        }
+        root.write(game, "sound/test_sound.wav", "lower candidate");
+        root.write(game, "sound/TEST_SOUND.WAV", "upper candidate");
+    }
+    root.write(game, "events/test_event.sc", "synthetic event metadata");
+    root.write(game, "generic/test.dat", "synthetic generic metadata");
+}
+
+void run_precache_manifest_integration(
+    const std::size_t run,
+    const PrecacheManifestIntegrationScenario scenario,
+    const PrecacheManifestTransportScenario transport_scenario =
+        PrecacheManifestTransportScenario::baseline,
+    const bool verify_stale_locator = false)
+{
+    INFO("fake-HLDS precache-manifest run " << run + 1U);
+
+    // Alternate exact game-root selection and valve fallback while retaining
+    // one validated environment for both consistency preparation and the
+    // post-response inventory/manifest publication.
+    hlclient::tests::ScopedLocalResourceTestRoot root;
+    constexpr std::string_view game = "manifestmod";
+    root.create_game(game);
+    const bool use_game_root = (run % 2U) == 0U;
+    const std::string_view selected_game = use_game_root ? game : "valve";
+    const std::uint32_t expected_root_id = use_game_root ? 0U : 1U;
+    write_manifest_integration_files(root, selected_game, scenario);
+
+    auto roots = hlclient::local_resources::LocalResourceSearchRoots::create(
+        root.path(),
+        game);
+    INFO((roots.error ? roots.error->context : std::string{}));
+    REQUIRE(roots);
+    REQUIRE(roots.roots);
+    auto created_environment =
+        hlclient::local_resources::LocalResourceEnvironment::create(
+            std::move(*roots.roots));
+    INFO((created_environment.error
+              ? created_environment.error->context
+              : std::string{}));
+    REQUIRE(created_environment);
+    REQUIRE(created_environment.environment);
+    std::shared_ptr<hlclient::local_resources::LocalResourceEnvironment>
+        mutable_environment{std::move(created_environment.environment)};
+    std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment>
+        environment = mutable_environment;
+    REQUIRE(environment);
+    CHECK(environment->root_count() == 2U);
+
+    auto prepared_provider =
+        consistency::PreparedLocalResourceConsistencyProvider::prepare(
+            *environment);
+    INFO((prepared_provider.error
+              ? prepared_provider.error->context
+              : std::string{}));
+    REQUIRE(prepared_provider);
+    REQUIRE(prepared_provider.provider);
+    CHECK(prepared_provider.provider->validated_root_count() == 2U);
+    CHECK(prepared_provider.provider->selected_root_id().value() ==
+          expected_root_id);
+    CHECK_FALSE(prepared_provider.provider->consumed());
+    const auto before = snapshot_synthetic_root(root.path());
+
+    network::NetworkRuntime runtime;
+    INFO(runtime.error_message());
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto server = network::UdpSocket::open_ipv4(runtime, error);
+    INFO(error);
+    REQUIRE(server);
+    REQUIRE(server->bind(network::NetworkAddress::loopback(0U), error));
+    const auto server_endpoint = server->local_address(error);
+    REQUIRE(server_endpoint);
+    auto client = network::UdpSocket::open_ipv4(runtime, error);
+    REQUIRE(client);
+    REQUIRE(client->bind(network::NetworkAddress::loopback(0U), error));
+    network::UdpDatagramTransport transport{std::move(*client)};
+
+    std::size_t authentication_releases = 0U;
+    PrecacheManifestIntegrationTraceCounts traces;
+    auto prepared_request =
+        prepared_request_with_session(authentication_releases);
+    auto response_stage_config = resource_client_response_config();
+    goldsrc::PrecacheManifestStageConfig manifest_stage_config;
+    manifest_stage_config.response = response_stage_config;
+    const auto expected_remote = *server_endpoint;
+
+    goldsrc::GoldSrcHandshakeCoordinator handshake{
+        transport,
+        *server_endpoint,
+        goldsrc::HandshakeStopPoint::precache_manifest,
+        std::move(prepared_request.request),
+        challenge_config(),
+        {},
+        {},
+        response_config(),
+        {},
+        std::move(prepared_request.session),
+        {},
+        {},
+        {},
+        [&traces, expected_remote](
+            const goldsrc::InitialSignonTraceEvent& event) {
+            if (event.endpoint != expected_remote) {
+                ++traces.endpoint_mismatches;
+            }
+            if (event.classification ==
+                goldsrc::InitialSignonTraceClassification::
+                    initial_request_queued) {
+                ++traces.initial_requests_queued;
+            }
+        },
+        {},
+        {},
+        {},
+        {},
+        {},
+        {},
+        {},
+        {},
+        transition_config(),
+        [&traces, expected_remote](
+            const goldsrc::ResourceTransitionTraceEvent& event) {
+            if (event.endpoint != expected_remote) {
+                ++traces.endpoint_mismatches;
+            }
+            if (event.classification ==
+                goldsrc::ResourceTransitionTraceClassification::
+                    transition_request_queued) {
+                ++traces.transition_requests_queued;
+            }
+        },
+        response_stage_config.resource_list,
+        [&traces, expected_remote](
+            const goldsrc::ResourceListTraceEvent& event) {
+            if (event.endpoint != expected_remote) {
+                ++traces.endpoint_mismatches;
+            }
+            if (event.classification ==
+                goldsrc::ResourceListTraceClassification::
+                    resource_list_decoded) {
+                ++traces.resource_lists_decoded;
+            }
+        },
+        response_stage_config,
+        prepared_provider.provider.get(),
+        [&traces, expected_remote](
+            const goldsrc::ResourceClientResponseTraceEvent& event) {
+            if (event.endpoint != expected_remote) {
+                ++traces.endpoint_mismatches;
+            }
+            if (event.classification ==
+                goldsrc::ResourceClientResponseTraceClassification::
+                    resource_response_queued) {
+                ++traces.resource_responses_queued;
+            }
+            if (event.classification ==
+                goldsrc::ResourceClientResponseTraceClassification::
+                    next_server_boundary_reached) {
+                ++traces.response_boundaries;
+            }
+        },
+        environment,
+        manifest_stage_config,
+        [&traces, &authentication_releases, expected_remote](
+            const goldsrc::PrecacheManifestTraceEvent& event) {
+            if (event.endpoint != expected_remote) {
+                ++traces.endpoint_mismatches;
+            }
+            if (event.classification ==
+                goldsrc::PrecacheManifestTraceClassification::
+                    resource_response_boundary_reached) {
+                traces.transmitted_at_response_boundary =
+                    event.transmitted_packet_count;
+            }
+            using Classification =
+                goldsrc::PrecacheManifestTraceClassification;
+            if (event.classification ==
+                    Classification::precache_manifest_ready ||
+                event.classification ==
+                    Classification::local_resources_incomplete ||
+                event.classification ==
+                    Classification::unsafe_local_resources ||
+                event.classification ==
+                    Classification::unsupported_local_profile ||
+                event.classification ==
+                    Classification::local_resource_io_error) {
+                ++traces.manifest_publications;
+                traces.transmitted_at_manifest_publication =
+                    event.transmitted_packet_count;
+            }
+            if (event.classification ==
+                    Classification::precache_manifest_ready ||
+                event.classification ==
+                    Classification::local_resources_incomplete ||
+                event.classification ==
+                    Classification::unsafe_local_resources ||
+                event.classification ==
+                    Classification::unsupported_local_profile ||
+                event.classification ==
+                    Classification::local_resource_io_error ||
+                event.classification == Classification::protocol_failure) {
+                ++traces.manifest_terminal_outcomes;
+                traces.transmitted_at_manifest_terminal =
+                    event.transmitted_packet_count;
+                traces.authentication_releases_at_manifest_terminal =
+                    authentication_releases;
+            }
+        }};
+
+    const auto epoch = goldsrc::ChallengeExchangeTimePoint{} +
+        std::chrono::milliseconds{90'000 + static_cast<std::int64_t>(run)};
+    const auto started = reach_first_service_request(
+        *server, handshake, epoch, error);
+    REQUIRE(handshake.local_endpoint());
+    CHECK(*handshake.local_endpoint() == started.client_endpoint);
+    CHECK(handshake.connect_send_attempts() == 1U);
+    CHECK_FALSE(handshake.terminal());
+    require_no_datagram(*server);
+
+    const auto first_batch = send_first_service_batch(
+        *server,
+        handshake,
+        started,
+        epoch + 4ms,
+        manifest_first_semantic_payload(),
+        error);
+    CHECK_FALSE(handshake.terminal());
+
+    handshake.update(first_batch.next_update);
+    const auto transition = decode_client_packet(
+        receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+        started.client_endpoint);
+    REQUIRE(is_exact_transition_request(transition));
+    REQUIRE(transition.header.sequence.flags.reliable);
+    auto last_client_sequence =
+        transition.header.sequence.sequence.value();
+    auto server_sequence = first_batch.next_server_sequence;
+    require_no_datagram(*server);
+
+    send_server_datagram(
+        *server,
+        started.client_endpoint,
+        server_packet(
+            server_sequence++,
+            false,
+            last_client_sequence,
+            false,
+            {}),
+        error);
+    handshake.update(first_batch.next_update + 1ms);
+    CHECK_FALSE(handshake.terminal());
+
+    const auto semantic = manifest_resource_list_payload(scenario);
+    const auto envelope = service_envelope(semantic);
+    const auto fragment_count_size =
+        (envelope.size() + goldsrc::kStockProtocol48NormalFragmentChunkSize -
+         1U) /
+        goldsrc::kStockProtocol48NormalFragmentChunkSize;
+    REQUIRE(fragment_count_size > 0U);
+    REQUIRE(fragment_count_size <=
+            (std::numeric_limits<std::uint16_t>::max)());
+    const auto fragment_count =
+        static_cast<std::uint16_t>(fragment_count_size);
+
+    auto now = first_batch.next_update + 2ms;
+    for (std::uint16_t index = 1U; index <= fragment_count; ++index) {
+        const auto offset = static_cast<std::size_t>(index - 1U) *
+            goldsrc::kStockProtocol48NormalFragmentChunkSize;
+        const auto length = (std::min)(
+            goldsrc::kStockProtocol48NormalFragmentChunkSize,
+            envelope.size() - offset);
+        send_server_datagram(
+            *server,
+            started.client_endpoint,
+            server_fragment(
+                server_sequence++,
+                last_client_sequence,
+                false,
+                index,
+                fragment_count,
+                std::span<const std::byte>{envelope}.subspan(offset, length)),
+            error);
+        handshake.update(now);
+        const auto acknowledgement = decode_client_packet(
+            receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+            started.client_endpoint);
+        check_transport_only_packet(acknowledgement);
+        last_client_sequence =
+            acknowledgement.header.sequence.sequence.value();
+        now += 1ms;
+    }
+
+    handshake.update(now);
+    auto response = decode_client_packet(
+        receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+        started.client_endpoint);
+    check_exact_resource_response_packet(
+        response,
+        kExactLocalProviderResponse);
+    CHECK_FALSE(handshake.terminal());
+    std::size_t response_datagrams = 1U;
+
+    if (transport_scenario ==
+        PrecacheManifestTransportScenario::dropped_acknowledgement) {
+        // Withhold the covering ACK for one bounded update. The semantic unit
+        // must remain queued exactly once and no premature retry is emitted.
+        handshake.update(now + 1ms);
+        require_no_datagram(*server);
+        now += 1ms;
+    }
+
+    if (transport_scenario ==
+            PrecacheManifestTransportScenario::dropped_response ||
+        transport_scenario ==
+            PrecacheManifestTransportScenario::dropped_acknowledgement) {
+        // Create the same reliable-generation gap used by the historical
+        // response integration. It requests a transport retry without a
+        // second semantic queue.
+        send_server_datagram(
+            *server,
+            started.client_endpoint,
+            server_packet(
+                server_sequence++,
+                true,
+                response.header.sequence.sequence.value(),
+                false,
+                {}),
+            error);
+        handshake.update(now + 1ms);
+        const auto gap_packet = decode_client_packet(
+            receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+            started.client_endpoint);
+        check_transport_only_packet(gap_packet);
+
+        send_server_datagram(
+            *server,
+            started.client_endpoint,
+            server_packet(
+                server_sequence++,
+                false,
+                gap_packet.header.sequence.sequence.value(),
+                false,
+                {}),
+            error);
+        handshake.update(now + 2ms);
+        auto retry = decode_client_packet(
+            receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+            started.client_endpoint);
+        check_exact_resource_response_packet(
+            retry,
+            kExactLocalProviderResponse);
+        REQUIRE(response.fragments[0U]);
+        REQUIRE(retry.fragments[0U]);
+        CHECK(retry.fragments[0U]->packed_id() ==
+              response.fragments[0U]->packed_id());
+        CHECK(retry.payload == response.payload);
+        CHECK(retry.header.sequence.sequence !=
+              response.header.sequence.sequence);
+        response = std::move(retry);
+        ++response_datagrams;
+        now += 2ms;
+    }
+
+    const auto next_payload = post_response_semantic_payload();
+    send_server_datagram(
+        *server,
+        started.client_endpoint,
+        server_packet(
+            server_sequence++,
+            false,
+            response.header.sequence.sequence.value(),
+            true,
+            service_envelope(next_payload)),
+        error);
+    handshake.update(now + 1ms);
+    CHECK_FALSE(handshake.terminal());
+    CHECK(handshake.state() ==
+          goldsrc::GoldSrcHandshakeState::waiting_for_precache_manifest);
+    require_no_datagram(*server);
+
+    // These two deterministic metadata-only updates build the inventory and
+    // manifest. Neither is allowed to drive the retained network session.
+    handshake.update(now + 2ms);
+    CHECK_FALSE(handshake.terminal());
+    require_no_datagram(*server);
+    handshake.update(now + 3ms);
+    REQUIRE(handshake.terminal());
+    require_no_datagram(*server);
+
+    if (scenario ==
+        PrecacheManifestIntegrationScenario::duplicate_map_match) {
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::protocol_error);
+        CHECK_FALSE(handshake.precache_manifest_result());
+        REQUIRE(handshake.precache_manifest_error());
+        CHECK(handshake.precache_manifest_error()->code ==
+              goldsrc::PrecacheManifestStageErrorCode::manifest_build_failed);
+        CHECK(handshake.precache_manifest_error()->manifest_code ==
+              goldsrc::PrecacheManifestErrorCode::readiness_build_failed);
+        CHECK(traces.initial_requests_queued == 1U);
+        CHECK(traces.transition_requests_queued == 1U);
+        CHECK(traces.resource_lists_decoded == 1U);
+        CHECK(traces.resource_responses_queued == 1U);
+        CHECK(traces.response_boundaries == 1U);
+        CHECK(traces.manifest_publications == 0U);
+        CHECK(traces.manifest_terminal_outcomes == 1U);
+        CHECK(traces.endpoint_mismatches == 0U);
+        REQUIRE(traces.transmitted_at_response_boundary);
+        REQUIRE(traces.transmitted_at_manifest_terminal);
+        REQUIRE(traces.authentication_releases_at_manifest_terminal);
+        CHECK(*traces.transmitted_at_manifest_terminal ==
+              *traces.transmitted_at_response_boundary);
+        CHECK(*traces.authentication_releases_at_manifest_terminal == 1U);
+        CHECK(prepared_provider.provider->consumed());
+        CHECK(authentication_releases == 1U);
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+        CHECK(can_open_synthetic_writer(
+            root.game_path(selected_game) / "tempdecal.wad"));
+        handshake.update(now + 100ms);
+        handshake.cancel(now + 200ms);
+        CHECK(authentication_releases == 1U);
+        require_no_datagram(*server);
+        return;
+    }
+
+    REQUIRE_FALSE(handshake.precache_manifest_error());
+    REQUIRE(handshake.precache_manifest_result());
+    const auto& publication = *handshake.precache_manifest_result();
+    const auto& manifest = publication.manifest();
+    const auto expected_entries = manifest_resource_entries(scenario);
+    const auto expected_map_index = static_cast<std::uint16_t>(
+        scenario == PrecacheManifestIntegrationScenario::sparse_slots
+            ? 4'095U
+            : 137U);
+    CHECK(publication.environment().get() == environment.get());
+    CHECK(publication.inventory().entry_count() == expected_entries.size());
+    CHECK(manifest.entry_count() == expected_entries.size());
+    CHECK(manifest.world_selection().wire_ordinal() == 5U);
+    CHECK(manifest.world_selection().entry_offset() == 5U);
+    CHECK(manifest.world_selection().resource_index() == expected_map_index);
+    REQUIRE(manifest.world_entry());
+    CHECK(manifest.world_entry() ==
+          manifest.find(goldsrc::ResourceType::model, expected_map_index));
+    CHECK(manifest.model_slots().entry_offset(expected_map_index) == 5U);
+    const auto& response_result = publication.response();
+    CHECK(response_result.response().wire_name() == "tempdecal.wad");
+    CHECK(response_result.response().byte_count() == 3U);
+    CHECK(response_result.reliable_lifecycle().fragmented());
+    CHECK(response_result.reliable_lifecycle().fragment_count() == 1U);
+    CHECK(response_result.reliable_lifecycle().transmit_count() ==
+          response_datagrams);
+    CHECK(response_result.reliable_lifecycle().acknowledgement().sequence ==
+          response.header.sequence.sequence);
+    CHECK(response_result.reliable_lifecycle().acknowledgement().reliable);
+
+    const bool missing_map =
+        scenario == PrecacheManifestIntegrationScenario::local_map_missing;
+    CHECK(manifest.world_selection().status() ==
+          (missing_map
+               ? goldsrc::WorldResourceReadiness::local_map_missing
+               : goldsrc::WorldResourceReadiness::ready));
+    CHECK(manifest.world_geometry_ready() == !missing_map);
+    if (missing_map) {
+        CHECK_FALSE(manifest.world_selection().locator());
+    } else {
+        REQUIRE(manifest.world_selection().locator());
+        CHECK(manifest.world_selection().locator()->root_id().value() ==
+              expected_root_id);
+    }
+
+    const auto& summary = manifest.readiness_summary();
+    CHECK(summary.total_entry_count() == expected_entries.size());
+    CHECK(summary.metadata_only_count() == 1U);
+    switch (scenario) {
+    case PrecacheManifestIntegrationScenario::complete:
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::precache_manifest_ready);
+        CHECK(manifest.completeness() ==
+              goldsrc::PrecacheManifestCompleteness::
+                  complete_for_supported_local_profile);
+        CHECK(manifest.complete_for_supported_local_profile());
+        CHECK(summary.resolved_mapped_file_count() == 5U);
+        CHECK(summary.missing_count() == 0U);
+        break;
+    case PrecacheManifestIntegrationScenario::world_ready_missing_sound:
+    case PrecacheManifestIntegrationScenario::missing_model:
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::local_resources_incomplete);
+        CHECK(manifest.completeness() ==
+              goldsrc::PrecacheManifestCompleteness::
+                  world_ready_but_incomplete);
+        CHECK_FALSE(manifest.complete_for_supported_local_profile());
+        CHECK(summary.resolved_mapped_file_count() == 4U);
+        CHECK(summary.missing_count() == 1U);
+        break;
+    case PrecacheManifestIntegrationScenario::local_map_missing:
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::local_resources_incomplete);
+        CHECK(manifest.completeness() ==
+              goldsrc::PrecacheManifestCompleteness::
+                  incomplete_missing_resources);
+        CHECK_FALSE(manifest.complete_for_supported_local_profile());
+        CHECK(summary.resolved_mapped_file_count() == 4U);
+        CHECK(summary.missing_count() == 1U);
+        break;
+    case PrecacheManifestIntegrationScenario::sparse_slots:
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::precache_manifest_ready);
+        CHECK(manifest.completeness() ==
+              goldsrc::PrecacheManifestCompleteness::
+                  complete_for_supported_local_profile);
+        CHECK(manifest.sound_slots().slot_count() == 4'096U);
+        CHECK(manifest.model_slots().slot_count() == 4'096U);
+        CHECK(manifest.generic_slots().slot_count() == 4'096U);
+        CHECK(manifest.event_script_slots().slot_count() == 4'096U);
+        CHECK(manifest.decal_slots().slot_count() == 4'096U);
+        CHECK_FALSE(manifest.sound_slots().entry_offset(4'094U));
+        CHECK(manifest.sound_slots().entry_offset(4'095U) == 1U);
+        CHECK(manifest.generic_slots().entry_offset(4'095U) == 0U);
+        CHECK(manifest.event_script_slots().entry_offset(4'095U) == 3U);
+        CHECK(manifest.decal_slots().entry_offset(4'095U) == 4U);
+        break;
+    case PrecacheManifestIntegrationScenario::malicious_name:
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::unsafe_local_resources);
+        CHECK(manifest.completeness() ==
+              goldsrc::PrecacheManifestCompleteness::
+                  blocked_unsafe_resources);
+        CHECK(summary.security_blocked_count() == 1U);
+        REQUIRE(manifest.find(goldsrc::ResourceType::generic, 73U));
+        CHECK(manifest.find(goldsrc::ResourceType::generic, 73U)
+                  ->readiness_status() ==
+              goldsrc::LocalResourceReadinessStatus::unsafe_name);
+        break;
+    case PrecacheManifestIntegrationScenario::unsupported_non_ascii:
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::unsupported_local_profile);
+        CHECK(manifest.completeness() ==
+              goldsrc::PrecacheManifestCompleteness::unsupported_profile);
+        CHECK(summary.unsupported_count() == 1U);
+        break;
+    case PrecacheManifestIntegrationScenario::ambiguous_sound:
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::local_resource_io_error);
+        CHECK(manifest.completeness() ==
+              goldsrc::PrecacheManifestCompleteness::local_io_failure);
+        CHECK(summary.ambiguous_count() == 1U);
+        break;
+    case PrecacheManifestIntegrationScenario::duplicate_map_match:
+        FAIL("Duplicate map match must have returned through the transactional failure branch");
+    }
+
+    CHECK(traces.initial_requests_queued == 1U);
+    CHECK(traces.transition_requests_queued == 1U);
+    CHECK(traces.resource_lists_decoded == 1U);
+    CHECK(traces.resource_responses_queued == 1U);
+    CHECK(traces.response_boundaries == 1U);
+    CHECK(traces.manifest_publications == 1U);
+    CHECK(traces.manifest_terminal_outcomes == 1U);
+    CHECK(traces.endpoint_mismatches == 0U);
+    REQUIRE(traces.transmitted_at_response_boundary);
+    REQUIRE(traces.transmitted_at_manifest_publication);
+    REQUIRE(traces.transmitted_at_manifest_terminal);
+    REQUIRE(traces.authentication_releases_at_manifest_terminal);
+    CHECK(*traces.transmitted_at_manifest_publication ==
+          *traces.transmitted_at_response_boundary);
+    CHECK(*traces.transmitted_at_manifest_terminal ==
+          *traces.transmitted_at_response_boundary);
+    CHECK(*traces.authentication_releases_at_manifest_terminal == 0U);
+    CHECK(prepared_provider.provider->consumed());
+    CHECK(authentication_releases == 1U);
+    CHECK(snapshot_synthetic_root(root.path()) == before);
+    CHECK(can_open_synthetic_writer(
+        root.game_path(selected_game) / "tempdecal.wad"));
+
+    if (verify_stale_locator) {
+        REQUIRE(manifest.world_selection().locator());
+        const auto locator = *manifest.world_selection().locator();
+        root.write(
+            selected_game,
+            "maps/test_map.bsp",
+            "synthetic replacement with changed size");
+        const auto reopened = environment->reopen_verified(locator);
+        REQUIRE_FALSE(reopened);
+        REQUIRE(reopened.error);
+        CHECK(reopened.error->code ==
+              hlclient::local_resources::
+                  LocalResourceLocatorReopenErrorCode::stale_locator);
+    }
+
+    handshake.update(now + 100ms);
+    handshake.cancel(now + 200ms);
+    CHECK(authentication_releases == 1U);
+    require_no_datagram(*server);
+    if (!verify_stale_locator) {
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+    }
+}
+
 class ScopedChildProcess final {
 public:
     ~ScopedChildProcess()
@@ -2885,6 +3673,108 @@ TEST_CASE("Production local provider rejects malicious server paths for 20 of 20
             ResourceResponseIntegrationScenario::malicious_resource_names,
             false);
     }
+}
+
+TEST_CASE("Fake HLDS complete precache manifest repeats 20 of 20",
+          "[goldsrc][precache-manifest][udp][complete][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::complete);
+    }
+}
+
+TEST_CASE("Fake HLDS world-ready incomplete precache manifest repeats 20 of 20",
+          "[goldsrc][precache-manifest][udp][incomplete][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::world_ready_missing_sound);
+    }
+}
+
+TEST_CASE("Fake HLDS locally missing map precache manifest repeats 20 of 20",
+          "[goldsrc][precache-manifest][udp][missing-map][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::local_map_missing);
+    }
+}
+
+TEST_CASE("Fake HLDS sparse maximum-index precache manifest repeats 20 of 20",
+          "[goldsrc][precache-manifest][udp][sparse-slots][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::sparse_slots);
+    }
+}
+
+TEST_CASE("Fake HLDS malicious-name precache manifest repeats 20 of 20",
+          "[goldsrc][precache-manifest][udp][security][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::malicious_name);
+    }
+}
+
+TEST_CASE("Fake HLDS precache manifest covers bounded secondary variants",
+          "[goldsrc][precache-manifest][udp][variants]")
+{
+    SECTION("missing non-world model") {
+        run_precache_manifest_integration(
+            100U,
+            PrecacheManifestIntegrationScenario::missing_model);
+    }
+
+    SECTION("unsupported non-ASCII server name") {
+        run_precache_manifest_integration(
+            101U,
+            PrecacheManifestIntegrationScenario::unsupported_non_ascii);
+    }
+
+    SECTION("duplicate exact ServerInfo map match") {
+        run_precache_manifest_integration(
+            102U,
+            PrecacheManifestIntegrationScenario::duplicate_map_match);
+    }
+
+    SECTION("published locator becomes stale after synthetic replacement") {
+        run_precache_manifest_integration(
+            103U,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::baseline,
+            true);
+    }
+
+    SECTION("dropped resource response retries transport only") {
+        run_precache_manifest_integration(
+            105U,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::dropped_response);
+    }
+
+    SECTION("dropped response ACK retries transport only") {
+        run_precache_manifest_integration(
+            106U,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::dropped_acknowledgement);
+    }
+}
+
+TEST_CASE("Fake HLDS case-ambiguous precache manifest runs when supported",
+          "[goldsrc][precache-manifest][udp][ambiguous][capability]")
+{
+    run_precache_manifest_integration(
+        104U,
+        PrecacheManifestIntegrationScenario::ambiguous_sound);
 }
 
 TEST_CASE("Local provider preparation failures emit zero UDP packets",

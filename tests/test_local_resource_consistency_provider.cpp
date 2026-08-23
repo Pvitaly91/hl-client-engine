@@ -29,6 +29,19 @@ static_assert(!std::is_copy_constructible_v<
 static_assert(!std::is_copy_assignable_v<
               consistency::PreparedLocalResourceConsistencyProvider>);
 
+[[nodiscard]] local::LocalResourceEnvironmentCreateResult make_environment(
+    ScopedLocalResourceTestRoot& temporary,
+    const std::string_view game = "valve",
+    const local::LocalResourceResolverLimits limits = {})
+{
+    auto roots =
+        local::LocalResourceSearchRoots::create(temporary.path(), game);
+    REQUIRE(roots);
+    REQUIRE(roots.roots);
+    return local::LocalResourceEnvironment::create(
+        std::move(*roots.roots), limits);
+}
+
 [[nodiscard]] consistency::
     PreparedLocalResourceConsistencyProviderCreateResult
 prepare(
@@ -161,6 +174,61 @@ TEST_CASE("Prepared local provider publishes known material once and promptly",
     REQUIRE(second.error);
     CHECK(second.error->code ==
           consistency::ResourceConsistencyErrorCode::unavailable);
+}
+
+TEST_CASE("Prepared local provider reuses one validated local environment",
+          "[local-resource][provider][environment]")
+{
+    ScopedLocalResourceTestRoot temporary;
+    temporary.write("valve", "tempdecal.wad", "abc");
+    temporary.write("valve", "independent.bin", "candidate");
+
+    auto environment = make_environment(temporary);
+    REQUIRE(environment);
+    REQUIRE(environment.environment);
+    const auto root_count = environment.environment->root_count();
+
+    auto incompatible_inspection =
+        local::LocalResourceFileInspectionLimits{};
+    incompatible_inspection.maximum_file_size =
+        environment.environment->limits().maximum_file_size + 1U;
+    auto rejected =
+        consistency::PreparedLocalResourceConsistencyProvider::prepare(
+            *environment.environment, incompatible_inspection);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error);
+    CHECK(rejected.error->code ==
+          consistency::ResourceConsistencyErrorCode::invalid_configuration);
+
+    auto prepared =
+        consistency::PreparedLocalResourceConsistencyProvider::prepare(
+            *environment.environment);
+    REQUIRE(prepared);
+    CHECK(prepared.provider->validated_root_count() == root_count);
+    CHECK(prepared.provider->selected_root_id().valid());
+    CHECK(prepared.provider->selected_root_id().value() == 0U);
+    CHECK(prepared.provider->byte_count() == 3U);
+    CHECK(prepared.provider->opaque_byte_count() == 16U);
+
+    // Preparation borrows the environment only for its synchronous resolve;
+    // the same retained root set remains available to later inventory work.
+    auto independent =
+        environment.environment->resolver().resolve("independent.bin");
+    REQUIRE(independent);
+    CHECK(independent.file->file_size() == 9U);
+    CHECK(independent.file->bytes_consumed() == 0U);
+
+    const auto requirements =
+        consistency::ResourceConsistencyRequirements::
+            stock_opcode5_single_resource();
+    REQUIRE(requirements);
+    auto begun = prepared.provider->begin(*requirements);
+    REQUIRE(begun);
+    auto completed = begun.operation->update();
+    REQUIRE(completed.session);
+    auto material = completed.session->take_material();
+    REQUIRE(material);
+    CHECK(material->byte_count() == 3U);
 }
 
 TEST_CASE("Prepared local provider fails closed without fallback material",

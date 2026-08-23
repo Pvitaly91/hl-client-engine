@@ -155,16 +155,36 @@ PreparedLocalResourceConsistencyProvider::prepare(
             "Local consistency provider limits are outside project hard caps");
     }
 
-    const auto root_count = roots.size();
-    auto resolver_result =
-        local::LocalResourceResolver::create(std::move(roots), limits.resolver);
-    if (!resolver_result) {
+    auto environment =
+        local::LocalResourceEnvironment::create(std::move(roots), limits.resolver);
+    if (!environment || !environment.environment) {
         return failure(
             ResourceConsistencyErrorCode::invalid_configuration,
-            resolver_result.error
-                ? resolver_result.error->context
-                : "Unable to create the local resource resolver");
+            environment.error
+                ? environment.error->context
+                : "Unable to create the local resource environment");
     }
+    return prepare(*environment.environment, limits.inspection);
+}
+
+PreparedLocalResourceConsistencyProviderCreateResult
+PreparedLocalResourceConsistencyProvider::prepare(
+    const local::LocalResourceEnvironment& environment,
+    const local::LocalResourceFileInspectionLimits inspection_limits)
+{
+    if (environment.root_count() == 0U ||
+        !local::valid_local_resource_resolver_limits(environment.limits()) ||
+        !local::valid_local_resource_file_inspection_limits(
+            inspection_limits) ||
+        inspection_limits.maximum_file_size >
+            environment.limits().maximum_file_size ||
+        !inspection_limits.require_non_empty) {
+        return failure(
+            ResourceConsistencyErrorCode::invalid_configuration,
+            "Local consistency provider environment or inspection limits are invalid");
+    }
+
+    const auto root_count = environment.root_count();
 
     auto target =
         local::LocalVirtualResourceName::create(kStockOpcode5LocalConsistencyTarget);
@@ -173,14 +193,15 @@ PreparedLocalResourceConsistencyProvider::prepare(
             ResourceConsistencyErrorCode::invalid_configuration,
             "The fixed local consistency target is invalid");
     }
-    auto resolution = resolver_result.resolver->resolve(*target.name);
+    auto resolution = environment.resolver().resolve(*target.name);
     if (!resolution) {
         return failure(map_resolution_error(resolution.code), resolution.context);
     }
 
     auto file = std::move(*resolution.file);
     const auto selected_root = file.root_id();
-    auto inspection = local::inspect_local_resource_file(file, limits.inspection);
+    auto inspection =
+        local::inspect_local_resource_file(file, inspection_limits);
     if (!inspection) {
         return failure(
             map_inspection_error(inspection.error->code),

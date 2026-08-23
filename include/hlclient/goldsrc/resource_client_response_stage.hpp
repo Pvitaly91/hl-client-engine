@@ -16,6 +16,8 @@
 
 namespace hlclient::goldsrc {
 
+class PrecacheManifestStage;
+
 using ResourceClientResponseStageClock = ResourceListStageClock;
 using ResourceClientResponseStageTimePoint = ResourceListStageTimePoint;
 
@@ -346,6 +348,47 @@ public:
     [[nodiscard]] bool response_acknowledged() const noexcept;
 
 private:
+    friend class PrecacheManifestStage;
+
+    // Only the metadata-only precache-manifest continuation may keep the
+    // already-started driver alive across the post-response boundary. Public
+    // callers retain the historical close-on-boundary behavior.
+    struct RetainConnectionAtBoundary final {};
+
+    ResourceClientResponseStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        ResourceClientResponseStageConfig config,
+        resource_consistency::IResourceConsistencyProvider*
+            consistency_provider,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback movement_trace_callback,
+        UserInfoSignonTraceCallback user_info_trace_callback,
+        ResourceTransitionTraceCallback transition_trace_callback,
+        ResourceListTraceCallback resource_list_trace_callback,
+        ResourceClientResponseTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+    ResourceClientResponseStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        ResourceClientResponseStageConfig config,
+        resource_consistency::IResourceConsistencyProvider*
+            consistency_provider,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback movement_trace_callback,
+        UserInfoSignonTraceCallback user_info_trace_callback,
+        ResourceTransitionTraceCallback transition_trace_callback,
+        ResourceListTraceCallback resource_list_trace_callback,
+        ResourceClientResponseTraceCallback trace_callback,
+        bool retain_connection_at_boundary);
+
+    [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    void finalize_retained_boundary(
+        ResourceClientResponseStageTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count = 1U) const noexcept;
     void push_event(ResourceClientResponseStageEvent event) noexcept;
     void drain_resource_list_events() noexcept;
@@ -409,6 +452,7 @@ private:
     ResourceClientResponseTraceCallback trace_callback_;
     bool trace_callback_active_{false};
     bool configuration_valid_{false};
+    bool retain_connection_at_boundary_{false};
     ResourceListStage resource_list_stage_;
     std::vector<std::optional<ResourceClientResponseStageEvent>> event_slots_;
     std::size_t event_head_{0U};

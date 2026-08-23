@@ -343,11 +343,74 @@ ResourceClientResponseStage::ResourceClientResponseStage(
     ResourceTransitionTraceCallback transition_trace_callback,
     ResourceListTraceCallback resource_list_trace_callback,
     ResourceClientResponseTraceCallback trace_callback)
+    : ResourceClientResponseStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          consistency_provider,
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(movement_trace_callback),
+          std::move(user_info_trace_callback),
+          std::move(transition_trace_callback),
+          std::move(resource_list_trace_callback),
+          std::move(trace_callback),
+          false}
+{
+}
+
+ResourceClientResponseStage::ResourceClientResponseStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    ResourceClientResponseStageConfig config,
+    resource_consistency::IResourceConsistencyProvider* consistency_provider,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback movement_trace_callback,
+    UserInfoSignonTraceCallback user_info_trace_callback,
+    ResourceTransitionTraceCallback transition_trace_callback,
+    ResourceListTraceCallback resource_list_trace_callback,
+    ResourceClientResponseTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : ResourceClientResponseStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          consistency_provider,
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(movement_trace_callback),
+          std::move(user_info_trace_callback),
+          std::move(transition_trace_callback),
+          std::move(resource_list_trace_callback),
+          std::move(trace_callback),
+          true}
+{
+}
+
+ResourceClientResponseStage::ResourceClientResponseStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    ResourceClientResponseStageConfig config,
+    resource_consistency::IResourceConsistencyProvider* consistency_provider,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback movement_trace_callback,
+    UserInfoSignonTraceCallback user_info_trace_callback,
+    ResourceTransitionTraceCallback transition_trace_callback,
+    ResourceListTraceCallback resource_list_trace_callback,
+    ResourceClientResponseTraceCallback trace_callback,
+    const bool retain_connection_at_boundary)
     : config_{std::move(config)},
       consistency_provider_{consistency_provider},
       trace_callback_{std::move(trace_callback)},
       configuration_valid_{
           valid_resource_client_response_stage_configuration(config_)},
+      retain_connection_at_boundary_{retain_connection_at_boundary},
       resource_list_stage_{
           transport,
           remote_endpoint,
@@ -669,6 +732,28 @@ bool ResourceClientResponseStage::response_transmitted() const noexcept
 bool ResourceClientResponseStage::response_acknowledged() const noexcept
 {
     return response_acknowledged_;
+}
+
+NetchanDriver* ResourceClientResponseStage::retained_driver() noexcept
+{
+    if (!retain_connection_at_boundary_ ||
+        state_ !=
+            ResourceClientResponseStageState::next_server_boundary_reached ||
+        cleanup_done_) {
+        return nullptr;
+    }
+    return resource_list_stage_.retained_driver();
+}
+
+void ResourceClientResponseStage::finalize_retained_boundary(
+    const ResourceClientResponseStageTimePoint now) noexcept
+{
+    if (!retain_connection_at_boundary_ ||
+        state_ !=
+            ResourceClientResponseStageState::next_server_boundary_reached) {
+        return;
+    }
+    cleanup(now);
 }
 
 bool ResourceClientResponseStage::can_push_events(
@@ -1685,7 +1770,9 @@ void ResourceClientResponseStage::decode_pending_server_payload(
         .fragmented = envelope.payload.reassembled,
         .occurred_at = now,
     });
-    cleanup(now);
+    if (!retain_connection_at_boundary_) {
+        cleanup(now);
+    }
     emit_trace(
         ResourceClientResponseTraceClassification::
             next_server_boundary_reached,

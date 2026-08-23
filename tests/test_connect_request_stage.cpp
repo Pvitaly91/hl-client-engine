@@ -31,6 +31,8 @@ using hlclient::goldsrc::GoldSrcHandshakeCoordinator;
 using hlclient::goldsrc::GoldSrcHandshakeState;
 using hlclient::goldsrc::HandshakeStopPoint;
 using hlclient::goldsrc::PrepareConnectRequestResult;
+using hlclient::auth::AuthenticationSession;
+using hlclient::auth::IAuthenticationSessionLifetime;
 using hlclient::network::Datagram;
 using hlclient::network::DatagramLocalAddressResult;
 using hlclient::network::DatagramSendResult;
@@ -122,6 +124,20 @@ public:
     std::vector<SentDatagram> sent;
     std::vector<std::size_t> receive_limits;
     std::deque<DatagramTransportReceiveResult> incoming;
+};
+
+class CountingAuthenticationLifetime final
+    : public IAuthenticationSessionLifetime {
+public:
+    explicit CountingAuthenticationLifetime(std::size_t& releases) noexcept
+        : releases_{releases}
+    {
+    }
+
+    ~CountingAuthenticationLifetime() override { ++releases_; }
+
+private:
+    std::size_t& releases_;
 };
 
 [[nodiscard]] std::vector<std::byte> ascii_bytes(const std::string_view text)
@@ -231,6 +247,50 @@ TEST_CASE("Connect stage 1: challenge success supplies the token to the request"
         transport.sent[1].payload, synthetic_profile());
     REQUIRE(parsed);
     CHECK(parsed.request->challenge() == 123'456'789U);
+}
+
+TEST_CASE("Precache-manifest coordinator mode requires one retained local environment",
+          "[goldsrc][connect-stage][precache][configuration]")
+{
+    FakeDatagramTransport transport;
+    const auto endpoint = NetworkAddress::loopback(27'014);
+    auto prepared = prepared_request();
+    REQUIRE(prepared);
+    auto authentication = synthetic_authentication();
+    REQUIRE(authentication);
+    std::size_t authentication_releases = 0U;
+    {
+        AuthenticationSession session{
+            std::move(*authentication.value),
+            std::make_unique<CountingAuthenticationLifetime>(
+                authentication_releases)};
+        GoldSrcHandshakeCoordinator coordinator{
+            transport,
+            endpoint,
+            HandshakeStopPoint::precache_manifest,
+            std::move(prepared.value),
+            {},
+            {},
+            {},
+            {},
+            {},
+            std::move(session)};
+
+        CHECK(coordinator.state() ==
+              GoldSrcHandshakeState::configuration_error);
+        CHECK(coordinator.terminal());
+        CHECK(authentication_releases == 1U);
+        CHECK_FALSE(coordinator.start(ChallengeExchangeTimePoint{}));
+        coordinator.cancel(ChallengeExchangeTimePoint{});
+        coordinator.update(ChallengeExchangeTimePoint{});
+        CHECK(authentication_releases == 1U);
+        CHECK(coordinator.precache_manifest_result() == std::nullopt);
+        CHECK(coordinator.precache_manifest_error() == std::nullopt);
+        CHECK(coordinator.error_context().find("local resource environment") !=
+              std::string_view::npos);
+        CHECK(transport.sent.empty());
+    }
+    CHECK(authentication_releases == 1U);
 }
 
 TEST_CASE("Connect stage 2: builder preserves the exact 32-bit challenge bit pattern",

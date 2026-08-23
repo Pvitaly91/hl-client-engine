@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace hlclient::local_resources {
@@ -18,6 +19,7 @@ inline constexpr std::size_t kMaximumLocalResourceSearchRoots = 8U;
 namespace detail {
 struct LocalResourceBaseStorage;
 struct LocalResourceRootStorage;
+struct LocalResourceRootSetToken;
 }
 
 class LocalResourceResolver;
@@ -27,6 +29,7 @@ struct LocalResourceSearchRootsCreateResult;
 class LocalResourceRootId final {
 public:
     [[nodiscard]] std::uint32_t value() const noexcept { return value_; }
+    [[nodiscard]] bool valid() const noexcept { return token_ != nullptr; }
 
     friend bool operator==(
         const LocalResourceRootId&,
@@ -36,12 +39,18 @@ private:
     friend class LocalResourceSearchRoots;
     friend class LocalResourceResolver;
     friend class LocalReadOnlyFile;
-    explicit LocalResourceRootId(const std::uint32_t value) noexcept
-        : value_{value}
+    explicit LocalResourceRootId(
+        const std::uint32_t value,
+        std::shared_ptr<const detail::LocalResourceRootSetToken> token = {})
+        noexcept
+        : value_{value}, token_{std::move(token)}
     {
     }
 
     std::uint32_t value_{0U};
+    // Equality includes opaque root-set provenance, not just the display
+    // ordinal. The token owns no filesystem handles or native paths.
+    std::shared_ptr<const detail::LocalResourceRootSetToken> token_;
 };
 
 enum class LocalResourceRootKind {

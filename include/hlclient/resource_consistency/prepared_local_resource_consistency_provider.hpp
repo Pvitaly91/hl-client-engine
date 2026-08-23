@@ -1,8 +1,7 @@
 #pragma once
 
+#include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_file_inspection.hpp>
-#include <hlclient/local_resources/local_resource_resolver.hpp>
-#include <hlclient/local_resources/local_resource_search_roots.hpp>
 #include <hlclient/resource_consistency/provider.hpp>
 
 #include <cstddef>
@@ -44,6 +43,11 @@ public:
     prepare(
         local_resources::LocalResourceSearchRoots roots,
         PreparedLocalResourceConsistencyProviderLimits limits = {});
+    [[nodiscard]] static PreparedLocalResourceConsistencyProviderCreateResult
+    prepare(
+        const local_resources::LocalResourceEnvironment& environment,
+        local_resources::LocalResourceFileInspectionLimits inspection_limits =
+            {});
 
     ~PreparedLocalResourceConsistencyProvider() override = default;
     PreparedLocalResourceConsistencyProvider(

@@ -245,7 +245,8 @@ struct OpenIntermediateDirectoryResult {
 
 [[nodiscard]] OpenIntermediateDirectoryResult open_intermediate_directory(
     const std::wstring& candidate,
-    const detail::LocalResourceRootStorage& root)
+    const detail::LocalResourceRootStorage& root,
+    const bool exact_root_lookup)
 {
     detail::UniqueHandle handle{::CreateFileW(
         candidate.c_str(),
@@ -256,10 +257,15 @@ struct OpenIntermediateDirectoryResult {
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr)};
     if (!handle) {
+        const auto open_error = ::GetLastError();
         return OpenIntermediateDirectoryResult{
             {},
-            LocalResourceResolutionCode::io_error,
-            "Intermediate local resource directory changed during lookup"};
+            exact_root_lookup && detail::is_missing_error(open_error)
+                ? LocalResourceResolutionCode::not_found
+                : LocalResourceResolutionCode::io_error,
+            exact_root_lookup && detail::is_missing_error(open_error)
+                ? "An intermediate locator directory disappeared from its selected root"
+                : "Intermediate local resource directory changed during lookup"};
     }
 
     BY_HANDLE_FILE_INFORMATION information{};
@@ -374,6 +380,20 @@ LocalResourceResolutionResult LocalResourceResolver::resolve(
 LocalResourceResolutionResult LocalResourceResolver::resolve(
     const LocalVirtualResourceName& name) const
 {
+    return resolve_from_roots(name, std::nullopt);
+}
+
+LocalResourceResolutionResult LocalResourceResolver::resolve_exact_root(
+    const LocalVirtualResourceName& name,
+    const LocalResourceRootId root_id) const
+{
+    return resolve_from_roots(name, root_id);
+}
+
+LocalResourceResolutionResult LocalResourceResolver::resolve_from_roots(
+    const LocalVirtualResourceName& name,
+    const std::optional<LocalResourceRootId> exact_root_id) const
+{
     std::vector<std::string_view> components;
     try {
         components = split_components(name.value());
@@ -383,8 +403,13 @@ LocalResourceResolutionResult LocalResourceResolver::resolve(
             "Unable to retain bounded local resource lookup state");
     }
 
+    bool exact_root_found = !exact_root_id.has_value();
     for (const auto& root_owner : roots_.roots_) {
         const auto& root = *root_owner;
+        if (exact_root_id && root.id != *exact_root_id) {
+            continue;
+        }
+        exact_root_found = true;
         std::wstring validated_root_path;
         if (!query_validated_root_path(root, validated_root_path) ||
             !detail::ordinal_equal_insensitive(
@@ -436,7 +461,8 @@ LocalResourceResolutionResult LocalResourceResolver::resolve(
             }
             candidate = append_component(candidate, found.actual_name);
             if (!final_component) {
-                auto opened = open_intermediate_directory(candidate, root);
+                auto opened = open_intermediate_directory(
+                    candidate, root, exact_root_id.has_value());
                 if (!opened) {
                     return resolution_failure(opened.code, opened.context);
                 }
@@ -444,6 +470,9 @@ LocalResourceResolutionResult LocalResourceResolver::resolve(
             }
         }
         if (missing) {
+            if (exact_root_id) {
+                break;
+            }
             continue;
         }
 
@@ -461,8 +490,12 @@ LocalResourceResolutionResult LocalResourceResolver::resolve(
             const auto open_error = ::GetLastError();
             if (detail::is_missing_error(open_error)) {
                 return resolution_failure(
-                    LocalResourceResolutionCode::io_error,
-                    "Local resource changed during its bounded lookup");
+                    exact_root_id
+                        ? LocalResourceResolutionCode::not_found
+                        : LocalResourceResolutionCode::io_error,
+                    exact_root_id
+                        ? "Local resource disappeared from its selected root during verified reopen"
+                        : "Local resource changed during its bounded lookup");
             }
             return resolution_failure(
                 LocalResourceResolutionCode::io_error,
@@ -541,9 +574,17 @@ LocalResourceResolutionResult LocalResourceResolver::resolve(
         }
     }
 
+    if (!exact_root_found) {
+        return resolution_failure(
+            LocalResourceResolutionCode::io_error,
+            "Selected local resource root is not available");
+    }
+
     return resolution_failure(
         LocalResourceResolutionCode::not_found,
-        "Local resource was not found in the configured search roots");
+        exact_root_id
+            ? "Local resource was not found in its selected search root"
+            : "Local resource was not found in the configured search roots");
 }
 
 std::size_t LocalResourceResolver::root_count() const noexcept

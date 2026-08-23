@@ -586,12 +586,33 @@ See [local resource resolution](LOCAL_RESOURCE_RESOLUTION.md),
 
 ### M3.2.2 — Local resource readiness and precache state
 
+**Status: completed.**
+
+M3.2.2 strictly correlates the M3.2.1 list/inventory snapshots, re-derives safe
+virtual names, assigns separate per-entry readiness and aggregate impacts, and
+publishes a bounded immutable metadata-only manifest. Type-local sparse slots
+preserve holes and independent numeric namespaces. ServerInfo map selection is
+an exact byte match to one model entry; world readiness remains separate from
+full-profile completeness.
+
+Path-safe owning locators bind a validated root ID, virtual name, equality-only
+identity, and expected size. The shared local environment supports exact-root
+verified reopen with no fallback and typed missing/stale outcomes. The retained
+same-session stage sends no new network message after the existing response.
+No resource `u24` size or flag becomes a readiness decision, and no asset
+content, download/cache, parser, world state, or renderer is added.
+
+See [local resource readiness](LOCAL_RESOURCE_READINESS.md) and the
+[metadata-only precache manifest](PRECACHE_MANIFEST.md).
+
+### M3.2.3 — Approved asset-source opening and importer dispatch
+
 **Status: next.**
 
-Interpret the M3.2.1 metadata-only inventory through separately specified
-readiness policy, approved local locators, and engine-owned precache state. Do
-not treat existence, resolver success, resource-list `u24` metadata, or provider
-material as an implicit readiness decision.
+Consume only approved locators through verified reopening, expose bounded asset
+sources, and dispatch supported format importers without weakening the local
+sandbox or moving filesystem policy into renderers. This work is not part of
+M3.2.2.
 
 ### M3.3 — Safe download/cache boundary
 

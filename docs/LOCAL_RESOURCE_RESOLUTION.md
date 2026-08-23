@@ -115,9 +115,10 @@ Per-entry states distinguish `resolved`, `missing`, `unsafe_name`,
 builder/configuration error publishes no partial inventory. The opaque 24-bit
 wire size code is never used as a local size or allocation request.
 
-An inventory says only whether a safe local candidate was observed. It does
-not say required/optional, valid, matching, downloadable, parseable, ready, or
-precached. Those policies belong to M3.2.2 and later milestones.
+An inventory says only whether a safe local candidate was observed. M3.2.2
+keeps this snapshot unchanged and adds a separate strict correlation/readiness
+layer; inventory alone still does not say required/optional, valid, matching,
+downloadable, parseable, ready, or precached.
 
 After a successful production-provider response boundary, the application
 composition root builds this metadata-only inventory from the owning resource
@@ -127,7 +128,13 @@ identity, file bytes, or digest.
 
 ## Explicit non-goals
 
-M3.2.1 adds no write path, persistent manifest/hash cache, auto-repair,
+M3.2.2 adds `LocalResourceEnvironment` and path-safe locators. Verified reopen
+uses the locator's exact root ID, repeats the same sandbox checks, verifies the
+opened identity and size, performs no fallback search, and reads no bytes.
+Missing targets and stale identity/size are distinct typed errors. See
+[local readiness](LOCAL_RESOURCE_READINESS.md).
+
+The local stack adds no write path, persistent manifest/hash cache, auto-repair,
 download root, resource request, `dlfile`, local-vs-server comparison, asset
 loading, BSP/WAD/MDL/SPR/WAV parser, map loading, renderer upload, world-state
-mutation, or precache state.
+mutation, or asset precache object.

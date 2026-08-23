@@ -24,7 +24,7 @@ The project also links the Windows SDK/OpenGL system import library through
 CMake's `OpenGL::GL` target and links Winsock2 where required. Those operating
 system components are not vendored or redistributed by this repository.
 
-M3.2.1 adds no third-party dependency. `hlclient_hash_md5` is an independently
+M3.2.1 and M3.2.2 add no third-party dependency. `hlclient_hash_md5` is an independently
 authored C++20 incremental compatibility module and does not use OpenSSL,
 Windows CryptoAPI, or another crypto package. MD5 is present only to reproduce
 GoldSrc compatibility material; it is not approved for security, authenticity,
@@ -43,6 +43,10 @@ hlclient_resource_consistency_local
     -> hlclient_hash_md5
 hlclient_goldsrc_local_resources
     -> hlclient_goldsrc_signon
+    -> hlclient_local_resources
+hlclient_goldsrc_resource_readiness
+    -> hlclient_goldsrc_signon
+    -> hlclient_goldsrc_local_resources
     -> hlclient_local_resources
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
 ```
@@ -219,7 +223,8 @@ sprites, sounds, textures, `client.dll`, and other game files remain supplied by
 the user under the terms governing their copy. Automated tests must use small,
 original test fixtures or synthetic byte sequences.
 
-For normal M3.2.1 runtime, the local consistency provider may read an explicit
+For normal M3.2.1/M3.2.2 runtime, the local consistency provider and readiness
+environment may read an explicit
 user-owned installation supplied through `--basedir` and `--game`. That is an
 opt-in, read-only runtime input, not a build dependency: there is no Steam
 library/registry/environment auto-discovery, stock executable launch,

@@ -6,16 +6,15 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M3.2.1's sandboxed local-resource foundation and
-production resource-consistency provider on top of the completed M3.1.2 list
-and M3.1.3 response boundaries. Opcode 43 is decoded into an owning ordered
-`ResourceListState`; the response continuation still models the selected
-41-byte client response neutrally as `Opcode5ResourceResponse`. An explicitly
-selected, pre-network local provider now derives the fixed profile material from
-read-only `tempdecal.wad`. Without that selection, the historical typed
-`provider_required`/zero-TX behavior remains.
+The repository has implemented M3.2.2's local-resource readiness and immutable
+metadata-only precache manifest on top of the M3.2.1 sandboxed local-resource
+foundation and completed M3.1.2/M3.1.3 list/response boundaries. The new
+`--stop-after precache-manifest` route strictly correlates the ordered list and
+inventory, selects the exact ServerInfo model entry, builds bounded type-local
+sparse slots, and sends no new network message. The shared validated local
+environment also supports exact-root, identity/size-verified locator reopening.
 
-Implemented M1–M3.2.1 bounded behavior includes the Protocol 48 challenge,
+Implemented M1–M3.2.2 bounded behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
@@ -40,8 +39,9 @@ cross-checks resource categories and fields but contains no numeric opcode-43
 constant or wire serializer; the semantic gate instead also relies on exact
 repeated grammar, coherent map differentials, and exact list endpoints. Live
 `hlclient` to stock HLDS, slot-1/file semantics, general `svc_*` parsing, a
-Steam authentication provider, custom-resource list bodies, readiness/precache,
-resource downloads/cache, snapshots, gameplay, and a public
+Steam authentication provider, custom-resource list bodies, live-stock
+readiness/precache interoperability validation, resource downloads/cache,
+snapshots, gameplay, and a public
 raw payload/command CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
@@ -404,6 +404,22 @@ different target. Root validation and one-handle streaming preparation complete
 before network initialization, so provider preparation failures send zero
 packets. Earlier stop points perform no provider filesystem work.
 
+M3.2.2 continues that exact session into the metadata-only manifest stop:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after precache-manifest `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve --net-trace
+```
+
+It reuses the same validated roots, strictly correlates list/inventory metadata,
+selects the exact ServerInfo model resource, and builds sparse type-local slot
+tables. It sends no packet after the existing response boundary and neither
+opens asset contents nor downloads, caches, parses, or renders a resource.
+
 Normal runtime may read an explicitly supplied user-owned Steam installation
 with zero writes and no stock process launch. Active stock `hl.exe`/HLDS
 research remains restricted to an isolated marked copy. The local provider and
@@ -413,7 +429,9 @@ interoperability or manual installation validation.
 See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
 and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
 [local resource resolution](docs/LOCAL_RESOURCE_RESOLUTION.md), and the
-[local consistency provider](docs/LOCAL_RESOURCE_CONSISTENCY_PROVIDER.md).
+[local consistency provider](docs/LOCAL_RESOURCE_CONSISTENCY_PROVIDER.md),
+[local readiness](docs/LOCAL_RESOURCE_READINESS.md), and the
+[metadata-only precache manifest](docs/PRECACHE_MANIFEST.md).
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -820,7 +838,10 @@ metadata-only inventory; fixed-target provider success/failure; and full
 production-provider fake-HLDS response, retransmission, lost-ACK, and next-boundary
 coverage. Test roots and file bytes are synthetic and temporary. No test writes
 to an installed game, creates a download/cache/precache entry, loads an asset,
-or touches a renderer. M3.2.2 is next for resource readiness and precache state.
+or touches a renderer. M3.2.2 adds strict correlation, separate per-entry
+readiness/aggregate impact, exact world selection, path-safe locators, and the
+bounded metadata-only manifest. M3.2.3 is next for approved asset-source
+opening and format-importer dispatch.
 
 ## License
 

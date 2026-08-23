@@ -18,6 +18,13 @@
 
 namespace hlclient::goldsrc {
 
+namespace detail {
+// Defined only by the test target. This narrow friendship lets correlation
+// tests fabricate otherwise-unrepresentable corrupted snapshots without
+// adding mutable or public construction APIs to production inventory state.
+class LocalResourceInventoryCorruptionTestAccess;
+}
+
 inline constexpr std::size_t kDefaultMaximumLocalResourceInventoryEntries =
     1'024U;
 inline constexpr std::size_t kMaximumLocalResourceInventoryEntries = 4'095U;
@@ -62,6 +69,7 @@ public:
 
 private:
     friend class LocalResourceInventoryBuilder;
+    friend class detail::LocalResourceInventoryCorruptionTestAccess;
 
     LocalResourceVirtualPathMetadata(
         local_resources::LocalVirtualResourceId id,
@@ -94,6 +102,7 @@ public:
 
 private:
     friend class LocalResourceInventoryBuilder;
+    friend class detail::LocalResourceInventoryCorruptionTestAccess;
 
     LocalResolvedResourceMetadata(
         local_resources::LocalResourceRootId root_id,
@@ -128,6 +137,7 @@ public:
 
 private:
     friend class LocalResourceInventoryBuilder;
+    friend class detail::LocalResourceInventoryCorruptionTestAccess;
 
     LocalResourceInventoryEntry(
         std::size_t wire_ordinal,
@@ -166,6 +176,7 @@ public:
 
 private:
     friend class LocalResourceInventoryBuilder;
+    friend class detail::LocalResourceInventoryCorruptionTestAccess;
 
     explicit LocalResourceInventorySummary(
         std::array<std::size_t, kLocalResourceInventoryStatusCount> counts)
@@ -195,6 +206,7 @@ public:
 
 private:
     friend class LocalResourceInventoryBuilder;
+    friend class detail::LocalResourceInventoryCorruptionTestAccess;
 
     LocalResourceInventoryState(
         std::vector<LocalResourceInventoryEntry> entries,

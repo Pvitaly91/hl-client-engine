@@ -387,6 +387,41 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_precache_manifest_state(
+    const PrecacheManifestStageState state) noexcept
+{
+    switch (state) {
+    case PrecacheManifestStageState::idle:
+    case PrecacheManifestStageState::waiting_for_resource_response_boundary:
+    case PrecacheManifestStageState::building_local_inventory:
+    case PrecacheManifestStageState::building_precache_manifest:
+        return GoldSrcHandshakeState::waiting_for_precache_manifest;
+    case PrecacheManifestStageState::precache_manifest_ready:
+        return GoldSrcHandshakeState::precache_manifest_ready;
+    case PrecacheManifestStageState::local_resources_incomplete:
+        return GoldSrcHandshakeState::local_resources_incomplete;
+    case PrecacheManifestStageState::unsafe_local_resources:
+        return GoldSrcHandshakeState::unsafe_local_resources;
+    case PrecacheManifestStageState::unsupported_local_profile:
+        return GoldSrcHandshakeState::unsupported_local_profile;
+    case PrecacheManifestStageState::local_resource_io_error:
+        return GoldSrcHandshakeState::local_resource_io_error;
+    case PrecacheManifestStageState::timed_out:
+        return GoldSrcHandshakeState::resource_response_timed_out;
+    case PrecacheManifestStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case PrecacheManifestStageState::backpressure:
+        return GoldSrcHandshakeState::resource_response_backpressure;
+    case PrecacheManifestStageState::secondary_stream_pending:
+        return GoldSrcHandshakeState::resource_response_secondary_stream_pending;
+    case PrecacheManifestStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case PrecacheManifestStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] bool signon_start_network_failure(
     const std::optional<NetchanDriverErrorCode> driver_code) noexcept
 {
@@ -621,7 +656,11 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     ResourceClientResponseStageConfig resource_response_config,
     resource_consistency::IResourceConsistencyProvider*
         resource_consistency_provider,
-    ResourceClientResponseTraceCallback resource_response_trace_callback)
+    ResourceClientResponseTraceCallback resource_response_trace_callback,
+    std::shared_ptr<const local_resources::LocalResourceEnvironment>
+        local_resource_environment,
+    PrecacheManifestStageConfig precache_manifest_config,
+    PrecacheManifestTraceCallback precache_manifest_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -650,7 +689,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::user_info ||
                 stop_point_ == HandshakeStopPoint::resource_list_boundary ||
                 stop_point_ == HandshakeStopPoint::resource_list ||
-                stop_point_ == HandshakeStopPoint::resource_response_boundary) {
+                stop_point_ == HandshakeStopPoint::resource_response_boundary ||
+                stop_point_ == HandshakeStopPoint::precache_manifest) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -749,6 +789,36 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                     std::move(resource_list_trace_callback),
                     std::move(resource_response_trace_callback));
             }
+            if (stop_point_ == HandshakeStopPoint::precache_manifest) {
+                if (!local_resource_environment) {
+                    configuration_error_ =
+                        "Precache-manifest mode requires a retained local resource environment";
+                    state_ = GoldSrcHandshakeState::configuration_error;
+                } else {
+                    precache_manifest_config.response =
+                        std::move(resource_response_config);
+                    precache_manifest_stage_ =
+                        std::unique_ptr<PrecacheManifestStage>{
+                            new PrecacheManifestStage{
+                                transport,
+                                remote_endpoint,
+                                std::move(local_resource_environment),
+                                std::move(precache_manifest_config),
+                                resource_consistency_provider,
+                                std::move(signon_trace_callback),
+                                std::move(pre_resource_trace_callback),
+                                std::move(delta_trace_callback),
+                                std::move(
+                                    movement_environment_trace_callback),
+                                std::move(user_info_trace_callback),
+                                std::move(resource_transition_trace_callback),
+                                std::move(resource_list_trace_callback),
+                                std::move(resource_response_trace_callback),
+                                std::move(precache_manifest_trace_callback),
+                                PrecacheManifestStage::
+                                    RetainConnectionAtBoundary{}}};
+                }
+            }
         }
     } else if (authentication_session_) {
         configuration_error_ =
@@ -772,6 +842,13 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (precache_manifest_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_precache_manifest) {
+        precache_manifest_stage_->update(now);
+        synchronize_from_precache_manifest(now);
+        release_authentication_session_if_terminal();
         return;
     }
     if (resource_client_response_stage_ &&
@@ -850,6 +927,13 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (precache_manifest_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_precache_manifest) {
+        precache_manifest_stage_->cancel(now);
+        synchronize_from_precache_manifest(now);
+        release_authentication_session_if_terminal();
         return;
     }
     if (resource_client_response_stage_ &&
@@ -987,6 +1071,11 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::resource_response_timed_out:
     case GoldSrcHandshakeState::resource_response_backpressure:
     case GoldSrcHandshakeState::resource_response_secondary_stream_pending:
+    case GoldSrcHandshakeState::precache_manifest_ready:
+    case GoldSrcHandshakeState::local_resources_incomplete:
+    case GoldSrcHandshakeState::unsafe_local_resources:
+    case GoldSrcHandshakeState::unsupported_local_profile:
+    case GoldSrcHandshakeState::local_resource_io_error:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -1008,6 +1097,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_resource_transition:
     case GoldSrcHandshakeState::waiting_for_resource_list:
     case GoldSrcHandshakeState::waiting_for_resource_response:
+    case GoldSrcHandshakeState::waiting_for_precache_manifest:
         return false;
     }
     return true;
@@ -1130,6 +1220,20 @@ GoldSrcHandshakeCoordinator::resource_client_response_error() const noexcept
                ? resource_client_response_stage_->error()
                : empty;
 }
+const std::optional<PrecacheManifestSignonState>&
+GoldSrcHandshakeCoordinator::precache_manifest_result() const noexcept
+{
+    static const std::optional<PrecacheManifestSignonState> empty;
+    return precache_manifest_stage_ ? precache_manifest_stage_->result()
+                                    : empty;
+}
+const std::optional<PrecacheManifestStageError>&
+GoldSrcHandshakeCoordinator::precache_manifest_error() const noexcept
+{
+    static const std::optional<PrecacheManifestStageError> empty;
+    return precache_manifest_stage_ ? precache_manifest_stage_->error()
+                                    : empty;
+}
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
     return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
@@ -1185,6 +1289,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
         resource_client_response_stage_->error()) {
         return resource_client_response_stage_->error()->context;
     }
+    if (precache_manifest_stage_ && precache_manifest_stage_->error()) {
+        return precache_manifest_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -1219,7 +1326,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::user_info &&
          stop_point_ != HandshakeStopPoint::resource_list_boundary &&
          stop_point_ != HandshakeStopPoint::resource_list &&
-         stop_point_ != HandshakeStopPoint::resource_response_boundary)) {
+         stop_point_ != HandshakeStopPoint::resource_response_boundary &&
+         stop_point_ != HandshakeStopPoint::precache_manifest)) {
         return;
     }
     if (!response_stage_) {
@@ -1254,7 +1362,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
           stop_point_ != HandshakeStopPoint::user_info &&
           stop_point_ != HandshakeStopPoint::resource_list_boundary &&
           stop_point_ != HandshakeStopPoint::resource_list &&
-          stop_point_ != HandshakeStopPoint::resource_response_boundary)) {
+          stop_point_ != HandshakeStopPoint::resource_response_boundary &&
+          stop_point_ != HandshakeStopPoint::precache_manifest)) {
         return;
     }
     if (!challenge_exchange_.local_endpoint() ||
@@ -1271,7 +1380,9 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
          (stop_point_ == HandshakeStopPoint::resource_list &&
           !resource_list_stage_) ||
          (stop_point_ == HandshakeStopPoint::resource_response_boundary &&
-          !resource_client_response_stage_)) {
+          !resource_client_response_stage_) ||
+         (stop_point_ == HandshakeStopPoint::precache_manifest &&
+          !precache_manifest_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
             "Post-ACCEPT mode has no transport stage or stable local endpoint";
@@ -1376,6 +1487,18 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         synchronize_from_resource_client_response();
         if (!resource_response_started &&
             state_ == GoldSrcHandshakeState::waiting_for_resource_response) {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::precache_manifest) {
+        const bool precache_started = precache_manifest_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime));
+        synchronize_from_precache_manifest(now);
+        if (!precache_started &&
+            state_ == GoldSrcHandshakeState::waiting_for_precache_manifest) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -1651,6 +1774,44 @@ void GoldSrcHandshakeCoordinator::synchronize_from_resource_client_response()
         stage_error->code ==
             ResourceClientResponseStageErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_precache_manifest(
+    const ChallengeExchangeTimePoint now)
+{
+    if (!precache_manifest_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Precache-manifest mode has no precache-manifest stage";
+        return;
+    }
+    const auto& stage_error = precache_manifest_stage_->error();
+    if (precache_manifest_stage_->state() ==
+            PrecacheManifestStageState::idle &&
+        stage_error) {
+        state_ =
+            stage_error->code ==
+                    PrecacheManifestStageErrorCode::invalid_configuration
+                ? GoldSrcHandshakeState::configuration_error
+                : GoldSrcHandshakeState::protocol_error;
+        return;
+    }
+    state_ = map_precache_manifest_state(precache_manifest_stage_->state());
+    if (stage_error &&
+        stage_error->code ==
+            PrecacheManifestStageErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+    if (precache_manifest_stage_->terminal() &&
+        precache_manifest_stage_->result() &&
+        precache_manifest_stage_->retained_driver() == nullptr) {
+        state_ = GoldSrcHandshakeState::protocol_error;
+        configuration_error_ =
+            "Precache-manifest publication lost its retained network continuation";
+    }
+    if (precache_manifest_stage_->terminal()) {
+        precache_manifest_stage_->finalize_retained_boundary(now);
     }
 }
 
