@@ -152,9 +152,64 @@ ResourceListStage::ResourceListStage(
     UserInfoSignonTraceCallback user_info_trace_callback,
     ResourceTransitionTraceCallback transition_trace_callback,
     ResourceListTraceCallback trace_callback)
+    : ResourceListStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(movement_trace_callback),
+          std::move(user_info_trace_callback),
+          std::move(transition_trace_callback),
+          std::move(trace_callback),
+          false}
+{
+}
+
+ResourceListStage::ResourceListStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    ResourceListStageConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback movement_trace_callback,
+    UserInfoSignonTraceCallback user_info_trace_callback,
+    ResourceTransitionTraceCallback transition_trace_callback,
+    ResourceListTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : ResourceListStage{
+          transport,
+          remote_endpoint,
+          std::move(config),
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(movement_trace_callback),
+          std::move(user_info_trace_callback),
+          std::move(transition_trace_callback),
+          std::move(trace_callback),
+          true}
+{
+}
+
+ResourceListStage::ResourceListStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    ResourceListStageConfig config,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback movement_trace_callback,
+    UserInfoSignonTraceCallback user_info_trace_callback,
+    ResourceTransitionTraceCallback transition_trace_callback,
+    ResourceListTraceCallback trace_callback,
+    const bool retain_connection_at_boundary)
     : config_{std::move(config)},
       trace_callback_{std::move(trace_callback)},
       configuration_valid_{valid_resource_list_stage_configuration(config_)},
+      retain_connection_at_boundary_{retain_connection_at_boundary},
       transition_stage_{
           transport,
           remote_endpoint,
@@ -407,6 +462,21 @@ std::size_t ResourceListStage::initial_request_queue_count() const noexcept
 std::size_t ResourceListStage::transition_request_queue_count() const noexcept
 {
     return transition_stage_.transition_request_queue_count();
+}
+
+NetchanDriver* ResourceListStage::retained_driver() noexcept
+{
+    if (!retain_connection_at_boundary_ ||
+        state_ != ResourceListStageState::client_response_required) {
+        return nullptr;
+    }
+    return transition_stage_.retained_driver();
+}
+
+void ResourceListStage::finalize_retained_boundary(
+    const ResourceListStageTimePoint now) noexcept
+{
+    transition_stage_.finalize_retained_boundary(now);
 }
 
 bool ResourceListStage::can_push_events(const std::size_t count) const noexcept
@@ -694,7 +764,9 @@ void ResourceListStage::decode_retained_resource_list(
         result_->boundary().byte_offset(),
         result_->boundary().bit_offset());
     state_ = ResourceListStageState::client_response_required;
-    transition_stage_.finalize_retained_boundary(now);
+    if (!retain_connection_at_boundary_) {
+        transition_stage_.finalize_retained_boundary(now);
+    }
     emit_trace(
         ResourceListTraceClassification::client_response_required,
         result_->resource_list().resource_count(),

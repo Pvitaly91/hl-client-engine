@@ -1,5 +1,6 @@
 #include "delta_test_fixture.hpp"
 #include "move_vars_test_fixture.hpp"
+#include "resource_client_response_test_fixture.hpp"
 #include "resource_list_test_fixture.hpp"
 #include "user_info_test_fixture.hpp"
 
@@ -12,6 +13,7 @@
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_runtime.hpp>
 #include <hlclient/network/udp_socket.hpp>
+#include <hlclient/resource_consistency/provider.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -39,11 +41,14 @@ namespace {
 
 using namespace std::chrono_literals;
 namespace auth = hlclient::auth;
+namespace consistency = hlclient::resource_consistency;
 namespace delta_fixture = hlclient::test::delta_fixture;
 namespace goldsrc = hlclient::goldsrc;
 namespace move_fixture = hlclient::test::move_vars_fixture;
 namespace network = hlclient::network;
 namespace resource_fixture = resource_list_test_fixture;
+namespace response_fixture =
+    hlclient::test::resource_client_response_fixture;
 namespace user_fixture = hlclient::test::user_info_fixture;
 
 inline constexpr std::string_view kAuthenticationMarker =
@@ -54,6 +59,25 @@ inline constexpr std::array kExactTransitionRequest{
     std::byte{0x03U}, std::byte{'s'}, std::byte{'e'}, std::byte{'n'},
     std::byte{'d'}, std::byte{'r'}, std::byte{'e'}, std::byte{'s'},
     std::byte{0U},
+};
+
+// Independently authored expected semantic response for the coordinator
+// integration. No production encoder contributes bytes to this fixture.
+inline constexpr std::array<std::byte, 41U> kExactResourceResponse{
+    std::byte{0x05U},
+    std::byte{0x01U}, std::byte{0x00U},
+    std::byte{'t'}, std::byte{'e'}, std::byte{'m'}, std::byte{'p'},
+    std::byte{'d'}, std::byte{'e'}, std::byte{'c'}, std::byte{'a'},
+    std::byte{'l'}, std::byte{'.'}, std::byte{'w'}, std::byte{'a'},
+    std::byte{'d'}, std::byte{0x00U},
+    std::byte{0x03U},
+    std::byte{0x00U}, std::byte{0x00U},
+    std::byte{0x04U}, std::byte{0x03U}, std::byte{0x02U}, std::byte{0x01U},
+    std::byte{0x04U},
+    std::byte{0xa0U}, std::byte{0xa1U}, std::byte{0xa2U}, std::byte{0xa3U},
+    std::byte{0xa4U}, std::byte{0xa5U}, std::byte{0xa6U}, std::byte{0xa7U},
+    std::byte{0xa8U}, std::byte{0xa9U}, std::byte{0xaaU}, std::byte{0xabU},
+    std::byte{0xacU}, std::byte{0xadU}, std::byte{0xaeU}, std::byte{0xafU},
 };
 
 class CountingAuthenticationLifetime final
@@ -68,6 +92,91 @@ public:
 
 private:
     std::size_t& releases_;
+};
+
+class CountingResourceConsistencyLifetime final
+    : public consistency::IResourceConsistencySessionLifetime {
+public:
+    explicit CountingResourceConsistencyLifetime(
+        std::size_t& releases) noexcept
+        : releases_{releases}
+    {
+    }
+
+    ~CountingResourceConsistencyLifetime() override { ++releases_; }
+
+private:
+    std::size_t& releases_;
+};
+
+class IntegrationResourceConsistencyOperation final
+    : public consistency::ResourceConsistencyOperation {
+public:
+    IntegrationResourceConsistencyOperation(
+        std::size_t& updates,
+        std::size_t& cancellations,
+        std::size_t& lifetime_releases) noexcept
+        : updates_{updates},
+          cancellations_{cancellations},
+          lifetime_releases_{lifetime_releases}
+    {
+    }
+
+    [[nodiscard]] consistency::ResourceConsistencyUpdateResult update()
+        override
+    {
+        ++updates_;
+        auto material = consistency::make_resource_consistency_material(
+            0x01020304U,
+            response_fixture::kSyntheticOpaqueMaterial);
+        REQUIRE(material);
+        return consistency::ResourceConsistencyUpdateResult::succeeded(
+            consistency::ResourceConsistencySession{
+                std::move(*material.material),
+                std::make_unique<CountingResourceConsistencyLifetime>(
+                    lifetime_releases_),
+            });
+    }
+
+    void cancel() noexcept override
+    {
+        if (!cancelled_) {
+            cancelled_ = true;
+            ++cancellations_;
+        }
+    }
+
+private:
+    std::size_t& updates_;
+    std::size_t& cancellations_;
+    std::size_t& lifetime_releases_;
+    bool cancelled_{false};
+};
+
+class IntegrationResourceConsistencyProvider final
+    : public consistency::IResourceConsistencyProvider {
+public:
+    [[nodiscard]] consistency::ResourceConsistencyBeginResult begin(
+        const consistency::ResourceConsistencyRequirements& requirements)
+        override
+    {
+        ++begins;
+        material_count = requirements.material_count();
+        opaque_byte_count = requirements.opaque_bytes_per_material();
+        return consistency::ResourceConsistencyBeginResult::started(
+            std::make_unique<IntegrationResourceConsistencyOperation>(
+                updates,
+                cancellations,
+                lifetime_releases));
+    }
+
+    std::size_t begins{0U};
+    std::size_t updates{0U};
+    std::size_t cancellations{0U};
+    std::size_t lifetime_releases{0U};
+    std::size_t material_count{0U};
+    std::size_t opaque_byte_count{0U};
+    std::size_t filesystem_calls{0U};
 };
 
 [[nodiscard]] std::vector<std::byte> bytes(const std::string_view text)
@@ -250,6 +359,20 @@ void send_server_datagram(
     goldsrc::ResourceListStageConfig config;
     config.transition = transition_config();
     config.maximum_stage_events = 512U;
+    return config;
+}
+
+[[nodiscard]] goldsrc::ResourceClientResponseStageConfig
+resource_client_response_config()
+{
+    goldsrc::ResourceClientResponseStageConfig config;
+    config.resource_list = resource_list_config();
+    config.resource_list.transition.user_info.movement_environment.delta
+        .pre_resource.initial_signon.driver
+        .maximum_unfragmented_reliable_payload =
+        goldsrc::kOpcode5ResourceResponseSemanticSize - 1U;
+    config.maximum_driver_events_per_update = 64U;
+    config.response.maximum_response_stage_events = 64U;
     return config;
 }
 
@@ -440,6 +563,14 @@ enum class ResourceListIntegrationScenario {
     timeout,
     cancellation,
     event_backpressure,
+};
+
+enum class ResourceResponseIntegrationScenario {
+    baseline,
+    dropped_response,
+    dropped_acknowledgement,
+    coalesced_tail,
+    differential_map,
 };
 
 [[nodiscard]] std::vector<std::byte> second_resource_list_payload(
@@ -740,6 +871,86 @@ void check_transport_only_packet(
         }));
 }
 
+void check_exact_resource_response_packet(
+    const goldsrc::ClientToServerNetchanPacket& packet)
+{
+    REQUIRE(packet.header.sequence.flags.reliable);
+    REQUIRE(packet.header.sequence.flags.fragmented);
+    REQUIRE(packet.fragments[0U]);
+    REQUIRE_FALSE(packet.fragments[1U]);
+    REQUIRE(packet.fragments[0U]->packed_id());
+    CHECK(packet.fragments[0U]->packed_id()->fragment_index() == 1U);
+    CHECK(packet.fragments[0U]->packed_id()->fragment_count() == 1U);
+    CHECK(packet.fragments[0U]->offset == 0U);
+    CHECK(packet.fragments[0U]->length == kExactResourceResponse.size());
+    CHECK(packet.fragment_payload_size == kExactResourceResponse.size());
+    CHECK(std::ranges::equal(packet.payload, kExactResourceResponse));
+}
+
+void check_coalesced_response_carrier(
+    const goldsrc::ClientToServerNetchanPacket& response,
+    const std::size_t run)
+{
+    constexpr std::array<std::size_t, 3U> tail_sizes{13U, 15U, 17U};
+    constexpr std::array<
+        goldsrc::ResourceResponseConcurrentTailProfile,
+        3U> tail_profiles{
+        goldsrc::ResourceResponseConcurrentTailProfile::
+            stock_coalesced_opaque_length_13,
+        goldsrc::ResourceResponseConcurrentTailProfile::
+            stock_coalesced_opaque_length_15,
+        goldsrc::ResourceResponseConcurrentTailProfile::
+            stock_coalesced_opaque_length_17,
+    };
+    const auto variant = run % tail_sizes.size();
+    const auto tail_size = tail_sizes[variant];
+    std::vector<std::byte> decoded_body{
+        std::byte{0x01U},
+        std::byte{0x01U}, std::byte{0x00U},
+        std::byte{0x01U}, std::byte{0x00U},
+        std::byte{0x00U}, std::byte{0x00U},
+        std::byte{0x29U}, std::byte{0x00U},
+        std::byte{0x00U},
+    };
+    decoded_body.insert(
+        decoded_body.end(),
+        response.payload.begin(),
+        response.payload.end());
+    for (std::size_t index = 0U; index < tail_size; ++index) {
+        decoded_body.push_back(static_cast<std::byte>(
+            (run * 29U + index * 17U + 2U) & 0xffU));
+    }
+
+    const auto parsed = goldsrc::Opcode5ResourceResponseCarrierParser{}.parse(
+        response.header,
+        decoded_body,
+        static_cast<std::uint64_t>(run + 1U));
+    REQUIRE(parsed.state);
+    REQUIRE_FALSE(parsed.error);
+    CHECK(parsed.state->response().wire_name() == "tempdecal.wad");
+    CHECK(parsed.state->geometry().semantic_reliable_range().byte_offset() ==
+          10U);
+    CHECK(parsed.state->geometry().semantic_reliable_range().byte_count() ==
+          kExactResourceResponse.size());
+    CHECK(parsed.state->geometry().tail_range().byte_offset() == 51U);
+    CHECK(parsed.state->geometry().tail_range().byte_count() == tail_size);
+    CHECK(parsed.state->geometry().full_decoded_body_size() ==
+          51U + tail_size);
+    CHECK(parsed.state->concurrent_tail().byte_count() == tail_size);
+    CHECK(parsed.state->concurrent_tail().profile() ==
+          tail_profiles[variant]);
+}
+
+[[nodiscard]] constexpr std::array<std::byte, 7U>
+post_response_semantic_payload()
+{
+    return {
+        std::byte{0x03U},
+        std::byte{'s'}, std::byte{'p'}, std::byte{'a'},
+        std::byte{'w'}, std::byte{'n'}, std::byte{0U},
+    };
+}
+
 struct TraceCounts {
     std::size_t user_info_messages{0U};
     std::size_t first_batch_completions{0U};
@@ -751,6 +962,12 @@ struct TraceCounts {
     std::size_t resource_entries{0U};
     std::size_t post_list_boundaries{0U};
     std::size_t client_response_boundaries{0U};
+    std::size_t response_requirements{0U};
+    std::size_t responses_ready{0U};
+    std::size_t responses_queued{0U};
+    std::size_t responses_transmitted{0U};
+    std::size_t responses_acknowledged{0U};
+    std::size_t response_boundaries{0U};
 };
 
 enum class IntegrationScenario {
@@ -1803,6 +2020,377 @@ void run_resource_list(
     require_no_datagram(*server);
 }
 
+void run_resource_response(
+    const std::size_t run,
+    const ResourceResponseIntegrationScenario scenario)
+{
+    INFO("fake-HLDS resource-response run " << run + 1U);
+    network::NetworkRuntime runtime;
+    INFO(runtime.error_message());
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto server = network::UdpSocket::open_ipv4(runtime, error);
+    INFO(error);
+    REQUIRE(server);
+    REQUIRE(server->bind(network::NetworkAddress::loopback(0U), error));
+    const auto server_endpoint = server->local_address(error);
+    REQUIRE(server_endpoint);
+    auto client = network::UdpSocket::open_ipv4(runtime, error);
+    REQUIRE(client);
+    REQUIRE(client->bind(network::NetworkAddress::loopback(0U), error));
+    network::UdpDatagramTransport transport{std::move(*client)};
+
+    std::size_t authentication_releases = 0U;
+    TraceCounts traces;
+    IntegrationResourceConsistencyProvider provider;
+    auto prepared = prepared_request_with_session(authentication_releases);
+    auto stage_config = resource_client_response_config();
+    goldsrc::GoldSrcHandshakeCoordinator handshake{
+        transport,
+        *server_endpoint,
+        goldsrc::HandshakeStopPoint::resource_response_boundary,
+        std::move(prepared.request),
+        challenge_config(),
+        {},
+        {},
+        response_config(),
+        {},
+        std::move(prepared.session),
+        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+        [&traces](const goldsrc::UserInfoSignonTraceEvent& event) {
+            if (event.classification ==
+                goldsrc::UserInfoSignonTraceClassification::
+                    user_info_message_decoded) {
+                ++traces.user_info_messages;
+            }
+            if (event.classification ==
+                goldsrc::UserInfoSignonTraceClassification::
+                    first_batch_complete) {
+                ++traces.first_batch_completions;
+            }
+        },
+        transition_config(),
+        [&traces](const goldsrc::ResourceTransitionTraceEvent& event) {
+            using Classification =
+                goldsrc::ResourceTransitionTraceClassification;
+            if (event.classification ==
+                Classification::transition_request_queued) {
+                ++traces.requests_queued;
+            }
+            if (event.classification ==
+                Classification::transition_request_acknowledged) {
+                ++traces.requests_acknowledged;
+            }
+            if (event.classification ==
+                Classification::transition_control_decoded) {
+                ++traces.controls;
+            }
+            if (event.classification ==
+                Classification::neutral_opcode43_boundary_reached) {
+                ++traces.boundaries;
+            }
+        },
+        stage_config.resource_list,
+        [&traces](const goldsrc::ResourceListTraceEvent& event) {
+            using Classification = goldsrc::ResourceListTraceClassification;
+            if (event.classification == Classification::resource_list_decoded) {
+                ++traces.resource_lists;
+            }
+            if (event.classification ==
+                Classification::resource_entry_metadata) {
+                ++traces.resource_entries;
+            }
+            if (event.classification ==
+                Classification::post_resource_boundary_reached) {
+                ++traces.post_list_boundaries;
+            }
+            if (event.classification ==
+                Classification::client_response_required) {
+                ++traces.client_response_boundaries;
+            }
+        },
+        stage_config,
+        &provider,
+        [&traces](const goldsrc::ResourceClientResponseTraceEvent& event) {
+            using Classification =
+                goldsrc::ResourceClientResponseTraceClassification;
+            if (event.classification ==
+                Classification::resource_response_requirements_ready) {
+                ++traces.response_requirements;
+            }
+            if (event.classification ==
+                Classification::resource_response_ready) {
+                ++traces.responses_ready;
+            }
+            if (event.classification ==
+                Classification::resource_response_queued) {
+                ++traces.responses_queued;
+            }
+            if (event.classification ==
+                Classification::resource_response_transmitted) {
+                ++traces.responses_transmitted;
+            }
+            if (event.classification ==
+                Classification::resource_response_acknowledged) {
+                ++traces.responses_acknowledged;
+            }
+            if (event.classification ==
+                Classification::next_server_boundary_reached) {
+                ++traces.response_boundaries;
+            }
+        }};
+
+    const auto epoch = goldsrc::ChallengeExchangeTimePoint{} +
+        std::chrono::milliseconds{50'000 + static_cast<std::int64_t>(run)};
+    const auto started = reach_first_service_request(
+        *server, handshake, epoch, error);
+    REQUIRE(handshake.local_endpoint());
+    CHECK(*handshake.local_endpoint() == started.client_endpoint);
+    CHECK(handshake.connect_send_attempts() == 1U);
+    CHECK(handshake.state() ==
+          goldsrc::GoldSrcHandshakeState::waiting_for_resource_response);
+
+    const auto first_batch = send_first_service_batch(
+        *server,
+        handshake,
+        started,
+        epoch + 4ms,
+        false,
+        error);
+    CHECK_FALSE(handshake.terminal());
+    CHECK(traces.first_batch_completions == 1U);
+
+    handshake.update(first_batch.next_update);
+    const auto transition = decode_client_packet(
+        receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+        started.client_endpoint);
+    REQUIRE(is_exact_transition_request(transition));
+    REQUIRE(transition.header.sequence.flags.reliable);
+    auto last_client_sequence = transition.header.sequence.sequence.value();
+    auto server_sequence = first_batch.next_server_sequence;
+    send_server_datagram(
+        *server,
+        started.client_endpoint,
+        server_packet(
+            server_sequence++,
+            false,
+            last_client_sequence,
+            false,
+            {}),
+        error);
+    handshake.update(first_batch.next_update + 1ms);
+    CHECK_FALSE(handshake.terminal());
+    CHECK(traces.requests_acknowledged == 1U);
+
+    const auto list_scenario =
+        scenario == ResourceResponseIntegrationScenario::differential_map
+            ? ResourceListIntegrationScenario::differential_map
+            : ResourceListIntegrationScenario::baseline;
+    const auto semantic = second_resource_list_payload(list_scenario, run);
+    const auto envelope = service_envelope(semantic);
+    const auto count_size =
+        (envelope.size() + goldsrc::kStockProtocol48NormalFragmentChunkSize -
+         1U) /
+        goldsrc::kStockProtocol48NormalFragmentChunkSize;
+    REQUIRE(count_size >= 3U);
+    REQUIRE(count_size <= (std::numeric_limits<std::uint16_t>::max)());
+    const auto fragment_count = static_cast<std::uint16_t>(count_size);
+
+    auto now = first_batch.next_update + 2ms;
+    for (std::uint16_t index = 1U; index <= fragment_count; ++index) {
+        const auto offset = static_cast<std::size_t>(index - 1U) *
+            goldsrc::kStockProtocol48NormalFragmentChunkSize;
+        const auto length = (std::min)(
+            goldsrc::kStockProtocol48NormalFragmentChunkSize,
+            envelope.size() - offset);
+        send_server_datagram(
+            *server,
+            started.client_endpoint,
+            server_fragment(
+                server_sequence++,
+                last_client_sequence,
+                false,
+                index,
+                fragment_count,
+                std::span<const std::byte>{envelope}.subspan(offset, length)),
+            error);
+        handshake.update(now);
+        const auto acknowledgement = decode_client_packet(
+            receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+            started.client_endpoint);
+        check_transport_only_packet(acknowledgement);
+        last_client_sequence =
+            acknowledgement.header.sequence.sequence.value();
+        now += 1ms;
+    }
+
+    // The response stage is allowed to publish after the final resource-list
+    // transport ACK in the same update. This extra bounded update also covers
+    // implementations that defer the client-first reliable send once.
+    handshake.update(now);
+    auto response = decode_client_packet(
+        receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+        started.client_endpoint);
+    check_exact_resource_response_packet(response);
+    std::size_t response_datagrams = 1U;
+    CHECK_FALSE(handshake.terminal());
+    CHECK(provider.lifetime_releases == 0U);
+
+    if (scenario == ResourceResponseIntegrationScenario::coalesced_tail) {
+        check_coalesced_response_carrier(response, run);
+    }
+
+    if (scenario ==
+        ResourceResponseIntegrationScenario::dropped_acknowledgement) {
+        const auto deliberately_dropped_ack = server_packet(
+            server_sequence,
+            false,
+            response.header.sequence.sequence.value(),
+            true,
+            {});
+        CHECK_FALSE(deliberately_dropped_ack.empty());
+        handshake.update(now + 1ms);
+        require_no_datagram(*server);
+        now += 1ms;
+    }
+
+    if (scenario == ResourceResponseIntegrationScenario::dropped_response ||
+        scenario ==
+            ResourceResponseIntegrationScenario::dropped_acknowledgement) {
+        // A newer reliable server unit first creates an ordinary outgoing ACK
+        // gap. Its equal-sequence wrong-generation ACK cannot release the
+        // response. Advancing that wrong generation past the response then
+        // requests a transport retry of the same canonical fragment.
+        send_server_datagram(
+            *server,
+            started.client_endpoint,
+            server_packet(
+                server_sequence++,
+                true,
+                response.header.sequence.sequence.value(),
+                false,
+                {}),
+            error);
+        handshake.update(now + 1ms);
+        const auto gap_packet = decode_client_packet(
+            receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+            started.client_endpoint);
+        check_transport_only_packet(gap_packet);
+
+        send_server_datagram(
+            *server,
+            started.client_endpoint,
+            server_packet(
+                server_sequence++,
+                false,
+                gap_packet.header.sequence.sequence.value(),
+                false,
+                {}),
+            error);
+        handshake.update(now + 2ms);
+        auto retry = decode_client_packet(
+            receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+            started.client_endpoint);
+        check_exact_resource_response_packet(retry);
+        REQUIRE(response.fragments[0U]);
+        REQUIRE(retry.fragments[0U]);
+        CHECK(retry.fragments[0U]->packed_id() ==
+              response.fragments[0U]->packed_id());
+        CHECK(retry.payload == response.payload);
+        CHECK(retry.header.sequence.sequence !=
+              response.header.sequence.sequence);
+        response = std::move(retry);
+        ++response_datagrams;
+        now += 2ms;
+    }
+
+    const auto next_payload = post_response_semantic_payload();
+    send_server_datagram(
+        *server,
+        started.client_endpoint,
+        server_packet(
+            server_sequence++,
+            false,
+            response.header.sequence.sequence.value(),
+            true,
+            service_envelope(next_payload)),
+        error);
+    handshake.update(now + 1ms);
+    now += 1ms;
+
+    REQUIRE(handshake.terminal());
+    REQUIRE(handshake.state() ==
+            goldsrc::GoldSrcHandshakeState::
+                resource_response_boundary_reached);
+    REQUIRE_FALSE(handshake.resource_client_response_error());
+    REQUIRE(handshake.resource_client_response_result());
+    const auto& result = *handshake.resource_client_response_result();
+    const auto& list = result.resource_list().resource_list();
+    CHECK(list.resource_count() == 128U);
+    CHECK(result.response().wire_name() == "tempdecal.wad");
+    CHECK(result.response().byte_count() == 0x01020304U);
+    CHECK_FALSE(result.source_carrier_geometry());
+    CHECK_FALSE(result.concurrent_tail());
+    CHECK(result.reliable_lifecycle().fragmented());
+    CHECK(result.reliable_lifecycle().fragment_count() == 1U);
+    CHECK(result.reliable_lifecycle().transmit_count() ==
+          response_datagrams);
+    CHECK(result.reliable_lifecycle().acknowledgement().sequence ==
+          response.header.sequence.sequence);
+    CHECK(result.reliable_lifecycle().acknowledgement().reliable);
+    REQUIRE(result.boundary().opcode());
+    CHECK(*result.boundary().opcode() == 3U);
+    CHECK(result.boundary().remaining_byte_count() ==
+          next_payload.size() - 1U);
+    CHECK(result.boundary().source_payload().decompressed);
+    if (scenario == ResourceResponseIntegrationScenario::differential_map) {
+        constexpr std::array<std::string_view, 3U> map_names{
+            "maps/differential_alpha.bsp",
+            "maps/differential_bravo.bsp",
+            "maps/differential_charlie.bsp",
+        };
+        const auto variant = run % map_names.size();
+        CHECK(list.entries()[1U].name().bytes() == map_names[variant]);
+        CHECK(list.entries()[1U].declared_size().raw_code() ==
+              98'765U + variant);
+    }
+
+    CHECK(traces.user_info_messages == 1U);
+    CHECK(traces.first_batch_completions == 1U);
+    CHECK(traces.requests_queued == 1U);
+    CHECK(traces.requests_acknowledged == 1U);
+    CHECK(traces.controls == 1U);
+    CHECK(traces.boundaries == 1U);
+    CHECK(traces.resource_lists == 1U);
+    CHECK(traces.resource_entries == 128U);
+    CHECK(traces.post_list_boundaries == 1U);
+    CHECK(traces.client_response_boundaries == 1U);
+    CHECK(traces.response_requirements == 1U);
+    CHECK(traces.responses_ready == 1U);
+    CHECK(traces.responses_queued == 1U);
+    CHECK(traces.responses_transmitted == 1U);
+    CHECK(traces.responses_acknowledged == 1U);
+    CHECK(traces.response_boundaries == 1U);
+    CHECK(provider.begins == 1U);
+    CHECK(provider.updates == 1U);
+    CHECK(provider.cancellations == 0U);
+    CHECK(provider.material_count == 1U);
+    CHECK(provider.opaque_byte_count == 16U);
+    CHECK(provider.filesystem_calls == 0U);
+    CHECK(provider.lifetime_releases == 1U);
+    CHECK(authentication_releases == 1U);
+    CHECK(handshake.error_context().empty());
+    REQUIRE(handshake.local_endpoint());
+    CHECK(*handshake.local_endpoint() == started.client_endpoint);
+
+    require_no_datagram(*server);
+    handshake.update(now + 100ms);
+    handshake.cancel(now + 200ms);
+    CHECK(provider.lifetime_releases == 1U);
+    CHECK(authentication_releases == 1U);
+    require_no_datagram(*server);
+}
+
 } // namespace
 
 TEST_CASE("Fake HLDS user-info stop point sends no transition request",
@@ -1907,6 +2495,56 @@ TEST_CASE("Fake HLDS malicious resource names remain metadata for 20 of 20",
         run_resource_list(
             run,
             ResourceListIntegrationScenario::malicious_names);
+    }
+}
+
+TEST_CASE("Fake HLDS resource-response baseline repeats 20 of 20",
+          "[goldsrc][resource-response][udp][baseline][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::baseline);
+    }
+}
+
+TEST_CASE("Fake HLDS dropped resource response repeats 20 of 20 without semantic requeue",
+          "[goldsrc][resource-response][udp][drop-response][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::dropped_response);
+    }
+}
+
+TEST_CASE("Fake HLDS dropped response ACK repeats 20 of 20 with transport-only retry",
+          "[goldsrc][resource-response][udp][drop-ack][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::dropped_acknowledgement);
+    }
+}
+
+TEST_CASE("Fake HLDS coalesced response tails repeat 20 of 20 outside reliable semantics",
+          "[goldsrc][resource-response][udp][coalesced-tail][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::coalesced_tail);
+    }
+}
+
+TEST_CASE("Fake HLDS map and resource-list differentials preserve response for 20 of 20",
+          "[goldsrc][resource-response][udp][differential][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        run_resource_response(
+            run,
+            ResourceResponseIntegrationScenario::differential_map);
     }
 }
 

@@ -8,8 +8,10 @@ owning service payload, and publishes a metadata-only client-response
 boundary. It does not send that response or touch the filesystem.
 
 Status: **standard profile completed; custom/player-resource profile typed
-unsupported and pending**. M3.1.3 response generation, M3.2 resolution and
-precache, and M3.3 download/cache remain out of scope.
+unsupported and pending**. The separate M3.1.3 continuation now provides a
+bounded neutral response codec and provider boundary, but it does not alter
+this stage or its historical zero-response stop. Production provider work,
+resolution/precache, and download/cache remain outside M3.1.2.
 
 ## Stock evidence and isolation
 
@@ -302,13 +304,17 @@ The outbound stock evidence is metadata only:
 - three same-process/reconnect coalescing variants have reliable-body lengths
   64, 66, and 68 bytes.
 
-No official mapping establishes the candidate's command semantics, and the
-coalesced variants remain metadata rather than a codec. M3.1.2 records that a
-normal response is required by the observed stock profile, but provides no
-builder, queues no response, and sends no post-list packet. That wire work is
-M3.1.3. The response follows a completed list in the accepted runs; the effect
-of local resource availability, response-loss/list-repeat behavior, command
-semantics, and the exact coalesced layout remain unconfirmed.
+No official mapping establishes the candidate's command semantics. M3.1.2
+records only that a response is required by the reconstructed stock profile;
+it provides no builder, queues no response, and sends no post-list packet.
+M3.1.3 handles the later step in a distinct `ResourceClientResponseStage`: it
+keeps the 10-byte descriptor and 11/13/15/17-byte contemporaneous tail outside
+the selected 41-byte semantic unit, names the wire message neutrally
+`Opcode5ResourceResponse`, and requires path-free provider material for the
+local byte-count and fixed 16-byte opaque fields. With no production provider,
+the continuation returns typed `provider_required` and sends nothing. See
+[GoldSrc post-resource client response](GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
+and [resource-consistency provider boundary](RESOURCE_CONSISTENCY_PROVIDER.md).
 
 ## Deterministic verification and CI
 
@@ -383,12 +389,13 @@ wire width for the uncaptured custom profile.
 - `0xFFFFFF` is preserved as an opaque raw size code, not named as a sentinel;
 - the `maxplayers 1` stock path did not reach a list, so it supplies no count or
   grammar differential;
-- local-file availability, a lost post-list response, list repetition after
-  loss, and coalesced response semantics were not established;
+- controlled active local-file, response-loss, covering-ACK, duplicate, and
+  next-payload scenarios have not yet produced a complete restoration-attested
+  corpus or tracked stock projection;
 - live project-client-to-stock-HLDS sign-on remains pending a production
   authentication provider and is separate from signed-stock capture evidence.
 
-## Explicitly absent and next milestone
+## Explicitly absent and continuation
 
 M3.1.2 adds no response builder, consistency codec, arbitrary resource
 command, filesystem lookup, path policy, VFS mount, resource resolution,
@@ -398,6 +405,11 @@ work. The historical `--stop-after resource-list-boundary` still stops before
 opcode-43 body parsing; `--stop-after resource-list` decodes the bounded list
 and stops before the required response or any resolution.
 
-The next milestone is M3.1.3: establish and implement the client
-resource/consistency response boundary without pulling filesystem work into
-the protocol layer.
+M3.1.3 is bounded/provider-pending: its codec, carrier/tail split, provider API,
+reliable lifecycle, and next-payload boundary exist, while production local
+material remains unavailable and therefore cannot be transmitted. The active
+stock verifier currently refuses projection because no completed
+restoration-attested M3.1.3 runs exist; no active scenario success is implied.
+If the first confirmed complex post-response server message needs a substantial
+codec, M3.1.4 precedes M3.2. Otherwise M3.2 owns approved local-resource
+resolution/precache, and M3.3 remains the safe download/cache boundary.

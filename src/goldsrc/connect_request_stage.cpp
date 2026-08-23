@@ -351,6 +351,42 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_resource_client_response_state(
+    const ResourceClientResponseStageState state) noexcept
+{
+    switch (state) {
+    case ResourceClientResponseStageState::idle:
+    case ResourceClientResponseStageState::waiting_for_resource_list:
+    case ResourceClientResponseStageState::preparing_response:
+    case ResourceClientResponseStageState::waiting_for_consistency_provider:
+    case ResourceClientResponseStageState::response_ready:
+    case ResourceClientResponseStageState::waiting_for_response_transmit:
+    case ResourceClientResponseStageState::waiting_for_response_ack:
+    case ResourceClientResponseStageState::waiting_for_server_continuation:
+    case ResourceClientResponseStageState::decoding_server_continuation:
+        return GoldSrcHandshakeState::waiting_for_resource_response;
+    case ResourceClientResponseStageState::next_server_boundary_reached:
+        return GoldSrcHandshakeState::resource_response_boundary_reached;
+    case ResourceClientResponseStageState::consistency_provider_required:
+        return GoldSrcHandshakeState::resource_response_provider_required;
+    case ResourceClientResponseStageState::unsupported_response_profile:
+        return GoldSrcHandshakeState::resource_response_unsupported_profile;
+    case ResourceClientResponseStageState::timed_out:
+        return GoldSrcHandshakeState::resource_response_timed_out;
+    case ResourceClientResponseStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case ResourceClientResponseStageState::backpressure:
+        return GoldSrcHandshakeState::resource_response_backpressure;
+    case ResourceClientResponseStageState::secondary_stream_pending:
+        return GoldSrcHandshakeState::resource_response_secondary_stream_pending;
+    case ResourceClientResponseStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case ResourceClientResponseStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] bool signon_start_network_failure(
     const std::optional<NetchanDriverErrorCode> driver_code) noexcept
 {
@@ -581,7 +617,11 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     ResourceTransitionStageConfig resource_transition_config,
     ResourceTransitionTraceCallback resource_transition_trace_callback,
     ResourceListStageConfig resource_list_config,
-    ResourceListTraceCallback resource_list_trace_callback)
+    ResourceListTraceCallback resource_list_trace_callback,
+    ResourceClientResponseStageConfig resource_response_config,
+    resource_consistency::IResourceConsistencyProvider*
+        resource_consistency_provider,
+    ResourceClientResponseTraceCallback resource_response_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -609,7 +649,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::movevars ||
                 stop_point_ == HandshakeStopPoint::user_info ||
                 stop_point_ == HandshakeStopPoint::resource_list_boundary ||
-                stop_point_ == HandshakeStopPoint::resource_list) {
+                stop_point_ == HandshakeStopPoint::resource_list ||
+                stop_point_ == HandshakeStopPoint::resource_response_boundary) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -693,6 +734,21 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                     std::move(resource_transition_trace_callback),
                     std::move(resource_list_trace_callback));
             }
+            if (stop_point_ == HandshakeStopPoint::resource_response_boundary) {
+                resource_client_response_stage_.emplace(
+                    transport,
+                    remote_endpoint,
+                    std::move(resource_response_config),
+                    resource_consistency_provider,
+                    std::move(signon_trace_callback),
+                    std::move(pre_resource_trace_callback),
+                    std::move(delta_trace_callback),
+                    std::move(movement_environment_trace_callback),
+                    std::move(user_info_trace_callback),
+                    std::move(resource_transition_trace_callback),
+                    std::move(resource_list_trace_callback),
+                    std::move(resource_response_trace_callback));
+            }
         }
     } else if (authentication_session_) {
         configuration_error_ =
@@ -716,6 +772,13 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (resource_client_response_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_resource_response) {
+        resource_client_response_stage_->update(now);
+        synchronize_from_resource_client_response();
+        release_authentication_session_if_terminal();
         return;
     }
     if (resource_list_stage_ &&
@@ -787,6 +850,13 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (resource_client_response_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_resource_response) {
+        resource_client_response_stage_->cancel(now);
+        synchronize_from_resource_client_response();
+        release_authentication_session_if_terminal();
         return;
     }
     if (resource_list_stage_ &&
@@ -911,6 +981,12 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::resource_list_timed_out:
     case GoldSrcHandshakeState::resource_list_backpressure:
     case GoldSrcHandshakeState::resource_list_secondary_stream_pending:
+    case GoldSrcHandshakeState::resource_response_boundary_reached:
+    case GoldSrcHandshakeState::resource_response_provider_required:
+    case GoldSrcHandshakeState::resource_response_unsupported_profile:
+    case GoldSrcHandshakeState::resource_response_timed_out:
+    case GoldSrcHandshakeState::resource_response_backpressure:
+    case GoldSrcHandshakeState::resource_response_secondary_stream_pending:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -931,6 +1007,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_user_info:
     case GoldSrcHandshakeState::waiting_for_resource_transition:
     case GoldSrcHandshakeState::waiting_for_resource_list:
+    case GoldSrcHandshakeState::waiting_for_resource_response:
         return false;
     }
     return true;
@@ -1037,6 +1114,22 @@ GoldSrcHandshakeCoordinator::resource_list_error() const noexcept
     static const std::optional<ResourceListStageError> empty;
     return resource_list_stage_ ? resource_list_stage_->error() : empty;
 }
+const std::optional<ResourceClientResponseSignonState>&
+GoldSrcHandshakeCoordinator::resource_client_response_result() const noexcept
+{
+    static const std::optional<ResourceClientResponseSignonState> empty;
+    return resource_client_response_stage_
+               ? resource_client_response_stage_->result()
+               : empty;
+}
+const std::optional<ResourceClientResponseStageError>&
+GoldSrcHandshakeCoordinator::resource_client_response_error() const noexcept
+{
+    static const std::optional<ResourceClientResponseStageError> empty;
+    return resource_client_response_stage_
+               ? resource_client_response_stage_->error()
+               : empty;
+}
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
     return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
@@ -1088,6 +1181,10 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (resource_list_stage_ && resource_list_stage_->error()) {
         return resource_list_stage_->error()->context;
     }
+    if (resource_client_response_stage_ &&
+        resource_client_response_stage_->error()) {
+        return resource_client_response_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -1121,7 +1218,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::movevars &&
          stop_point_ != HandshakeStopPoint::user_info &&
          stop_point_ != HandshakeStopPoint::resource_list_boundary &&
-         stop_point_ != HandshakeStopPoint::resource_list)) {
+         stop_point_ != HandshakeStopPoint::resource_list &&
+         stop_point_ != HandshakeStopPoint::resource_response_boundary)) {
         return;
     }
     if (!response_stage_) {
@@ -1153,9 +1251,10 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
          stop_point_ != HandshakeStopPoint::pre_resource &&
          stop_point_ != HandshakeStopPoint::delta_schemas &&
          stop_point_ != HandshakeStopPoint::movevars &&
-         stop_point_ != HandshakeStopPoint::user_info &&
-         stop_point_ != HandshakeStopPoint::resource_list_boundary &&
-         stop_point_ != HandshakeStopPoint::resource_list)) {
+          stop_point_ != HandshakeStopPoint::user_info &&
+          stop_point_ != HandshakeStopPoint::resource_list_boundary &&
+          stop_point_ != HandshakeStopPoint::resource_list &&
+          stop_point_ != HandshakeStopPoint::resource_response_boundary)) {
         return;
     }
     if (!challenge_exchange_.local_endpoint() ||
@@ -1169,8 +1268,10 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         (stop_point_ == HandshakeStopPoint::user_info && !user_info_stage_) ||
         (stop_point_ == HandshakeStopPoint::resource_list_boundary &&
          !resource_transition_stage_) ||
-        (stop_point_ == HandshakeStopPoint::resource_list &&
-         !resource_list_stage_)) {
+         (stop_point_ == HandshakeStopPoint::resource_list &&
+          !resource_list_stage_) ||
+         (stop_point_ == HandshakeStopPoint::resource_response_boundary &&
+          !resource_client_response_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
             "Post-ACCEPT mode has no transport stage or stable local endpoint";
@@ -1262,6 +1363,19 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         synchronize_from_resource_list();
         if (!resource_list_started &&
             state_ == GoldSrcHandshakeState::waiting_for_resource_list) {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::resource_response_boundary) {
+        const bool resource_response_started =
+            resource_client_response_stage_->start(
+                now,
+                *challenge_exchange_.local_endpoint(),
+                std::move(driver_lifetime));
+        synchronize_from_resource_client_response();
+        if (!resource_response_started &&
+            state_ == GoldSrcHandshakeState::waiting_for_resource_response) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -1503,6 +1617,39 @@ void GoldSrcHandshakeCoordinator::synchronize_from_resource_list()
     state_ = map_resource_list_state(resource_list_stage_->state());
     if (stage_error &&
         stage_error->code == ResourceListStageErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_resource_client_response()
+{
+    if (!resource_client_response_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Resource-response mode has no resource-client-response stage";
+        return;
+    }
+    const auto& stage_error = resource_client_response_stage_->error();
+    if (resource_client_response_stage_->state() ==
+            ResourceClientResponseStageState::idle &&
+        stage_error) {
+        if (stage_error->code ==
+                ResourceClientResponseStageErrorCode::invalid_configuration ||
+            stage_error->driver_code ==
+                NetchanDriverErrorCode::invalid_configuration) {
+            state_ = GoldSrcHandshakeState::configuration_error;
+        } else if (signon_start_network_failure(stage_error->driver_code)) {
+            state_ = GoldSrcHandshakeState::network_error;
+        } else {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    state_ = map_resource_client_response_state(
+        resource_client_response_stage_->state());
+    if (stage_error &&
+        stage_error->code ==
+            ResourceClientResponseStageErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

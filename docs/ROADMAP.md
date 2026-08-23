@@ -508,11 +508,48 @@ or TX exists. See
 
 ### M3.1.3 — Client resource/consistency response boundary
 
-**Status: next; exact response semantics and implementation pending.**
+**Status: bounded codec and provider boundary completed; production provider
+and active-stock TX evidence pending.**
 
-Establish the required post-list client response, reliable lifecycle, and
-consistency/resource-negotiation boundary. Do not introduce filesystem
-resolution, download, cache, or precache as part of that protocol work.
+M3.1.3 preserves the historical M3.1.2 `ResourceListStage` and
+`--stop-after resource-list` behavior: response queue count remains zero and
+that route sends nothing. A separate `ResourceClientResponseStage` validates
+the 10-byte fragment descriptor, selects the exact 41-byte neutral
+`Opcode5ResourceResponse`, keeps the 11/13/15/17-byte contemporaneous tail out
+of canonical reliable bytes, and exposes
+`--stop-after resource-response-boundary`.
+
+The response codec is exact and byte-aligned. Compatibility-profile constants
+fill opcode/count/identifier/type/index/flags; local byte count and the private
+fixed 16-byte field must arrive through the path-free
+`IResourceConsistencyProvider`. No production provider is registered, so the
+production stage returns typed `provider_required` and sends no incomplete,
+fallback, or captured response. Synthetic providers exist only in tests. When
+material is available, semantics queue once through the retained
+`NetchanDriver`; transport owns fresh-sequence retransmission, and completion
+requires numeric ACK coverage plus exact reliable-generation equality. The
+stage then reads only opcode byte zero of the first complete following server
+payload and leaves the complex body unconsumed.
+
+The PowerShell verifier rejects primary/registered Steam roots, reparse points,
+marker mismatch, or missing restoration attestation. No completed
+restoration-attested active M3.1.3 runs currently exist, so the required
+baseline/map/restart/reconnect, loss/duplicate, local-resource, and next-payload
+scenario counts are incomplete and no tracked stock response projection is
+created. Historical reconstructed evidence and deterministic project tests do
+not imply active project-to-stock response success. See
+[GoldSrc post-resource client response](GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
+and [resource-consistency provider boundary](RESOURCE_CONSISTENCY_PROVIDER.md).
+
+### M3.1.4 — Next complex post-response server message codec
+
+**Status: conditional planned milestone before M3.2.**
+
+Add this milestone only if completed active evidence shows that the first
+post-response opcode begins a separate substantial message grammar. M3.1.3
+already owns the exact opcode/body-unconsumed boundary; M3.1.4 must not scan or
+permissively parse the remaining payload. If no separate large codec is
+required, proceed directly to M3.2.
 
 ### M3.2 — Local resource resolution and precache state
 

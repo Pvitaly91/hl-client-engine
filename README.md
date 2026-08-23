@@ -6,14 +6,17 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented the bounded standard-profile scope of
-**M3.1.2: identifying opcode 43 as `ResourceListMessage`, decoding its exact
-LSB-first entry grammar into an owning ordered `ResourceListState`, and
-stopping at a metadata-only client-response boundary**. The standard semantic
-gate is passed across 54 exact signed-stock parses and three coherent map
-profiles. Custom/player-resource entries remain typed unsupported and pending.
+The repository has implemented M3.1.2's bounded standard resource-list profile
+and M3.1.3's bounded response codec/provider boundary. Opcode 43 is decoded as
+`ResourceListMessage` into an owning ordered `ResourceListState`; the separate
+continuation models the selected 41-byte client response as neutral
+`Opcode5ResourceResponse`, keeps its fragment descriptor and contemporaneous
+tail outside the semantic bytes, and stops at the first opcode of the next
+complete server payload. M3.1.3 is **provider-pending**: no production
+local-resource provider exists, so a production continuation reports typed
+`provider_required` and sends nothing.
 
-Implemented M1–M3.1.2 behavior includes the Protocol 48 challenge, captured
+Implemented M1–M3.1.3 bounded behavior includes the Protocol 48 challenge, captured
 one-shot `connect` request, strict immediate connectionless `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
 persistent reliable state, strict fragmentation/reassembly, the fixed `new`
@@ -30,13 +33,15 @@ The earlier M2.4.2 server-info second-client evidence gap remains. Signed-stock
 sets separately confirm netchan/fragment behavior, the initial request, the
 server-info/delta/movevars grammars, opcode-13 single/repeated profiles, request
 loss/ACK/duplicate behavior, six-fragment resource-transition transfers, and
-54 stable resource-list bodies. The pinned public Valve SDK independently
+54 stable resource-list bodies and the reconstructed post-list carrier/body
+grammar. The pinned public Valve SDK independently
 cross-checks resource categories and fields but contains no numeric opcode-43
 constant or wire serializer; the semantic gate instead also relies on exact
 repeated grammar, coherent map differentials, and exact list endpoints. Live
 `hlclient` to stock HLDS, slot-1/file semantics, general `svc_*` parsing, a
-Steam authentication provider, custom-resource bodies, the post-list response
-builder, filesystem resolution/downloads, snapshots, gameplay, and a public
+Steam authentication provider, custom-resource list bodies, a production
+resource-consistency provider, filesystem resolution/downloads, snapshots,
+gameplay, and a public
 raw payload/command CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
@@ -361,6 +366,27 @@ asset, or renderer action. Custom/player-resource flag profiles fail closed as
 typed unsupported. See
 [GoldSrc opcode-43 resource list](docs/GOLDSRC_RESOURCE_LIST.md).
 
+The separate M3.1.3 continuation is selected with:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after resource-response-boundary `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin --net-trace
+```
+
+`ResourceListStage` and `--stop-after resource-list` retain their historical
+M3.1.2 semantics: `response_queue_count() == 0`, no response is queued or sent,
+and no provider is consulted. `ResourceClientResponseStage` is a distinct
+continuation. It requires path-free typed consistency material, builds and
+queues the 41-byte semantic unit exactly once, lets the retained driver own
+retransmission and covering-ACK handling, and publishes only the first opcode
+of the next complete server payload with its complex body unconsumed. There is
+no production provider in this milestone, so the production route currently
+terminates as `provider_required` before TX; synthetic providers are test-only.
+See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
+and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md).
+
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
 project client exercises request plus accept/reject behavior against
@@ -563,6 +589,25 @@ entries remain pending, and the offline run reports
 [GoldSrc opcode-43 resource list](docs/GOLDSRC_RESOURCE_LIST.md) and the
 [tracked sanitized stock projection](docs/evidence/GOLDSRC_RESOURCE_LIST_STOCK.json).
 
+M3.1.3 has a separate PowerShell 5.1-compatible verifier. Its research-root
+mode is preflight only: it starts no process and makes no post-run drift claim.
+Projection accepts only a complete set of bounded ignored relay metadata with
+a successful per-run restoration attestation:
+
+```powershell
+.\scripts\verify_stock_resource_response.ps1 -ValidateResearchRoot `
+  -ResearchHalfLifeRoot C:\research\Half-Life-isolated
+.\scripts\verify_stock_resource_response.ps1 -ProjectEvidenceSet
+```
+
+At present there are no completed restoration-attested active M3.1.3 runs, so
+projection intentionally returns nonzero and
+`docs/evidence/GOLDSRC_RESOURCE_CLIENT_RESPONSE_STOCK.json` does not exist.
+The reconstructed 54-session corpus supports the bounded codec design, but it
+does not substitute for the required active baseline/map/restart/reconnect,
+loss/duplicate, local-resource differential, and next-payload scenarios. No
+active-stock scenario success or project-to-stock response TX is claimed.
+
 The repository does not contain or redistribute Steam, Half-Life, game, WAD,
 BSP, MDL, sound, or other copyrighted game assets. Users must supply any assets
 they are licensed to use.
@@ -709,6 +754,12 @@ terminal-fill/EOP, byte-preserving malicious-name isolation, immutable owning
 state, post-list response metadata with zero TX, transactional stage events,
 and same-socket fake-HLDS continuation. The historical pre-body stop retains
 its M3.1.1 behavior.
+M3.1.3 adds an independent 41-byte neutral opcode-5 fixture, strict response
+parser/builder, exact descriptor/semantic/tail separation, a path-free
+move-only provider API, semantic-once reliable lifecycle, covering-ACK and
+next-payload boundaries, and deterministic provider/loss/duplicate tests.
+These project tests are not promoted to active-stock evidence; the stock
+projection remains blocked as described above.
 
 ## License
 

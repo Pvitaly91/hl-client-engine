@@ -24,6 +24,7 @@ enum class ConnectionStopPoint {
     user_info,
     resource_list_boundary,
     resource_list,
+    resource_response_boundary,
 };
 
 enum class AuthenticationProviderKind {

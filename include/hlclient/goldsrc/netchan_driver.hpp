@@ -172,6 +172,14 @@ struct NetchanDriverEvent {
     std::size_t fragment_length{0U};
     std::size_t covered_size{0U};
     NetchanDriverTimePoint occurred_at{};
+    // Present only for reliable_payload_acknowledged. This is the exact
+    // validated observation that completed the in-flight reliable unit; no
+    // caller needs to reconstruct the covering ACK after session commit.
+    std::optional<NetchanAcknowledgementObservation> acknowledgement;
+    // Present only when the acknowledged reliable unit belonged to a local
+    // outgoing fragment transfer. Captured before session commit clears that
+    // transfer, and therefore suitable for exact generation auditing.
+    std::optional<std::uint64_t> completed_reliable_generation;
 };
 
 enum class NetchanDriverTraceClassification {

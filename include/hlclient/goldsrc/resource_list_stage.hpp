@@ -222,6 +222,37 @@ public:
     }
 
 private:
+    friend class ResourceClientResponseStage;
+
+    struct RetainConnectionAtBoundary final {};
+
+    ResourceListStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        ResourceListStageConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback movement_trace_callback,
+        UserInfoSignonTraceCallback user_info_trace_callback,
+        ResourceTransitionTraceCallback transition_trace_callback,
+        ResourceListTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+    ResourceListStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        ResourceListStageConfig config,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback movement_trace_callback,
+        UserInfoSignonTraceCallback user_info_trace_callback,
+        ResourceTransitionTraceCallback transition_trace_callback,
+        ResourceListTraceCallback trace_callback,
+        bool retain_connection_at_boundary);
+
+    [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    void finalize_retained_boundary(ResourceListStageTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count = 1U) const noexcept;
     void push_event(ResourceListStageEvent event) noexcept;
     void drain_transition_events() noexcept;
@@ -264,6 +295,7 @@ private:
     ResourceListTraceCallback trace_callback_;
     bool trace_callback_active_{false};
     bool configuration_valid_{false};
+    bool retain_connection_at_boundary_{false};
     ResourceTransitionStage transition_stage_;
     std::vector<std::optional<ResourceListStageEvent>> event_slots_;
     std::size_t event_head_{0U};

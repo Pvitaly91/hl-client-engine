@@ -607,9 +607,17 @@ TEST_CASE("Netchan driver permits bounded client-first reliable data only",
     REQUIRE(acknowledged);
     CHECK(acknowledged->type ==
           goldsrc::NetchanDriverEventType::reliable_payload_acknowledged);
+    REQUIRE(acknowledged->acknowledgement);
+    CHECK(acknowledged->acknowledgement->sequence == sequence(1U));
+    CHECK(acknowledged->acknowledgement->reliable);
+    CHECK(acknowledged->acknowledgement->disposition ==
+          goldsrc::NetchanAcknowledgementDisposition::advanced);
+    CHECK_FALSE(acknowledged->completed_reliable_generation);
     auto payload = driver.poll_event();
     REQUIRE(payload);
     CHECK(payload->type == goldsrc::NetchanDriverEventType::payload_ready);
+    CHECK_FALSE(payload->acknowledgement);
+    CHECK_FALSE(payload->completed_reliable_generation);
     REQUIRE(payload->payload);
     CHECK(payload->payload->bytes == bytes("SERVER_FIRST"));
     CHECK_FALSE(driver.poll_event());
@@ -1629,7 +1637,8 @@ TEST_CASE("Outgoing normal fragments are stop-and-wait and retry only the missin
     REQUIRE(first_fragment_trace != trace.rend());
     CHECK(first_fragment_trace->fragment_stream ==
           goldsrc::NetchanFragmentStream::normal);
-    CHECK(first_fragment_trace->local_transfer_id.has_value());
+    REQUIRE(first_fragment_trace->local_transfer_id);
+    const auto reliable_generation = *first_fragment_trace->local_transfer_id;
     CHECK(first_fragment_trace->fragment_offset == 0U);
     CHECK(first_fragment_trace->fragment_length ==
           goldsrc::kStockProtocol48NormalFragmentChunkSize);
@@ -1755,6 +1764,16 @@ TEST_CASE("Outgoing normal fragments are stop-and-wait and retry only the missin
         if (event->type ==
             goldsrc::NetchanDriverEventType::reliable_payload_acknowledged) {
             ++acknowledged_events;
+            REQUIRE(event->acknowledgement);
+            CHECK(event->acknowledgement->sequence ==
+                  final_fragment.header.sequence.sequence);
+            CHECK(event->acknowledgement->reliable == final_toggle);
+            CHECK(event->acknowledgement->disposition ==
+                  goldsrc::NetchanAcknowledgementDisposition::advanced);
+            REQUIRE(event->completed_reliable_generation);
+            CHECK(*event->completed_reliable_generation == reliable_generation);
+        } else {
+            CHECK_FALSE(event->completed_reliable_generation);
         }
     }
     CHECK(acknowledged_events == 1U);

@@ -71,10 +71,15 @@ opcode-43 boundary. M3.1.2 optionally continues from that exact retained
 cursor, decodes the confirmed LSB-first standard `ResourceListMessage` into
 ordered owning metadata, validates exact end-of-payload, and stops at a
 metadata-only required-response boundary without TX or filesystem access. The
-custom/player-resource grammar, response builder, server-info second-client
-slot field, resource resolution, snapshots, movement application, and commands
-remain future evidence or implementation increments behind the same provider
-boundary. The future bridge adapts
+M3.1.3 continuation then separates descriptor/41-byte semantic/tail geometry,
+uses the neutral `Opcode5ResourceResponse` codec, obtains private local-derived
+fields only through `hlclient_resource_consistency_api`, queues semantics once
+through the retained driver, and stops at the first opcode of the next complete
+server payload. No production consistency provider exists, so production ends
+as `provider_required` without TX. Custom/player-resource grammar,
+server-info second-client slot evidence, resource resolution, snapshots,
+movement application, and commands remain future increments behind the same
+boundaries. The future bridge adapts
 observed or exported in-process state to the same project types. It must not
 make renderer behavior depend on injected addresses or Valve private layouts.
 
@@ -88,10 +93,11 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
 | `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
 | `hlclient_goldsrc_netchan` | netchan classifier/base/fragment codec, payload transform, wrap-safe persistent session, bounded pending plus one reliable unit in flight, transactional unfragmented/fragment sends, filesystem-free slot-0 normal reassembly, bounded same-transport driver, owning events, metadata-only traces, and first-ACK compatibility primitive | transport creation/closure, authentication semantics or bytes, slot-1/file interpretation, decompression, files, `svc_*`, world/render state |
-| `hlclient_goldsrc_signon` | exact fixed initial and transition client requests, strict `BZ2\0` in-memory envelope decoder, bounded confirmed service-message continuation, owning immutable server-info/pre-resource/delta/movement/user-info/transition/resource-list state, dedicated private-value user-info grammar, fixed opcode-45 control, historical neutral opcode-43 boundary, exact LSB-first standard resource-list codec, metadata-only response boundary, same-driver retained stages, and exact cursor accounting | arbitrary commands, custom/player-resource bodies, post-list response generation, resource resolution, runtime delta or movement application, command execution, filesystem, renderer, SDL, assets, world state |
+| `hlclient_resource_consistency_api` | path-free bounded provider requirements, move-only asynchronous operation/session/material ownership, cancellation, and private opaque-material handoff | filesystem/path policy, local lookup, checksum calculation, sockets, GoldSrc list types, assets, renderer |
+| `hlclient_goldsrc_signon` | exact fixed initial/transition requests, strict `BZ2\0` decoding, owning immutable sign-on/list/response states, historical neutral opcode-43 and zero-TX resource-list stop, exact standard list and neutral 41-byte opcode-5 codecs, carrier/tail separation, provider-required response stage, same-driver semantic-once lifecycle, and next-payload opcode boundary | arbitrary commands, custom/player-resource bodies, production consistency material, resource resolution, runtime application, command execution, filesystem, renderer, SDL, assets, world state |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter and bounded local-file loading | discovery, caching, Steam integration, fallback search, protocol parsing |
-| `hlclient_goldsrc_client` | challenge/connect/response coordination, same-socket bootstrap/initial/pre-resource/delta/movevars/user-info/resource-transition/resource-list composition, and driver/auth-lifetime ownership through the selected terminal stop | auth generation, wire codec duplication, arbitrary reliable payload production, post-list response generation/negotiation, runtime delta or movement application, OpenGL, SDL, filesystem, world/render state |
+| `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/initial/pre-resource/delta/movevars/user-info/transition/list/response composition, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, runtime application, OpenGL, SDL, filesystem, world/render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_asset_api` | owning asset sources, neutral CPU assets, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
@@ -153,7 +159,8 @@ Network input is untrusted. Parsers must:
 Compatibility constants may be checked against official SDK declarations, but
 the runtime implementation remains project-owned.
 
-The current application path reaches the bounded post-movevars boundary:
+The current application path exposes explicit bounded stops through the
+provider-gated post-resource response boundary:
 
 ```text
 --connect IPv4:port
@@ -205,13 +212,26 @@ The current application path reaches the bounded post-movevars boundary:
                                               |-> terminal neutral opcode 43;
                                               |   validated but unconsumed;
                                               |   body unread, no reply
-                                              `-> optional ResourceListStage
-                                                  -> exact opcode-43 cursor
-                                                  -> strict LSB-first count/entries
-                                                  -> immutable ordered metadata
-                                                  -> terminal zero fill + exact EOP
-                                                  -> response-required boundary;
-                                                     metadata only, no TX/files
+                                               `-> optional ResourceListStage
+                                                   -> exact opcode-43 cursor
+                                                   -> strict LSB-first count/entries
+                                                   -> immutable ordered metadata
+                                                   -> terminal zero fill + exact EOP
+                                                   -> response-required boundary
+                                                   |-> terminal `resource-list`;
+                                                   |   historical metadata only,
+                                                   |   zero queued response/TX/files
+                                                   `-> optional ResourceClientResponseStage
+                                                       -> descriptor/41-byte/tail split
+                                                       -> typed provider requirements
+                                                       |-> no production provider:
+                                                       |   `provider_required`, no TX
+                                                       `-> provider material available:
+                                                           -> queue semantic bytes once
+                                                           -> driver retry/covering ACK
+                                                           -> first complete next payload
+                                                           -> opcode at offset 0;
+                                                              complex body unconsumed
 ```
 
 The application has only an explicit user-file authentication provider; it
@@ -223,12 +243,23 @@ nine-byte request and owns at most one second payload received before its
 covering ACK. The resource-list continuation queues nothing. Each public
 earlier stop closes after publishing its own
 boundary; friend-only retention carries that same driver/lifetime only through
-the selected continuation. No route exposes received raw reliable/fragment/
+the selected continuation. The separate response continuation can queue one
+typed semantic unit only after a provider succeeds; without the absent
+production provider it publishes `provider_required` and sends nothing. No
+route exposes received raw reliable/fragment/
 delta/movevars/user-info/resource bytes or updates filesystem, world, asset,
 or renderer state; the transition request object exposes only its fixed typed
 nine-byte wire message. The delta, MoveVars, user-info, transition, and
 resource-list states are metadata for future milestones and are not applied to
 packets, simulation, player entities, resource lookup, or world memory.
+
+The active stock verifier has no completed restoration-attested M3.1.3 runs,
+and therefore no tracked response projection exists. Historical reconstructed
+carrier evidence and deterministic fake-HLDS tests justify the bounded API and
+test behavior, but are not an active project-client-to-stock response success
+claim. If the first confirmed complex next-server message needs a substantial
+codec, M3.1.4 is inserted before M3.2; otherwise M3.2 supplies the first
+approved production local-resource provider behind the path-free API.
 
 M2.3.3 splits netchan into pure base/fragment wire codecs and transform,
 transport-independent persistent reliable state, a transactional normal

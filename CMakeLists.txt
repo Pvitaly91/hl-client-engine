@@ -173,6 +173,17 @@ target_link_libraries(
 set_property(TARGET hlclient_goldsrc_netchan PROPERTY FOLDER "Engine/Network/GoldSrc")
 
 hlclient_add_library(
+    hlclient_resource_consistency_api
+    include/hlclient/resource_consistency/provider.hpp
+    src/resource_consistency/provider.cpp
+)
+add_library(
+    hlclient::resource_consistency_api ALIAS hlclient_resource_consistency_api)
+set_property(
+    TARGET hlclient_resource_consistency_api
+    PROPERTY FOLDER "Engine/Resource Consistency")
+
+hlclient_add_library(
     hlclient_goldsrc_signon
     include/hlclient/goldsrc/bit_reader.hpp
     include/hlclient/goldsrc/client_message.hpp
@@ -184,6 +195,8 @@ hlclient_add_library(
     include/hlclient/goldsrc/pre_resource_signon_stage.hpp
     include/hlclient/goldsrc/resource_list.hpp
     include/hlclient/goldsrc/resource_list_stage.hpp
+    include/hlclient/goldsrc/resource_client_response.hpp
+    include/hlclient/goldsrc/resource_client_response_stage.hpp
     include/hlclient/goldsrc/resource_transition_control.hpp
     include/hlclient/goldsrc/resource_transition_request.hpp
     include/hlclient/goldsrc/resource_transition_stage.hpp
@@ -202,6 +215,8 @@ hlclient_add_library(
     src/goldsrc/pre_resource_signon_stage.cpp
     src/goldsrc/resource_list.cpp
     src/goldsrc/resource_list_stage.cpp
+    src/goldsrc/resource_client_response.cpp
+    src/goldsrc/resource_client_response_stage.cpp
     src/goldsrc/resource_transition_control.cpp
     src/goldsrc/resource_transition_request.cpp
     src/goldsrc/resource_transition_stage.cpp
@@ -218,6 +233,7 @@ target_link_libraries(
         hlclient::goldsrc
         hlclient::goldsrc_netchan
         hlclient::network
+        hlclient::resource_consistency_api
     PRIVATE
         hlclient::bzip2
         hlclient::core

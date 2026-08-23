@@ -51,6 +51,10 @@ add_executable(hlclient_tests
     test_post_resource_list_stream.cpp
     test_resource_list.cpp
     test_resource_list_stage.cpp
+    test_resource_client_response.cpp
+    test_resource_client_response_stage.cpp
+    test_resource_response_carrier.cpp
+    test_resource_consistency_provider.cpp
     test_resource_transition_control.cpp
     test_resource_transition_request.cpp
     test_resource_transition_stage.cpp
@@ -79,6 +83,7 @@ target_link_libraries(hlclient_tests
         hlclient_network
         hlclient_scene_api
         hlclient_renderer_null
+        hlclient_resource_consistency_api
 )
 
 target_compile_features(hlclient_tests PRIVATE cxx_std_20)

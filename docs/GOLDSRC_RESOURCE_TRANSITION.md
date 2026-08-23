@@ -4,13 +4,15 @@ M3.1.1 implements the exact client transition request, its persistent reliable
 lifecycle, the bounded second service transfer, strict opcode-45 control, and
 an exact neutral stop at numeric opcode 43. It deliberately does not parse or
 name the opcode-43 body as a resource list. That historical stop remains
-unchanged after M3.1.2.
+unchanged after M3.1.2 and M3.1.3.
 
 Status: completed for the bounded transition and neutral opcode-43 boundary
 scope. The M3.1.1 evidence alone did not pass the resource-list semantic/body
 gate; the separate M3.1.2 continuation now passes it for the standard stock
 profile and is documented in
 [GoldSrc opcode-43 resource list](GOLDSRC_RESOURCE_LIST.md).
+The still-separate M3.1.3 continuation is documented in
+[GoldSrc post-resource client response](GOLDSRC_RESOURCE_CLIENT_RESPONSE.md).
 
 ## Evidence and compatibility profile
 
@@ -307,6 +309,15 @@ The separate M3.1.2 `--stop-after resource-list` route now decodes the bounded
 standard body into owning metadata and stops at an exact metadata-only
 required-response boundary. It still sends no post-list response and performs
 no resolution or file action. Custom/player-resource entries remain typed
-unsupported and pending. The next milestone is M3.1.3 client resource/
-consistency response work; M3.2 local resolution and M3.3 safe download/cache
-remain later.
+unsupported and pending.
+
+M3.1.3 adds a separate `--stop-after resource-response-boundary` composition;
+it does not change either older stop. Its neutral 41-byte opcode-5 codec keeps
+the fragment descriptor and contemporaneous tail separate, requires typed
+path-free provider material, and delegates semantic-once TX/retry/covering ACK
+to the retained driver. Because no production provider exists, production
+execution reports `provider_required` and sends no response. Active stock
+projection also remains blocked: there are no completed restoration-attested
+M3.1.3 runs, so no active loss/duplicate/next-phase success is claimed. M3.1.4
+precedes M3.2 if the next complex message requires its own substantial codec;
+otherwise M3.2 remains local resolution/precache and M3.3 safe download/cache.

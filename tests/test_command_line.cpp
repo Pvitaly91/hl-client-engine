@@ -286,6 +286,21 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
               hlclient::core::ConnectionStopPoint::resource_list);
     }
 
+    SECTION("explicit file provider supports the post-resource response boundary")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"resource-response-boundary"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::resource_response_boundary);
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -445,6 +460,15 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             std::string_view{"--ignore-resource-hash"},
             std::string_view{"--raw-resource-list"},
             std::string_view{"--fake-steam-id"},
+            std::string_view{"--raw-resource-response"},
+            std::string_view{"--response-file"},
+            std::string_view{"--captured-response"},
+            std::string_view{"--resource-checksum-file"},
+            std::string_view{"--ignore-consistency"},
+            std::string_view{"--fake-consistency"},
+            std::string_view{"--send-opcode5"},
+            std::string_view{"--skip-resource-response"},
+            std::string_view{"--resource-root"},
         };
         for (const auto argument : rejected) {
             CAPTURE(argument);
@@ -608,9 +632,11 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("user-info") != std::string_view::npos);
     CHECK(help.find("resource-list-boundary") != std::string_view::npos);
     CHECK(help.find("resource-list") != std::string_view::npos);
+    CHECK(help.find("resource-response-boundary") != std::string_view::npos);
     CHECK(help.find("stop before parsing opcode-43 body") != std::string_view::npos);
     CHECK(help.find("required client response") !=
           std::string_view::npos);
+    CHECK(help.find("provider-required") != std::string_view::npos);
     CHECK(help.find("--auth-provider") != std::string_view::npos);
     CHECK(help.find("file") != std::string_view::npos);
     CHECK(help.find("--auth-material-file") != std::string_view::npos);

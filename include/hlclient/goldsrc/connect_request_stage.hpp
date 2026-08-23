@@ -10,6 +10,7 @@
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 #include <hlclient/goldsrc/pre_resource_signon_stage.hpp>
 #include <hlclient/goldsrc/resource_list_stage.hpp>
+#include <hlclient/goldsrc/resource_client_response_stage.hpp>
 #include <hlclient/goldsrc/resource_transition_stage.hpp>
 #include <hlclient/goldsrc/user_info_signon_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
@@ -38,6 +39,7 @@ enum class HandshakeStopPoint {
     user_info,
     resource_list_boundary,
     resource_list,
+    resource_response_boundary,
 };
 
 enum class ConnectRequestStageState {
@@ -185,6 +187,13 @@ enum class GoldSrcHandshakeState {
     resource_list_timed_out,
     resource_list_backpressure,
     resource_list_secondary_stream_pending,
+    waiting_for_resource_response,
+    resource_response_boundary_reached,
+    resource_response_provider_required,
+    resource_response_unsupported_profile,
+    resource_response_timed_out,
+    resource_response_backpressure,
+    resource_response_secondary_stream_pending,
     timed_out,
     cancelled,
     configuration_error,
@@ -220,7 +229,13 @@ public:
         ResourceTransitionStageConfig resource_transition_config = {},
         ResourceTransitionTraceCallback resource_transition_trace_callback = {},
         ResourceListStageConfig resource_list_config = {},
-        ResourceListTraceCallback resource_list_trace_callback = {});
+        ResourceListTraceCallback resource_list_trace_callback = {},
+        ResourceClientResponseStageConfig resource_response_config = {},
+        // Non-owning; must outlive this coordinator. Provider calls execute on
+        // the coordinator update path and must be nonblocking.
+        resource_consistency::IResourceConsistencyProvider*
+            resource_consistency_provider = nullptr,
+        ResourceClientResponseTraceCallback resource_response_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -266,6 +281,10 @@ public:
     resource_list_result() const noexcept;
     [[nodiscard]] const std::optional<ResourceListStageError>&
     resource_list_error() const noexcept;
+    [[nodiscard]] const std::optional<ResourceClientResponseSignonState>&
+    resource_client_response_result() const noexcept;
+    [[nodiscard]] const std::optional<ResourceClientResponseStageError>&
+    resource_client_response_error() const noexcept;
     // Non-null only after a successful netchan bootstrap. The returned object
     // is the same session that committed the M2.3.3 bootstrap ACKs; callers must use
     // the coordinator's original externally-owned datagram transport.
@@ -286,6 +305,7 @@ private:
     void synchronize_from_user_info();
     void synchronize_from_resource_transition();
     void synchronize_from_resource_list();
+    void synchronize_from_resource_client_response();
     void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
@@ -300,6 +320,7 @@ private:
     std::optional<UserInfoSignonStage> user_info_stage_;
     std::optional<ResourceTransitionStage> resource_transition_stage_;
     std::optional<ResourceListStage> resource_list_stage_;
+    std::optional<ResourceClientResponseStage> resource_client_response_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;

@@ -997,6 +997,112 @@ void log_resource_list_trace(
     }
 }
 
+void log_resource_client_response_trace(
+    const hlclient::goldsrc::ResourceClientResponseTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::ResourceClientResponseTraceClassification;
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::resource_list_ready:
+        return;
+    case Classification::resource_response_requirements_ready:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] client response requirements determined");
+        return;
+    case Classification::consistency_provider_required:
+        hlclient::core::log(
+            LogLevel::error,
+            "[resource] a resource-consistency provider is required; response not sent");
+        return;
+    case Classification::resource_response_ready:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] client response ready, bytes=" +
+                std::to_string(event.semantic_byte_count));
+        return;
+    case Classification::resource_response_queued:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] client response queued");
+        return;
+    case Classification::resource_response_transmitted:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[resource] client response transmitted, generation=" +
+                (event.reliable_generation
+                     ? std::to_string(*event.reliable_generation)
+                     : std::string{"unavailable"}) +
+                " sequence=" +
+                (event.transmit_sequence
+                     ? std::to_string(*event.transmit_sequence)
+                     : std::string{"unavailable"}));
+        return;
+    case Classification::resource_response_acknowledged:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] client response acknowledged");
+        return;
+    case Classification::concurrent_tail_observed:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[resource] concurrent tail metadata observed, bytes=" +
+                std::to_string(event.payload_byte_count));
+        return;
+    case Classification::server_continuation_received:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[resource] following server payload received, bytes=" +
+                std::to_string(event.payload_byte_count));
+        return;
+    case Classification::next_server_boundary_reached:
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] next server boundary opcode=" +
+                (event.opcode
+                     ? std::to_string(static_cast<unsigned int>(*event.opcode))
+                     : std::string{"end-of-payload"}) +
+                " offset=0");
+        return;
+    case Classification::unsupported_response_profile:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unsupported post-resource response profile");
+        return;
+    case Classification::stage_timed_out:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource response stage timed out");
+        return;
+    case Classification::stage_cancelled:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource response stage cancelled");
+        return;
+    case Classification::backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource response event backpressure");
+        return;
+    case Classification::secondary_stream_pending:
+        hlclient::core::log(
+            LogLevel::error,
+            "Secondary post-resource stream remains pending");
+        return;
+    case Classification::network_failure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource response network failure");
+        return;
+    case Classification::protocol_failure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource response protocol failure");
+        return;
+    }
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -1494,6 +1600,70 @@ void log_resource_list_trace(
             LogLevel::error,
             "Secondary resource-list stream remains pending");
         return 1;
+    case State::resource_response_boundary_reached:
+    {
+        if (!handshake.resource_client_response_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Post-resource stage completed without an owning result");
+            return 1;
+        }
+        const auto& result = *handshake.resource_client_response_result();
+        const auto& boundary = result.boundary();
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] neutral opcode-5 response lifecycle completed");
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] semantic bytes=" +
+                std::to_string(result.response().bytes_consumed()) +
+                " reliable-generation=" +
+                std::to_string(
+                    result.reliable_lifecycle().reliable_generation()) +
+                " transport-sends=" +
+                std::to_string(result.reliable_lifecycle().transmit_count()));
+        hlclient::core::log(
+            LogLevel::info,
+            "[resource] next server boundary opcode=" +
+                (boundary.opcode()
+                     ? std::to_string(
+                           static_cast<unsigned int>(*boundary.opcode()))
+                     : std::string{"end-of-payload"}) +
+                " offset=" + std::to_string(boundary.byte_offset()) +
+                " unconsumed-body=" +
+                std::to_string(boundary.remaining_byte_count()) + " bytes");
+        hlclient::core::log(
+            LogLevel::info,
+            "The next complex body remains unparsed; no filesystem, download, "
+            "cache, or precache action was performed");
+        return 0;
+    }
+    case State::resource_response_provider_required:
+        hlclient::core::log(
+            LogLevel::error,
+            "The neutral opcode-5 response requires a configured path-free "
+            "resource-consistency provider; no incomplete response was sent");
+        return 1;
+    case State::resource_response_unsupported_profile:
+        hlclient::core::log(
+            LogLevel::error,
+            "Unsupported post-resource response profile");
+        return 1;
+    case State::resource_response_timed_out:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource response stage timed out");
+        return 1;
+    case State::resource_response_backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource response event queue reached its hard bound");
+        return 1;
+    case State::resource_response_secondary_stream_pending:
+        hlclient::core::log(
+            LogLevel::error,
+            "Secondary post-resource response stream remains pending");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -1523,6 +1693,7 @@ void log_resource_list_trace(
     case State::waiting_for_user_info:
     case State::waiting_for_resource_transition:
     case State::waiting_for_resource_list:
+    case State::waiting_for_resource_response:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -1619,7 +1790,11 @@ public:
                 net_trace
                     ? hlclient::goldsrc::ResourceListTraceCallback{
                           &log_resource_list_trace}
-                    : hlclient::goldsrc::ResourceListTraceCallback{}}
+                    : hlclient::goldsrc::ResourceListTraceCallback{},
+                {},
+                nullptr,
+                hlclient::goldsrc::ResourceClientResponseTraceCallback{
+                    &log_resource_client_response_trace}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -1942,6 +2117,10 @@ int run(const hlclient::core::CommandLineOptions& options)
             break;
         case hlclient::core::ConnectionStopPoint::resource_list:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::resource_list;
+            break;
+        case hlclient::core::ConnectionStopPoint::resource_response_boundary:
+            stop_point =
+                hlclient::goldsrc::HandshakeStopPoint::resource_response_boundary;
             break;
         }
         challenge_session = std::make_unique<HandshakeSession>(

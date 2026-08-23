@@ -911,6 +911,14 @@ private:
         const bool completes_reliable =
             incoming_acknowledgement_completes_reliable_payload(
                 session_, inspection);
+        const auto acknowledgement = inspection.acknowledgement();
+        std::optional<std::uint64_t> completed_reliable_generation;
+        if (completes_reliable) {
+            const auto& transfer = session_.outgoing_fragment_transfer();
+            if (transfer && transfer->transfer_id.valid()) {
+                completed_reliable_generation = transfer->transfer_id.value();
+            }
+        }
         const std::size_t required_events = completes_reliable ? 2U : 1U;
         if (!ensure_event_capacity(required_events, now)) {
             return false;
@@ -961,6 +969,8 @@ private:
                 0U,
                 0U,
                 now,
+                acknowledgement,
+                completed_reliable_generation,
             });
         }
         const auto payload_size = payload.bytes.size();
@@ -1131,6 +1141,14 @@ private:
         const bool completes_reliable =
             incoming_acknowledgement_completes_reliable_payload(
                 session_, inspection);
+        const auto acknowledgement = inspection.acknowledgement();
+        std::optional<std::uint64_t> completed_reliable_generation;
+        if (completes_reliable) {
+            const auto& transfer = session_.outgoing_fragment_transfer();
+            if (transfer && transfer->transfer_id.valid()) {
+                completed_reliable_generation = transfer->transfer_id.value();
+            }
+        }
         const bool has_completion = prepared.plan->completion_size().has_value();
         const auto prepared_completion_size =
             prepared.plan->completion_size().value_or(0U);
@@ -1231,6 +1249,8 @@ private:
                 0U,
                 0U,
                 now,
+                acknowledgement,
+                completed_reliable_generation,
             });
         }
         if (receipt.started_transfer) {
