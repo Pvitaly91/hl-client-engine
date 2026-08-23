@@ -75,8 +75,10 @@ models are missing.
 
 ## Explicit boundary
 
-This milestone opens files only during the existing sandboxed inventory lookup
+M3.2.2 opens files only during the existing sandboxed inventory lookup
 and only metadata is retained. It does not hash general resources, validate
 asset contents, parse BSP/WAD/MDL/SPR/WAV data, load an asset, download or cache
-anything, mutate `ClientWorldState`, or call a renderer. M3.2.3 is the next
-boundary for approved asset-source opening and format-importer dispatch.
+anything, mutate `ClientWorldState`, or call a renderer. M3.2.3 consumes this
+evidence only through a distinct one-source continuation: the exact world entry
+must remain ready and its locator is reopened and validated before importer
+dispatch. Readiness alone is never treated as parsed-format validity.

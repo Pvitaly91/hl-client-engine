@@ -50,13 +50,15 @@ public:
         std::string result_name,
         std::optional<AssetError> failure = std::nullopt,
         int* import_count = nullptr,
-        int* destruction_count = nullptr)
+        int* destruction_count = nullptr,
+        int* probe_count = nullptr)
         : importer_id_{std::move(importer_id)},
           confidence_{confidence},
           result_name_{std::move(result_name)},
           failure_{std::move(failure)},
           import_count_{import_count},
-          destruction_count_{destruction_count}
+          destruction_count_{destruction_count},
+          probe_count_{probe_count}
     {
     }
 
@@ -74,6 +76,9 @@ public:
 
     [[nodiscard]] AssetProbeConfidence probe(const AssetProbe& probe) const noexcept override
     {
+        if (probe_count_ != nullptr) {
+            ++*probe_count_;
+        }
         observed_signature_size_ = probe.signature.size();
         observed_structural_size_ = probe.structural_bytes.size();
         observed_version_ = probe.version_hint;
@@ -116,6 +121,7 @@ private:
     std::optional<AssetError> failure_;
     int* import_count_{nullptr};
     int* destruction_count_{nullptr};
+    int* probe_count_{nullptr};
     mutable std::size_t observed_signature_size_{0};
     mutable std::size_t observed_structural_size_{0};
     mutable std::optional<std::uint32_t> observed_version_;
@@ -255,6 +261,111 @@ TEST_CASE("AssetSource rejects unsafe virtual paths", "[assets][registry]")
     CHECK_FALSE(AssetSource::create("../outside.mdl", {}));
     CHECK_FALSE(AssetSource::create(std::filesystem::current_path().root_path(), {}));
     CHECK_FALSE(AssetSource::create({}, {}));
+}
+
+TEST_CASE("Registry pure probe reports an empty registry without importing", "[assets][registry][probe]")
+{
+    ModelImporterRegistry registry;
+
+    const auto result = registry.probe(make_source());
+
+    CHECK(result.state == hlclient::assets::AssetImporterProbeState::no_match);
+    CHECK(result.best_confidence == hlclient::assets::kAssetProbeNoMatch);
+    CHECK(result.best_priority == 0);
+    CHECK(result.top_candidates.empty());
+    CHECK_FALSE(result.selected());
+}
+
+TEST_CASE("Registry pure probe returns sorted top candidates without importing", "[assets][registry][probe]")
+{
+    int alpha_probe_count = 0;
+    int zeta_probe_count = 0;
+    int alpha_import_count = 0;
+    int zeta_import_count = 0;
+    ModelImporterRegistry registry;
+    REQUIRE(registry.register_importer(std::make_unique<SyntheticModelImporter>(
+        "zeta",
+        AssetProbeConfidence{75U},
+        "zeta",
+        std::nullopt,
+        &zeta_import_count,
+        nullptr,
+        &zeta_probe_count), 5));
+    REQUIRE(registry.register_importer(std::make_unique<SyntheticModelImporter>(
+        "alpha",
+        AssetProbeConfidence{75U},
+        "alpha",
+        std::nullopt,
+        &alpha_import_count,
+        nullptr,
+        &alpha_probe_count), 5));
+
+    const auto result = registry.probe(make_source());
+
+    CHECK(result.state == hlclient::assets::AssetImporterProbeState::ambiguous);
+    CHECK(result.best_confidence == AssetProbeConfidence{75U});
+    CHECK(result.best_priority == 5);
+    REQUIRE(result.top_candidates.size() == 2U);
+    CHECK(result.top_candidates[0].importer_id == "alpha");
+    CHECK(result.top_candidates[1].importer_id == "zeta");
+    CHECK(result.top_candidates[0].confidence == AssetProbeConfidence{75U});
+    CHECK(result.top_candidates[0].priority == 5);
+    CHECK(alpha_probe_count == 1);
+    CHECK(zeta_probe_count == 1);
+    CHECK(alpha_import_count == 0);
+    CHECK(zeta_import_count == 0);
+}
+
+TEST_CASE("Registry import shares probe ranking and invokes only the winner", "[assets][registry][probe]")
+{
+    int weak_probe_count = 0;
+    int strong_probe_count = 0;
+    int weak_import_count = 0;
+    int strong_import_count = 0;
+    ModelImporterRegistry registry;
+    REQUIRE(registry.register_importer(std::make_unique<SyntheticModelImporter>(
+        "weak",
+        AssetProbeConfidence{99U},
+        "weak",
+        std::nullopt,
+        &weak_import_count,
+        nullptr,
+        &weak_probe_count), 100));
+    REQUIRE(registry.register_importer(std::make_unique<SyntheticModelImporter>(
+        "strong",
+        AssetProbeConfidence{100U},
+        "strong",
+        std::nullopt,
+        &strong_import_count,
+        nullptr,
+        &strong_probe_count), -100));
+
+    const auto result = registry.import(make_source());
+
+    REQUIRE(result);
+    CHECK(result.value().identity.source_name == "strong");
+    CHECK(weak_probe_count == 1);
+    CHECK(strong_probe_count == 1);
+    CHECK(weak_import_count == 0);
+    CHECK(strong_import_count == 1);
+}
+
+TEST_CASE("Registry rejects importer IDs beyond the diagnostic bound", "[assets][registry][probe]")
+{
+    ModelImporterRegistry registry;
+    const std::string long_id(
+        hlclient::assets::kMaximumAssetImporterIdBytes + 1U, 'x');
+
+    const auto result = registry.register_importer(
+        std::make_unique<SyntheticModelImporter>(
+            long_id, AssetProbeConfidence{50U}, "unused"));
+
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error);
+    CHECK(result.error->code ==
+          hlclient::assets::AssetImporterRegistrationErrorCode::ImporterIdTooLong);
+    CHECK(result.error->importer_id.empty());
+    CHECK(registry.size() == 0U);
 }
 
 TEST_CASE("Registry imports through a matching typed importer", "[assets][registry]")

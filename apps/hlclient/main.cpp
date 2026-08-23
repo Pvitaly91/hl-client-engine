@@ -1159,6 +1159,78 @@ void log_precache_manifest_trace(
     }
 }
 
+void log_precache_asset_dispatch_trace(
+    const hlclient::goldsrc::PrecacheAssetDispatchTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::PrecacheAssetDispatchTraceClassification;
+    const auto resource_metadata =
+        " type=" + std::string{hlclient::goldsrc::to_string(event.resource_type)} +
+        " index=" + std::to_string(event.resource_index) +
+        " ordinal=" + std::to_string(event.wire_ordinal);
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::precache_manifest_ready:
+        return;
+    case Classification::world_entry_selected:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[asset] world source selected:" + resource_metadata);
+        return;
+    case Classification::asset_source_open_started:
+    case Classification::asset_source_progress:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[asset] source progress: bytes=" +
+                std::to_string(event.progress_bytes) + "/" +
+                std::to_string(event.byte_count));
+        return;
+    case Classification::asset_source_ready:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[asset] source opened: bytes=" +
+                std::to_string(event.byte_count));
+        return;
+    case Classification::importer_probe_completed:
+    case Classification::importer_selected:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[asset] importer probe: category=" +
+                std::string{hlclient::assets::to_string(
+                    event.importer_category)} +
+                (event.importer_id.empty()
+                     ? std::string{}
+                     : ", importer=" + event.importer_id));
+        return;
+    case Classification::asset_imported:
+    case Classification::importer_boundary_reached:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[asset] importer dispatch: category=" +
+                std::string{hlclient::assets::to_string(
+                    event.importer_category)} +
+                ", result=" +
+                (event.dispatch_state
+                     ? std::string{hlclient::assets::to_string(
+                           *event.dispatch_state)}
+                     : std::string{"unknown"}));
+        return;
+    case Classification::world_source_unavailable:
+    case Classification::source_open_failed:
+    case Classification::ambiguous_importer:
+    case Classification::import_failed:
+    case Classification::stage_timed_out:
+    case Classification::stage_cancelled:
+    case Classification::backpressure:
+    case Classification::network_failure:
+    case Classification::protocol_failure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Asset-dispatch stage ended before its successful boundary");
+        return;
+    }
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -1751,6 +1823,40 @@ void log_precache_manifest_trace(
             LogLevel::error,
             "[precache] manifest published with local lookup failures");
         return 1;
+    case State::asset_imported:
+        return 0;
+    case State::importer_boundary_reached:
+        return 0;
+    case State::world_source_unavailable:
+        hlclient::core::log(
+            LogLevel::error,
+            "[asset] selected world source is unavailable");
+        return 1;
+    case State::asset_source_open_failed:
+        hlclient::core::log(
+            LogLevel::error,
+            "[asset] verified selected-world source opening failed");
+        return 1;
+    case State::ambiguous_asset_importer:
+        hlclient::core::log(
+            LogLevel::error,
+            "[asset] world importer selection is ambiguous");
+        return 1;
+    case State::asset_import_failed:
+        hlclient::core::log(
+            LogLevel::error,
+            "[asset] selected world importer failed");
+        return 1;
+    case State::asset_dispatch_timed_out:
+        hlclient::core::log(
+            LogLevel::error,
+            "[asset] selected-world source opening timed out");
+        return 1;
+    case State::asset_dispatch_backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "[asset] dispatch event queue reached its hard bound");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -1782,6 +1888,7 @@ void log_precache_manifest_trace(
     case State::waiting_for_resource_list:
     case State::waiting_for_resource_response:
     case State::waiting_for_precache_manifest:
+    case State::waiting_for_asset_dispatch:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -1884,6 +1991,54 @@ void log_precache_manifest_trace(
     return hlclient::app::precache_manifest_exit_code(manifest.completeness());
 }
 
+[[nodiscard]] int report_asset_dispatch(
+    const hlclient::goldsrc::ApprovedAssetDispatchState& result)
+{
+    const auto& plan = result.plan();
+    const auto& dispatched = result.dispatch_result();
+    hlclient::core::log(
+        LogLevel::info,
+        "[asset] world source selected: type=" +
+            std::string{hlclient::goldsrc::to_string(plan.resource_type())} +
+            " index=" + std::to_string(plan.resource_index()));
+    hlclient::core::log(
+        LogLevel::info,
+        "[asset] source opened: bytes=" +
+            std::to_string(result.source_byte_count()));
+    auto category = dispatched.selected_category;
+    if (category == hlclient::assets::AssetImporterCategory::none &&
+        plan.role() == hlclient::assets::AssetDispatchRole::world) {
+        category = hlclient::assets::AssetImporterCategory::world;
+    }
+    const auto dispatch_summary =
+        dispatched.state == hlclient::assets::AssetDispatchState::imported
+            ? std::string_view{"imported"}
+            : dispatched.state ==
+                      hlclient::assets::AssetDispatchState::
+                          importer_not_registered
+                  ? std::string_view{"no-match"}
+                  : dispatched.state ==
+                            hlclient::assets::AssetDispatchState::
+                                ambiguous_importer
+                        ? std::string_view{"ambiguous"}
+                        : std::string_view{"failed"};
+    hlclient::core::log(
+        LogLevel::info,
+        "[asset] importer dispatch: category=" +
+            std::string{hlclient::assets::to_string(category)} +
+            " result=" + std::string{dispatch_summary});
+    if (!dispatched.selected_importer_id.empty()) {
+        hlclient::core::log(
+            LogLevel::info,
+            "[asset] importer=" + dispatched.selected_importer_id);
+    }
+    return dispatched.state == hlclient::assets::AssetDispatchState::imported ||
+                   dispatched.state == hlclient::assets::AssetDispatchState::
+                                           importer_not_registered
+               ? 0
+               : 1;
+}
+
 [[nodiscard]] hlclient::network::UdpSocket open_challenge_socket(
     const hlclient::network::NetworkRuntime& runtime,
     const hlclient::network::NetworkAddress& remote_endpoint)
@@ -1923,6 +2078,8 @@ public:
             resource_consistency_provider,
         std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment>
             local_resource_environment,
+        const hlclient::assets::AssetImporterRegistries*
+            asset_importer_registries,
         const bool net_trace)
         : local_resource_environment_{
               std::move(local_resource_environment)},
@@ -1990,7 +2147,13 @@ public:
                  net_trace
                      ? hlclient::goldsrc::PrecacheManifestTraceCallback{
                            &log_precache_manifest_trace}
-                     : hlclient::goldsrc::PrecacheManifestTraceCallback{}}
+                     : hlclient::goldsrc::PrecacheManifestTraceCallback{},
+                 asset_importer_registries,
+                 {},
+                 net_trace
+                     ? hlclient::goldsrc::PrecacheAssetDispatchTraceCallback{
+                           &log_precache_asset_dispatch_trace}
+                     : hlclient::goldsrc::PrecacheAssetDispatchTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -2021,6 +2184,11 @@ public:
     [[nodiscard]] int report_result() const
     {
         const int handshake_result = report_handshake_result(handshake_);
+        if (handshake_.asset_dispatch_result()) {
+            const int dispatch_result = report_asset_dispatch(
+                *handshake_.asset_dispatch_result());
+            return handshake_result != 0 ? handshake_result : dispatch_result;
+        }
         if (handshake_.precache_manifest_result()) {
             const int manifest_result = report_precache_manifest(
                 *handshake_.precache_manifest_result());
@@ -2237,6 +2405,20 @@ int run_opengl_renderer(
     return 0;
 }
 
+int run_asset_dispatch_stop(HandshakeSession& session)
+{
+    hlclient::core::log(
+        LogLevel::info,
+        "Asset-dispatch stop is running without renderer or GPU work");
+    while (!session.terminal()) {
+        session.update(hlclient::goldsrc::ChallengeExchangeClock::now());
+        if (!session.terminal()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    }
+    return session.report_result();
+}
+
 int run(const hlclient::core::CommandLineOptions& options)
 {
     print_version();
@@ -2273,6 +2455,12 @@ int run(const hlclient::core::CommandLineOptions& options)
         hlclient::core::log(
             LogLevel::info,
             "Asset pipeline initialized; no production format importers are registered in M0.1");
+    } else if (options.stop_after ==
+               hlclient::core::ConnectionStopPoint::asset_dispatch) {
+        hlclient::core::log(
+            LogLevel::info,
+            "Approved asset dispatch initialized; no production format "
+            "importers are registered before M4.1");
     } else if (options.resource_consistency_provider) {
         hlclient::core::log(
             LogLevel::info,
@@ -2412,6 +2600,9 @@ int run(const hlclient::core::CommandLineOptions& options)
         case hlclient::core::ConnectionStopPoint::precache_manifest:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::precache_manifest;
             break;
+        case hlclient::core::ConnectionStopPoint::asset_dispatch:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::asset_dispatch;
+            break;
         }
         challenge_session = std::make_unique<HandshakeSession>(
             *address,
@@ -2420,7 +2611,14 @@ int run(const hlclient::core::CommandLineOptions& options)
             std::move(preparation.authentication_session),
             resource_consistency_provider.get(),
             local_resource_environment,
+            &asset_importers,
             options.net_trace);
+    }
+
+    if (options.stop_after ==
+            hlclient::core::ConnectionStopPoint::asset_dispatch &&
+        challenge_session) {
+        return run_asset_dispatch_stop(*challenge_session);
     }
 
     const auto frame_limit = smoke_test_frame_limit();

@@ -9,6 +9,7 @@
 #include <hlclient/goldsrc/movement_environment_stage.hpp>
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 #include <hlclient/goldsrc/pre_resource_signon_stage.hpp>
+#include <hlclient/goldsrc/precache_asset_dispatch_stage.hpp>
 #include <hlclient/goldsrc/precache_manifest_stage.hpp>
 #include <hlclient/goldsrc/resource_list_stage.hpp>
 #include <hlclient/goldsrc/resource_client_response_stage.hpp>
@@ -43,6 +44,7 @@ enum class HandshakeStopPoint {
     resource_list,
     resource_response_boundary,
     precache_manifest,
+    asset_dispatch,
 };
 
 enum class ConnectRequestStageState {
@@ -203,6 +205,15 @@ enum class GoldSrcHandshakeState {
     unsafe_local_resources,
     unsupported_local_profile,
     local_resource_io_error,
+    waiting_for_asset_dispatch,
+    asset_imported,
+    importer_boundary_reached,
+    world_source_unavailable,
+    asset_source_open_failed,
+    ambiguous_asset_importer,
+    asset_import_failed,
+    asset_dispatch_timed_out,
+    asset_dispatch_backpressure,
     timed_out,
     cancelled,
     configuration_error,
@@ -248,7 +259,13 @@ public:
         std::shared_ptr<const local_resources::LocalResourceEnvironment>
             local_resource_environment = {},
         PrecacheManifestStageConfig precache_manifest_config = {},
-        PrecacheManifestTraceCallback precache_manifest_trace_callback = {});
+        PrecacheManifestTraceCallback precache_manifest_trace_callback = {},
+        // Non-owning; must outlive this coordinator and remain structurally
+        // immutable while asset dispatch is possible.
+        const assets::AssetImporterRegistries* asset_importer_registries =
+            nullptr,
+        PrecacheAssetDispatchStageConfig asset_dispatch_config = {},
+        PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -302,6 +319,10 @@ public:
     precache_manifest_result() const noexcept;
     [[nodiscard]] const std::optional<PrecacheManifestStageError>&
     precache_manifest_error() const noexcept;
+    [[nodiscard]] const std::optional<ApprovedAssetDispatchState>&
+    asset_dispatch_result() const noexcept;
+    [[nodiscard]] const std::optional<PrecacheAssetDispatchStageError>&
+    asset_dispatch_error() const noexcept;
     // Non-null only after a successful netchan bootstrap. The returned object
     // is the same session that committed the M2.3.3 bootstrap ACKs; callers must use
     // the coordinator's original externally-owned datagram transport.
@@ -324,6 +345,7 @@ private:
     void synchronize_from_resource_list();
     void synchronize_from_resource_client_response();
     void synchronize_from_precache_manifest(ChallengeExchangeTimePoint now);
+    void synchronize_from_asset_dispatch();
     void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
@@ -340,6 +362,7 @@ private:
     std::optional<ResourceListStage> resource_list_stage_;
     std::optional<ResourceClientResponseStage> resource_client_response_stage_;
     std::unique_ptr<PrecacheManifestStage> precache_manifest_stage_;
+    std::unique_ptr<PrecacheAssetDispatchStage> asset_dispatch_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;

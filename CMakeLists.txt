@@ -131,6 +131,29 @@ target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
 set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
 
 hlclient_add_library(
+    hlclient_asset_dispatch
+    include/hlclient/assets/asset_importer_dispatcher.hpp
+    src/assets/asset_importer_dispatcher.cpp
+)
+add_library(hlclient::asset_dispatch ALIAS hlclient_asset_dispatch)
+target_link_libraries(hlclient_asset_dispatch PUBLIC hlclient::asset_api)
+set_property(
+    TARGET hlclient_asset_dispatch PROPERTY FOLDER "Engine/Assets/Dispatch")
+
+hlclient_add_library(
+    hlclient_local_asset_source
+    include/hlclient/local_assets/local_asset_source.hpp
+    src/local_assets/local_asset_source.cpp
+)
+add_library(hlclient::local_asset_source ALIAS hlclient_local_asset_source)
+target_link_libraries(
+    hlclient_local_asset_source
+    PUBLIC hlclient::asset_api hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_local_asset_source PROPERTY FOLDER "Engine/Assets/Source")
+
+hlclient_add_library(
     hlclient_asset_manager
     include/hlclient/assets/asset_manager.hpp
     src/assets/asset_manager.cpp
@@ -338,6 +361,26 @@ set_property(
     PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
+    hlclient_goldsrc_asset_dispatch
+    include/hlclient/goldsrc/precache_asset_dispatch.hpp
+    include/hlclient/goldsrc/precache_asset_dispatch_stage.hpp
+    src/goldsrc/precache_asset_dispatch.cpp
+    src/goldsrc/precache_asset_dispatch_stage.cpp
+)
+add_library(
+    hlclient::goldsrc_asset_dispatch ALIAS hlclient_goldsrc_asset_dispatch)
+target_link_libraries(
+    hlclient_goldsrc_asset_dispatch
+    PUBLIC
+        hlclient::goldsrc_resource_readiness
+        hlclient::local_asset_source
+        hlclient::asset_dispatch
+)
+set_property(
+    TARGET hlclient_goldsrc_asset_dispatch
+    PROPERTY FOLDER "Engine/Resources/GoldSrc")
+
+hlclient_add_library(
     hlclient_auth
     include/hlclient/auth/authentication_provider.hpp
     src/auth/authentication_provider.cpp
@@ -363,6 +406,7 @@ target_link_libraries(
         hlclient::goldsrc
         hlclient::goldsrc_netchan
         hlclient::goldsrc_resource_readiness
+        hlclient::goldsrc_asset_dispatch
         hlclient::goldsrc_signon
         hlclient::network
     PRIVATE hlclient::core

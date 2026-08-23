@@ -422,6 +422,44 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_asset_dispatch_state(
+    const PrecacheAssetDispatchStageState state) noexcept
+{
+    switch (state) {
+    case PrecacheAssetDispatchStageState::idle:
+    case PrecacheAssetDispatchStageState::waiting_for_precache_manifest:
+    case PrecacheAssetDispatchStageState::selecting_world_entry:
+    case PrecacheAssetDispatchStageState::opening_asset_source:
+    case PrecacheAssetDispatchStageState::asset_source_ready:
+    case PrecacheAssetDispatchStageState::probing_importers:
+    case PrecacheAssetDispatchStageState::importing_asset:
+        return GoldSrcHandshakeState::waiting_for_asset_dispatch;
+    case PrecacheAssetDispatchStageState::asset_imported:
+        return GoldSrcHandshakeState::asset_imported;
+    case PrecacheAssetDispatchStageState::importer_boundary_reached:
+        return GoldSrcHandshakeState::importer_boundary_reached;
+    case PrecacheAssetDispatchStageState::world_source_unavailable:
+        return GoldSrcHandshakeState::world_source_unavailable;
+    case PrecacheAssetDispatchStageState::source_open_failed:
+        return GoldSrcHandshakeState::asset_source_open_failed;
+    case PrecacheAssetDispatchStageState::ambiguous_importer:
+        return GoldSrcHandshakeState::ambiguous_asset_importer;
+    case PrecacheAssetDispatchStageState::import_failed:
+        return GoldSrcHandshakeState::asset_import_failed;
+    case PrecacheAssetDispatchStageState::timed_out:
+        return GoldSrcHandshakeState::asset_dispatch_timed_out;
+    case PrecacheAssetDispatchStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case PrecacheAssetDispatchStageState::backpressure:
+        return GoldSrcHandshakeState::asset_dispatch_backpressure;
+    case PrecacheAssetDispatchStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case PrecacheAssetDispatchStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] bool signon_start_network_failure(
     const std::optional<NetchanDriverErrorCode> driver_code) noexcept
 {
@@ -660,7 +698,10 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     std::shared_ptr<const local_resources::LocalResourceEnvironment>
         local_resource_environment,
     PrecacheManifestStageConfig precache_manifest_config,
-    PrecacheManifestTraceCallback precache_manifest_trace_callback)
+    PrecacheManifestTraceCallback precache_manifest_trace_callback,
+    const assets::AssetImporterRegistries* asset_importer_registries,
+    PrecacheAssetDispatchStageConfig asset_dispatch_config,
+    PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -690,7 +731,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::resource_list_boundary ||
                 stop_point_ == HandshakeStopPoint::resource_list ||
                 stop_point_ == HandshakeStopPoint::resource_response_boundary ||
-                stop_point_ == HandshakeStopPoint::precache_manifest) {
+                stop_point_ == HandshakeStopPoint::precache_manifest ||
+                stop_point_ == HandshakeStopPoint::asset_dispatch) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -819,6 +861,35 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                                     RetainConnectionAtBoundary{}}};
                 }
             }
+            if (stop_point_ == HandshakeStopPoint::asset_dispatch) {
+                if (!local_resource_environment ||
+                    asset_importer_registries == nullptr) {
+                    configuration_error_ =
+                        "Asset-dispatch mode requires a retained local resource environment and importer registries";
+                    state_ = GoldSrcHandshakeState::configuration_error;
+                } else {
+                    asset_dispatch_config.manifest.response =
+                        std::move(resource_response_config);
+                    asset_dispatch_stage_ =
+                        std::make_unique<PrecacheAssetDispatchStage>(
+                            transport,
+                            remote_endpoint,
+                            std::move(local_resource_environment),
+                            *asset_importer_registries,
+                            std::move(asset_dispatch_config),
+                            resource_consistency_provider,
+                            std::move(signon_trace_callback),
+                            std::move(pre_resource_trace_callback),
+                            std::move(delta_trace_callback),
+                            std::move(movement_environment_trace_callback),
+                            std::move(user_info_trace_callback),
+                            std::move(resource_transition_trace_callback),
+                            std::move(resource_list_trace_callback),
+                            std::move(resource_response_trace_callback),
+                            std::move(precache_manifest_trace_callback),
+                            std::move(asset_dispatch_trace_callback));
+                }
+            }
         }
     } else if (authentication_session_) {
         configuration_error_ =
@@ -842,6 +913,13 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (asset_dispatch_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_asset_dispatch) {
+        asset_dispatch_stage_->update(now);
+        synchronize_from_asset_dispatch();
+        release_authentication_session_if_terminal();
         return;
     }
     if (precache_manifest_stage_ &&
@@ -927,6 +1005,13 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (asset_dispatch_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_asset_dispatch) {
+        asset_dispatch_stage_->cancel(now);
+        synchronize_from_asset_dispatch();
+        release_authentication_session_if_terminal();
         return;
     }
     if (precache_manifest_stage_ &&
@@ -1076,6 +1161,14 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::unsafe_local_resources:
     case GoldSrcHandshakeState::unsupported_local_profile:
     case GoldSrcHandshakeState::local_resource_io_error:
+    case GoldSrcHandshakeState::asset_imported:
+    case GoldSrcHandshakeState::importer_boundary_reached:
+    case GoldSrcHandshakeState::world_source_unavailable:
+    case GoldSrcHandshakeState::asset_source_open_failed:
+    case GoldSrcHandshakeState::ambiguous_asset_importer:
+    case GoldSrcHandshakeState::asset_import_failed:
+    case GoldSrcHandshakeState::asset_dispatch_timed_out:
+    case GoldSrcHandshakeState::asset_dispatch_backpressure:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -1098,6 +1191,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_resource_list:
     case GoldSrcHandshakeState::waiting_for_resource_response:
     case GoldSrcHandshakeState::waiting_for_precache_manifest:
+    case GoldSrcHandshakeState::waiting_for_asset_dispatch:
         return false;
     }
     return true;
@@ -1234,6 +1328,18 @@ GoldSrcHandshakeCoordinator::precache_manifest_error() const noexcept
     return precache_manifest_stage_ ? precache_manifest_stage_->error()
                                     : empty;
 }
+const std::optional<ApprovedAssetDispatchState>&
+GoldSrcHandshakeCoordinator::asset_dispatch_result() const noexcept
+{
+    static const std::optional<ApprovedAssetDispatchState> empty;
+    return asset_dispatch_stage_ ? asset_dispatch_stage_->result() : empty;
+}
+const std::optional<PrecacheAssetDispatchStageError>&
+GoldSrcHandshakeCoordinator::asset_dispatch_error() const noexcept
+{
+    static const std::optional<PrecacheAssetDispatchStageError> empty;
+    return asset_dispatch_stage_ ? asset_dispatch_stage_->error() : empty;
+}
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
     return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
@@ -1292,6 +1398,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (precache_manifest_stage_ && precache_manifest_stage_->error()) {
         return precache_manifest_stage_->error()->context;
     }
+    if (asset_dispatch_stage_ && asset_dispatch_stage_->error()) {
+        return asset_dispatch_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -1327,7 +1436,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::resource_list_boundary &&
          stop_point_ != HandshakeStopPoint::resource_list &&
          stop_point_ != HandshakeStopPoint::resource_response_boundary &&
-         stop_point_ != HandshakeStopPoint::precache_manifest)) {
+         stop_point_ != HandshakeStopPoint::precache_manifest &&
+         stop_point_ != HandshakeStopPoint::asset_dispatch)) {
         return;
     }
     if (!response_stage_) {
@@ -1363,7 +1473,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
           stop_point_ != HandshakeStopPoint::resource_list_boundary &&
           stop_point_ != HandshakeStopPoint::resource_list &&
           stop_point_ != HandshakeStopPoint::resource_response_boundary &&
-          stop_point_ != HandshakeStopPoint::precache_manifest)) {
+          stop_point_ != HandshakeStopPoint::precache_manifest &&
+          stop_point_ != HandshakeStopPoint::asset_dispatch)) {
         return;
     }
     if (!challenge_exchange_.local_endpoint() ||
@@ -1382,7 +1493,9 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
          (stop_point_ == HandshakeStopPoint::resource_response_boundary &&
           !resource_client_response_stage_) ||
          (stop_point_ == HandshakeStopPoint::precache_manifest &&
-          !precache_manifest_stage_)) {
+          !precache_manifest_stage_) ||
+         (stop_point_ == HandshakeStopPoint::asset_dispatch &&
+          !asset_dispatch_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
             "Post-ACCEPT mode has no transport stage or stable local endpoint";
@@ -1499,6 +1612,18 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         synchronize_from_precache_manifest(now);
         if (!precache_started &&
             state_ == GoldSrcHandshakeState::waiting_for_precache_manifest) {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::asset_dispatch) {
+        const bool asset_dispatch_started = asset_dispatch_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime));
+        synchronize_from_asset_dispatch();
+        if (!asset_dispatch_started &&
+            state_ == GoldSrcHandshakeState::waiting_for_asset_dispatch) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -1812,6 +1937,35 @@ void GoldSrcHandshakeCoordinator::synchronize_from_precache_manifest(
     }
     if (precache_manifest_stage_->terminal()) {
         precache_manifest_stage_->finalize_retained_boundary(now);
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_asset_dispatch()
+{
+    if (!asset_dispatch_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Asset-dispatch mode has no asset-dispatch stage";
+        return;
+    }
+
+    // The coordinator exposes aggregate state/result rather than the nested
+    // event queue. Drain it on every synchronization so every accepted
+    // chunk/size profile remains operable without an impossible external poll.
+    while (asset_dispatch_stage_->poll_event()) {
+    }
+
+    const auto& stage_error = asset_dispatch_stage_->error();
+    state_ = map_asset_dispatch_state(asset_dispatch_stage_->state());
+    if (stage_error &&
+        (stage_error->code ==
+             PrecacheAssetDispatchStageErrorCode::invalid_configuration ||
+         stage_error->source_open_code ==
+             ApprovedAssetSourceOpenErrorCode::invalid_configuration ||
+         stage_error->local_source_open_code ==
+             local_assets::LocalAssetSourceOpenErrorCode::
+                 invalid_configuration)) {
+        state_ = GoldSrcHandshakeState::configuration_error;
     }
 }
 

@@ -81,6 +81,9 @@ an evidence-gated GoldSrc name mapper, and an ordered metadata-only inventory.
 M3.2.2 retains that same validated local environment after the response, strictly
 correlates inventory/list metadata, selects the exact ServerInfo map entry, and
 publishes an immutable metadata-only manifest with type-local sparse slots. The
+M3.2.3 continuation opens only the selected world locator through the retained
+environment, validates a bounded same-handle byte source, and runs pure,
+deterministic importer selection before any parser or renderer boundary. The
 sign-on target still sees only the path-free provider API. Custom/player-resource
 grammar, server-info second-client slot evidence, snapshots, movement
 application, and commands remain future increments behind the same boundaries.
@@ -105,6 +108,9 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_goldsrc_signon` | exact fixed initial/transition requests, strict `BZ2\0` decoding, owning immutable sign-on/list/response states, historical neutral opcode-43 and zero-TX resource-list stop, exact standard list and neutral 41-byte opcode-5 codecs, carrier/tail separation, provider-required response stage, same-driver semantic-once lifecycle, and next-payload opcode boundary | arbitrary commands, custom/player-resource bodies, production consistency material, resource resolution, runtime application, command execution, filesystem, renderer, SDL, assets, world state |
 | `hlclient_goldsrc_local_resources` | evidence-gated resource-type/name classification and ordered metadata-only `LocalResourceInventoryState` adapter | sign-on transport, readiness/precache decisions, downloads/cache, file contents, asset loading |
 | `hlclient_goldsrc_resource_readiness` | strict list/inventory correlation, per-entry readiness and aggregate impact, exact map selection, immutable ordered manifest, and bounded type-local sparse slots | downloads/cache, file-content parsing, assets, renderer, OpenGL |
+| `hlclient_local_asset_source` | incremental exact-root locator reopen, bounded same-handle read, exact EOF and final-snapshot validation, owning `AssetSource` publication | GoldSrc types, importer selection, path fallback, renderer, network |
+| `hlclient_asset_dispatch` | pointer-free pure importer probes, deterministic typed/cross-category selection, and owning imported-asset result | filesystem, GoldSrc protocol, network, renderer, OpenGL |
+| `hlclient_goldsrc_asset_dispatch` | evidence-derived resource role/plan, approved source facade, selected-world manifest continuation, and same-session terminal dispatch state | format parsing, download/cache, renderer/GPU work, extra network messages |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter, bounded local-file loading, and metadata-manifest CLI exit policy | discovery, caching, Steam integration, fallback search, protocol parsing |
 | `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/initial/pre-resource/delta/movevars/user-info/transition/list/response composition, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, runtime application, OpenGL, SDL, filesystem, world/render state |
@@ -123,7 +129,7 @@ Public dependencies should point inward toward stable project-owned contracts.
 Private implementation dependencies may point outward to SDL, GLAD, OpenGL,
 Winsock, or SDK headers without exposing them to unrelated consumers.
 
-The M3.2.2 target direction is deliberately acyclic:
+The M3.2.3 target direction is deliberately acyclic:
 
 ```text
 hlclient_hash_md5 -> hlclient_core
@@ -139,11 +145,20 @@ hlclient_goldsrc_resource_readiness
     -> hlclient_goldsrc_signon
     -> hlclient_goldsrc_local_resources
     -> hlclient_local_resources
+hlclient_local_asset_source
+    -> hlclient_asset_api
+    -> hlclient_local_resources
+hlclient_asset_dispatch -> hlclient_asset_api
+hlclient_goldsrc_asset_dispatch
+    -> hlclient_goldsrc_resource_readiness
+    -> hlclient_local_asset_source
+    -> hlclient_asset_dispatch
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
 ```
 
-The corresponding Visual Studio folders are `Engine/Core/Hash`,
-`Engine/Resources/Local`, `Engine/Resource Consistency`, and
+The corresponding Visual Studio folders include `Engine/Core/Hash`,
+`Engine/Resources/Local`, `Engine/Resource Consistency`,
+`Engine/Assets/Source`, `Engine/Assets/Dispatch`, and
 `Engine/Resources/GoldSrc`; the diagnostic belongs under `Tools/Resources`.
 In particular, `hlclient_goldsrc_signon` does not acquire a filesystem or
 concrete local-provider dependency.
@@ -441,9 +456,19 @@ composition root. See [Asset pipeline](ASSET_PIPELINE.md) for the complete
 selection and extension contract.
 
 There is no global registry, global constructor registration, renderer-side
-file parsing, or GPU handle in a neutral asset. Real GoldSrc format targets are
-deferred until their parsers are implemented. The M3.2.1 resolver and provider
-do not feed `AssetManager` or either renderer.
+file parsing, or GPU handle in a neutral asset. M3.2.3 adds a separate approved
+path for one manifest locator:
+
+```text
+LocalResourceLocator -> reopen_verified -> same-handle bytes
+    -> ApprovedAssetSource -> AssetDispatchPlan -> typed registry
+```
+
+That path never reopens `AssetSource::virtual_path()` and never calls
+`AssetManager`. Pure probes preserve confidence-before-priority selection and
+return a typed no-importer boundary when the production registries are empty.
+Real GoldSrc format targets remain deferred until their parsers are
+implemented; neither approved path feeds a renderer in M3.2.3.
 
 ## Clean-room and SDK boundary
 
@@ -481,12 +506,13 @@ order:
 1. parse command-line inputs and validate paths/endpoints;
 2. independently create the asset-facing filesystem,
    `AssetImporterRegistries`, and `AssetManager` only when that existing asset
-   path is requested; the consistency provider does not feed them;
+   path is requested; the approved manifest route borrows the registries but
+   never feeds its path through `AssetManager`;
 3. explicitly register compiled-in format implementations (none exist in
    M0.1);
 4. when a later stop point is explicit, acquire bounded authentication material
    through the configured provider and retain its optional session lifetime;
-5. only for the response-boundary route with explicit local selection, validate
+5. only for response/manifest/asset-dispatch routes with explicit local selection, validate
    `--basedir`/`--game`, prepare fixed-target consistency material through one
    sandboxed handle, close the file, and retain the one-shot provider;
 6. create one nonblocking UDP transport and the M1/M2 coordinator for the
@@ -498,12 +524,13 @@ order:
    the selected stage-owned driver process the same socket until the requested
    opaque, initial-sign-on, pre-resource, delta-schema, movement-environment,
     user-info, neutral opcode-43, standard resource-list/response boundary, or
-    metadata-only precache-manifest boundary is acknowledged and published;
+    metadata-only precache-manifest or selected-world asset-dispatch boundary
+    is acknowledged and published;
 10. derive `RenderScene` from its `ClientWorldState`, render, and present;
 11. stop after the configured terminal challenge/connect-request/
     connect-response/netchan-bootstrap/signon-boundary/pre-resource/
     delta-schemas/movevars/user-info/resource-list-boundary/resource-list or
-    resource-response-boundary or precache-manifest outcome,
+    resource-response-boundary, precache-manifest, or asset-dispatch outcome,
     let driver terminal cleanup release its optional lifetime exactly once,
     then shut down renderer resources before their platform dependencies.
 

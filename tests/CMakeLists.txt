@@ -2,7 +2,9 @@ add_executable(hlclient_tests
     test_auth_material_file.cpp
     test_authentication_provider.cpp
     test_asset_manager.cpp
+    test_asset_importer_dispatch.cpp
     test_asset_registry.cpp
+    test_approved_asset_source.cpp
     test_byte_io.cpp
     test_challenge_exchange.cpp
     test_challenge_protocol.cpp
@@ -40,6 +42,8 @@ add_executable(hlclient_tests
     test_world_resource_selection.cpp
     test_precache_slot_tables.cpp
     test_precache_manifest.cpp
+    test_precache_asset_dispatch_plan.cpp
+    test_precache_asset_dispatch_stage.cpp
     test_precache_manifest_exit_policy.cpp
     test_precache_manifest_stage.cpp
     test_local_resource_consistency_provider.cpp
@@ -89,17 +93,20 @@ target_link_libraries(hlclient_tests
         hlclient_app_support
         hlclient_auth
         hlclient_asset_api
+        hlclient_asset_dispatch
         hlclient_asset_manager
         hlclient_core
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_goldsrc_client
+        hlclient_goldsrc_asset_dispatch
         hlclient_goldsrc_resource_readiness
         hlclient_goldsrc_local_resources
         hlclient_goldsrc_netchan
         hlclient_goldsrc_signon
         hlclient_hash_md5
         hlclient_local_resources
+        hlclient_local_asset_source
         hlclient_network
         hlclient_scene_api
         hlclient_renderer_null

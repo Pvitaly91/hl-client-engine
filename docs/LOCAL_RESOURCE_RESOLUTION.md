@@ -134,7 +134,14 @@ opened identity and size, performs no fallback search, and reads no bytes.
 Missing targets and stale identity/size are distinct typed errors. See
 [local readiness](LOCAL_RESOURCE_READINESS.md).
 
+M3.2.3 builds on, rather than weakens, that capability. Its approved opener
+reads from the returned `LocalReadOnlyFile` handle only after root, virtual ID,
+identity, and size revalidation, then compares the complete final metadata
+snapshot. It never converts the `AssetSource` virtual path back into a lookup
+and never searches another root. See
+[approved asset sources](APPROVED_ASSET_SOURCE.md).
+
 The local stack adds no write path, persistent manifest/hash cache, auto-repair,
-download root, resource request, `dlfile`, local-vs-server comparison, asset
-loading, BSP/WAD/MDL/SPR/WAV parser, map loading, renderer upload, world-state
+download root, resource request, `dlfile`, local-vs-server comparison,
+BSP/WAD/MDL/SPR/WAV parser, map activation, renderer upload, world-state
 mutation, or asset precache object.

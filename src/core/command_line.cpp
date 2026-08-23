@@ -96,13 +96,16 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::resource_response_boundary;
             } else if (value == "precache-manifest") {
                 options.stop_after = ConnectionStopPoint::precache_manifest;
+            } else if (value == "asset-dispatch") {
+                options.stop_after = ConnectionStopPoint::asset_dispatch;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
                                " (expected challenge, connect-request, connect-response, "
                                "netchan-bootstrap, signon-boundary, pre-resource, "
                                "delta-schemas, movevars, user-info, or "
                                "resource-list-boundary, resource-list, or "
-                               "resource-response-boundary, or precache-manifest)");
+                               "resource-response-boundary, precache-manifest, or "
+                               "asset-dispatch)");
             }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
@@ -152,7 +155,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "a connect-request, connect-response, netchan-bootstrap, or "
                        "signon-boundary/pre-resource/delta-schemas/movevars/"
                        "user-info/resource-list-boundary/resource-list/"
-                       "resource-response-boundary/precache-manifest stop point");
+                       "resource-response-boundary/precache-manifest/"
+                       "asset-dispatch stop point");
     }
     if (options.authentication_provider && !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
@@ -172,7 +176,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::resource_list_boundary ||
          options.stop_after == ConnectionStopPoint::resource_list ||
          options.stop_after == ConnectionStopPoint::resource_response_boundary ||
-         options.stop_after == ConnectionStopPoint::precache_manifest) &&
+         options.stop_after == ConnectionStopPoint::precache_manifest ||
+         options.stop_after == ConnectionStopPoint::asset_dispatch) &&
         !options.authentication_provider) {
         return failure(
             "Netchan bootstrap and sign-on require the explicit "
@@ -190,6 +195,13 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             "The precache-manifest stop point requires "
             "--resource-consistency-provider local");
     }
+    if (options.stop_after == ConnectionStopPoint::asset_dispatch &&
+        options.resource_consistency_provider !=
+            ResourceConsistencyProviderKind::local) {
+        return failure(
+            "The asset-dispatch stop point requires "
+            "--resource-consistency-provider local");
+    }
 
     return CommandLineParseResult{std::move(options), {}};
 }
@@ -201,7 +213,8 @@ bool requires_local_resource_consistency_preparation(
                ResourceConsistencyProviderKind::local &&
            (options.stop_after ==
                 ConnectionStopPoint::resource_response_boundary ||
-            options.stop_after == ConnectionStopPoint::precache_manifest);
+            options.stop_after == ConnectionStopPoint::precache_manifest ||
+            options.stop_after == ConnectionStopPoint::asset_dispatch);
 }
 
 std::string_view command_line_help() noexcept
@@ -219,7 +232,8 @@ Options:
                        netchan-bootstrap, signon-boundary, pre-resource,
                        delta-schemas, movevars, user-info, or
                        resource-list-boundary, resource-list, or
-                       resource-response-boundary, or precache-manifest
+                       resource-response-boundary, precache-manifest, or
+                       asset-dispatch
                        (default: challenge)
   --auth-provider <name>
                       Authentication provider for connect stages: file
@@ -227,8 +241,8 @@ Options:
                       Local 245-byte auth input for file provider; never logged
   --resource-consistency-provider <name>
                       Explicit read-only response provider: local; requires
-                      --basedir and is prepared only for resource-response-boundary
-                      or precache-manifest
+                      --basedir and is prepared only for resource-response-boundary,
+                      precache-manifest, or asset-dispatch
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
@@ -263,6 +277,10 @@ Precache-manifest continues from that exact retained boundary without sending a
 new packet. It correlates path-free local metadata, selects the exact ServerInfo
 map entry, and publishes a bounded immutable metadata-only manifest. It does not
 download, cache, open asset contents, parse assets, or integrate with a renderer.
+Asset-dispatch continues on the same retained session, securely opens the
+selected world source through its verified locator, runs importer dispatch,
+and stops before renderer work. No matching importer is an expected boundary
+until the BSP importer milestone.
 No mode implements authentication generation.
 )";
 }

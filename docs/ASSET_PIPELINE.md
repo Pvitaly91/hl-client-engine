@@ -109,6 +109,26 @@ same registry policy. `AssetImporterRegistries` owns all five registries. It is
 a normal object owned by the application composition root, not a singleton;
 there is no static self-registration.
 
+M3.2.3 exposes the same selection as a pure `probe()` result. It calls each
+registered probe exactly once, never imports, and returns bounded sorted IDs,
+confidence, priority, and `no_match`/`selected`/`ambiguous` state without an
+importer pointer. `AssetImporterDispatcher` uses that cached selection so the
+unique winner imports once without a second probe. For an evidence-authorized
+model-or-sprite source, model and sprite candidates are ranked globally; a tie
+at the best confidence/priority is ambiguous, while lower-ranked ambiguity
+does not block a unique stronger candidate.
+
+The GoldSrc approved-source path is separate from `AssetManager`:
+
+```text
+verified locator handle -> owning AssetSource -> evidence-derived role
+    -> AssetImporterDispatcher -> imported asset or typed importer boundary
+```
+
+World, audio, and model-or-sprite roles permit only their corresponding
+registries. Decals remain metadata-only; generic and event-script resources are
+unsupported. An extension never creates or changes one of these roles.
+
 ## `AssetManager`
 
 `AssetManager` coordinates, but does not parse or upload:

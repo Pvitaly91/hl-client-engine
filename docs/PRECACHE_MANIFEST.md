@@ -82,8 +82,12 @@ bytes, digests, file contents, or authentication material. Exit status is zero
 only for a complete supported local profile; a published incomplete, blocked,
 unsupported, or local-I/O snapshot is a typed nonzero result.
 
-## Next boundary
+## Approved continuation
 
-M3.2.3 may consume an approved locator through verified exact-root reopening
-and dispatch a supported format importer. M3.2.2 deliberately does not begin
-that work.
+The direct `--stop-after precache-manifest` contract remains metadata-only and
+performs zero asset-source opens. M3.2.3's separate
+`--stop-after asset-dispatch` continuation may consume only the exact selected
+world locator through verified exact-root reopening. It may proceed when
+`world_geometry_ready()` is true even if unrelated resources make the full
+manifest incomplete. See [approved asset sources](APPROVED_ASSET_SOURCE.md)
+and [asset importer dispatch](ASSET_IMPORTER_DISPATCH.md).

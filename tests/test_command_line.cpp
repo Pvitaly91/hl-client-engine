@@ -362,6 +362,45 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
               std::string::npos);
     }
 
+    SECTION("asset dispatch requires and schedules the local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"asset-dispatch"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::asset_dispatch);
+        CHECK(result.options->game_directory == "valve");
+        CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
+    SECTION("asset dispatch rejects a missing local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"asset-dispatch"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("requires --resource-consistency-provider local") !=
+              std::string::npos);
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -737,9 +776,18 @@ TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
     SECTION("asset loading and download options remain unavailable")
     {
         constexpr std::array forbidden{
+            std::string_view{"--asset-file"},
+            std::string_view{"--raw-asset"},
+            std::string_view{"--import-file"},
             std::string_view{"--load-map"},
             std::string_view{"--parse-bsp"},
             std::string_view{"--parse-mdl"},
+            std::string_view{"--parse-spr"},
+            std::string_view{"--decode-wav"},
+            std::string_view{"--force-importer"},
+            std::string_view{"--ignore-importer-ambiguity"},
+            std::string_view{"--trust-extension"},
+            std::string_view{"--skip-locator-check"},
             std::string_view{"--load-resource"},
             std::string_view{"--precache-file"},
             std::string_view{"--download-missing"},
@@ -799,6 +847,10 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("resource-list") != std::string_view::npos);
     CHECK(help.find("resource-response-boundary") != std::string_view::npos);
     CHECK(help.find("precache-manifest") != std::string_view::npos);
+    CHECK(help.find("asset-dispatch") != std::string_view::npos);
+    CHECK(help.find("securely opens the") != std::string_view::npos);
+    CHECK(help.find("expected boundary") != std::string_view::npos);
+    CHECK(help.find("before renderer work") != std::string_view::npos);
     CHECK(help.find("metadata-only manifest") != std::string_view::npos);
     CHECK(help.find("does not") != std::string_view::npos);
     CHECK(help.find("stop before parsing opcode-43 body") != std::string_view::npos);

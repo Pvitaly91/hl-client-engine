@@ -607,12 +607,23 @@ See [local resource readiness](LOCAL_RESOURCE_READINESS.md) and the
 
 ### M3.2.3 — Approved asset-source opening and importer dispatch
 
-**Status: next.**
+**Status: completed.**
 
-Consume only approved locators through verified reopening, expose bounded asset
-sources, and dispatch supported format importers without weakening the local
-sandbox or moving filesystem policy into renderers. This work is not part of
-M3.2.2.
+M3.2.3 consumes only approved locators through exact-root verified reopening.
+The incremental same-handle operation validates size before allocation, reads
+within per-update bounds, proves exact EOF, compares the final metadata
+snapshot, and atomically publishes an owning source. Production opens only the
+exact selected world entry; it never preloads the complete manifest.
+
+Pure registry probes and deterministic cross-category dispatch preserve M0.1's
+confidence/priority/tie rules. The production composition intentionally has no
+format importer, so a safely opened world reaches the typed no-importer
+boundary. The same retained sign-on lifetime is finalized once without any new
+semantic network message. No GoldSrc format parser, download/cache behavior,
+renderer, or GPU integration is part of this milestone.
+
+See [approved asset sources](APPROVED_ASSET_SOURCE.md) and
+[asset importer dispatch](ASSET_IMPORTER_DISPATCH.md).
 
 ### M3.3 — Safe download/cache boundary
 
@@ -647,6 +658,15 @@ Planned work:
 
 Exit criteria: a representative user-owned Half-Life map renders repeatably,
 and parser tests cover corrupt offsets, counts, dimensions, and lump lengths.
+
+### M4.1 — GoldSrc BSP importer and CPU world geometry
+
+**Status: next.**
+
+Add the first real production format importer: a bounded GoldSrc BSP decoder
+that converts validated source bytes into neutral CPU `WorldAsset` geometry.
+Renderer upload, live world activation, dependent WAD loading, and gameplay
+remain later work.
 
 ## M5 — Entity snapshots
 

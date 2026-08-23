@@ -15,6 +15,7 @@
 namespace hlclient::goldsrc {
 
 class GoldSrcHandshakeCoordinator;
+class PrecacheAssetDispatchStage;
 
 using PrecacheManifestStageClock = ResourceClientResponseStageClock;
 using PrecacheManifestStageTimePoint = ResourceClientResponseStageTimePoint;
@@ -223,6 +224,7 @@ public:
 
 private:
     friend class GoldSrcHandshakeCoordinator;
+    friend class PrecacheAssetDispatchStage;
 
     // A future post-manifest coordinator branch may own this stage and keep
     // the exact driver/auth lifetime alive. The public manifest API never

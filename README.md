@@ -6,15 +6,16 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M3.2.2's local-resource readiness and immutable
-metadata-only precache manifest on top of the M3.2.1 sandboxed local-resource
-foundation and completed M3.1.2/M3.1.3 list/response boundaries. The new
-`--stop-after precache-manifest` route strictly correlates the ordered list and
-inventory, selects the exact ServerInfo model entry, builds bounded type-local
-sparse slots, and sends no new network message. The shared validated local
-environment also supports exact-root, identity/size-verified locator reopening.
+The repository has implemented M3.2.3's approved asset-source opening and
+format-importer dispatch on top of the M3.2.2 immutable metadata-only precache
+manifest and M3.2.1 sandboxed local-resource foundation. The
+`--stop-after asset-dispatch` route selects the exact ServerInfo world entry,
+reopens its locator in the exact validated root, reads it incrementally from one
+verified handle, and probes the world importer registry without sending a new
+network message. No production format importer is registered yet, so the typed
+no-importer boundary is the expected successful result.
 
-Implemented M1–M3.2.2 bounded behavior includes the Protocol 48 challenge,
+Implemented M1–M3.2.3 bounded behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
@@ -420,6 +421,26 @@ selects the exact ServerInfo model resource, and builds sparse type-local slot
 tables. It sends no packet after the existing response boundary and neither
 opens asset contents nor downloads, caches, parses, or renders a resource.
 
+M3.2.3 adds the explicit approved-source and importer boundary:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after asset-dispatch `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve --net-trace
+```
+
+This continues the same retained socket, driver, endpoint, authentication
+lifetime, manifest, and validated root environment. It opens only the selected
+world source through `reopen_verified()`, validates exact EOF and a final
+same-handle metadata snapshot, and runs deterministic importer probing. The
+current production registries are empty, so `importer_boundary_reached` exits
+successfully. Missing/stale sources and importer ambiguity or failure exit
+nonzero. No asset path is reopened, no dependent resource is loaded, and no
+renderer or GPU work occurs.
+
 Normal runtime may read an explicitly supplied user-owned Steam installation
 with zero writes and no stock process launch. Active stock `hl.exe`/HLDS
 research remains restricted to an isolated marked copy. The local provider and
@@ -430,8 +451,10 @@ See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONS
 and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
 [local resource resolution](docs/LOCAL_RESOURCE_RESOLUTION.md), and the
 [local consistency provider](docs/LOCAL_RESOURCE_CONSISTENCY_PROVIDER.md),
-[local readiness](docs/LOCAL_RESOURCE_READINESS.md), and the
-[metadata-only precache manifest](docs/PRECACHE_MANIFEST.md).
+[local readiness](docs/LOCAL_RESOURCE_READINESS.md), the
+[metadata-only precache manifest](docs/PRECACHE_MANIFEST.md),
+[approved asset sources](docs/APPROVED_ASSET_SOURCE.md), and
+[asset importer dispatch](docs/ASSET_IMPORTER_DISPATCH.md).
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -703,7 +726,9 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
   `hlclient_goldsrc_local_resources`, `hlclient_resource_consistency_api`,
   `hlclient_resource_consistency_local`, `hlclient_auth`,
   `hlclient_app_support`, `hlclient_client`;
-- `hlclient_asset_api`, `hlclient_asset_manager`, `hlclient_scene_api`;
+- `hlclient_asset_api`, `hlclient_local_asset_source`,
+  `hlclient_asset_dispatch`, `hlclient_asset_manager`, `hlclient_scene_api`;
+- `hlclient_goldsrc_asset_dispatch`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
 - `hlclient_local_resource_check` (network-free read-only diagnostic);
@@ -840,8 +865,10 @@ coverage. Test roots and file bytes are synthetic and temporary. No test writes
 to an installed game, creates a download/cache/precache entry, loads an asset,
 or touches a renderer. M3.2.2 adds strict correlation, separate per-entry
 readiness/aggregate impact, exact world selection, path-safe locators, and the
-bounded metadata-only manifest. M3.2.3 is next for approved asset-source
-opening and format-importer dispatch.
+bounded metadata-only manifest. M3.2.3 adds one-source incremental verified
+opening, exact EOF/final-snapshot checks, pure importer probes, deterministic
+cross-category dispatch, and a same-session selected-world stop before any
+parser or renderer work.
 
 ## License
 
