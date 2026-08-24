@@ -38,13 +38,23 @@ private:
 struct OpenGlWorldRendererStatistics {
     std::uint64_t package_revision{0U};
     std::uint64_t upload_count{0U};
+    std::uint64_t scene_upload_count{0U};
+    std::uint64_t brush_upload_count{0U};
+    std::uint64_t visibility_update_count{0U};
     std::uint64_t rendered_frame_count{0U};
     std::uint64_t draw_call_count{0U};
+    std::uint64_t brush_draw_call_count{0U};
+    std::uint64_t rendered_command_count{0U};
     std::uint64_t triangle_count{0U};
     std::uint64_t base_texture_bind_count{0U};
     std::uint64_t lightmap_bind_count{0U};
     RenderExtent last_extent{};
     bool world_present{false};
+    bool scene_present{false};
+    std::uint64_t scene_revision{0U};
+    std::uint64_t visibility_revision{0U};
+    std::uint64_t visible_world_surface_count{0U};
+    std::uint64_t visible_brush_instance_count{0U};
 
     // Bounded count-only diagnostics used by capability-gated resource tests.
     // They intentionally expose neither OpenGL names nor source pixels.

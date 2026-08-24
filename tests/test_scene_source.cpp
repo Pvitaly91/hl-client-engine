@@ -63,6 +63,14 @@ TEST_CASE("Null renderer records compact scene metadata and lifecycle statistics
     CHECK(renderer.statistics().rendered_frames == 0U);
     CHECK_FALSE(renderer.statistics().static_world_present);
     CHECK_FALSE(renderer.statistics().package_revision.has_value());
+    CHECK_FALSE(renderer.statistics().scene_package_present);
+    CHECK_FALSE(renderer.statistics().visibility_present);
+    CHECK_FALSE(renderer.statistics().visible_draw_list_present);
+    CHECK_FALSE(renderer.statistics().scene_revision.has_value());
+    CHECK_FALSE(renderer.statistics().visibility_revision.has_value());
+    CHECK(renderer.statistics().visible_world_surface_count == 0U);
+    CHECK(renderer.statistics().visible_brush_instance_count == 0U);
+    CHECK(renderer.statistics().visible_draw_command_count == 0U);
 
     CHECK_THROWS_AS(renderer.render({}, {}), std::logic_error);
     renderer.initialize();
@@ -79,6 +87,10 @@ TEST_CASE("Null renderer records compact scene metadata and lifecycle statistics
     CHECK(renderer.statistics().rendered_frames == 1U);
     CHECK(renderer.statistics().last_clear_color.red == 0.75F);
     CHECK_FALSE(renderer.statistics().static_world_present);
+    CHECK_FALSE(renderer.statistics().scene_package_present);
+    CHECK_FALSE(renderer.statistics().visibility_present);
+    CHECK_FALSE(renderer.statistics().visible_draw_list_present);
+    CHECK(renderer.statistics().visible_draw_command_count == 0U);
     CHECK(renderer.statistics().camera_valid);
     CHECK(renderer.statistics().last_extent.width == 640);
     CHECK(renderer.statistics().last_extent.height == 480);

@@ -17,7 +17,9 @@ namespace {
            argument == "--stop-after" || argument == "--auth-provider" ||
            argument == "--auth-material-file" ||
            argument == "--resource-consistency-provider" ||
-           argument == "--name" || argument == "--model";
+           argument == "--name" || argument == "--model" ||
+           argument == "--visibility" || argument == "--brush-submodels" ||
+           argument == "--camera";
 }
 
 } // namespace
@@ -28,6 +30,9 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     bool stop_after_seen = false;
     bool connect_request_setting_seen = false;
     bool resource_consistency_provider_seen = false;
+    bool visibility_seen = false;
+    bool brush_submodels_seen = false;
+    bool camera_seen = false;
 
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
@@ -111,6 +116,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::world_textures;
             } else if (value == "world-render-package") {
                 options.stop_after = ConnectionStopPoint::world_render_package;
+            } else if (value == "world-spatial-scene") {
+                options.stop_after = ConnectionStopPoint::world_spatial_scene;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
                                " (expected challenge, connect-request, connect-response, "
@@ -119,7 +126,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                                "resource-list-boundary, resource-list, or "
                                "resource-response-boundary, precache-manifest, or "
                                "asset-dispatch, world-geometry, world-textures, or "
-                               "world-render-package)");
+                               "world-render-package, or world-spatial-scene)");
             }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
@@ -146,6 +153,54 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         } else if (argument == "--model") {
             connect_request_setting_seen = true;
             options.player_model = std::string{value};
+        } else if (argument == "--visibility") {
+            if (visibility_seen) {
+                return failure("--visibility may be specified only once");
+            }
+            visibility_seen = true;
+            if (value == "all") {
+                options.world_visibility = WorldVisibilityOption::all;
+            } else if (value == "frustum") {
+                options.world_visibility = WorldVisibilityOption::frustum;
+            } else if (value == "pvs") {
+                options.world_visibility = WorldVisibilityOption::pvs;
+            } else if (value == "pvs-frustum") {
+                options.world_visibility = WorldVisibilityOption::pvs_frustum;
+            } else {
+                return failure(
+                    "Unsupported --visibility value: " + std::string{value} +
+                    " (expected all, frustum, pvs, or pvs-frustum)");
+            }
+        } else if (argument == "--brush-submodels") {
+            if (brush_submodels_seen) {
+                return failure("--brush-submodels may be specified only once");
+            }
+            brush_submodels_seen = true;
+            if (value == "off") {
+                options.brush_submodels = BrushSubmodelsOption::off;
+            } else if (value == "static") {
+                options.brush_submodels = BrushSubmodelsOption::static_initial;
+            } else {
+                return failure(
+                    "Unsupported --brush-submodels value: " +
+                    std::string{value} + " (expected off or static)");
+            }
+        } else if (argument == "--camera") {
+            if (camera_seen) {
+                return failure("--camera may be specified only once");
+            }
+            camera_seen = true;
+            if (value == "static") {
+                options.world_camera = WorldCameraOption::static_camera;
+            } else if (value == "orbit") {
+                options.world_camera = WorldCameraOption::orbit;
+            } else if (value == "spawn") {
+                options.world_camera = WorldCameraOption::spawn;
+            } else {
+                return failure(
+                    "Unsupported --camera value: " + std::string{value} +
+                    " (expected static, orbit, or spawn)");
+            }
         } else {
             options.connect_endpoint = std::string{value};
         }
@@ -153,12 +208,19 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
 
     if (options.view_world) {
         if (stop_after_seen &&
-            options.stop_after != ConnectionStopPoint::world_render_package) {
+            options.stop_after != ConnectionStopPoint::world_spatial_scene) {
             return failure(
                 "--view-world is compatible only with --stop-after "
-                "world-render-package");
+                "world-spatial-scene");
         }
-        options.stop_after = ConnectionStopPoint::world_render_package;
+        options.stop_after = ConnectionStopPoint::world_spatial_scene;
+    }
+    if ((visibility_seen || brush_submodels_seen || camera_seen) &&
+        !options.view_world &&
+        options.stop_after != ConnectionStopPoint::world_spatial_scene) {
+        return failure(
+            "--visibility, --brush-submodels, and --camera require "
+            "--view-world or --stop-after world-spatial-scene");
     }
     if ((stop_after_seen || options.view_world || connect_request_setting_seen) &&
         !options.connect_endpoint) {
@@ -181,7 +243,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "user-info/resource-list-boundary/resource-list/"
                        "resource-response-boundary/precache-manifest/"
                        "asset-dispatch/world-geometry/world-textures/"
-                       "world-render-package stop point or --view-world");
+                       "world-render-package/world-spatial-scene stop point or "
+                       "--view-world");
     }
     if (options.authentication_provider && !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
@@ -205,7 +268,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::asset_dispatch ||
          options.stop_after == ConnectionStopPoint::world_geometry ||
          options.stop_after == ConnectionStopPoint::world_textures ||
-         options.stop_after == ConnectionStopPoint::world_render_package) &&
+         options.stop_after == ConnectionStopPoint::world_render_package ||
+         options.stop_after == ConnectionStopPoint::world_spatial_scene) &&
         !options.authentication_provider) {
         return failure(
             "Netchan bootstrap and sign-on require the explicit "
@@ -251,6 +315,13 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             "The world-render-package boundary requires "
             "--resource-consistency-provider local");
     }
+    if (options.stop_after == ConnectionStopPoint::world_spatial_scene &&
+        options.resource_consistency_provider !=
+            ResourceConsistencyProviderKind::local) {
+        return failure(
+            "The world-spatial-scene boundary requires "
+            "--resource-consistency-provider local");
+    }
     if (options.view_world && options.renderer != RendererBackend::opengl) {
         return failure("--view-world requires --renderer opengl");
     }
@@ -269,7 +340,8 @@ bool requires_local_resource_consistency_preparation(
             options.stop_after == ConnectionStopPoint::asset_dispatch ||
             options.stop_after == ConnectionStopPoint::world_geometry ||
             options.stop_after == ConnectionStopPoint::world_textures ||
-            options.stop_after == ConnectionStopPoint::world_render_package);
+            options.stop_after == ConnectionStopPoint::world_render_package ||
+            options.stop_after == ConnectionStopPoint::world_spatial_scene);
 }
 
 std::string_view command_line_help() noexcept
@@ -289,7 +361,7 @@ Options:
                        resource-list-boundary, resource-list, or
                        resource-response-boundary, precache-manifest, or
                        asset-dispatch, world-geometry, world-textures, or
-                       world-render-package
+                       world-render-package, or world-spatial-scene
                        (default: challenge)
   --auth-provider <name>
                       Authentication provider for connect stages: file
@@ -299,13 +371,20 @@ Options:
                       Explicit read-only response provider: local; requires
                       --basedir and is prepared only for resource-response-boundary,
                       precache-manifest, asset-dispatch, world-geometry, or
-                      world-textures, or world-render-package
+                      world-textures, world-render-package, or
+                      world-spatial-scene
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
   --view-world        Build the world render package, disconnect, then run the
                       local diagnostic OpenGL preview
+  --visibility <mode> World visibility: all, frustum, pvs, or pvs-frustum
+                      (default: all)
+  --brush-submodels <mode>
+                      Brush submodels: off or static (default: off)
+  --camera <mode>     Diagnostic camera: static, orbit, or spawn
+                      (default: static)
 
 Connect-request mode sends once without waiting. Connect-response mode waits
 boundedly for the immediate connectionless accept/reject only. Netchan-bootstrap

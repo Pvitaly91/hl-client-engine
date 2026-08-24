@@ -733,17 +733,44 @@ water/sky/animation, gameplay input, or resource download/cache.
 
 ### M4.4 — PVS/culling and brush submodels
 
-**Status: next.**
+**Status: completed.**
 
-Add bounded visibility/culling runtime and explicit brush-submodel instances
-after their entity/transform evidence and rendering contracts are defined.
+One canonical BSP v30 decode now publishes an owning renderer-neutral spatial
+handoff. Checked front/back node children, model-0 root, leaf bounds,
+marksurface-to-world-surface membership, and strict GoldSrc RLE PVS rows form
+an immutable `WorldSpatialPackage`. Leaf zero remains traversable but is never
+PVS-addressable; bit zero names source leaf one, and `visofs = -1` selects the
+masked all-visible row. Bounded point/AABB traversal rejects invalid graphs,
+cycles, and work-limit overflow transactionally.
+
+The CPU visibility resolver supports `all`, frustum-only, PVS-only, and
+PVS-plus-frustum with explicit fail-closed, frustum-only, or all-surfaces PVS
+fallback. Exact per-source-surface ranges feed a stable renderer-neutral draw
+list. Immutable scene-resource identity and per-frame visibility revisions are
+separate, so camera/PVS changes do not re-upload geometry or textures.
+
+BSP models 1..N reuse the M4.1 face builder. A bounded inert quoted entity
+document interprets only brush-reference and initial transform/render metadata.
+The supported qcsg profile uses entity-origin-relative geometry and Valve
+`(YAW * PITCH) * ROLL` initial transforms; nonzero source-model origins and
+nonzero rendermodes remain typed unsupported outcomes. The existing texture,
+WAD3, lightmap, atlas, and material code builds one aggregate immutable brush
+resource shared by supported static opaque instances.
+
+`world-spatial-scene` is the new CPU-only same-session stop. The viewer routes
+add explicit visibility, brush, and diagnostic spawn-camera choices while
+preserving M4.3 defaults (`all`, brush models off). OpenGL draws selected world
+surface ranges and supported brush transforms while retaining the historical
+full-world path. No doors, platforms, rotation updates, think/use/touch,
+snapshots, interpolation, gameplay input, translucent rendering, or other
+runtime entity behavior is introduced.
 
 ### M4.5 — Runtime entities and models
 
 **Status: planned.**
 
 Apply validated runtime entity/model state only after the M4.4 visibility and
-brush-submodel boundary is complete. M4.3 does not begin this work.
+brush-submodel boundary is complete. M4.4 does not begin this runtime work.
 
 ## M5 — Entity snapshots
 

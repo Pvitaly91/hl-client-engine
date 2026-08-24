@@ -4,6 +4,8 @@
 #include <hlclient/assets/world_texture_types.hpp>
 #include <hlclient/renderer/render_camera_math.hpp>
 #include <hlclient/world_render/world_render_types.hpp>
+#include <hlclient/world_scene_render/world_scene_render_types.hpp>
+#include <hlclient/world_visibility/world_visible_draw_list.hpp>
 
 #include <glad/gl.h>
 
@@ -891,6 +893,14 @@ struct GpuWorldResources {
     GlObject white_lightmap;
 };
 
+struct GpuSceneResources {
+    std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>
+        scene_instance;
+    world_scene_render::WorldSceneRendererResourceIdentity identity{};
+    GpuWorldResources world;
+    std::optional<GpuWorldResources> brushes;
+};
+
 [[nodiscard]] GpuWorldResources build_gpu_resources(
     const world_render::WorldRenderPackage& package)
 {
@@ -932,6 +942,90 @@ struct GpuWorldResources {
             "Static-world draw offset exceeds the OpenGL pointer range");
     }
     return static_cast<std::uintptr_t>(byte_offset);
+}
+
+struct FrameDrawCounters {
+    std::uint64_t draw_calls{0U};
+    std::uint64_t brush_draw_calls{0U};
+    std::uint64_t triangles{0U};
+    std::uint64_t base_texture_binds{0U};
+    std::uint64_t lightmap_binds{0U};
+};
+
+void draw_package_range(
+    GpuWorldResources& resources,
+    const world_render::WorldRenderPackage& package,
+    const std::uint32_t first_index,
+    const std::uint32_t index_count,
+    const std::size_t material_index,
+    const RenderMatrix4& model_view_projection,
+    const bool brush,
+    FrameDrawCounters& counters)
+{
+    const auto materials = package.materials();
+    const auto indices = package.indices();
+    const std::size_t first = first_index;
+    const std::size_t count = index_count;
+    if (index_count == 0U || index_count % 3U != 0U ||
+        first > indices.size() || count > indices.size() - first ||
+        material_index >= materials.size() ||
+        !renderer::is_finite(model_view_projection)) {
+        fail(OpenGlRendererErrorCode::draw_range_invalid,
+            "Visible draw command has an invalid package range");
+    }
+    const auto& material = materials[material_index];
+
+    glUseProgram(resources.program.program.name());
+    glBindVertexArray(resources.geometry.vertex_array.name());
+    glUniformMatrix4fv(
+        resources.program.model_view_projection,
+        1,
+        GL_FALSE,
+        model_view_projection.values.data());
+    glUniform1i(resources.program.lightmap_layer, 0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        resources.base_textures[material.base_texture_asset_index].name());
+    ++counters.base_texture_binds;
+
+    glActiveTexture(GL_TEXTURE1);
+    if (material.lightmap_mode ==
+        world_render::WorldRenderLightmapMode::atlas) {
+        glBindTexture(
+            GL_TEXTURE_2D_ARRAY,
+            resources.lightmap_pages[*material.lightmap_atlas_page_index]
+                .name());
+        glUniform1i(resources.program.lightmap_enabled, 1);
+    } else {
+        glBindTexture(
+            GL_TEXTURE_2D_ARRAY,
+            resources.white_lightmap.name());
+        glUniform1i(resources.program.lightmap_enabled, 0);
+    }
+    ++counters.lightmap_binds;
+    glUniform1i(
+        resources.program.masked_alpha,
+        material.base_texture_alpha_mode ==
+                assets::WorldTextureAlphaMode::masked_index_255
+            ? 1
+            : 0);
+
+    const auto byte_offset = checked_index_byte_offset(first_index);
+    glDrawElements(
+        GL_TRIANGLES,
+        to_gl_size(
+            count,
+            OpenGlRendererErrorCode::draw_range_invalid,
+            "Visible draw command exceeds GLsizei"),
+        GL_UNSIGNED_INT,
+        reinterpret_cast<const void*>(byte_offset));
+    ++counters.draw_calls;
+    if (brush) {
+        ++counters.brush_draw_calls;
+    }
+    counters.triangles += static_cast<std::uint64_t>(index_count / 3U);
 }
 
 } // namespace
@@ -977,19 +1071,49 @@ OpenGlRendererErrorCode OpenGlRendererError::code() const noexcept
 
 class OpenGlRenderer::Implementation final {
 public:
+    void clear_visibility_tracking() noexcept
+    {
+        visibility_scene_identity_.reset();
+        visibility_result_signature_.reset();
+        visibility_revision_ = 0U;
+        statistics_.visibility_revision = 0U;
+    }
+
+    void note_visibility(
+        const world_visibility::WorldVisibilitySceneIdentity scene_identity,
+        const std::uint64_t revision,
+        const world_visibility::WorldVisibilityResultSignature
+            result_signature) noexcept
+    {
+        if (!visibility_scene_identity_ ||
+            *visibility_scene_identity_ != scene_identity ||
+            visibility_revision_ != revision ||
+            !visibility_result_signature_ ||
+            *visibility_result_signature_ != result_signature) {
+            ++statistics_.visibility_update_count;
+            visibility_scene_identity_ = scene_identity;
+            visibility_revision_ = revision;
+            visibility_result_signature_ = result_signature;
+        }
+        statistics_.visibility_revision = revision;
+    }
+
     void release_world_resources() noexcept
     {
-        if (resources_) {
+        if (resources_ || scene_resources_) {
             resources_.reset();
+            scene_resources_.reset();
             ++statistics_.world_resource_release_count;
         }
         statistics_.active_world_resources = false;
         statistics_.package_revision = 0U;
+        statistics_.scene_revision = 0U;
         statistics_.uploaded_base_texture_count = 0U;
         statistics_.uploaded_base_mip_level_count = 0U;
         statistics_.uploaded_lightmap_page_count = 0U;
         statistics_.uploaded_lightmap_layer_count = 0U;
         statistics_.uploaded_white_lightmap_count = 0U;
+        clear_visibility_tracking();
     }
 
     [[nodiscard]] GpuWorldResources& ensure_resources(
@@ -1041,6 +1165,100 @@ public:
         }
     }
 
+    [[nodiscard]] GpuSceneResources& ensure_scene_resources(
+        const std::shared_ptr<
+            const world_scene_render::WorldSceneRenderPackage>& scene)
+    {
+        const auto identity = scene->resource_identity();
+        if (scene_resources_ && scene_resources_->identity == identity) {
+            // The immutable scene identity/revision is the renderer cache key.
+            // Refresh the retained owners so an equivalent republished package
+            // does not keep an otherwise-dead CPU package alive or trigger a
+            // visibility-only GPU upload.
+            scene_resources_->scene_instance = scene;
+            scene_resources_->world.package_instance =
+                scene->world_package();
+            if (scene_resources_->brushes) {
+                scene_resources_->brushes->package_instance =
+                    scene->brush_library().render_package();
+            }
+            return *scene_resources_;
+        }
+
+        release_world_resources();
+        try {
+            const auto& world_package = scene->world_package();
+            if (!world_package) {
+                fail(OpenGlRendererErrorCode::invalid_world_package,
+                    "World scene contains no world render package");
+            }
+            const auto hardware = query_hardware_limits();
+            validate_package(*world_package, hardware);
+
+            GpuSceneResources candidate;
+            candidate.scene_instance = scene;
+            candidate.identity = identity;
+            candidate.world = build_gpu_resources(*world_package);
+            candidate.world.package_instance = world_package;
+
+            const auto& brush_package =
+                scene->brush_library().render_package();
+            if (brush_package) {
+                validate_package(*brush_package, hardware);
+                candidate.brushes.emplace(
+                    build_gpu_resources(*brush_package));
+                candidate.brushes->package_instance = brush_package;
+            }
+
+            scene_resources_.emplace(std::move(candidate));
+            ++statistics_.upload_count;
+            ++statistics_.scene_upload_count;
+            if (scene_resources_->brushes) {
+                ++statistics_.brush_upload_count;
+            }
+            statistics_.package_revision =
+                world_package->resource_revision();
+            statistics_.scene_revision = identity.revision;
+
+            const auto accumulate = [this](const GpuWorldResources& value) {
+                statistics_.uploaded_base_texture_count +=
+                    static_cast<std::uint64_t>(value.base_textures.size());
+                statistics_.uploaded_base_mip_level_count +=
+                    static_cast<std::uint64_t>(value.base_textures.size()) *
+                    static_cast<std::uint64_t>(
+                        assets::kWorldTextureMipLevelCount);
+                statistics_.uploaded_lightmap_page_count +=
+                    static_cast<std::uint64_t>(value.lightmap_pages.size());
+                statistics_.uploaded_lightmap_layer_count +=
+                    static_cast<std::uint64_t>(value.lightmap_pages.size()) *
+                    static_cast<std::uint64_t>(
+                        assets::kWorldLightmapStyleSlotCount);
+                statistics_.uploaded_white_lightmap_count +=
+                    value.white_lightmap.name() == 0U ? 0U : 1U;
+            };
+            accumulate(scene_resources_->world);
+            if (scene_resources_->brushes) {
+                accumulate(*scene_resources_->brushes);
+            }
+            statistics_.active_world_resources = true;
+            return *scene_resources_;
+        } catch (const OpenGlRendererError&) {
+            ++statistics_.failed_upload_count;
+            release_world_resources();
+            throw;
+        } catch (const std::bad_alloc&) {
+            ++statistics_.failed_upload_count;
+            release_world_resources();
+            fail(OpenGlRendererErrorCode::unable_to_retain_resources,
+                "Unable to retain world-scene OpenGL resources");
+        } catch (const std::length_error&) {
+            ++statistics_.failed_upload_count;
+            release_world_resources();
+            fail(OpenGlRendererErrorCode::unable_to_retain_resources,
+                "World-scene OpenGL resource containers exceed their limits");
+        }
+    }
+
     [[nodiscard]] OpenGlWorldRendererStatistics& statistics() noexcept
     {
         return statistics_;
@@ -1053,6 +1271,12 @@ public:
 
 private:
     std::optional<GpuWorldResources> resources_;
+    std::optional<GpuSceneResources> scene_resources_;
+    std::optional<world_visibility::WorldVisibilitySceneIdentity>
+        visibility_scene_identity_;
+    std::optional<world_visibility::WorldVisibilityResultSignature>
+        visibility_result_signature_;
+    std::uint64_t visibility_revision_{0U};
     OpenGlWorldRendererStatistics statistics_{};
 };
 
@@ -1075,6 +1299,17 @@ OpenGlRenderer::OpenGlRenderer()
         require_no_gl_error(
             OpenGlRendererErrorCode::gl_operation_failed,
             "OpenGL renderer initialization");
+
+        GLint context_profile_mask = 0;
+        glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &context_profile_mask);
+        require_no_gl_error(
+            OpenGlRendererErrorCode::gl_operation_failed,
+            "OpenGL context profile query");
+        if ((context_profile_mask & GL_CONTEXT_CORE_PROFILE_BIT) == 0) {
+            throw std::runtime_error{
+                "OpenGL 3.3 Core is required, but the current context is not "
+                "a Core profile"};
+        }
 
         information_.vendor = open_gl_string(GL_VENDOR);
         information_.device = open_gl_string(GL_RENDERER);
@@ -1115,6 +1350,10 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     const int height = std::max(extent.height, 0);
     statistics.last_extent = RenderExtent{width, height};
     statistics.world_present = scene.static_world.has_value();
+    statistics.scene_present = scene.static_world &&
+        scene.static_world->scene_package != nullptr;
+    statistics.visible_world_surface_count = 0U;
+    statistics.visible_brush_instance_count = 0U;
 
     glViewport(0, 0, width, height);
     glClearColor(
@@ -1146,6 +1385,55 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         fail(OpenGlRendererErrorCode::invalid_world_package,
             "Static-world scene requested an unsupported culling mode");
     }
+    if (scene.static_world->visible_draw_list &&
+        !scene.static_world->scene_package) {
+        fail(OpenGlRendererErrorCode::invalid_world_package,
+            "Visible draw commands require an immutable world scene package");
+    }
+    if (scene.static_world->scene_package &&
+        scene.static_world->scene_package->world_package() !=
+            scene.static_world->package) {
+        fail(OpenGlRendererErrorCode::invalid_world_package,
+            "RenderScene world and scene packages do not share one resource");
+    }
+    if (scene.static_world->visible_draw_list) {
+        const auto expected_scene_identity = scene.static_world
+            ->scene_package->visibility_scene_identity();
+        const auto draw_scene_identity =
+            scene.static_world->visible_draw_list->scene_identity();
+        const auto draw_result_signature =
+            scene.static_world->visible_draw_list->result_signature();
+        if (!scene.static_world->visibility_summary ||
+            scene.static_world->visibility_summary->revision == 0U ||
+            scene.static_world->visibility_summary->revision !=
+                scene.static_world->visible_draw_list->visibility_revision() ||
+            scene.static_world->visibility_summary->scene_resource_id !=
+                expected_scene_identity.resource_id ||
+            scene.static_world->visibility_summary->scene_resource_revision !=
+                expected_scene_identity.revision ||
+            scene.static_world->visibility_summary
+                    ->visibility_input_signature !=
+                expected_scene_identity.visibility_input_signature ||
+            scene.static_world->visibility_summary->draw_input_signature !=
+                expected_scene_identity.draw_input_signature ||
+            scene.static_world->visibility_summary->result_signature_first !=
+                draw_result_signature.first ||
+            scene.static_world->visibility_summary->result_signature_second !=
+                draw_result_signature.second ||
+            !draw_result_signature ||
+            draw_scene_identity != expected_scene_identity) {
+            fail(OpenGlRendererErrorCode::draw_range_invalid,
+                "Visible draw-list identity/revision does not match its scene");
+        }
+        statistics.visible_world_surface_count = static_cast<std::uint64_t>(
+            scene.static_world->visibility_summary
+                ->visible_world_surface_count);
+        statistics.visible_brush_instance_count = static_cast<std::uint64_t>(
+            scene.static_world->visibility_summary
+                ->visible_brush_instance_count);
+    } else {
+        implementation_->clear_visibility_tracking();
+    }
 
     const auto matrix = camera_view_projection(
         scene.camera,
@@ -1157,12 +1445,6 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         fail(OpenGlRendererErrorCode::camera_invalid,
             "Static-world camera is invalid: " + detail);
     }
-
-    auto& resources =
-        implementation_->ensure_resources(scene.static_world->package);
-    const auto& package = *scene.static_world->package;
-    const auto materials = package.materials();
-    const auto batches = package.draw_batches();
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
@@ -1176,62 +1458,111 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         glDisable(GL_CULL_FACE);
     }
 
-    glUseProgram(resources.program.program.name());
-    glBindVertexArray(resources.geometry.vertex_array.name());
-    glUniformMatrix4fv(
-        resources.program.model_view_projection,
-        1,
-        GL_FALSE,
-        matrix.matrix->values.data());
-    glUniform1i(resources.program.lightmap_layer, 0);
-
-    std::uint64_t frame_draw_calls = 0U;
-    std::uint64_t frame_triangles = 0U;
-    std::uint64_t frame_base_binds = 0U;
-    std::uint64_t frame_lightmap_binds = 0U;
-    for (const auto& batch : batches) {
-        const auto& material = materials[batch.render_material_index];
-
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(
-            GL_TEXTURE_2D,
-            resources.base_textures[material.base_texture_asset_index].name());
-        ++frame_base_binds;
-
-        glActiveTexture(GL_TEXTURE1);
-        if (material.lightmap_mode ==
-            world_render::WorldRenderLightmapMode::atlas) {
-            glBindTexture(
-                GL_TEXTURE_2D_ARRAY,
-                resources.lightmap_pages[
-                    *material.lightmap_atlas_page_index]
-                    .name());
-            glUniform1i(resources.program.lightmap_enabled, 1);
-        } else {
-            glBindTexture(
-                GL_TEXTURE_2D_ARRAY,
-                resources.white_lightmap.name());
-            glUniform1i(resources.program.lightmap_enabled, 0);
+    FrameDrawCounters frame;
+    if (scene.static_world->scene_package) {
+        auto& resources = implementation_->ensure_scene_resources(
+            scene.static_world->scene_package);
+        if (scene.static_world->visible_draw_list) {
+            implementation_->note_visibility(
+                scene.static_world->visible_draw_list->scene_identity(),
+                scene.static_world->visibility_summary->revision,
+                scene.static_world->visible_draw_list->result_signature());
         }
-        ++frame_lightmap_binds;
-        glUniform1i(
-            resources.program.masked_alpha,
-            material.base_texture_alpha_mode ==
-                    assets::WorldTextureAlphaMode::masked_index_255
-                ? 1
-                : 0);
-
-        const auto byte_offset = checked_index_byte_offset(batch.first_index);
-        glDrawElements(
-            GL_TRIANGLES,
-            to_gl_size(
-                static_cast<std::size_t>(batch.index_count),
-                OpenGlRendererErrorCode::draw_range_invalid,
-                "Static-world draw count exceeds GLsizei"),
-            GL_UNSIGNED_INT,
-            reinterpret_cast<const void*>(byte_offset));
-        ++frame_draw_calls;
-        frame_triangles += static_cast<std::uint64_t>(batch.index_count / 3U);
+        const auto& world_package =
+            *scene.static_world->scene_package->world_package();
+        if (scene.static_world->visible_draw_list) {
+            const auto commands =
+                scene.static_world->visible_draw_list->commands();
+            for (const auto& command : commands) {
+                const bool brush = command.object_kind ==
+                    world_visibility::WorldVisibleObjectKind::
+                        brush_instance_surface;
+                if (command.object_kind !=
+                        world_visibility::WorldVisibleObjectKind::world_surface &&
+                    !brush) {
+                    fail(OpenGlRendererErrorCode::draw_range_invalid,
+                        "Visible command contains an unknown object kind");
+                }
+                const world_render::WorldRenderPackage* package =
+                    &world_package;
+                GpuWorldResources* package_resources = &resources.world;
+                if (brush) {
+                    const auto& brush_package = scene.static_world
+                        ->scene_package->brush_library().render_package();
+                    if (!brush_package || !resources.brushes ||
+                        !command.source_model_index ||
+                        !command.source_instance_index) {
+                        fail(OpenGlRendererErrorCode::draw_range_invalid,
+                            "Brush draw command has no cached model resource");
+                    }
+                    package = brush_package.get();
+                    package_resources = &*resources.brushes;
+                } else if (command.source_model_index ||
+                           command.source_instance_index) {
+                    fail(OpenGlRendererErrorCode::draw_range_invalid,
+                        "World draw command contains brush identity");
+                }
+                if (!renderer::is_finite(command.model_transform)) {
+                    fail(OpenGlRendererErrorCode::draw_range_invalid,
+                        "Visible command contains a non-finite model transform");
+                }
+                const auto materials = package->materials();
+                if (command.render_material_index >= materials.size()) {
+                    fail(OpenGlRendererErrorCode::draw_range_invalid,
+                        "Visible command material is outside its package");
+                }
+                const auto& material =
+                    materials[command.render_material_index];
+                if (command.alpha_mode !=
+                        material.base_texture_alpha_mode ||
+                    command.lightmap_mode != material.lightmap_mode ||
+                    command.lightmap_atlas_page_index !=
+                        material.lightmap_atlas_page_index) {
+                    fail(OpenGlRendererErrorCode::draw_range_invalid,
+                        "Visible command material profile does not match package");
+                }
+                const auto mvp = renderer::multiply(
+                    *matrix.matrix, command.model_transform);
+                draw_package_range(
+                    *package_resources,
+                    *package,
+                    command.first_index,
+                    command.index_count,
+                    command.render_material_index,
+                    mvp,
+                    brush,
+                    frame);
+            }
+            statistics.rendered_command_count +=
+                static_cast<std::uint64_t>(commands.size());
+        } else {
+            for (const auto& batch : world_package.draw_batches()) {
+                draw_package_range(
+                    resources.world,
+                    world_package,
+                    batch.first_index,
+                    batch.index_count,
+                    batch.render_material_index,
+                    *matrix.matrix,
+                    false,
+                    frame);
+            }
+        }
+    } else {
+        auto& resources = implementation_->ensure_resources(
+            scene.static_world->package);
+        const auto& package = *scene.static_world->package;
+        for (const auto& batch : package.draw_batches()) {
+            draw_package_range(
+                resources,
+                package,
+                batch.first_index,
+                batch.index_count,
+                batch.render_material_index,
+                *matrix.matrix,
+                false,
+                frame);
+        }
     }
 
     require_no_gl_error(
@@ -1241,10 +1572,11 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     glUseProgram(0U);
 
     ++statistics.rendered_frame_count;
-    statistics.draw_call_count += frame_draw_calls;
-    statistics.triangle_count += frame_triangles;
-    statistics.base_texture_bind_count += frame_base_binds;
-    statistics.lightmap_bind_count += frame_lightmap_binds;
+    statistics.draw_call_count += frame.draw_calls;
+    statistics.brush_draw_call_count += frame.brush_draw_calls;
+    statistics.triangle_count += frame.triangles;
+    statistics.base_texture_bind_count += frame.base_texture_binds;
+    statistics.lightmap_bind_count += frame.lightmap_binds;
 }
 
 const OpenGlWorldRendererStatistics& OpenGlRenderer::statistics() const noexcept

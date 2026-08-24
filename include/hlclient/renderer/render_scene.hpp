@@ -2,11 +2,21 @@
 
 #include <hlclient/assets/asset_types.hpp>
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 
 namespace hlclient::world_render {
 class WorldRenderPackage;
+}
+
+namespace hlclient::world_scene_render {
+class WorldSceneRenderPackage;
+}
+
+namespace hlclient::world_visibility {
+class WorldVisibleDrawList;
 }
 
 namespace hlclient::renderer {
@@ -38,11 +48,28 @@ enum class RenderBaselineLightStylePolicy {
     source_slot_zero,
 };
 
+struct RenderStaticWorldVisibilitySummary {
+    std::uint64_t revision{0U};
+    std::uint64_t scene_resource_id{0U};
+    std::uint64_t scene_resource_revision{0U};
+    std::uint64_t visibility_input_signature{0U};
+    std::uint64_t draw_input_signature{0U};
+    std::uint64_t result_signature_first{0U};
+    std::uint64_t result_signature_second{0U};
+    std::size_t visible_world_surface_count{0U};
+    std::size_t visible_brush_instance_count{0U};
+};
+
 struct RenderStaticWorld {
     std::shared_ptr<const world_render::WorldRenderPackage> package;
     RenderCullMode cull_mode{RenderCullMode::none};
     RenderBaselineLightStylePolicy light_style_policy{
         RenderBaselineLightStylePolicy::source_slot_zero};
+    std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>
+        scene_package;
+    std::shared_ptr<const world_visibility::WorldVisibleDrawList>
+        visible_draw_list;
+    std::optional<RenderStaticWorldVisibilitySummary> visibility_summary;
 };
 
 struct RenderScene {

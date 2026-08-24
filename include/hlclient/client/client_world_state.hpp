@@ -10,6 +10,15 @@ namespace hlclient::world_render {
 class WorldRenderPackage;
 }
 
+namespace hlclient::world_scene_render {
+class WorldSceneRenderPackage;
+}
+
+namespace hlclient::world_visibility {
+class WorldVisibilitySet;
+class WorldVisibleDrawList;
+}
+
 namespace hlclient::client {
 
 struct RenderCameraState {
@@ -37,7 +46,15 @@ public:
     void set_connection_requested(bool requested) noexcept;
     void set_static_world(
         std::shared_ptr<const world_render::WorldRenderPackage> package) noexcept;
+    void set_world_scene(
+        std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>
+            package) noexcept;
     void clear_static_world() noexcept;
+    [[nodiscard]] bool set_world_visibility(
+        std::shared_ptr<const world_visibility::WorldVisibilitySet> visibility,
+        std::shared_ptr<const world_visibility::WorldVisibleDrawList>
+            draw_list) noexcept;
+    void clear_world_visibility() noexcept;
     void set_camera(const RenderCameraState& camera) noexcept;
     [[nodiscard]] bool set_preview_render_options(
         const PreviewRenderOptions& options) noexcept;
@@ -46,16 +63,30 @@ public:
     [[nodiscard]] bool connection_requested() const noexcept;
     [[nodiscard]] const std::shared_ptr<const world_render::WorldRenderPackage>&
     static_world() const noexcept;
+    [[nodiscard]] const std::shared_ptr<
+        const world_scene_render::WorldSceneRenderPackage>&
+    world_scene() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const world_visibility::WorldVisibilitySet>&
+    world_visibility() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const world_visibility::WorldVisibleDrawList>&
+    visible_draw_list() const noexcept;
     [[nodiscard]] const RenderCameraState& camera() const noexcept;
     [[nodiscard]] std::uint64_t world_revision() const noexcept;
+    [[nodiscard]] std::uint64_t scene_revision() const noexcept;
+    [[nodiscard]] std::uint64_t visibility_revision() const noexcept;
     [[nodiscard]] const PreviewRenderOptions& preview_render_options() const noexcept;
 
 private:
     double elapsed_seconds_{0.0};
     bool connection_requested_{false};
     std::shared_ptr<const world_render::WorldRenderPackage> static_world_;
+    std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> world_scene_;
+    std::shared_ptr<const world_visibility::WorldVisibilitySet> world_visibility_;
+    std::shared_ptr<const world_visibility::WorldVisibleDrawList> visible_draw_list_;
     RenderCameraState camera_{};
     std::uint64_t world_revision_{0U};
+    std::uint64_t scene_revision_{0U};
+    std::uint64_t visibility_revision_{0U};
     PreviewRenderOptions preview_render_options_{};
 };
 

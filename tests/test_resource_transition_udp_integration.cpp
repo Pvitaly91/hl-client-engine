@@ -24,8 +24,15 @@
 #include <hlclient/network/udp_socket.hpp>
 #include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_search_roots.hpp>
+#include <hlclient/platform/sdl_runtime.hpp>
+#include <hlclient/platform/sdl_window.hpp>
+#include <hlclient/renderer/opengl/opengl_renderer.hpp>
+#include <hlclient/renderer/render_scene.hpp>
 #include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
 #include <hlclient/resource_consistency/provider.hpp>
+#include <hlclient/world_preview/world_preview_scene_source.hpp>
+
+#include <glad/gl.h>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
@@ -71,7 +78,12 @@ namespace response_fixture =
     hlclient::test::resource_client_response_fixture;
 namespace synthetic_bsp = hlclient::tests;
 namespace user_fixture = hlclient::test::user_info_fixture;
+namespace world_preview = hlclient::world_preview;
 namespace world_render = hlclient::world_render;
+namespace world_scene_render = hlclient::world_scene_render;
+namespace world_visibility = hlclient::world_visibility;
+namespace opengl = hlclient::renderer::opengl;
+namespace renderer = hlclient::renderer;
 
 template <typename Type>
 concept HasRendererHandle =
@@ -645,6 +657,7 @@ enum class PrecacheManifestCompletionMode {
     production_bsp_malformed_rejection,
     production_world_textures,
     production_world_render_package,
+    production_world_spatial_scene,
 };
 
 enum class ProductionBspIntegrationScenario {
@@ -2872,6 +2885,111 @@ void configure_two_face_production_geometry(
     }
 }
 
+// M4.4-only extension of the established two-face render fixture. World-model
+// faces 0 and 1 retain the exact M4.3 geometry/material/lightmap contract while
+// face 2 is owned exclusively by dmodel *1. The three-leaf BSP (leaf zero plus
+// two visleaves) uses {0x00, 0x01}, a real GoldSrc zero-run row. Camera-leaf
+// self-inclusion still exposes its own membership. The root separates the
+// camera/world square from the translated brush instance without renderer
+// state.
+void configure_world_spatial_scene_geometry(
+    synthetic_bsp::SyntheticBspBuilder& builder)
+{
+    constexpr std::array planes{
+        synthetic_bsp::SyntheticBspPlane{
+            {1.0F, 0.0F, 0.0F}, 128.0F, 0},
+        synthetic_bsp::SyntheticBspPlane{
+            {0.0F, 0.0F, 1.0F}, 0.0F, 2},
+    };
+    constexpr std::array vertices{
+        synthetic_bsp::SyntheticBspVector3{0.0F, 0.0F, 0.0F},
+        synthetic_bsp::SyntheticBspVector3{64.0F, 0.0F, 0.0F},
+        synthetic_bsp::SyntheticBspVector3{64.0F, 64.0F, 0.0F},
+        synthetic_bsp::SyntheticBspVector3{0.0F, 64.0F, 0.0F},
+    };
+    constexpr std::array edges{
+        synthetic_bsp::SyntheticBspEdge{0U, 0U},
+        synthetic_bsp::SyntheticBspEdge{0U, 1U},
+        synthetic_bsp::SyntheticBspEdge{1U, 2U},
+        synthetic_bsp::SyntheticBspEdge{2U, 0U},
+        synthetic_bsp::SyntheticBspEdge{0U, 2U},
+        synthetic_bsp::SyntheticBspEdge{2U, 3U},
+        synthetic_bsp::SyntheticBspEdge{3U, 0U},
+    };
+    constexpr std::array<std::int32_t, 6U> surfedges{1, 2, 3, 4, 5, 6};
+    std::array faces{
+        synthetic_bsp::SyntheticBspFace{},
+        synthetic_bsp::SyntheticBspFace{},
+        synthetic_bsp::SyntheticBspFace{},
+    };
+    faces[0U].plane_index = 1;
+    faces[0U].surfedge_count = 3;
+    faces[0U].light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+    faces[0U].light_offset = 0;
+    faces[1U].plane_index = 1;
+    faces[1U].first_surfedge = 3;
+    faces[1U].surfedge_count = 3;
+    faces[1U].texinfo_index = 1;
+    faces[1U].light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+    faces[1U].light_offset = 75;
+    faces[2U].plane_index = 1;
+    faces[2U].surfedge_count = 3;
+    faces[2U].light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+    faces[2U].light_offset = 0;
+
+    auto node = synthetic_bsp::SyntheticBspNode{};
+    node.plane_index = 0;
+    node.children = {-3, -2};
+    node.minimum = {-1, -129, -1};
+    node.maximum = {465, 65, 65};
+    node.face_count = 2U;
+
+    std::array<synthetic_bsp::SyntheticBspLeaf, 3U> leaves{};
+    leaves[0U].contents = -2;
+    leaves[0U].visibility_offset = -1;
+    leaves[0U].marksurface_count = 0U;
+    leaves[1U].visibility_offset = 0;
+    leaves[1U].minimum = {-1, -129, -1};
+    leaves[1U].maximum = {127, 65, 65};
+    leaves[1U].marksurface_count = 1U;
+    leaves[2U].visibility_offset = 0;
+    leaves[2U].minimum = {128, -1, -1};
+    leaves[2U].maximum = {465, 65, 65};
+    leaves[2U].first_marksurface = 1U;
+    leaves[2U].marksurface_count = 1U;
+    constexpr std::array<std::uint16_t, 2U> marksurfaces{0U, 1U};
+
+    std::array models{
+        synthetic_bsp::SyntheticBspModel{},
+        synthetic_bsp::SyntheticBspModel{},
+    };
+    models[0U].minimum = {-1.0F, -129.0F, -1.0F};
+    models[0U].maximum = {465.0F, 65.0F, 65.0F};
+    models[0U].visibility_leaf_count = 2;
+    models[0U].face_count = 2;
+    models[1U].first_face = 2;
+    models[1U].face_count = 1;
+
+    builder.set_planes(planes)
+        .set_vertices(vertices)
+        .set_edges(edges)
+        .set_surfedges(surfedges)
+        .set_faces(faces)
+        .set_nodes(std::span{&node, 1U})
+        .set_leaves(leaves)
+        .set_marksurfaces(marksurfaces)
+        .set_models(models);
+    builder.lump(synthetic_bsp::SyntheticBspLumpId::visibility) = {
+        std::byte{0x00U}, std::byte{0x01U}};
+
+    auto& lighting =
+        builder.lump(synthetic_bsp::SyntheticBspLumpId::lighting);
+    lighting.resize(150U);
+    for (std::size_t index = 0U; index < lighting.size(); ++index) {
+        lighting[index] = static_cast<std::byte>(index + 1U);
+    }
+}
+
 [[nodiscard]] std::vector<std::byte> make_two_face_production_bsp()
 {
     synthetic_bsp::SyntheticBspBuilder builder;
@@ -2973,7 +3091,8 @@ void populate_embedded_texture_palette(
 
 [[nodiscard]] std::vector<std::byte> production_world_texture_bsp_fixture(
     const ProductionWorldTextureIntegrationScenario scenario,
-    const bool include_rgb_lightmaps = false)
+    const bool include_rgb_lightmaps = false,
+    const bool include_world_spatial_scene = false)
 {
     synthetic_bsp::SyntheticBspBuilder builder;
     const bool has_external = production_texture_uses_wad(scenario);
@@ -2993,14 +3112,26 @@ void populate_embedded_texture_palette(
         }
     }
     entities += "}\n";
+    if (include_world_spatial_scene) {
+        entities +=
+            "{\n\"classname\" \"func_wall\"\n\"model\" \"*1\"\n"
+            "\"origin\" \"400 0 0\"\n}\n"
+            "{\n\"classname\" \"info_player_start\"\n"
+            "\"origin\" \"32 -128 32\"\n"
+            "\"angles\" \"0 90 0\"\n}\n";
+    }
     builder.lump(synthetic_bsp::SyntheticBspLumpId::entities) =
         bytes(entities);
 
     if (scenario == ProductionWorldTextureIntegrationScenario::mixed) {
-        configure_two_face_production_geometry(
-            builder,
-            true,
-            include_rgb_lightmaps);
+        if (include_world_spatial_scene) {
+            configure_world_spatial_scene_geometry(builder);
+        } else {
+            configure_two_face_production_geometry(
+                builder,
+                true,
+                include_rgb_lightmaps);
+        }
         std::array texinfo{
             synthetic_bsp::SyntheticBspTexinfo{},
             synthetic_bsp::SyntheticBspTexinfo{},
@@ -3607,6 +3738,138 @@ void check_production_world_render_package(
     }
 }
 
+void check_world_spatial_scene_preview(
+    const std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>&
+        scene,
+    const goldsrc::brush_models::GoldSrcSpawnCameraExtractionResult& spawn)
+{
+    REQUIRE(scene);
+    REQUIRE(spawn);
+    REQUIRE(spawn.descriptor);
+    const auto& descriptor = *spawn.descriptor;
+    CHECK(descriptor.source_class ==
+          goldsrc::brush_models::GoldSrcSpawnCameraSourceClass::
+              info_player_start);
+    CHECK(descriptor.position.x == 32.0F);
+    CHECK(descriptor.position.y == -128.0F);
+    CHECK(descriptor.position.z == 32.0F);
+    CHECK(descriptor.forward.x == Catch::Approx(0.0F).margin(0.0001F));
+    CHECK(descriptor.forward.y == Catch::Approx(1.0F).margin(0.0001F));
+    CHECK(descriptor.forward.z == Catch::Approx(0.0F).margin(0.0001F));
+
+    struct ModeExpectation {
+        world_visibility::WorldVisibilityMode mode{
+            world_visibility::WorldVisibilityMode::all};
+        std::vector<std::uint32_t> world_surfaces;
+        std::vector<std::uint32_t> brush_instances;
+    };
+    const std::array expectations{
+        ModeExpectation{
+            world_visibility::WorldVisibilityMode::all,
+            {0U, 1U},
+            {0U}},
+        ModeExpectation{
+            world_visibility::WorldVisibilityMode::frustum_only,
+            {0U, 1U},
+            {}},
+        ModeExpectation{
+            world_visibility::WorldVisibilityMode::pvs_only,
+            {0U},
+            {}},
+        ModeExpectation{
+            world_visibility::WorldVisibilityMode::pvs_and_frustum,
+            {0U},
+            {}},
+    };
+
+    for (const auto& expected : expectations) {
+        INFO("M4.4 CPU preview visibility mode " <<
+             world_visibility::to_string(expected.mode));
+        world_preview::WorldPreviewSceneOptions options;
+        options.camera_mode = world_preview::WorldPreviewCameraMode::spawn;
+        options.spawn_camera =
+            world_preview::WorldPreviewSpawnCameraDescriptor{
+                descriptor.position,
+                descriptor.forward,
+                descriptor.up,
+            };
+        options.visibility_mode = expected.mode;
+        options.brush_submodels =
+            world_preview::WorldPreviewBrushSubmodelsMode::static_instances;
+        options.visibility_extent = {640, 480};
+
+        world_preview::WorldPreviewSceneSource source{scene, options};
+        CHECK(source.spawn_camera_applied());
+        CHECK(source.fallback_warning_count() == 0U);
+        CHECK_FALSE(source.world_state().connection_requested());
+        CHECK(source.world_state().world_scene() == scene);
+        REQUIRE(source.world_state().world_visibility());
+        REQUIRE(source.world_state().visible_draw_list());
+        const auto& visibility = *source.world_state().world_visibility();
+        const auto& draw_list = *source.world_state().visible_draw_list();
+        CHECK(visibility.requested_mode() == expected.mode);
+        CHECK(visibility.applied_mode() == expected.mode);
+        CHECK(visibility.fallback_reason() ==
+              world_visibility::WorldPvsFallbackReason::none);
+        if (expected.mode == world_visibility::WorldVisibilityMode::pvs_only ||
+            expected.mode ==
+                world_visibility::WorldVisibilityMode::pvs_and_frustum) {
+            REQUIRE(visibility.camera_leaf_index());
+            CHECK(*visibility.camera_leaf_index() == 1U);
+            CHECK(std::ranges::equal(
+                visibility.visible_leaf_indices(), std::array{1U}));
+        }
+        CHECK(std::ranges::equal(
+            visibility.visible_world_surface_indices(),
+            expected.world_surfaces));
+        CHECK(std::ranges::equal(
+            visibility.visible_brush_instance_indices(),
+            expected.brush_instances));
+        CHECK(draw_list.visibility_revision() == visibility.revision());
+        CHECK(draw_list.scene_identity() == visibility.scene_identity());
+        CHECK(draw_list.statistics().world_command_count ==
+              expected.world_surfaces.size());
+        CHECK(draw_list.statistics().brush_command_count ==
+              expected.brush_instances.size());
+        CHECK(draw_list.statistics().command_count ==
+              expected.world_surfaces.size() +
+                  expected.brush_instances.size());
+        CHECK(draw_list.statistics().triangle_count ==
+              expected.world_surfaces.size() +
+                  expected.brush_instances.size());
+        REQUIRE(draw_list.commands().size() ==
+                expected.world_surfaces.size() +
+                    expected.brush_instances.size());
+        for (std::size_t command_index = 0U;
+             command_index < expected.world_surfaces.size();
+             ++command_index) {
+            const auto& command = draw_list.commands()[command_index];
+            CHECK(command.object_kind ==
+                  world_visibility::WorldVisibleObjectKind::world_surface);
+            CHECK(command.source_surface_index ==
+                  expected.world_surfaces[command_index]);
+            CHECK_FALSE(command.source_model_index);
+            CHECK_FALSE(command.source_instance_index);
+        }
+        for (std::size_t brush_index = 0U;
+             brush_index < expected.brush_instances.size();
+             ++brush_index) {
+            const auto& command = draw_list.commands()[
+                expected.world_surfaces.size() + brush_index];
+            CHECK(command.object_kind ==
+                  world_visibility::WorldVisibleObjectKind::
+                      brush_instance_surface);
+            CHECK(command.source_surface_index == 0U);
+            REQUIRE(command.source_model_index);
+            CHECK(*command.source_model_index == 1U);
+            REQUIRE(command.source_instance_index);
+            CHECK(*command.source_instance_index ==
+                  expected.brush_instances[brush_index]);
+            CHECK(command.model_transform.values[12U] == 400.0F);
+        }
+    }
+}
+
 [[nodiscard]] std::vector<std::byte> production_bsp_fixture(
     const ProductionBspIntegrationScenario scenario)
 {
@@ -3806,6 +4069,10 @@ void check_literal_bsp_world_from_production_flow(
     CHECK(world.statistics.embedded_texture_reference_count == 0U);
 }
 
+using WorldSpatialSceneObserver = void (*)(
+    const std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>&,
+    const goldsrc::brush_models::GoldSrcSpawnCameraExtractionResult&);
+
 void run_precache_manifest_integration(
     const std::size_t run,
     const PrecacheManifestIntegrationScenario scenario,
@@ -3819,17 +4086,23 @@ void run_precache_manifest_integration(
         ProductionBspIntegrationScenario::valid_quad,
     const ProductionWorldTextureIntegrationScenario
         production_texture_scenario =
-            ProductionWorldTextureIntegrationScenario::mixed)
+            ProductionWorldTextureIntegrationScenario::mixed,
+    const WorldSpatialSceneObserver world_spatial_scene_observer = nullptr)
 {
     INFO("fake-HLDS precache-manifest run " << run + 1U);
     const bool production_world_render_package =
         completion_mode ==
         PrecacheManifestCompletionMode::production_world_render_package;
+    const bool production_world_spatial_scene =
+        completion_mode ==
+        PrecacheManifestCompletionMode::production_world_spatial_scene;
+    const bool production_world_package_pipeline =
+        production_world_render_package || production_world_spatial_scene;
     const bool production_world_textures =
         completion_mode ==
         PrecacheManifestCompletionMode::production_world_textures;
     const bool production_texture_pipeline =
-        production_world_textures || production_world_render_package;
+        production_world_textures || production_world_package_pipeline;
     const bool production_bsp_dispatch =
         completion_mode != PrecacheManifestCompletionMode::manifest_only;
     const bool legacy_malformed_face_rejection =
@@ -3860,7 +4133,7 @@ void run_precache_manifest_integration(
     REQUIRE_FALSE((production_texture_pipeline &&
                    production_bsp_scenario !=
                        ProductionBspIntegrationScenario::valid_quad));
-    REQUIRE_FALSE((production_world_render_package &&
+    REQUIRE_FALSE((production_world_package_pipeline &&
                    production_texture_scenario !=
                        ProductionWorldTextureIntegrationScenario::mixed));
 
@@ -3885,7 +4158,8 @@ void run_precache_manifest_integration(
         production_world_bytes = production_texture_pipeline
             ? production_world_texture_bsp_fixture(
                   production_texture_scenario,
-                  production_world_render_package)
+                  production_world_package_pipeline,
+                  production_world_spatial_scene)
             : production_bsp_fixture(production_bsp_scenario);
         if (legacy_malformed_face_rejection) {
             const auto face_descriptor =
@@ -4020,9 +4294,17 @@ void run_precache_manifest_integration(
     world_texture_config.asset_dispatch = asset_dispatch_config;
     world_texture_config.asset_dispatch.manifest = manifest_stage_config;
     goldsrc::WorldRenderPackageStageConfig world_render_package_config;
-    if (production_world_render_package) {
+    if (production_world_package_pipeline) {
         world_render_package_config.world_textures =
             std::move(world_texture_config);
+        world_render_package_config.build_world_spatial_scene =
+            production_world_spatial_scene;
+        if (production_world_spatial_scene) {
+            world_render_package_config.world_scene.brushes =
+                goldsrc::brush_models::GoldSrcWorldSceneBrushMode::
+                    static_initial;
+            world_render_package_config.world_scene.extract_spawn = true;
+        }
         world_render_package_config.maximum_stage_events = 257U;
         CHECK(world_render_package_config.maximum_stage_events == 257U);
         REQUIRE(goldsrc::valid_world_render_package_stage_configuration(
@@ -4037,13 +4319,15 @@ void run_precache_manifest_integration(
     goldsrc::GoldSrcHandshakeCoordinator handshake{
         transport,
         *server_endpoint,
-        production_world_render_package
-            ? goldsrc::HandshakeStopPoint::world_render_package
+        production_world_spatial_scene
+            ? goldsrc::HandshakeStopPoint::world_spatial_scene
+            : (production_world_render_package
+                   ? goldsrc::HandshakeStopPoint::world_render_package
             : (production_world_textures
                    ? goldsrc::HandshakeStopPoint::world_textures
                    : (production_bsp_dispatch
                           ? goldsrc::HandshakeStopPoint::asset_dispatch
-                          : goldsrc::HandshakeStopPoint::precache_manifest)),
+                          : goldsrc::HandshakeStopPoint::precache_manifest))),
         std::move(prepared_request.request),
         challenge_config(),
         {},
@@ -4455,7 +4739,7 @@ void run_precache_manifest_integration(
         error);
     handshake.update(now + 1ms);
     CHECK_FALSE(handshake.terminal());
-    if (production_world_render_package) {
+    if (production_world_package_pipeline) {
         CHECK(handshake.state() ==
               goldsrc::GoldSrcHandshakeState::
                   waiting_for_world_render_package);
@@ -4549,10 +4833,10 @@ void run_precache_manifest_integration(
     }
 
     CHECK(handshake.lightmap_import_count() ==
-          (production_world_render_package ? 1U : 0U));
+          (production_world_package_pipeline ? 1U : 0U));
     CHECK(handshake.renderer_upload_count() == 0U);
 
-    if (production_world_render_package) {
+    if (production_world_package_pipeline) {
         constexpr auto expected_terminal_state =
             goldsrc::GoldSrcHandshakeState::world_render_package_ready;
         CHECK(handshake.state() == expected_terminal_state);
@@ -4583,6 +4867,75 @@ void run_precache_manifest_integration(
         CHECK(package_stage->lightmap_import_count() == 1U);
         CHECK(package_stage->lightmap_set_publication_count() == 1U);
         CHECK(package_stage->render_package_publication_count() == 1U);
+        CHECK(package_stage->bsp_scene_parse_count() ==
+              (production_world_spatial_scene ? 1U : 0U));
+        CHECK(package_stage->brush_library_build_count() ==
+              (production_world_spatial_scene ? 1U : 0U));
+        CHECK(package_stage->world_scene_publication_count() ==
+              (production_world_spatial_scene ? 1U : 0U));
+        if (production_world_spatial_scene) {
+            REQUIRE(handshake.world_spatial_scene_result());
+            CHECK(package_stage->scene_result().get() ==
+                  handshake.world_spatial_scene_result().get());
+            const auto retained_scene =
+                handshake.world_spatial_scene_result();
+            REQUIRE(retained_scene);
+            const auto& scene = *retained_scene;
+            CHECK(scene.world_package().get() == retained_package.get());
+            CHECK(scene.statistics().world_surface_count == 2U);
+            CHECK(scene.statistics().brush_model_count == 1U);
+            CHECK(scene.statistics().brush_surface_count == 1U);
+            CHECK(scene.statistics().brush_instance_count == 1U);
+            CHECK(scene.statistics().supported_brush_instance_count == 1U);
+            CHECK(scene.statistics().unsupported_brush_instance_count == 0U);
+            REQUIRE(scene.brush_instances().size() == 1U);
+            CHECK(scene.brush_instances()[0U].source_instance_index == 0U);
+            CHECK(scene.brush_instances()[0U].source_entity_ordinal == 1U);
+            CHECK(scene.brush_instances()[0U].source_model_index == 1U);
+            CHECK(scene.brush_instances()[0U].support_status ==
+                  world_scene_render::BrushSubmodelRenderSupportStatus::
+                      supported_static_opaque);
+            CHECK(scene.brush_instances()[0U].touched_leaf_indices ==
+                  std::vector<std::uint32_t>{2U});
+            CHECK(scene.spatial_package().statistics().plane_count == 2U);
+            CHECK(scene.spatial_package().statistics().node_count == 1U);
+            CHECK(scene.spatial_package().statistics().leaf_count == 3U);
+            CHECK(scene.spatial_package().statistics().marksurface_link_count ==
+                  2U);
+            CHECK(scene.spatial_package().statistics()
+                      .mapped_world_surface_link_count == 2U);
+            CHECK(scene.spatial_package().pvs_table().row_byte_count() == 1U);
+            CHECK(scene.spatial_package().pvs_table().visible_leaf_count() ==
+                  2U);
+            CHECK(scene.spatial_package().statistics().unique_pvs_row_count ==
+                  2U);
+            CHECK(scene.spatial_package().statistics()
+                      .decompressed_pvs_bytes == 2U);
+            REQUIRE(handshake.world_spawn_camera_result());
+            CHECK(package_stage->spawn_camera_result().has_value());
+
+            // The stage is terminal and has already released its retained
+            // connection lifetime. CPU preview resolution must not re-enter
+            // the fake server, mutate the immutable scene, or create a
+            // renderer.
+            const auto transmitted_before_preview =
+                package_stage->transmitted_packet_count();
+            check_world_spatial_scene_preview(
+                retained_scene,
+                *handshake.world_spawn_camera_result());
+            if (world_spatial_scene_observer != nullptr) {
+                world_spatial_scene_observer(
+                    retained_scene,
+                    *handshake.world_spawn_camera_result());
+            }
+            CHECK(package_stage->transmitted_packet_count() ==
+                  transmitted_before_preview);
+            CHECK(handshake.renderer_upload_count() == 0U);
+            require_no_datagram(*server);
+        } else {
+            CHECK_FALSE(handshake.world_spatial_scene_result());
+            CHECK_FALSE(package_stage->scene_result());
+        }
         REQUIRE(package_stage->local_endpoint());
         CHECK(*package_stage->local_endpoint() == started.client_endpoint);
         CHECK(package_stage->remote_endpoint() == expected_remote);
@@ -4716,6 +5069,12 @@ void run_precache_manifest_integration(
         CHECK(package_stage->texture_set_publication_count() == 1U);
         CHECK(package_stage->lightmap_set_publication_count() == 1U);
         CHECK(package_stage->render_package_publication_count() == 1U);
+        CHECK(package_stage->bsp_scene_parse_count() ==
+              (production_world_spatial_scene ? 1U : 0U));
+        CHECK(package_stage->brush_library_build_count() ==
+              (production_world_spatial_scene ? 1U : 0U));
+        CHECK(package_stage->world_scene_publication_count() ==
+              (production_world_spatial_scene ? 1U : 0U));
         CHECK(package_stage->transmitted_packet_count() ==
               transmitted_at_manifest);
         CHECK(authentication_releases == 1U);
@@ -5294,6 +5653,157 @@ void run_precache_manifest_integration(
     }
 }
 
+class FakeHldsOpenGlContext final {
+public:
+    FakeHldsOpenGlContext()
+        : runtime_{std::make_unique<hlclient::platform::SdlRuntime>()},
+          window_{std::make_unique<hlclient::platform::SdlWindow>(
+              hlclient::platform::SdlWindowConfig{
+                  "HL Client fake-HLDS OpenGL scene test", 96, 96, true})}
+    {
+    }
+
+    [[nodiscard]] bool initialize_renderer() noexcept
+    {
+        try {
+            renderer_ = std::make_unique<opengl::OpenGlRenderer>();
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    [[nodiscard]] opengl::OpenGlRenderer& renderer() noexcept
+    {
+        return *renderer_;
+    }
+
+    void release_renderer() noexcept
+    {
+        renderer_.reset();
+    }
+
+private:
+    std::unique_ptr<hlclient::platform::SdlRuntime> runtime_;
+    std::unique_ptr<hlclient::platform::SdlWindow> window_;
+    std::unique_ptr<opengl::OpenGlRenderer> renderer_;
+};
+
+[[nodiscard]] std::unique_ptr<FakeHldsOpenGlContext>
+try_create_fake_hlds_open_gl_context() noexcept
+{
+    try {
+        return std::make_unique<FakeHldsOpenGlContext>();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+[[nodiscard]] std::vector<std::byte> read_fake_hlds_framebuffer()
+{
+    constexpr std::size_t width = 96U;
+    constexpr std::size_t height = 96U;
+    std::vector<std::byte> pixels(width * height * 4U);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(
+        0,
+        0,
+        static_cast<GLsizei>(width),
+        static_cast<GLsizei>(height),
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        pixels.data());
+    return pixels;
+}
+
+void render_fake_hlds_world_spatial_scene(
+    const std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>&
+        scene,
+    const goldsrc::brush_models::GoldSrcSpawnCameraExtractionResult& spawn)
+{
+    REQUIRE(scene);
+    REQUIRE(spawn);
+    REQUIRE(spawn.descriptor);
+
+    auto visible_options = world_preview::WorldPreviewSceneOptions{};
+    visible_options.camera_mode = world_preview::WorldPreviewCameraMode::spawn;
+    visible_options.spawn_camera =
+        world_preview::WorldPreviewSpawnCameraDescriptor{
+            {200.0F, -512.0F, 32.0F},
+            {0.0F, 1.0F, 0.0F},
+            {0.0F, 0.0F, 1.0F},
+        };
+    visible_options.visibility_mode =
+        world_visibility::WorldVisibilityMode::pvs_and_frustum;
+    visible_options.brush_submodels =
+        world_preview::WorldPreviewBrushSubmodelsMode::static_instances;
+    visible_options.visibility_extent = {96, 96};
+    world_preview::WorldPreviewSceneSource visible_source{
+        scene, visible_options};
+    REQUIRE(visible_source.update(hlclient::client::FrameTime{0.0}));
+    REQUIRE(visible_source.world_state().world_visibility());
+    REQUIRE(visible_source.world_state().visible_draw_list());
+    REQUIRE(visible_source.world_state().world_visibility()
+                ->visible_brush_instance_indices().size() == 1U);
+    CHECK(visible_source.world_state().world_visibility()
+              ->visible_brush_instance_indices()[0U] == 0U);
+
+    auto hidden_options = visible_options;
+    hidden_options.spawn_camera =
+        world_preview::WorldPreviewSpawnCameraDescriptor{
+            spawn.descriptor->position,
+            spawn.descriptor->forward,
+            spawn.descriptor->up,
+        };
+    world_preview::WorldPreviewSceneSource hidden_source{scene, hidden_options};
+    REQUIRE(hidden_source.update(hlclient::client::FrameTime{0.0}));
+    REQUIRE(hidden_source.world_state().world_visibility());
+    REQUIRE(hidden_source.world_state().visible_draw_list());
+    CHECK(hidden_source.world_state().world_visibility()
+              ->visible_brush_instance_indices().empty());
+    CHECK((visible_source.world_state().world_visibility()->revision() !=
+               hidden_source.world_state().world_visibility()->revision() ||
+           visible_source.world_state().world_visibility()
+                   ->result_signature() !=
+               hidden_source.world_state().world_visibility()
+                   ->result_signature()));
+    CHECK(visible_source.world_state().visible_draw_list()
+              ->commands().size() >
+          hidden_source.world_state().visible_draw_list()->commands().size());
+
+    auto context = try_create_fake_hlds_open_gl_context();
+    if (!context || !context->initialize_renderer()) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+
+    constexpr renderer::RenderExtent extent{96, 96};
+    auto visible_scene = hlclient::client::build_render_scene(
+        visible_source.world_state());
+    auto hidden_scene = hlclient::client::build_render_scene(
+        hidden_source.world_state());
+    auto& gl_renderer = context->renderer();
+    gl_renderer.render(visible_scene, extent);
+    const auto visible_pixels = read_fake_hlds_framebuffer();
+    const auto brush_draws_after_visible =
+        gl_renderer.statistics().brush_draw_call_count;
+    REQUIRE(brush_draws_after_visible > 0U);
+
+    gl_renderer.render(hidden_scene, extent);
+    const auto hidden_pixels = read_fake_hlds_framebuffer();
+    const auto& statistics = gl_renderer.statistics();
+    CHECK(visible_pixels != hidden_pixels);
+    CHECK(statistics.upload_count == 1U);
+    CHECK(statistics.scene_upload_count == 1U);
+    CHECK(statistics.brush_upload_count == 1U);
+    CHECK(statistics.visibility_update_count == 2U);
+    CHECK(statistics.brush_draw_call_count == brush_draws_after_visible);
+    CHECK(statistics.visible_brush_instance_count == 0U);
+    CHECK(glGetError() == GL_NO_ERROR);
+
+    context->release_renderer();
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
 void run_world_texture_integration(
     const std::size_t run,
     const ProductionWorldTextureIntegrationScenario scenario,
@@ -5324,6 +5834,24 @@ void run_world_render_package_integration(const std::size_t run)
         64U,
         ProductionBspIntegrationScenario::valid_quad,
         ProductionWorldTextureIntegrationScenario::mixed);
+}
+
+void run_world_spatial_scene_integration(
+    const std::size_t run,
+    const PrecacheManifestTransportScenario transport_scenario =
+        PrecacheManifestTransportScenario::baseline,
+    const WorldSpatialSceneObserver observer = nullptr)
+{
+    run_precache_manifest_integration(
+        run,
+        PrecacheManifestIntegrationScenario::complete,
+        transport_scenario,
+        false,
+        PrecacheManifestCompletionMode::production_world_spatial_scene,
+        64U,
+        ProductionBspIntegrationScenario::valid_quad,
+        ProductionWorldTextureIntegrationScenario::mixed,
+        observer);
 }
 
 class ScopedChildProcess final {
@@ -5951,6 +6479,49 @@ TEST_CASE("Production fake HLDS publishes an immutable CPU world render package 
         INFO("production CPU world-render-package run " << run + 1U
                                                          << "/20");
         run_world_render_package_integration(run);
+    }
+}
+
+TEST_CASE("Production fake HLDS proves M4.4 CPU visibility and static brushes 20 of 20",
+          "[goldsrc][world-spatial-scene][udp][production][full-flow][cpu-only][pvs][frustum][combined][static-brush][repeat-20]")
+{
+    STATIC_REQUIRE_FALSE(HasRendererHandle<goldsrc::WorldRenderPackageStage>);
+    STATIC_REQUIRE_FALSE(
+        HasRendererHandle<world_scene_render::WorldSceneRenderPackage>);
+    STATIC_REQUIRE_FALSE(
+        HasRendererHandle<world_preview::WorldPreviewSceneSource>);
+
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production CPU world-spatial-scene run " << run + 1U <<
+             "/20");
+        run_world_spatial_scene_integration(300U + run);
+    }
+}
+
+TEST_CASE("Production fake HLDS M4.4 scene renders two OpenGL visibility frames",
+          "[goldsrc][world-spatial-scene][udp][production][full-flow][opengl][pvs][frustum][static-brush]")
+{
+    run_world_spatial_scene_integration(
+        320U,
+        PrecacheManifestTransportScenario::baseline,
+        &render_fake_hlds_world_spatial_scene);
+}
+
+TEST_CASE("Production M4.4 CPU scene survives dropped response and ACK continuations 20 of 20",
+          "[goldsrc][world-spatial-scene][udp][production][cpu-only][drop-response][drop-ack][pvs][frustum][combined][static-brush][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production M4.4 dropped-response continuation run " <<
+             run + 1U << "/20");
+        run_world_spatial_scene_integration(
+            400U + run,
+            PrecacheManifestTransportScenario::dropped_response);
+
+        INFO("production M4.4 dropped-ACK continuation run " << run + 1U <<
+             "/20");
+        run_world_spatial_scene_integration(
+            500U + run,
+            PrecacheManifestTransportScenario::dropped_acknowledgement);
     }
 }
 

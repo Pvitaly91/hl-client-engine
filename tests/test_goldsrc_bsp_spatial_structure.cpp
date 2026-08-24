@@ -68,6 +68,32 @@ TEST_CASE("Node plane, node-child, and leaf-child references are bounded",
     }
 }
 
+TEST_CASE("Canonical BSP decode publishes owning spatial source records",
+    "[goldsrc-bsp][spatial][handoff]")
+{
+    auto source = fixture::literal_minimal_goldsrc_bsp_v30();
+    auto parsed = bsp::GoldSrcBspParser::parse(source);
+    REQUIRE(parsed);
+    REQUIRE(parsed.document);
+
+    const auto& spatial = parsed.document->spatial_source;
+    REQUIRE(spatial.planes.size() == 1U);
+    REQUIRE(spatial.nodes.size() == 1U);
+    REQUIRE(spatial.leaves.size() == 2U);
+    REQUIRE(spatial.marksurface_face_ordinals.size() == 1U);
+    CHECK(spatial.nodes[0].encoded_children[0] == -1);
+    CHECK(spatial.nodes[0].encoded_children[1] == -2);
+    CHECK(spatial.marksurface_face_ordinals[0] == 0U);
+    CHECK(spatial.world_model.render_headnode == 0);
+    CHECK(spatial.world_model.visible_leaf_count == 1);
+    CHECK(spatial.source_face_count == 1U);
+
+    source.assign(source.size(), std::byte{0});
+    CHECK(spatial.planes[0].normal.z == 1.0F);
+    CHECK(spatial.nodes[0].bounds.maximum.x == 65.0F);
+    CHECK(spatial.leaves[1].marksurface_count == 1U);
+}
+
 TEST_CASE("Leaves and marksurfaces retain only validated references",
     "[goldsrc-bsp][spatial][leaves]")
 {

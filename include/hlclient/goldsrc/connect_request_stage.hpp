@@ -53,6 +53,7 @@ enum class HandshakeStopPoint {
     asset_dispatch,
     world_textures,
     world_render_package,
+    world_spatial_scene,
 };
 
 enum class ConnectRequestStageState {
@@ -361,6 +362,12 @@ public:
     [[nodiscard]] const std::shared_ptr<
         const world_render::WorldRenderPackage>&
     world_render_package_result() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const
+        world_scene_render::WorldSceneRenderPackage>&
+    world_spatial_scene_result() const noexcept;
+    [[nodiscard]] const std::optional<
+        brush_models::GoldSrcSpawnCameraExtractionResult>&
+    world_spawn_camera_result() const noexcept;
     [[nodiscard]] const std::optional<WorldRenderPackageStageError>&
     world_render_package_error() const noexcept;
     // Explicit stop-boundary counters. The handshake pipeline is CPU-only and

@@ -2,6 +2,7 @@
 
 #include <hlclient/renderer/renderer.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -15,6 +16,15 @@ struct NullRendererStatistics {
     bool static_world_present{false};
     std::optional<std::uint64_t> package_resource_id;
     std::optional<std::uint64_t> package_revision;
+    bool scene_package_present{false};
+    std::optional<std::uint64_t> scene_resource_id;
+    std::optional<std::uint64_t> scene_revision;
+    bool visibility_present{false};
+    bool visible_draw_list_present{false};
+    std::optional<std::uint64_t> visibility_revision;
+    std::size_t visible_world_surface_count{0U};
+    std::size_t visible_brush_instance_count{0U};
+    std::size_t visible_draw_command_count{0U};
     bool camera_valid{false};
     RenderExtent last_extent{};
 

@@ -1,5 +1,7 @@
 #include <hlclient/client/client_scene_source.hpp>
-#include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp>
+#include <hlclient/goldsrc/brush_models/goldsrc_world_scene_builder.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp>
 #include <hlclient/goldsrc/lightmaps/goldsrc_world_lightmap_import.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import.hpp>
 #include <hlclient/local_assets/local_asset_source.hpp>
@@ -35,6 +37,12 @@ struct Options {
     std::optional<std::string> game_directory;
     std::optional<std::string> virtual_map;
     std::optional<hlclient::world_preview::WorldPreviewCameraMode> camera_mode;
+    hlclient::world_visibility::WorldVisibilityMode visibility_mode{
+        hlclient::world_visibility::WorldVisibilityMode::all};
+    hlclient::world_preview::WorldPreviewBrushSubmodelsMode brush_submodels{
+        hlclient::world_preview::WorldPreviewBrushSubmodelsMode::off};
+    bool visibility_mode_present{false};
+    bool brush_submodels_present{false};
 };
 
 [[nodiscard]] std::optional<std::string> narrow_printable_ascii(
@@ -63,7 +71,9 @@ struct Options {
     for (int index = 1; index < argument_count; ++index) {
         const std::wstring_view argument{arguments[index]};
         if (argument != L"--basedir" && argument != L"--game" &&
-            argument != L"--map" && argument != L"--camera") {
+            argument != L"--map" && argument != L"--camera" &&
+            argument != L"--visibility" &&
+            argument != L"--brush-submodels") {
             return std::nullopt;
         }
         if (index + 1 >= argument_count) {
@@ -96,7 +106,7 @@ struct Options {
                 return std::nullopt;
             }
             options.virtual_map = std::move(*narrow);
-        } else {
+        } else if (argument == L"--camera") {
             if (options.camera_mode) {
                 return std::nullopt;
             }
@@ -107,6 +117,43 @@ struct Options {
             } else if (*narrow == "orbit") {
                 options.camera_mode =
                     hlclient::world_preview::WorldPreviewCameraMode::orbit;
+            } else if (*narrow == "spawn") {
+                options.camera_mode =
+                    hlclient::world_preview::WorldPreviewCameraMode::spawn;
+            } else {
+                return std::nullopt;
+            }
+        } else if (argument == L"--visibility") {
+            if (options.visibility_mode_present) {
+                return std::nullopt;
+            }
+            options.visibility_mode_present = true;
+            if (*narrow == "all") {
+                options.visibility_mode =
+                    hlclient::world_visibility::WorldVisibilityMode::all;
+            } else if (*narrow == "frustum") {
+                options.visibility_mode = hlclient::world_visibility::
+                    WorldVisibilityMode::frustum_only;
+            } else if (*narrow == "pvs") {
+                options.visibility_mode =
+                    hlclient::world_visibility::WorldVisibilityMode::pvs_only;
+            } else if (*narrow == "pvs-frustum") {
+                options.visibility_mode = hlclient::world_visibility::
+                    WorldVisibilityMode::pvs_and_frustum;
+            } else {
+                return std::nullopt;
+            }
+        } else {
+            if (options.brush_submodels_present) {
+                return std::nullopt;
+            }
+            options.brush_submodels_present = true;
+            if (*narrow == "off") {
+                options.brush_submodels = hlclient::world_preview::
+                    WorldPreviewBrushSubmodelsMode::off;
+            } else if (*narrow == "static") {
+                options.brush_submodels = hlclient::world_preview::
+                    WorldPreviewBrushSubmodelsMode::static_instances;
             } else {
                 return std::nullopt;
             }
@@ -124,7 +171,9 @@ void print_usage()
     std::cerr
         << "Usage: hlclient_world_viewer --basedir <Half-Life root> "
            "--game <directory> --map <maps/name.bsp> "
-           "--camera <static|orbit>\n";
+           "--camera <static|orbit|spawn> "
+           "[--visibility <all|frustum|pvs|pvs-frustum>] "
+           "[--brush-submodels <off|static>]\n";
 }
 
 [[nodiscard]] std::optional<std::uint64_t> smoke_test_frame_limit()
@@ -306,17 +355,107 @@ build_world_render_package(
         std::move(*built.package));
 }
 
+struct PreparedWorldScene {
+    std::shared_ptr<
+        const hlclient::world_scene_render::WorldSceneRenderPackage>
+        package;
+    std::optional<
+        hlclient::world_preview::WorldPreviewSpawnCameraDescriptor>
+        spawn_camera;
+    hlclient::goldsrc::brush_models::GoldSrcWorldSceneBuildStatistics
+        build_statistics{};
+};
+
+[[nodiscard]] std::optional<PreparedWorldScene> build_world_scene(
+    const hlclient::goldsrc::bsp::GoldSrcBspParsedDocument& document,
+    std::shared_ptr<const hlclient::world_render::WorldRenderPackage>
+        world_package,
+    const std::span<const std::byte> retained_bsp_source,
+    const std::shared_ptr<
+        const hlclient::local_resources::LocalResourceEnvironment>& environment,
+    const Options& options)
+{
+    namespace brush = hlclient::goldsrc::brush_models;
+    std::optional<hlclient::world_scene_render::BrushSubmodelRenderLibrary>
+        brush_library;
+    if (options.brush_submodels == hlclient::world_preview::
+            WorldPreviewBrushSubmodelsMode::static_instances) {
+        auto built_library = brush::GoldSrcBrushRenderLibraryBuilder::build(
+            document,
+            retained_bsp_source,
+            environment);
+        if (!built_library || !built_library.library) {
+            const auto code = built_library.error
+                ? brush::to_string(built_library.error->code)
+                : std::string_view{"brush_library_build_failed"};
+            std::cerr << "brush-library=" << code << '\n';
+            return std::nullopt;
+        }
+        brush_library.emplace(std::move(*built_library.library));
+    }
+
+    const brush::GoldSrcWorldSceneBuildConfig build_config{
+        options.brush_submodels == hlclient::world_preview::
+                WorldPreviewBrushSubmodelsMode::static_instances
+            ? brush::GoldSrcWorldSceneBrushMode::static_initial
+            : brush::GoldSrcWorldSceneBrushMode::off,
+        *options.camera_mode ==
+            hlclient::world_preview::WorldPreviewCameraMode::spawn,
+    };
+    auto built_scene = brush::GoldSrcWorldSceneBuilder::build(
+        document,
+        std::move(world_package),
+        std::move(brush_library),
+        build_config);
+    if (!built_scene || !built_scene.scene_package) {
+        const auto code = built_scene.error
+            ? brush::to_string(built_scene.error->code)
+            : std::string_view{"world_scene_build_failed"};
+        std::cerr << "world-scene=" << code << '\n';
+        return std::nullopt;
+    }
+
+    std::optional<
+        hlclient::world_preview::WorldPreviewSpawnCameraDescriptor>
+        spawn_camera;
+    if (built_scene.spawn_camera && built_scene.spawn_camera->descriptor) {
+        const auto& source = *built_scene.spawn_camera->descriptor;
+        spawn_camera =
+            hlclient::world_preview::WorldPreviewSpawnCameraDescriptor{
+                source.position,
+                source.forward,
+                source.up,
+            };
+    }
+    auto scene_package = std::make_shared<
+        const hlclient::world_scene_render::WorldSceneRenderPackage>(
+        std::move(*built_scene.scene_package));
+    return PreparedWorldScene{
+        std::move(scene_package),
+        std::move(spawn_camera),
+        built_scene.statistics,
+    };
+}
+
 [[nodiscard]] int render_world(
-    std::shared_ptr<const hlclient::world_render::WorldRenderPackage> package,
-    const hlclient::world_preview::WorldPreviewCameraMode camera_mode,
+    PreparedWorldScene prepared,
+    const Options& options,
     const std::optional<std::uint64_t> frame_limit)
 {
     hlclient::world_preview::WorldPreviewSceneOptions scene_options;
-    scene_options.camera_mode = camera_mode;
+    scene_options.camera_mode = *options.camera_mode;
     scene_options.cull_mode = hlclient::client::PreviewWorldCullMode::none;
+    scene_options.visibility_mode = options.visibility_mode;
+    scene_options.brush_submodels = options.brush_submodels;
+    scene_options.spawn_camera = prepared.spawn_camera;
     hlclient::world_preview::WorldPreviewSceneSource scene_source{
-        package,
+        prepared.package,
         scene_options};
+    const auto& package = prepared.package->world_package();
+    if (!package) {
+        std::cerr << "viewer-runtime=world_package_unavailable\n";
+        return 1;
+    }
 
     // Every CPU prerequisite and the immutable package are valid before SDL
     // or an OpenGL context exists.
@@ -350,14 +489,22 @@ build_world_render_package(
         }
 
         const auto current_time = std::chrono::steady_clock::now();
+        current_extent = window.pixel_extent();
+        const auto extent_update = scene_source.set_render_extent(
+            hlclient::renderer::RenderExtent{
+                current_extent.width,
+                current_extent.height,
+            });
+        if (!extent_update) {
+            std::cerr << "scene-extent-update=failed\n";
+            return 1;
+        }
         const auto updated = scene_source.update(current_time - previous_time);
         if (!updated) {
             std::cerr << "scene-update=failed\n";
             return 1;
         }
         previous_time = current_time;
-
-        current_extent = window.pixel_extent();
         renderer.render(
             hlclient::client::build_render_scene(scene_source.world_state()),
             hlclient::renderer::RenderExtent{
@@ -376,6 +523,13 @@ build_world_render_package(
     const auto& texture_statistics =
         package->textured_world().textures.statistics();
     const auto& lightmap_statistics = package->lightmaps().statistics();
+    const auto& scene_statistics = prepared.package->statistics();
+    const auto& spatial_statistics =
+        prepared.package->spatial_package().statistics();
+    const auto& final_visibility =
+        scene_source.world_state().world_visibility();
+    const auto& final_draw_list =
+        scene_source.world_state().visible_draw_list();
 
     std::cout << "geometry-vertices=" << package_statistics.vertex_count << '\n';
     std::cout << "geometry-triangles=" << package_statistics.triangle_count
@@ -390,11 +544,83 @@ build_world_render_package(
               << '\n';
     std::cout << "lightmap-bindings="
               << lightmap_statistics.surface_binding_count << '\n';
+    std::cout << "spatial-nodes=" << spatial_statistics.node_count << '\n';
+    std::cout << "spatial-leaves=" << spatial_statistics.leaf_count << '\n';
+    std::cout << "visibility-mode="
+              << hlclient::world_visibility::to_string(options.visibility_mode)
+              << '\n';
+    if (final_visibility) {
+        const auto& visibility_statistics = final_visibility->statistics();
+        std::cout << "visibility-applied="
+                  << hlclient::world_visibility::to_string(
+                         final_visibility->applied_mode())
+                  << '\n';
+        std::cout << "pvs-fallback="
+                  << hlclient::world_visibility::to_string(
+                         final_visibility->fallback_reason())
+                  << '\n';
+        const auto pvs_requested =
+            options.visibility_mode == hlclient::world_visibility::
+                WorldVisibilityMode::pvs_only ||
+            options.visibility_mode == hlclient::world_visibility::
+                WorldVisibilityMode::pvs_and_frustum;
+        std::cout << "pvs-row-available="
+                  << (pvs_requested &&
+                          final_visibility->fallback_reason() ==
+                              hlclient::world_visibility::
+                                  WorldPvsFallbackReason::none
+                          ? 1
+                          : 0)
+                  << '\n';
+        if (final_visibility->camera_leaf_index()) {
+            std::cout << "camera-leaf="
+                      << *final_visibility->camera_leaf_index() << '\n';
+        } else {
+            std::cout << "camera-leaf=unavailable\n";
+        }
+        std::cout << "visible-world-surfaces="
+                  << visibility_statistics.visible_world_surface_count << '/'
+                  << visibility_statistics.total_world_surface_count << '\n';
+        std::cout << "pvs-culled-world-surfaces="
+                  << visibility_statistics.world_surface_culled_by_pvs_count
+                  << '\n';
+        std::cout << "frustum-culled-world-surfaces="
+                  << visibility_statistics
+                         .world_surface_culled_by_frustum_count
+                  << '\n';
+        std::cout << "visible-brush-instances="
+                  << visibility_statistics.visible_brush_instance_count << '/'
+                  << visibility_statistics.total_brush_instance_count << '\n';
+    }
+    std::cout << "brush-models=" << scene_statistics.brush_model_count << '\n';
+    std::cout << "brush-instances=" << scene_statistics.brush_instance_count
+              << '\n';
+    std::cout << "brush-supported="
+              << scene_statistics.supported_brush_instance_count << '\n';
+    std::cout << "brush-unsupported="
+              << scene_statistics.unsupported_brush_instance_count << '\n';
+    std::cout << "entity-document-parses="
+              << prepared.build_statistics.entity_document_parse_count << '\n';
+    std::cout << "spawn-camera-applied="
+              << (scene_source.spawn_camera_applied() ? 1 : 0) << '\n';
     std::cout << "world-upload-count=" << renderer_statistics.upload_count
               << '\n';
+    std::cout << "scene-upload-count=" << renderer_statistics.scene_upload_count
+              << '\n';
+    std::cout << "brush-upload-count=" << renderer_statistics.brush_upload_count
+              << '\n';
+    std::cout << "visibility-updates="
+              << renderer_statistics.visibility_update_count << '\n';
     std::cout << "rendered-frames="
               << renderer_statistics.rendered_frame_count << '\n';
     std::cout << "draw-calls=" << renderer_statistics.draw_call_count << '\n';
+    std::cout << "brush-draw-calls="
+              << renderer_statistics.brush_draw_call_count << '\n';
+    std::cout << "rendered-commands="
+              << (final_draw_list
+                      ? final_draw_list->statistics().command_count
+                      : 0U)
+              << '\n';
     std::cout << "triangles=" << renderer_statistics.triangle_count << '\n';
     std::cout << "vsync-enabled=" << (window.vsync_enabled() ? 1 : 0) << '\n';
     std::cout << "network-operations=0\n";
@@ -406,9 +632,13 @@ build_world_render_package(
     }
     if (rendered_frames > 0U &&
         (renderer_statistics.upload_count != 1U ||
+            renderer_statistics.scene_upload_count != 1U ||
             renderer_statistics.rendered_frame_count != rendered_frames ||
-            renderer_statistics.draw_call_count == 0U ||
-            renderer_statistics.triangle_count == 0U)) {
+            !renderer_statistics.scene_present ||
+            (options.visibility_mode ==
+                    hlclient::world_visibility::WorldVisibilityMode::all &&
+                (renderer_statistics.draw_call_count == 0U ||
+                    renderer_statistics.triangle_count == 0U)))) {
         std::cerr << "viewer-runtime=world_render_incomplete\n";
         return 1;
     }
@@ -494,39 +724,66 @@ build_world_render_package(
         std::cerr << "map-locator=" << code << '\n';
         return 1;
     }
+    resolved.file.reset();
 
-    auto source = open_map_source(environment, *locator.locator);
-    if (!source) {
-        return 1;
-    }
-    const auto retained_bsp_source = source->source().bytes();
-    hlclient::goldsrc::bsp::GoldSrcBspWorldImporter importer;
-    auto imported = importer.import(source->source());
-    if (!imported) {
-        std::cerr << "bsp-import=failed\n";
-        return 1;
-    }
-    auto world = std::move(imported).value();
-    auto textures =
-        import_complete_textures(world, retained_bsp_source, environment);
-    if (!textures) {
-        return 1;
-    }
+    auto prepared = [&]() -> std::optional<PreparedWorldScene> {
+        auto source = open_map_source(environment, *locator.locator);
+        if (!source) {
+            return std::nullopt;
+        }
+        const auto retained_bsp_source = source->source().bytes();
+        auto parsed = hlclient::goldsrc::bsp::GoldSrcBspParser::parse(
+            retained_bsp_source,
+            {},
+            hlclient::goldsrc::bsp::GoldSrcBspParseOptions{
+                options->brush_submodels == hlclient::world_preview::
+                    WorldPreviewBrushSubmodelsMode::static_instances});
+        if (!parsed || !parsed.document) {
+            const auto code = parsed.error
+                ? hlclient::goldsrc::bsp::to_string(parsed.error->code)
+                : std::string_view{"bsp_parse_failed"};
+            std::cerr << "bsp-import=" << code << '\n';
+            return std::nullopt;
+        }
+        auto document = std::move(*parsed.document);
+        // The byte parser has no path input. Attach only the already-validated
+        // virtual resource identity; never retain or expose a native path.
+        document.world_asset.identity.source_name = *options->virtual_map;
+        auto textures = import_complete_textures(
+            document.world_asset,
+            retained_bsp_source,
+            environment);
+        if (!textures) {
+            return std::nullopt;
+        }
 
-    auto package = build_world_render_package(
-        std::move(world),
-        std::move(*textures),
-        retained_bsp_source);
-    if (!package) {
-        return 1;
-    }
-    // The renderer and scene source receive only the immutable package. Close
-    // every verified source/environment handle before SDL or OpenGL starts.
-    source.reset();
+        // Keep the canonical document intact for spatial/model association;
+        // the M4.3 render package owns an exact copy of world model zero.
+        auto world_package = build_world_render_package(
+            document.world_asset,
+            std::move(*textures),
+            retained_bsp_source);
+        if (!world_package) {
+            return std::nullopt;
+        }
+        return build_world_scene(
+            document,
+            std::move(world_package),
+            retained_bsp_source,
+            environment,
+            *options);
+    }();
+
+    // The returned scene owns only renderer-neutral immutable packages. The
+    // lambda has destroyed the canonical BSP document, source span and opened
+    // LocalAssetSource; release the resolver environment before SDL/OpenGL.
     environment.reset();
+    if (!prepared) {
+        return 1;
+    }
     return render_world(
-        std::move(package),
-        *options->camera_mode,
+        std::move(*prepared),
+        *options,
         frame_limit);
 }
 

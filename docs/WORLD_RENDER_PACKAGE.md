@@ -65,6 +65,14 @@ Source surface order drives construction, and the triangle order within each
 surface is unchanged. Each source triangle appears exactly once in the final
 index stream.
 
+M4.4 also retains one exact `WorldRenderSurfaceRange` per source surface. It
+records the source ordinal, checked first/count index range, material, bounds,
+source batch, alpha/lightmap mode, and optional atlas page. These ranges are
+derived during the existing deterministic batching pass: they neither change
+M4.3 geometry/resource identity nor require a second index buffer. Visibility
+uses them to select individual surfaces without rebuilding or re-uploading the
+package; the original full-batch path remains valid when no draw list exists.
+
 ## Builder and validation
 
 `WorldRenderPackageBuilder` is a pure caller-driven composition step. It takes
@@ -95,10 +103,13 @@ base-texture and lightmap bytes, and 768 MiB of aggregate CPU render data.
 ## Scene and camera model
 
 `ClientWorldState` may hold a shared immutable package, a neutral camera,
-preview options, and a world revision. Scene conversion maps these values into
-`RenderScene`, whose `RenderStaticWorld` carries only a package reference,
-`RenderCullMode`, and the baseline source-slot-zero light-style policy. The
-scene still owns its clear color and exposes no GoldSrc protocol object.
+preview options, and a world revision. M4.4 optionally adds an immutable
+`WorldSceneRenderPackage`, a `WorldVisibilitySet`, and a
+`WorldVisibleDrawList`, with separate scene-resource and per-frame visibility
+revisions. Scene conversion maps these values into `RenderScene`, whose
+`RenderStaticWorld` retains the package reference, cull/baseline-style policy,
+and optional scene/draw-list references. The scene still owns its clear color
+and exposes no GoldSrc protocol object.
 
 `RenderCamera` is a Z-up look-at camera with position, target, up vector,
 vertical field of view in radians, and positive near/far planes. Validation
@@ -106,12 +117,14 @@ requires finite values, distinct position and target, a nonzero up vector,
 nonparallel forward/up directions, a safe field of view, and `far > near > 0`.
 A zero render extent or invalid camera skips/fails world drawing safely.
 
-`WorldPreviewSceneSource` is diagnostic, not a spawn or gameplay camera. It
-derives a finite center and radius from package bounds, uses a deterministic
-isometric direction based on `(1, -1, 0.75)`, targets the center, keeps
+`WorldPreviewSceneSource` is diagnostic, not a gameplay camera. Its historical
+static/orbit modes derive a finite center and radius from package bounds, use a
+deterministic isometric direction based on `(1, -1, 0.75)`, target the center, keep
 `(0, 0, 1)` as up, and chooses bounded near/far distances from the radius. Its
 optional orbit is elapsed-time deterministic and bounded; static mode never
-moves. It consumes no keyboard/mouse gameplay input and generates no user
+moves. M4.4 spawn mode may consume one already validated inert initial camera
+descriptor and falls back to the bounds camera if none is available. It creates
+no player, consumes no keyboard/mouse gameplay input, and generates no user
 commands.
 
 The preview defaults to `RenderCullMode::none`. Because bounds do not identify
@@ -134,6 +147,17 @@ after that cleanup. Rendering may then outlive all network/resource stages,
 but it is not a gameplay connection: the renderer owns only the immutable CPU
 package reference.
 
-M4.3 deliberately excludes PVS/frustum runtime, brush submodels/entities,
-dynamic lights and styles, translucent surfaces, animated/water/sky effects,
-spawn-camera parsing, gameplay input, and M3.3 downloads/cache.
+M4.4's `world-spatial-scene` continuation builds the spatial package and
+renderer-neutral scene entirely on the CPU and works with the null renderer.
+Optional static brush geometry/instances and diagnostic spawn-camera
+extraction reuse one bounded inert entity document parse. The returned scene
+retains no entity document, BSP/PVS source bytes, path, network state, or GPU
+handle. Per-frame PVS/frustum results change only the visibility revision;
+scene identity continues to control resource upload.
+
+The M4.3 package and historical all-surfaces/full-batch defaults remain
+available. M4.4 still excludes runtime entity behavior, dynamic brush motion,
+translucent rendermodes, dynamic lights/styles, animated/water/sky effects,
+gameplay input, server snapshots, and M3.3 downloads/cache. See
+[world visibility](WORLD_VISIBILITY.md) and
+[brush-submodel rendering](BRUSH_SUBMODEL_RENDERING.md).

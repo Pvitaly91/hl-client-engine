@@ -29,7 +29,17 @@ add_executable(hlclient_tests
     test_goldsrc_bsp_face_loop.cpp
     test_goldsrc_bsp_world_geometry.cpp
     test_goldsrc_bsp_models.cpp
+    test_goldsrc_brush_submodels.cpp
     test_goldsrc_bsp_spatial_structure.cpp
+    test_goldsrc_entity_document.cpp
+    test_goldsrc_brush_transform.cpp
+    test_goldsrc_brush_render_library.cpp
+    test_goldsrc_spawn_camera.cpp
+    test_goldsrc_world_scene_builder.cpp
+    test_brush_submodel_instances.cpp
+    test_goldsrc_pvs_decoder.cpp
+    test_world_spatial_package.cpp
+    test_world_spatial_query.cpp
     test_goldsrc_lightmap_extents.cpp
     test_goldsrc_lightmap_import.cpp
     test_goldsrc_bsp_importer.cpp
@@ -62,7 +72,12 @@ add_executable(hlclient_tests
     test_world_lightmap_atlas.cpp
     test_world_render_package.cpp
     test_world_render_package_stage.cpp
+    test_world_spatial_scene_stage.cpp
     test_render_camera_math.cpp
+    test_world_view_frustum.cpp
+    test_world_visibility_resolver.cpp
+    test_world_visible_draw_list.cpp
+    test_world_scene_render_package.cpp
     test_world_preview_scene.cpp
     test_precache_slot_tables.cpp
     test_precache_manifest.cpp
@@ -125,8 +140,10 @@ target_link_libraries(hlclient_tests
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_goldsrc_bsp
+        hlclient_goldsrc_brush_models
         hlclient_goldsrc_indexed_texture
         hlclient_goldsrc_lightmaps
+        hlclient_goldsrc_spatial
         hlclient_goldsrc_wad3
         hlclient_goldsrc_client
         hlclient_goldsrc_asset_dispatch
@@ -146,6 +163,9 @@ target_link_libraries(hlclient_tests
         hlclient_platform
         hlclient_glad
         hlclient_world_render
+        hlclient_world_spatial
+        hlclient_world_scene_renderer
+        hlclient_world_visibility
         hlclient_world_preview
         hlclient_resource_consistency_api
         hlclient_resource_consistency_local

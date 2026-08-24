@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -17,7 +18,8 @@ namespace bsp = hlclient::goldsrc::bsp;
 namespace fixture = hlclient::tests;
 using Catch::Approx;
 
-[[nodiscard]] fixture::SyntheticBspBuilder make_world_and_submodel_builder()
+[[nodiscard]] fixture::SyntheticBspBuilder make_world_and_submodel_builder(
+    const bool duplicate_submodel_face_range = false)
 {
     fixture::SyntheticBspBuilder builder;
     constexpr std::array vertices{
@@ -56,7 +58,10 @@ using Catch::Approx;
     submodel.maximum = {193.0F, 65.0F, 1.0F};
     submodel.first_face = 1;
     submodel.face_count = 1;
-    const std::array models{world_model, submodel};
+    std::vector models{world_model, submodel};
+    if (duplicate_submodel_face_range) {
+        models.push_back(submodel);
+    }
 
     builder.set_vertices(vertices)
         .set_edges(edges)
@@ -151,6 +156,65 @@ TEST_CASE("Brush submodels are validated but their faces are not emitted",
     CHECK(world.surfaces.size() == 1U);
     CHECK(world.vertices.size() == 3U);
     CHECK(world.bounds.maximum.x == Approx(64.0F));
+}
+
+TEST_CASE("Render model face ranges are pairwise non-overlapping",
+    "[goldsrc-bsp][models][range][overlap]")
+{
+    SECTION("valid ordered adjacent ranges")
+    {
+        const auto result = bsp::GoldSrcBspParser::parse(
+            make_world_and_submodel_builder().build());
+        REQUIRE(result);
+        REQUIRE(result.document->brush_submodels.size() == 1U);
+        CHECK(result.document->world_asset.surfaces.size() == 1U);
+        CHECK(result.document->brush_submodels[0U].geometry.surfaces.size() ==
+            1U);
+    }
+
+    SECTION("world and submodel overlap")
+    {
+        auto builder = make_world_and_submodel_builder();
+        auto& models = builder.lump(fixture::SyntheticBspLumpId::models);
+        fixture::synthetic_write_i32le(models, 64U + 56U, 0);
+        const auto bytes = builder.build();
+        const auto model_lump_offset = static_cast<std::size_t>(
+            fixture::synthetic_read_i32le(
+                bytes,
+                fixture::synthetic_lump_descriptor_offset(
+                    fixture::SyntheticBspLumpId::models)));
+        const auto result = bsp::GoldSrcBspParser::parse(bytes);
+        REQUIRE_FALSE(result);
+        REQUIRE_FALSE(result.document);
+        REQUIRE(result.error);
+        CHECK(result.error->code ==
+            bsp::GoldSrcBspErrorCode::invalid_model_reference);
+        CHECK(result.error->lump_id == bsp::GoldSrcBspLumpId::models);
+        CHECK(result.error->element_index == 1U);
+        CHECK(result.error->byte_offset ==
+            model_lump_offset + 64U + 56U);
+    }
+
+    SECTION("two submodels overlap")
+    {
+        auto builder = make_world_and_submodel_builder(true);
+        const auto bytes = builder.build();
+        const auto model_lump_offset = static_cast<std::size_t>(
+            fixture::synthetic_read_i32le(
+                bytes,
+                fixture::synthetic_lump_descriptor_offset(
+                    fixture::SyntheticBspLumpId::models)));
+        const auto result = bsp::GoldSrcBspParser::parse(bytes);
+        REQUIRE_FALSE(result);
+        REQUIRE_FALSE(result.document);
+        REQUIRE(result.error);
+        CHECK(result.error->code ==
+            bsp::GoldSrcBspErrorCode::invalid_model_reference);
+        CHECK(result.error->lump_id == bsp::GoldSrcBspLumpId::models);
+        CHECK(result.error->element_index == 2U);
+        CHECK(result.error->byte_offset ==
+            model_lump_offset + (2U * 64U) + 56U);
+    }
 }
 
 TEST_CASE("Every model, including a skipped submodel, is structurally validated",

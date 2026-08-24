@@ -144,6 +144,13 @@ struct BatchKey {
 struct PendingBatch {
     BatchKey key{};
     std::vector<std::uint32_t> indices;
+    struct SurfaceRange {
+        std::size_t source_surface_index{0U};
+        std::size_t first_pending_index{0U};
+        std::size_t index_count{0U};
+        assets::WorldBounds bounds{};
+    };
+    std::vector<SurfaceRange> surface_ranges;
     std::size_t source_surface_count{0U};
 };
 
@@ -611,11 +618,17 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                         "Deterministic material batch count exceeds configured limits");
                 }
                 const auto batch_index = pending_batches.size();
-                pending_batches.push_back(PendingBatch{key, {}, 0U});
+                pending_batches.push_back(PendingBatch{key, {}, {}, 0U});
                 found = batch_lookup.emplace(key, batch_index).first;
             }
             auto& pending = pending_batches[found->second];
             ++pending.source_surface_count;
+            pending.surface_ranges.push_back(PendingBatch::SurfaceRange{
+                surface_index,
+                pending.indices.size(),
+                index_count,
+                surface.bounds,
+            });
             std::size_t pending_index_count = 0U;
             if (!checked_add(
                     pending.indices.size(), index_count, pending_index_count) ||
@@ -669,6 +682,9 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
         render_materials.reserve(pending_batches.size());
         std::vector<WorldDrawBatch> draw_batches;
         draw_batches.reserve(pending_batches.size());
+        std::vector<WorldRenderSurfaceRange> surface_ranges(
+            world.surfaces.size());
+        std::vector<bool> surface_range_covered(world.surfaces.size(), false);
         WorldRenderStatistics statistics;
         statistics.vertex_count = render_vertices.size();
         statistics.index_count = world.indices.size();
@@ -686,6 +702,8 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                     "Render batch index range cannot be represented exactly");
             }
             const auto material_index = render_materials.size();
+            const auto batch_index = draw_batches.size();
+            const auto batch_first_index = render_indices.size();
             render_materials.push_back(WorldRenderMaterial{
                 material_index,
                 pending.key.base_texture_asset_index,
@@ -706,6 +724,35 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 pending.key.atlas_page_index,
                 pending.source_surface_count,
             });
+            for (const auto& pending_range : pending.surface_ranges) {
+                if (pending_range.source_surface_index >= surface_ranges.size() ||
+                    surface_range_covered[pending_range.source_surface_index] ||
+                    pending_range.first_pending_index >
+                        std::numeric_limits<std::uint32_t>::max() ||
+                    batch_first_index >
+                        std::numeric_limits<std::uint32_t>::max() -
+                            pending_range.first_pending_index ||
+                    pending_range.index_count >
+                        std::numeric_limits<std::uint32_t>::max()) {
+                    return fail(WorldRenderPackageErrorCode::invalid_surface_range,
+                        pending_range.source_surface_index,
+                        "Per-surface render range cannot be represented exactly");
+                }
+                surface_ranges[pending_range.source_surface_index] =
+                    WorldRenderSurfaceRange{
+                        pending_range.source_surface_index,
+                        static_cast<std::uint32_t>(
+                            batch_first_index + pending_range.first_pending_index),
+                        static_cast<std::uint32_t>(pending_range.index_count),
+                        material_index,
+                        pending_range.bounds,
+                        batch_index,
+                        pending.key.alpha_mode,
+                        pending.key.lightmap_mode,
+                        pending.key.atlas_page_index,
+                    };
+                surface_range_covered[pending_range.source_surface_index] = true;
+            }
             render_indices.insert(render_indices.end(),
                 pending.indices.begin(),
                 pending.indices.end());
@@ -728,6 +775,13 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 std::nullopt,
                 "Render batches do not retain every source triangle exactly once");
         }
+        if (!std::ranges::all_of(surface_range_covered, [](const bool covered) {
+                return covered;
+            })) {
+            return fail(WorldRenderPackageErrorCode::invalid_surface_range,
+                std::nullopt,
+                "Per-surface render ranges do not cover every source surface");
+        }
 
         std::size_t output_geometry_bytes = 0U;
         if (!checked_accumulate_bytes(render_vertices.size(),
@@ -737,7 +791,9 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
             !checked_accumulate_bytes(render_materials.size(),
                 sizeof(WorldRenderMaterial), output_geometry_bytes) ||
             !checked_accumulate_bytes(draw_batches.size(),
-                sizeof(WorldDrawBatch), output_geometry_bytes)) {
+                sizeof(WorldDrawBatch), output_geometry_bytes) ||
+            !checked_accumulate_bytes(surface_ranges.size(),
+                sizeof(WorldRenderSurfaceRange), output_geometry_bytes)) {
             return fail(WorldRenderPackageErrorCode::output_limit_exceeded,
                 std::nullopt,
                 "Render output byte count overflows the host size type");
@@ -777,6 +833,7 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 std::move(render_indices),
                 std::move(render_materials),
                 std::move(draw_batches),
+                std::move(surface_ranges),
                 retained_bounds,
                 WorldRenderCoordinateMetadata{},
                 statistics,

@@ -2,6 +2,7 @@
 
 #include <hlclient/assets/asset_types.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_format.hpp>
+#include <hlclient/goldsrc/spatial/goldsrc_spatial_package_builder.hpp>
 
 #include <array>
 #include <cstddef>
@@ -10,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hlclient::goldsrc::bsp {
 
@@ -42,6 +44,16 @@ struct GoldSrcBspImportLimits {
 
 [[nodiscard]] bool valid_goldsrc_bsp_import_limits(
     const GoldSrcBspImportLimits& limits) noexcept;
+
+struct GoldSrcBspParseOptions {
+    // Historical M4.1-M4.3 importers retain only model 0. M4.4 opts in when a
+    // brush render library is requested; all fixed records and references are
+    // still decoded and validated by the same canonical parser.
+    bool materialize_brush_submodels{true};
+};
+
+[[nodiscard]] assets::AssetSourceFingerprint goldsrc_bsp_source_fingerprint(
+    std::span<const std::byte> source) noexcept;
 
 enum class GoldSrcBspErrorCode {
     invalid_configuration,
@@ -86,10 +98,45 @@ struct GoldSrcBspError {
     std::size_t byte_offset{0U};
     std::optional<std::size_t> element_index;
     std::string context;
+    // Present only when canonical geometry materialization failed for a
+    // brush submodel (models[1..N]). Structural BSP and world-model failures
+    // remain untagged so callers can preserve their package boundary.
+    std::optional<std::uint32_t> source_model_index;
+};
+
+// Owning handoff of the one canonical BSP validation/decode pass.  Spatial
+// package construction consumes these records and the public WorldAsset; it
+// never reparses node/leaf/model wire layouts independently.
+struct GoldSrcBspSpatialSource {
+    std::vector<spatial::GoldSrcSpatialSourcePlane> planes;
+    std::vector<spatial::GoldSrcSpatialSourceNode> nodes;
+    std::vector<spatial::GoldSrcSpatialSourceLeaf> leaves;
+    std::vector<std::uint32_t> marksurface_face_ordinals;
+    // Exact validated ownership set for render faces in BSP models[1..N].
+    // Spatial membership uses it to distinguish submodel-only faces from
+    // malformed marksurface references to otherwise unowned face records.
+    std::vector<std::uint32_t> submodel_face_ordinals;
+    std::vector<std::byte> visibility_bytes;
+    spatial::GoldSrcSpatialSourceModel world_model{};
+    std::uint32_t source_face_count{0U};
+};
+
+// One renderer-neutral owning geometry asset per BSP render submodel. Source
+// model metadata stays separate from entity instances: the parser performs no
+// entity association and applies no transform policy.
+struct GoldSrcBspBrushSubmodelAsset {
+    std::uint32_t source_model_index{0U};
+    assets::AssetVector3 source_model_origin{};
+    assets::WorldBounds source_model_bounds{};
+    std::int32_t render_headnode{0};
+    assets::WorldAsset geometry;
 };
 
 struct GoldSrcBspParsedDocument {
     assets::WorldAsset world_asset;
+    GoldSrcBspSpatialSource spatial_source;
+    std::vector<GoldSrcBspBrushSubmodelAsset> brush_submodels;
+    std::vector<std::byte> entity_lump_bytes;
     // Fixed-record lumps report record counts. Variable byte lumps report byte
     // counts, while the texture lump reports its directory entry count.
     std::array<std::size_t, kGoldSrcBspLumpCount> lump_element_counts{};
@@ -109,7 +156,8 @@ class GoldSrcBspParser final {
 public:
     [[nodiscard]] static GoldSrcBspParseResult parse(
         std::span<const std::byte> source,
-        const GoldSrcBspImportLimits& limits = {});
+        const GoldSrcBspImportLimits& limits = {},
+        const GoldSrcBspParseOptions& options = {});
 };
 
 } // namespace hlclient::goldsrc::bsp

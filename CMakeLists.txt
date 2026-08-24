@@ -135,6 +135,34 @@ target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
 set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
 
 hlclient_add_library(
+    hlclient_world_spatial
+    include/hlclient/world_spatial/world_spatial_types.hpp
+    include/hlclient/world_spatial/world_spatial_query.hpp
+    src/world_spatial/world_spatial_types.cpp
+    src/world_spatial/world_spatial_query.cpp
+)
+add_library(hlclient::world_spatial ALIAS hlclient_world_spatial)
+target_link_libraries(hlclient_world_spatial PUBLIC hlclient::asset_api)
+set_property(
+    TARGET hlclient_world_spatial
+    PROPERTY FOLDER "Engine/Renderer/World/Visibility")
+
+hlclient_add_library(
+    hlclient_goldsrc_spatial
+    include/hlclient/goldsrc/spatial/goldsrc_pvs_decoder.hpp
+    include/hlclient/goldsrc/spatial/goldsrc_spatial_package_builder.hpp
+    src/goldsrc/spatial/goldsrc_pvs_decoder.cpp
+    src/goldsrc/spatial/goldsrc_spatial_package_builder.cpp
+)
+add_library(hlclient::goldsrc_spatial ALIAS hlclient_goldsrc_spatial)
+target_link_libraries(
+    hlclient_goldsrc_spatial
+    PUBLIC hlclient::asset_api hlclient::world_spatial)
+set_property(
+    TARGET hlclient_goldsrc_spatial
+    PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
+
+hlclient_add_library(
     hlclient_goldsrc_indexed_texture
     include/hlclient/goldsrc/indexed_texture/goldsrc_indexed_texture_decoder.hpp
     src/goldsrc/indexed_texture/goldsrc_indexed_texture_decoder.cpp
@@ -154,16 +182,21 @@ hlclient_add_library(
     include/hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_texture_source_parser.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp
+    include/hlclient/goldsrc/bsp/goldsrc_entity_document.hpp
     include/hlclient/goldsrc/bsp/goldsrc_worldspawn_wad_references.hpp
     src/goldsrc/bsp/goldsrc_bsp_parser.cpp
     src/goldsrc/bsp/goldsrc_bsp_texture_source_parser.cpp
     src/goldsrc/bsp/goldsrc_bsp_world_importer.cpp
+    src/goldsrc/bsp/goldsrc_entity_document.cpp
     src/goldsrc/bsp/goldsrc_worldspawn_wad_references.cpp
 )
 add_library(hlclient::goldsrc_bsp ALIAS hlclient_goldsrc_bsp)
 target_link_libraries(
     hlclient_goldsrc_bsp
-    PUBLIC hlclient::asset_api hlclient::goldsrc_indexed_texture)
+    PUBLIC
+        hlclient::asset_api
+        hlclient::goldsrc_indexed_texture
+        hlclient::goldsrc_spatial)
 set_property(
     TARGET hlclient_goldsrc_bsp
     PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
@@ -605,6 +638,86 @@ target_link_libraries(
 set_property(TARGET hlclient_renderer_api PROPERTY FOLDER "Engine/Renderer")
 
 hlclient_add_library(
+    hlclient_world_visibility
+    include/hlclient/world_visibility/world_view_frustum.hpp
+    include/hlclient/world_visibility/world_visibility_resolver.hpp
+    include/hlclient/world_visibility/world_visibility_types.hpp
+    include/hlclient/world_visibility/world_visible_draw_list.hpp
+    src/world_visibility/world_view_frustum.cpp
+    src/world_visibility/world_visibility_resolver.cpp
+    src/world_visibility/world_visibility_types.cpp
+    src/world_visibility/world_visible_draw_list.cpp
+)
+add_library(hlclient::world_visibility ALIAS hlclient_world_visibility)
+target_link_libraries(
+    hlclient_world_visibility
+    PUBLIC
+        hlclient::renderer_api
+        hlclient::world_render_api
+        hlclient::world_spatial)
+set_property(
+    TARGET hlclient_world_visibility
+    PROPERTY FOLDER "Engine/Renderer/World/Visibility")
+
+hlclient_add_library(
+    hlclient_goldsrc_brush_models
+    include/hlclient/goldsrc/brush_models/brush_submodel_instances.hpp
+    include/hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp
+    include/hlclient/goldsrc/brush_models/goldsrc_brush_entity.hpp
+    include/hlclient/goldsrc/brush_models/goldsrc_spawn_camera.hpp
+    include/hlclient/goldsrc/brush_models/goldsrc_world_scene_builder.hpp
+    include/hlclient/goldsrc/brush_models/goldsrc_brush_transform.hpp
+    src/goldsrc/brush_models/brush_submodel_instances.cpp
+    src/goldsrc/brush_models/goldsrc_brush_render_library.cpp
+    src/goldsrc/brush_models/goldsrc_brush_entity.cpp
+    src/goldsrc/brush_models/goldsrc_spawn_camera.cpp
+    src/goldsrc/brush_models/goldsrc_world_scene_builder.cpp
+    src/goldsrc/brush_models/goldsrc_brush_transform.cpp
+)
+add_library(
+    hlclient::goldsrc_brush_models ALIAS hlclient_goldsrc_brush_models)
+target_link_libraries(
+    hlclient_goldsrc_brush_models
+    PUBLIC
+        hlclient::goldsrc_bsp
+        hlclient::renderer_api
+        hlclient::world_spatial)
+set_property(
+    TARGET hlclient_goldsrc_brush_models
+    PROPERTY FOLDER "Engine/Renderer/World/Brush Models")
+
+hlclient_add_library(
+    hlclient_world_scene_renderer
+    include/hlclient/world_scene_render/world_scene_render_types.hpp
+    src/world_scene_render/world_scene_render_types.cpp
+)
+add_library(
+    hlclient::world_scene_render ALIAS hlclient_world_scene_renderer)
+target_link_libraries(
+    hlclient_world_scene_renderer
+    PUBLIC
+        hlclient::renderer_api
+        hlclient::world_render_api
+        hlclient::world_spatial
+        hlclient::world_visibility)
+set_property(
+    TARGET hlclient_world_scene_renderer
+    PROPERTY FOLDER "Engine/Renderer/World")
+target_link_libraries(
+    hlclient_goldsrc_brush_models
+    PUBLIC
+        hlclient_world_scene_renderer
+        hlclient_goldsrc_lightmaps
+        hlclient_goldsrc_world_texture_import
+        hlclient_world_render_package)
+target_link_libraries(
+    hlclient_goldsrc_world_render
+    PUBLIC hlclient_goldsrc_brush_models)
+target_link_libraries(
+    hlclient_client
+    PUBLIC hlclient_world_scene_renderer hlclient_world_visibility)
+
+hlclient_add_library(
     hlclient_scene_api
     include/hlclient/client/client_scene_source.hpp
     src/client/client_scene_source.cpp
@@ -612,7 +725,10 @@ hlclient_add_library(
 add_library(hlclient::scene_api ALIAS hlclient_scene_api)
 target_link_libraries(
     hlclient_scene_api
-    PUBLIC hlclient::client hlclient::renderer_api
+    PUBLIC
+        hlclient::client
+        hlclient::renderer_api
+        hlclient::world_visibility
     PRIVATE hlclient::core
 )
 set_property(TARGET hlclient_scene_api PROPERTY FOLDER "Engine/Client")
@@ -625,7 +741,12 @@ hlclient_add_library(
 add_library(hlclient::world_preview ALIAS hlclient_world_preview)
 target_link_libraries(
     hlclient_world_preview
-    PUBLIC hlclient::scene_api hlclient::world_render_api)
+    PUBLIC
+        hlclient::scene_api
+        hlclient::world_render_api
+        hlclient::world_scene_render
+        hlclient::world_visibility
+    PRIVATE hlclient::core)
 set_property(
     TARGET hlclient_world_preview PROPERTY FOLDER "Engine/Renderer/World")
 
@@ -637,7 +758,10 @@ hlclient_add_library(
 add_library(hlclient::renderer_null ALIAS hlclient_renderer_null)
 target_link_libraries(
     hlclient_renderer_null
-    PUBLIC hlclient::renderer_api
+    PUBLIC
+        hlclient::renderer_api
+        hlclient::world_scene_render
+        hlclient::world_visibility
     PRIVATE hlclient::core
 )
 set_property(TARGET hlclient_renderer_null PROPERTY FOLDER "Engine/Renderer")
@@ -653,6 +777,8 @@ target_link_libraries(
     PUBLIC hlclient::renderer_api
     PRIVATE
         hlclient::world_render_api
+        hlclient::world_scene_render
+        hlclient::world_visibility
         hlclient::glad
         OpenGL::GL
 )
@@ -723,6 +849,7 @@ target_link_libraries(
     hlclient_world_viewer
     PRIVATE
         hlclient::goldsrc_bsp
+        hlclient::goldsrc_brush_models
         hlclient::goldsrc_world_texture_import
         hlclient::goldsrc_lightmaps
         hlclient::world_render_package

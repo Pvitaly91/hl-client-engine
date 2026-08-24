@@ -14,9 +14,13 @@
 #include <hlclient/goldsrc/wad3/goldsrc_wad3_texture.hpp>
 #include <hlclient/platform/sdl_runtime.hpp>
 #include <hlclient/platform/sdl_window.hpp>
+#include <hlclient/client/client_scene_source.hpp>
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
 #include <hlclient/renderer/render_scene.hpp>
 #include <hlclient/world_render/world_render_package_builder.hpp>
+#include <hlclient/world_preview/world_preview_scene_source.hpp>
+#include <hlclient/world_scene_render/world_scene_render_types.hpp>
+#include <hlclient/world_spatial/world_spatial_types.hpp>
 
 #include <glad/gl.h>
 #include <SDL3/SDL_video.h>
@@ -52,6 +56,9 @@ namespace opengl = hlclient::renderer::opengl;
 namespace renderer = hlclient::renderer;
 namespace wad3 = hlclient::goldsrc::wad3;
 namespace world_render = hlclient::world_render;
+namespace world_preview = hlclient::world_preview;
+namespace world_scene = hlclient::world_scene_render;
+namespace world_spatial = hlclient::world_spatial;
 
 struct ActualOpenGlVersion {
     std::uint32_t major{0U};
@@ -107,6 +114,12 @@ parse_actual_open_gl_version(const std::string_view text) noexcept
         (version.major == 3U && version.minor >= 3U);
 }
 
+[[nodiscard]] constexpr bool supports_required_open_gl_profile(
+    const GLint profile_mask) noexcept
+{
+    return (profile_mask & GL_CONTEXT_CORE_PROFILE_BIT) != 0;
+}
+
 [[nodiscard]] std::optional<ActualOpenGlVersion>
 current_actual_open_gl_version() noexcept
 {
@@ -135,6 +148,32 @@ current_actual_open_gl_version() noexcept
     }
     return parse_actual_open_gl_version(
         std::string_view{version_text, byte_count});
+}
+
+[[nodiscard]] std::optional<GLint>
+current_actual_open_gl_profile_mask() noexcept
+{
+    const auto get_integer_address = SDL_GL_GetProcAddress("glGetIntegerv");
+    const auto get_error_address = SDL_GL_GetProcAddress("glGetError");
+    if (get_integer_address == nullptr || get_error_address == nullptr) {
+        return std::nullopt;
+    }
+    static_assert(
+        sizeof(PFNGLGETINTEGERVPROC) == sizeof(SDL_FunctionPointer));
+    static_assert(sizeof(PFNGLGETERRORPROC) == sizeof(SDL_FunctionPointer));
+    const auto get_integer =
+        std::bit_cast<PFNGLGETINTEGERVPROC>(get_integer_address);
+    const auto get_error = std::bit_cast<PFNGLGETERRORPROC>(get_error_address);
+    if (get_error() != GL_NO_ERROR) {
+        return std::nullopt;
+    }
+
+    GLint profile_mask = 0;
+    get_integer(GL_CONTEXT_PROFILE_MASK, &profile_mask);
+    if (get_error() != GL_NO_ERROR) {
+        return std::nullopt;
+    }
+    return profile_mask;
 }
 
 class HiddenOpenGlContext final {
@@ -747,6 +786,250 @@ make_full_pipeline_package()
     return scene;
 }
 
+[[nodiscard]] world_spatial::WorldSpatialPackage make_visibility_spatial(
+    const std::size_t world_surface_count)
+{
+    const assets::WorldBounds world_bounds{
+        {-8.0F, -2.0F, -2.0F}, {8.0F, 2.0F, 2.0F}};
+    world_spatial::WorldSpatialNode node;
+    node.plane_index = 0U;
+    node.children = {
+        world_spatial::WorldSpatialNodeChild{
+            world_spatial::WorldSpatialNodeChildKind::leaf, 2U},
+        world_spatial::WorldSpatialNodeChild{
+            world_spatial::WorldSpatialNodeChildKind::leaf, 1U},
+    };
+    node.bounds = world_bounds;
+
+    world_spatial::WorldSpatialLeaf leaf_zero;
+    leaf_zero.source_leaf_index = 0U;
+    leaf_zero.bounds = world_bounds;
+    leaf_zero.surface_membership.source_leaf_index = 0U;
+    leaf_zero.solid_or_special = true;
+
+    world_spatial::WorldSpatialLeaf leaf_one;
+    leaf_one.source_leaf_index = 1U;
+    leaf_one.bounds = {{-8.0F, -2.0F, -2.0F}, {1.5F, 2.0F, 2.0F}};
+    leaf_one.pvs_row_index = 0U;
+    leaf_one.pvs_bit_addressable = true;
+    leaf_one.surface_membership.source_leaf_index = 1U;
+    leaf_one.surface_membership.source_marksurface_count = 1U;
+    leaf_one.surface_membership.world_surface_indices = {0U};
+
+    world_spatial::WorldSpatialLeaf leaf_two;
+    leaf_two.source_leaf_index = 2U;
+    leaf_two.bounds = {{1.5F, -2.0F, -2.0F}, {8.0F, 2.0F, 2.0F}};
+    leaf_two.pvs_row_index = 1U;
+    leaf_two.pvs_bit_addressable = true;
+    leaf_two.surface_membership.source_leaf_index = 2U;
+    if (world_surface_count > 1U) {
+        leaf_two.surface_membership.source_marksurface_count = 1U;
+        leaf_two.surface_membership.world_surface_indices = {1U};
+    }
+
+    return world_spatial::WorldSpatialPackage{
+        {world_spatial::WorldSpatialPlane{
+            {1.0F, 0.0F, 0.0F}, 1.5F, 0}},
+        {node},
+        {leaf_zero, leaf_one, leaf_two},
+        world_spatial::WorldPvsTable{
+            1U,
+            2U,
+            {{std::byte{0x01U}}, {std::byte{0x02U}},
+                {std::byte{0x03U}}},
+            {std::nullopt, 0U, 1U},
+            2U},
+        world_spatial::WorldSpatialModelMetadata{0U, 2U, world_bounds},
+        world_spatial::WorldSpatialStatistics{
+            1U, 1U, 3U, world_surface_count, world_surface_count, 3U, 3U},
+        world_spatial::WorldSpatialCompatibilityProfile::
+            goldsrc_bsp_v30_leaf_one_is_pvs_bit_zero,
+        world_spatial::WorldSpatialEvidenceProfile::
+            canonical_validated_bsp_records};
+}
+
+[[nodiscard]] std::shared_ptr<const world_scene::WorldSceneRenderPackage>
+make_visibility_scene(
+    std::shared_ptr<const world_render::WorldRenderPackage> world,
+    std::shared_ptr<const world_render::WorldRenderPackage> brush = {},
+    const std::span<const float> brush_x_translations = {})
+{
+    std::vector<world_scene::BrushSubmodelRenderModel> models;
+    std::vector<world_scene::BrushSubmodelRenderInstance> instances;
+    if (brush) {
+        std::vector<std::uint32_t> render_surface_indices;
+        render_surface_indices.reserve(brush->surface_ranges().size());
+        for (std::size_t index = 0U; index < brush->surface_ranges().size();
+             ++index) {
+            render_surface_indices.push_back(
+                static_cast<std::uint32_t>(index));
+        }
+        models.emplace_back(
+            1U, brush->bounds(), std::move(render_surface_indices));
+
+        for (std::size_t index = 0U; index < brush_x_translations.size();
+             ++index) {
+            const auto translation = brush_x_translations[index];
+            world_scene::BrushSubmodelRenderInstance instance;
+            instance.source_instance_index = static_cast<std::uint32_t>(index);
+            instance.source_entity_ordinal = index + 1U;
+            instance.source_model_index = 1U;
+            instance.model_transform.values[12U] = translation;
+            instance.transformed_bounds = brush->bounds();
+            instance.transformed_bounds.minimum.x += translation;
+            instance.transformed_bounds.maximum.x += translation;
+            instance.touched_leaf_indices = {1U};
+            instance.support_status = world_scene::
+                BrushSubmodelRenderSupportStatus::supported_static_opaque;
+            instances.push_back(std::move(instance));
+        }
+    }
+    world_scene::BrushSubmodelRenderLibrary library{
+        std::move(brush), std::move(models)};
+
+    const auto world_surface_count = world->surface_ranges().size();
+    world_scene::WorldSceneRenderPackageBuilder builder;
+    auto built = builder.build(
+        std::move(world),
+        make_visibility_spatial(world_surface_count),
+        std::move(library),
+        std::move(instances));
+    if (!built || !built.package) {
+        throw std::runtime_error{
+            "Unable to build OpenGL visibility scene fixture"};
+    }
+    return std::make_shared<const world_scene::WorldSceneRenderPackage>(
+        std::move(*built.package));
+}
+
+struct BrushSceneFixtureInstance {
+    renderer::RenderMatrix4 model_transform{};
+    std::vector<std::uint32_t> touched_leaf_indices{1U};
+    world_scene::BrushSubmodelRenderSupportStatus support_status{
+        world_scene::BrushSubmodelRenderSupportStatus::supported_static_opaque};
+};
+
+[[nodiscard]] renderer::RenderMatrix4 make_brush_fixture_transform(
+    const float x,
+    const float y,
+    const float z,
+    const float cosine = 1.0F,
+    const float sine = 0.0F) noexcept
+{
+    renderer::RenderMatrix4 transform;
+    transform.values[0U] = cosine;
+    transform.values[2U] = -sine;
+    transform.values[8U] = sine;
+    transform.values[10U] = cosine;
+    transform.values[12U] = x;
+    transform.values[13U] = y;
+    transform.values[14U] = z;
+    return transform;
+}
+
+[[nodiscard]] assets::WorldBounds transform_brush_fixture_bounds(
+    const assets::WorldBounds& local_bounds,
+    const renderer::RenderMatrix4& transform) noexcept
+{
+    assets::WorldBounds result{};
+    for (std::size_t corner = 0U; corner < 8U; ++corner) {
+        const auto transformed = renderer::transform(transform,
+            renderer::RenderHomogeneousVector{
+                (corner & 1U) == 0U
+                    ? local_bounds.minimum.x
+                    : local_bounds.maximum.x,
+                (corner & 2U) == 0U
+                    ? local_bounds.minimum.y
+                    : local_bounds.maximum.y,
+                (corner & 4U) == 0U
+                    ? local_bounds.minimum.z
+                    : local_bounds.maximum.z,
+                1.0F});
+        const assets::AssetVector3 point{
+            transformed.x, transformed.y, transformed.z};
+        if (corner == 0U) {
+            result = {point, point};
+            continue;
+        }
+        result.minimum.x = std::min(result.minimum.x, point.x);
+        result.minimum.y = std::min(result.minimum.y, point.y);
+        result.minimum.z = std::min(result.minimum.z, point.z);
+        result.maximum.x = std::max(result.maximum.x, point.x);
+        result.maximum.y = std::max(result.maximum.y, point.y);
+        result.maximum.z = std::max(result.maximum.z, point.z);
+    }
+    return result;
+}
+
+[[nodiscard]] std::shared_ptr<const world_scene::WorldSceneRenderPackage>
+make_profiled_brush_scene(
+    std::shared_ptr<const world_render::WorldRenderPackage> world,
+    std::shared_ptr<const world_render::WorldRenderPackage> brush,
+    const std::span<const BrushSceneFixtureInstance> fixture_instances)
+{
+    std::vector<std::uint32_t> render_surface_indices;
+    render_surface_indices.reserve(brush->surface_ranges().size());
+    for (std::size_t index = 0U; index < brush->surface_ranges().size();
+         ++index) {
+        render_surface_indices.push_back(
+            static_cast<std::uint32_t>(index));
+    }
+    std::vector<world_scene::BrushSubmodelRenderModel> models;
+    models.emplace_back(
+        1U, brush->bounds(), std::move(render_surface_indices));
+    world_scene::BrushSubmodelRenderLibrary library{
+        brush, std::move(models)};
+
+    std::vector<world_scene::BrushSubmodelRenderInstance> instances;
+    instances.reserve(fixture_instances.size());
+    for (std::size_t index = 0U; index < fixture_instances.size(); ++index) {
+        const auto& fixture_instance = fixture_instances[index];
+        world_scene::BrushSubmodelRenderInstance instance;
+        instance.source_instance_index = static_cast<std::uint32_t>(index);
+        instance.source_entity_ordinal = index + 1U;
+        instance.source_model_index = 1U;
+        instance.model_transform = fixture_instance.model_transform;
+        instance.transformed_bounds = transform_brush_fixture_bounds(
+            brush->bounds(), fixture_instance.model_transform);
+        instance.touched_leaf_indices = fixture_instance.touched_leaf_indices;
+        instance.support_status = fixture_instance.support_status;
+        instances.push_back(std::move(instance));
+    }
+
+    world_scene::WorldSceneRenderPackageBuilder builder;
+    auto built = builder.build(
+        std::move(world),
+        make_visibility_spatial(1U),
+        std::move(library),
+        std::move(instances));
+    if (!built || !built.package) {
+        throw std::runtime_error{
+            "Unable to build profiled OpenGL brush scene fixture"};
+    }
+    return std::make_shared<const world_scene::WorldSceneRenderPackage>(
+        std::move(*built.package));
+}
+
+[[nodiscard]] world_preview::WorldPreviewSceneOptions visibility_options(
+    const hlclient::world_visibility::WorldVisibilityMode mode,
+    const bool brushes)
+{
+    world_preview::WorldPreviewSceneOptions options;
+    options.camera_mode = world_preview::WorldPreviewCameraMode::spawn;
+    options.spawn_camera = world_preview::WorldPreviewSpawnCameraDescriptor{
+        {0.0F, -2.0F, 0.0F},
+        {0.0F, 1.0F, 0.0F},
+        {0.0F, 0.0F, 1.0F}};
+    options.visibility_mode = mode;
+    options.pvs_fallback_policy =
+        hlclient::world_visibility::WorldPvsFallbackPolicy::fail_closed;
+    options.brush_submodels = brushes
+        ? world_preview::WorldPreviewBrushSubmodelsMode::static_instances
+        : world_preview::WorldPreviewBrushSubmodelsMode::off;
+    options.visibility_extent = {96, 96};
+    return options;
+}
+
 TEST_CASE("OpenGL renderer error classifications are bounded and stable",
           "[renderer][opengl]")
 {
@@ -803,6 +1086,13 @@ TEST_CASE("OpenGL actual-version capability parsing is bounded",
     REQUIRE(newer.has_value());
     CHECK(supports_required_open_gl_version(*newer));
 
+    CHECK_FALSE(supports_required_open_gl_profile(0));
+    CHECK_FALSE(supports_required_open_gl_profile(
+        GL_CONTEXT_COMPATIBILITY_PROFILE_BIT));
+    CHECK(supports_required_open_gl_profile(GL_CONTEXT_CORE_PROFILE_BIT));
+    CHECK(supports_required_open_gl_profile(
+        GL_CONTEXT_CORE_PROFILE_BIT | GL_CONTEXT_COMPATIBILITY_PROFILE_BIT));
+
     CHECK_FALSE(parse_actual_open_gl_version("").has_value());
     CHECK_FALSE(
         parse_actual_open_gl_version("OpenGL 3.3").has_value());
@@ -813,17 +1103,47 @@ TEST_CASE("OpenGL actual-version capability parsing is bounded",
                     .has_value());
 }
 
+TEST_CASE("OpenGL actual context capability requires a Core profile",
+          "[renderer][opengl][capability][actual-context]")
+{
+    auto context = try_create_context();
+    if (!context) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_profile_mask = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile_mask.has_value());
+    if (!supports_required_open_gl_profile(*actual_profile_mask)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+
+    context->initialize_renderer();
+    CHECK(supports_required_open_gl_profile(*actual_profile_mask));
+    CHECK(glGetError() == GL_NO_ERROR);
+    context->release_renderer();
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
 TEST_CASE("OpenGL renderer uploads, caches and draws a synthetic static world",
           "[renderer][opengl][world-frame]")
 {
     auto context = try_create_context();
     if (!context) {
-        SKIP("OpenGL 3.3 context unavailable on this host");
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
     }
     const auto actual_version = current_actual_open_gl_version();
     REQUIRE(actual_version.has_value());
     if (!supports_required_open_gl_version(*actual_version)) {
-        SKIP("OpenGL 3.3 context unavailable on this host");
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_profile_mask = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile_mask.has_value());
+    if (!supports_required_open_gl_profile(*actual_profile_mask)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
     }
     context->initialize_renderer();
 
@@ -981,12 +1301,17 @@ TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",
 
     auto context = try_create_context();
     if (!context) {
-        SKIP("OpenGL 3.3 context unavailable on this host");
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
     }
     const auto actual_version = current_actual_open_gl_version();
     REQUIRE(actual_version.has_value());
     if (!supports_required_open_gl_version(*actual_version)) {
-        SKIP("OpenGL 3.3 context unavailable on this host");
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_profile_mask = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile_mask.has_value());
+    if (!supports_required_open_gl_profile(*actual_profile_mask)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
     }
     context->initialize_renderer();
 
@@ -1024,6 +1349,375 @@ TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",
     CHECK(statistics.failed_upload_count == 0U);
     CHECK(statistics.last_extent == extent);
 
+    context->release_renderer();
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("OpenGL scene visibility changes commands without resource reupload",
+    "[renderer][opengl][m4.4][visibility-frame]")
+{
+    auto world = make_frame_package(false, false, 2U, 0U, 0xC0U);
+    auto scene_package = make_visibility_scene(world);
+    auto equivalent_scene_package = make_visibility_scene(world);
+    REQUIRE(equivalent_scene_package != scene_package);
+    CHECK(equivalent_scene_package->resource_identity() ==
+        scene_package->resource_identity());
+
+    world_preview::WorldPreviewSceneSource all_source{
+        scene_package,
+        visibility_options(
+            hlclient::world_visibility::WorldVisibilityMode::all, false)};
+    auto all_scene = hlclient::client::build_render_scene(
+        all_source.world_state());
+    REQUIRE(all_scene.static_world);
+    REQUIRE(all_scene.static_world->visible_draw_list);
+    REQUIRE(all_scene.static_world->visibility_summary);
+    CHECK(all_scene.static_world->visible_draw_list->commands().size() == 2U);
+
+    world_preview::WorldPreviewSceneSource equivalent_all_source{
+        equivalent_scene_package,
+        visibility_options(
+            hlclient::world_visibility::WorldVisibilityMode::all, false)};
+    auto equivalent_all_scene = hlclient::client::build_render_scene(
+        equivalent_all_source.world_state());
+    REQUIRE(equivalent_all_scene.static_world);
+    REQUIRE(equivalent_all_scene.static_world->visible_draw_list);
+    REQUIRE(equivalent_all_scene.static_world->visibility_summary);
+    CHECK(equivalent_all_scene.static_world->visibility_summary->revision ==
+        all_scene.static_world->visibility_summary->revision);
+    CHECK(equivalent_all_scene.static_world->visible_draw_list
+              ->result_signature() ==
+        all_scene.static_world->visible_draw_list->result_signature());
+
+    world_preview::WorldPreviewSceneSource pvs_source{
+        scene_package,
+        visibility_options(
+            hlclient::world_visibility::WorldVisibilityMode::pvs_only,
+            false)};
+    auto pvs_scene = hlclient::client::build_render_scene(
+        pvs_source.world_state());
+    REQUIRE(pvs_scene.static_world->visible_draw_list);
+    REQUIRE(pvs_scene.static_world->visibility_summary);
+    CHECK(pvs_scene.static_world->visibility_summary->revision ==
+        all_scene.static_world->visibility_summary->revision);
+    CHECK(pvs_scene.static_world->visible_draw_list->result_signature() !=
+        all_scene.static_world->visible_draw_list->result_signature());
+    CHECK(pvs_scene.static_world->visible_draw_list->commands().size() == 1U);
+
+    world_preview::WorldPreviewSceneSource frustum_source{
+        scene_package,
+        visibility_options(
+            hlclient::world_visibility::WorldVisibilityMode::frustum_only,
+            false)};
+    auto frustum_scene = hlclient::client::build_render_scene(
+        frustum_source.world_state());
+    REQUIRE(frustum_scene.static_world->visible_draw_list);
+    REQUIRE(frustum_scene.static_world->visibility_summary);
+    CHECK(frustum_scene.static_world->visibility_summary->revision ==
+        all_scene.static_world->visibility_summary->revision);
+    CHECK(frustum_scene.static_world->visible_draw_list->result_signature() !=
+        pvs_scene.static_world->visible_draw_list->result_signature());
+    CHECK(frustum_scene.static_world->visible_draw_list->commands().size() == 1U);
+
+    world_preview::WorldPreviewSceneSource combined_source{
+        scene_package,
+        visibility_options(
+            hlclient::world_visibility::WorldVisibilityMode::pvs_and_frustum,
+            false)};
+    auto combined_scene = hlclient::client::build_render_scene(
+        combined_source.world_state());
+    REQUIRE(combined_scene.static_world->visible_draw_list);
+    REQUIRE(combined_scene.static_world->visibility_summary);
+    CHECK(combined_scene.static_world->visibility_summary->revision ==
+        all_scene.static_world->visibility_summary->revision);
+    CHECK(combined_scene.static_world->visible_draw_list->result_signature() !=
+        frustum_scene.static_world->visible_draw_list->result_signature());
+    CHECK(combined_scene.static_world->visible_draw_list->commands().size() == 1U);
+
+    auto context = try_create_context();
+    if (!context) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_profile_mask = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile_mask.has_value());
+    if (!supports_required_open_gl_profile(*actual_profile_mask)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    context->initialize_renderer();
+    constexpr renderer::RenderExtent extent{96, 96};
+    auto& gl_renderer = context->renderer();
+    gl_renderer.render(all_scene, extent);
+    gl_renderer.render(equivalent_all_scene, extent);
+    CHECK(gl_renderer.statistics().upload_count == 1U);
+    CHECK(gl_renderer.statistics().scene_upload_count == 1U);
+    gl_renderer.render(pvs_scene, extent);
+    const auto visible_sample = read_pixel(48, 48);
+    const auto hidden_sample = read_pixel(90, 48);
+    CHECK_FALSE(approximately_clear(visible_sample, pvs_scene.clear_color));
+    CHECK(approximately_clear(hidden_sample, pvs_scene.clear_color));
+    gl_renderer.render(frustum_scene, extent);
+    gl_renderer.render(combined_scene, extent);
+
+    const auto& statistics = gl_renderer.statistics();
+    CHECK(statistics.scene_present);
+    CHECK(statistics.upload_count == 1U);
+    CHECK(statistics.scene_upload_count == 1U);
+    CHECK(statistics.brush_upload_count == 0U);
+    CHECK(statistics.visibility_update_count == 4U);
+    CHECK(statistics.draw_call_count == 7U);
+    CHECK(statistics.rendered_command_count == 7U);
+    CHECK(statistics.visible_world_surface_count == 1U);
+    CHECK(statistics.visible_brush_instance_count == 0U);
+    CHECK(glGetError() == GL_NO_ERROR);
+
+    context->release_renderer();
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("OpenGL brush instances share one aggregate GPU upload",
+    "[renderer][opengl][m4.4][brush-frame]")
+{
+    auto world = make_frame_package(false, true, 0U, 0U, 0x30U);
+    auto brushes = make_frame_package(false, true, 0U, 0U, 0xE0U);
+    constexpr std::array translations{-1.0F, 1.0F};
+    auto scene_package = make_visibility_scene(world, brushes, translations);
+    world_preview::WorldPreviewSceneSource source{
+        scene_package,
+        visibility_options(
+            hlclient::world_visibility::WorldVisibilityMode::all, true)};
+    auto scene = hlclient::client::build_render_scene(source.world_state());
+    REQUIRE(scene.static_world);
+    REQUIRE(scene.static_world->visible_draw_list);
+    CHECK(scene.static_world->visible_draw_list->commands().size() == 3U);
+
+    auto context = try_create_context();
+    if (!context) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_profile_mask = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile_mask.has_value());
+    if (!supports_required_open_gl_profile(*actual_profile_mask)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    context->initialize_renderer();
+    constexpr renderer::RenderExtent extent{96, 96};
+    auto& gl_renderer = context->renderer();
+    gl_renderer.render(scene, extent);
+    REQUIRE(source.update(hlclient::client::FrameTime{0.0}));
+    scene = hlclient::client::build_render_scene(source.world_state());
+    gl_renderer.render(scene, extent);
+
+    const auto left_instance_sample = read_pixel(20, 48);
+    const auto right_instance_sample = read_pixel(76, 48);
+    CHECK_FALSE(approximately_clear(left_instance_sample, scene.clear_color));
+    CHECK_FALSE(approximately_clear(right_instance_sample, scene.clear_color));
+    const auto& statistics = gl_renderer.statistics();
+    CHECK(statistics.upload_count == 1U);
+    CHECK(statistics.scene_upload_count == 1U);
+    CHECK(statistics.brush_upload_count == 1U);
+    CHECK(statistics.visibility_update_count == 2U);
+    CHECK(statistics.rendered_command_count == 6U);
+    CHECK(statistics.draw_call_count == 6U);
+    CHECK(statistics.brush_draw_call_count == 4U);
+    CHECK(statistics.visible_brush_instance_count == 2U);
+    CHECK(statistics.failed_upload_count == 0U);
+    CHECK(glGetError() == GL_NO_ERROR);
+
+    context->release_renderer();
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("OpenGL brush profiles and CPU visibility bound framebuffer work",
+    "[renderer][opengl][m4.4][brush-profiles]")
+{
+    auto world = make_frame_package(false, true, 0U, 0U, 0x30U);
+    auto brushes = make_frame_package(true, false, 1U, 0U, 0xE0U);
+    REQUIRE(brushes->materials().size() == 1U);
+    CHECK(brushes->materials()[0U].base_texture_alpha_mode ==
+        assets::WorldTextureAlphaMode::masked_index_255);
+    CHECK(brushes->materials()[0U].lightmap_mode ==
+        world_render::WorldRenderLightmapMode::atlas);
+    CHECK(brushes->materials()[0U].lightmap_atlas_page_index == 0U);
+
+    constexpr float diagonal = 0.707106769F;
+    std::array<BrushSceneFixtureInstance, 4U> fixture_instances;
+    fixture_instances[0U].model_transform = make_brush_fixture_transform(
+        0.0F, -0.25F, 0.0F, diagonal, diagonal);
+    fixture_instances[1U].model_transform =
+        make_brush_fixture_transform(-2.5F, -0.25F, 0.0F);
+    fixture_instances[1U].touched_leaf_indices = {2U};
+    fixture_instances[2U].model_transform =
+        make_brush_fixture_transform(5.0F, -0.25F, 0.0F);
+    fixture_instances[3U].model_transform =
+        make_brush_fixture_transform(2.5F, -0.25F, 0.0F);
+    fixture_instances[3U].support_status = world_scene::
+        BrushSubmodelRenderSupportStatus::unsupported_rendermode;
+
+    auto scene_package = make_profiled_brush_scene(
+        world, brushes, fixture_instances);
+    CHECK(scene_package->statistics().supported_brush_instance_count == 3U);
+    CHECK(scene_package->statistics().unsupported_brush_instance_count == 1U);
+
+    const auto make_options = [](const auto mode) {
+        auto options = visibility_options(mode, true);
+        options.spawn_camera->position = {0.0F, -6.0F, 0.0F};
+        return options;
+    };
+    world_preview::WorldPreviewSceneSource all_source{
+        scene_package,
+        make_options(hlclient::world_visibility::WorldVisibilityMode::all)};
+    auto all_scene =
+        hlclient::client::build_render_scene(all_source.world_state());
+    REQUIRE(all_scene.static_world);
+    REQUIRE(all_scene.static_world->visible_draw_list);
+    REQUIRE(all_scene.static_world->visibility_summary);
+    CHECK(all_scene.static_world->visibility_summary
+              ->visible_brush_instance_count == 3U);
+    CHECK(all_scene.static_world->visible_draw_list->commands().size() == 4U);
+    CHECK(all_scene.static_world->visible_draw_list->statistics()
+              .masked_command_count == 3U);
+    for (const auto& command :
+        all_scene.static_world->visible_draw_list->commands()) {
+        if (command.object_kind != hlclient::world_visibility::
+                WorldVisibleObjectKind::brush_instance_surface) {
+            continue;
+        }
+        CHECK(command.alpha_mode ==
+            assets::WorldTextureAlphaMode::masked_index_255);
+        CHECK(command.lightmap_mode ==
+            world_render::WorldRenderLightmapMode::atlas);
+        CHECK(command.lightmap_atlas_page_index == 0U);
+        CHECK(command.source_instance_index != 3U);
+    }
+
+    world_preview::WorldPreviewSceneSource pvs_source{
+        scene_package,
+        make_options(
+            hlclient::world_visibility::WorldVisibilityMode::pvs_only)};
+    REQUIRE(pvs_source.update(hlclient::client::FrameTime{0.0}));
+    auto pvs_scene =
+        hlclient::client::build_render_scene(pvs_source.world_state());
+    REQUIRE(pvs_scene.static_world->visible_draw_list);
+    REQUIRE(pvs_scene.static_world->visibility_summary);
+    CHECK(pvs_scene.static_world->visibility_summary
+              ->visible_brush_instance_count == 2U);
+    CHECK(pvs_scene.static_world->visible_draw_list->commands().size() == 3U);
+
+    world_preview::WorldPreviewSceneSource frustum_source{
+        scene_package,
+        make_options(
+            hlclient::world_visibility::WorldVisibilityMode::frustum_only)};
+    REQUIRE(frustum_source.update(hlclient::client::FrameTime{0.0}));
+    REQUIRE(frustum_source.update(hlclient::client::FrameTime{0.0}));
+    auto frustum_scene =
+        hlclient::client::build_render_scene(frustum_source.world_state());
+    REQUIRE(frustum_scene.static_world->visible_draw_list);
+    REQUIRE(frustum_scene.static_world->visibility_summary);
+    CHECK(frustum_scene.static_world->visibility_summary
+              ->visible_brush_instance_count == 2U);
+    CHECK(frustum_scene.static_world->visible_draw_list->commands().size() ==
+        3U);
+
+    world_preview::WorldPreviewSceneSource combined_source{
+        scene_package,
+        make_options(
+            hlclient::world_visibility::WorldVisibilityMode::
+                pvs_and_frustum)};
+    for (std::size_t update = 0U; update < 3U; ++update) {
+        REQUIRE(combined_source.update(hlclient::client::FrameTime{0.0}));
+    }
+    auto combined_scene =
+        hlclient::client::build_render_scene(combined_source.world_state());
+    REQUIRE(combined_scene.static_world->visible_draw_list);
+    REQUIRE(combined_scene.static_world->visibility_summary);
+    CHECK(combined_scene.static_world->visibility_summary
+              ->visible_brush_instance_count == 1U);
+    CHECK(combined_scene.static_world->visible_draw_list->commands().size() ==
+        2U);
+
+    auto context = try_create_context();
+    if (!context) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_profile_mask = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile_mask.has_value());
+    if (!supports_required_open_gl_profile(*actual_profile_mask)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    context->initialize_renderer();
+    constexpr renderer::RenderExtent extent{96, 96};
+    auto& gl_renderer = context->renderer();
+
+    gl_renderer.render(all_scene, extent);
+    const auto rotated_opaque_sample = read_pixel(42, 48);
+    const auto rotated_masked_sample = read_pixel(54, 48);
+    const auto rotated_outside_sample = read_pixel(36, 60);
+    const auto pvs_candidate_sample = read_pixel(8, 48);
+    CHECK(static_cast<int>(rotated_opaque_sample[0U]) >
+        static_cast<int>(rotated_masked_sample[0U]) + 40);
+    CHECK(std::abs(static_cast<int>(rotated_outside_sample[0U]) -
+              static_cast<int>(rotated_masked_sample[0U])) <= 8);
+    CHECK_FALSE(
+        approximately_clear(pvs_candidate_sample, all_scene.clear_color));
+
+    auto unsupported_probe = all_scene;
+    unsupported_probe.camera.position.x = 2.5F;
+    unsupported_probe.camera.target.x = 2.5F;
+    gl_renderer.render(unsupported_probe, extent);
+    CHECK(approximately_clear(read_pixel(42, 48), all_scene.clear_color));
+
+    auto all_frustum_probe = all_scene;
+    all_frustum_probe.camera.position.x = 5.0F;
+    all_frustum_probe.camera.target.x = 5.0F;
+    gl_renderer.render(all_frustum_probe, extent);
+    CHECK_FALSE(
+        approximately_clear(read_pixel(42, 48), all_scene.clear_color));
+    CHECK(gl_renderer.statistics().upload_count == 1U);
+
+    gl_renderer.render(pvs_scene, extent);
+    CHECK(approximately_clear(read_pixel(8, 48), pvs_scene.clear_color));
+
+    auto frustum_probe = frustum_scene;
+    frustum_probe.camera.position.x = 5.0F;
+    frustum_probe.camera.target.x = 5.0F;
+    gl_renderer.render(frustum_probe, extent);
+    CHECK(approximately_clear(read_pixel(42, 48), frustum_scene.clear_color));
+
+    gl_renderer.render(combined_scene, extent);
+    const auto& statistics = gl_renderer.statistics();
+    CHECK(statistics.upload_count == 1U);
+    CHECK(statistics.scene_upload_count == 1U);
+    CHECK(statistics.brush_upload_count == 1U);
+    CHECK(statistics.visibility_update_count == 4U);
+    CHECK(statistics.rendered_command_count == 20U);
+    CHECK(statistics.draw_call_count == 20U);
+    CHECK(statistics.brush_draw_call_count == 14U);
+    CHECK(statistics.uploaded_base_texture_count == 2U);
+    CHECK(statistics.uploaded_base_mip_level_count == 8U);
+    CHECK(statistics.uploaded_lightmap_page_count == 1U);
+    CHECK(statistics.uploaded_lightmap_layer_count == 4U);
+    CHECK(statistics.uploaded_white_lightmap_count == 1U);
+    CHECK(statistics.failed_upload_count == 0U);
+    CHECK(statistics.active_world_resources);
+    CHECK(glGetError() == GL_NO_ERROR);
+
+    // Release every scene/world/brush GL object while its owning context is
+    // still current. HiddenOpenGlContext destroys the window only afterwards.
     context->release_renderer();
     CHECK(glGetError() == GL_NO_ERROR);
 }

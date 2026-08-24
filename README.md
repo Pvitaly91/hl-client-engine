@@ -6,19 +6,24 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.3's first bounded static-world rendering path
-on top of M4.1 CPU BSP geometry and M4.2 embedded/WAD3 RGBA textures. The new
+The repository has implemented M4.4's bounded renderer-neutral spatial,
+visibility, and static brush-submodel path on top of M4.3's first static-world
+rendering path, M4.1 CPU BSP geometry, and M4.2 embedded/WAD3 RGBA textures. The
 CPU continuation decodes exact GoldSrc RGB lightmap samples, retains all four
 source style slots, packs deterministic padded multi-page atlases, and builds
 an immutable renderer-neutral `WorldRenderPackage` with normalized base UVs,
-texel-centered lightmap UVs, materials, and draw batches. The OpenGL 3.3 Core
-backend uploads that package transactionally and renders a bounds-derived Z-up
-diagnostic camera. `--stop-after world-render-package` remains CPU-only;
+texel-centered lightmap UVs, materials, draw batches, and exact per-surface
+ranges. M4.4 adds an owning BSP spatial/PVS package, CPU PVS/frustum selection,
+an immutable scene package, and optional static initial opaque brush instances.
+The OpenGL 3.3 Core backend uploads scene resources transactionally while
+visibility revisions change draw selection without re-upload. Both
+`--stop-after world-render-package` and `--stop-after world-spatial-scene`
+remain CPU-only;
 `--view-world` cleans up the retained network/authentication lifetime before it
 opens the local preview. The standalone `hlclient_world_viewer` performs the
 same composition offline and read-only for an explicit user-owned map.
 
-Implemented M1–M4.3 bounded behavior includes the Protocol 48 challenge,
+Implemented M1–M4.4 bounded behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
@@ -462,8 +467,9 @@ The BSP parser accepts version 30 only, validates the exact 124-byte header and
 all 15 lumps with explicit little-endian reads, cross-checks every retained
 reference, reconstructs closed convex world-model face loops, and emits flat
 normals, deterministic fan indices, raw texel-unit S/T, material-reference
-metadata, surfaces, and finite bounds. Only model 0 geometry is emitted.
-Entities, PVS, collision runtime, brush-submodel instances, embedded/WAD
+metadata, surfaces, and finite bounds. Only model 0 geometry is emitted by
+this historical M4.1 result. Entity interpretation, PVS decoding, collision
+runtime, brush-submodel instances, embedded/WAD
 texture pixels, palettes, lightmaps, and renderer resources remain absent.
 
 M4.2 adds a later texture-resolution stop on the same retained composition:
@@ -559,22 +565,41 @@ Remove-Item Env:HLCLIENT_SMOKE_TEST_FRAMES
 ```
 
 `--view-world` is intentionally not a gameplay connection and rejects the null
-renderer. It shows static model 0 with base textures, baseline lightmaps,
-masked alpha, depth testing, and a double-sided bounds preview. PVS/frustum
-culling, brush entities, spawn cameras, dynamic lights/styles, animated water,
-and sky remain outside M4.3.
+renderer. Its historical defaults show static model 0 with base textures,
+baseline lightmaps, masked alpha, depth testing, and a double-sided bounds
+preview. M4.4 options can explicitly enable PVS/frustum culling, supported
+static initial opaque brush instances, and an inert diagnostic spawn pose.
+Runtime entities, dynamic brush motion, nonzero/translucent rendermodes,
+dynamic lights/styles, animated water, and sky remain unavailable.
 
 For a completely offline, read-only user-owned map preview:
 
 ```powershell
 .\build\bin\Debug\hlclient_world_viewer.exe `
   --basedir "D:\Steam\steamapps\common\Half-Life" `
-  --game valve --map maps/crossfire.bsp --camera orbit
+  --game valve --map maps/crossfire.bsp `
+  --camera spawn --visibility pvs-frustum --brush-submodels static
 ```
 
 The viewer accepts a safe virtual map name, not a native map path; it starts no
 network or stock process and writes no game data. See the
 [viewer contract](docs/WORLD_VIEWER.md) for bounded verification usage.
+
+For the same M4.4 scene composition without SDL, OpenGL, or GPU resources:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after world-spatial-scene `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve `
+  --visibility pvs-frustum --brush-submodels static
+```
+
+Visibility accepts `all`, `frustum`, `pvs`, or `pvs-frustum`; brush submodels
+accept `off` or `static`; cameras accept `static`, `orbit`, or `spawn`.
+Historical defaults remain `all`, `off`, and `static`.
 
 See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
 and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
@@ -591,6 +616,11 @@ and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.
 [world texture resolution](docs/WORLD_TEXTURE_RESOLUTION.md),
 [GoldSrc world lightmaps](docs/GOLDSRC_LIGHTMAPS.md), the
 [world render package](docs/WORLD_RENDER_PACKAGE.md), the
+[GoldSrc BSP spatial package](docs/GOLDSRC_BSP_SPATIAL.md),
+[GoldSrc PVS profile](docs/GOLDSRC_PVS.md),
+[world visibility](docs/WORLD_VISIBILITY.md),
+[GoldSrc brush submodels](docs/GOLDSRC_BRUSH_SUBMODELS.md),
+[brush-submodel rendering](docs/BRUSH_SUBMODEL_RENDERING.md), the
 [OpenGL world renderer](docs/OPENGL_WORLD_RENDERER.md), and the
 [offline world viewer](docs/WORLD_VIEWER.md).
 
@@ -840,7 +870,9 @@ The central data-flow invariants are:
 
 ```text
 Approved source -> Format importers -> Neutral CPU assets
-    -> WorldRenderPackage -> ClientWorldState -> RenderScene -> IRenderer
+    -> WorldRenderPackage -> WorldSceneRenderPackage
+    -> WorldVisibilitySet/WorldVisibleDrawList
+    -> ClientWorldState -> RenderScene -> IRenderer
 
 GoldSrc network source --\
                          +-> ClientWorldState -> RenderScene -> IRenderer
@@ -871,9 +903,11 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
   `hlclient_goldsrc_wad3`, `hlclient_goldsrc_asset_dispatch`,
   `hlclient_goldsrc_world_texture_import`,
   `hlclient_goldsrc_world_textures`, `hlclient_goldsrc_lightmaps`,
-  `hlclient_goldsrc_world_render`;
+  `hlclient_goldsrc_world_render`, `hlclient_goldsrc_spatial`,
+  `hlclient_goldsrc_brush_models`;
 - `hlclient_world_render_api`, `hlclient_world_render_package`,
-  `hlclient_world_preview`;
+  `hlclient_world_spatial`, `hlclient_world_visibility`,
+  `hlclient_world_scene_renderer`, `hlclient_world_preview`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
 - `hlclient_local_resource_check` and `hlclient_world_texture_check`
@@ -907,6 +941,11 @@ See [Architecture](docs/ARCHITECTURE.md),
 [world texture resolution](docs/WORLD_TEXTURE_RESOLUTION.md),
 [GoldSrc world lightmaps](docs/GOLDSRC_LIGHTMAPS.md),
 [world render package](docs/WORLD_RENDER_PACKAGE.md),
+[GoldSrc BSP spatial](docs/GOLDSRC_BSP_SPATIAL.md),
+[GoldSrc PVS](docs/GOLDSRC_PVS.md),
+[world visibility](docs/WORLD_VISIBILITY.md),
+[GoldSrc brush submodels](docs/GOLDSRC_BRUSH_SUBMODELS.md),
+[brush-submodel rendering](docs/BRUSH_SUBMODEL_RENDERING.md),
 [OpenGL world renderer](docs/OPENGL_WORLD_RENDERER.md),
 [offline world viewer](docs/WORLD_VIEWER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
@@ -1041,6 +1080,12 @@ state, cache, masked, culling, resize, and transactional-failure checks where a
 3.3 Core context is available. A synthetic graphical integration validates
 non-clear pixels without network or installed game data; the offline viewer is
 an optional user-owned verification path rather than a CI asset dependency.
+M4.4 adds synthetic BSP-node/leaf/marksurface and strict PVS RLE fixtures,
+point/AABB traversal, frustum and fallback coverage, exact per-surface draw
+ranges, inert entity/transform/brush-instance tests, scene/visibility revision
+separation, and static-brush rendering checks. OpenGL frame tests run when the
+actual current context reports 3.3 or newer and skip only for unavailable or
+legacy contexts; a requested version alone is not the capability gate.
 
 ## License
 

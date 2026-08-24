@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/bsp/goldsrc_worldspawn_wad_references.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_entity_document.hpp>
 
 #include <algorithm>
 #include <new>
@@ -87,105 +88,36 @@ inline constexpr std::size_t kHardMaximumWadBasenameBytes = 255U;
     return false;
 }
 
-struct QuotedToken {
-    std::string value;
-    std::size_t begin_offset{0U};
-};
-
-struct QuotedTokenResult {
-    std::optional<QuotedToken> token;
-    std::optional<GoldSrcWorldspawnError> error;
-};
-
-[[nodiscard]] QuotedTokenResult parse_quoted(
-    const std::span<const std::byte> entity_lump,
-    std::size_t& cursor,
-    const std::size_t maximum_bytes,
-    const bool key)
+[[nodiscard]] GoldSrcWorldspawnErrorCode worldspawn_error_code(
+    const GoldSrcEntityDocumentErrorCode code) noexcept
 {
-    if (cursor >= entity_lump.size() || entity_lump[cursor] != std::byte{'"'}) {
-        return QuotedTokenResult{
-            std::nullopt,
-            GoldSrcWorldspawnError{
-                GoldSrcWorldspawnErrorCode::unexpected_token,
-                cursor,
-                std::nullopt,
-                "Worldspawn key/value token must begin with a quote",
-            },
-        };
+    switch (code) {
+    case GoldSrcEntityDocumentErrorCode::invalid_configuration:
+        return GoldSrcWorldspawnErrorCode::invalid_configuration;
+    case GoldSrcEntityDocumentErrorCode::entity_lump_too_large:
+        return GoldSrcWorldspawnErrorCode::entity_lump_too_large;
+    case GoldSrcEntityDocumentErrorCode::unexpected_token:
+    case GoldSrcEntityDocumentErrorCode::missing_value:
+    case GoldSrcEntityDocumentErrorCode::trailing_bytes_after_nul:
+        return GoldSrcWorldspawnErrorCode::unexpected_token;
+    case GoldSrcEntityDocumentErrorCode::unterminated_quote:
+        return GoldSrcWorldspawnErrorCode::unterminated_quote;
+    case GoldSrcEntityDocumentErrorCode::missing_closing_brace:
+        return GoldSrcWorldspawnErrorCode::missing_closing_brace;
+    case GoldSrcEntityDocumentErrorCode::nul_in_key_or_value:
+        return GoldSrcWorldspawnErrorCode::nul_in_key_or_value;
+    case GoldSrcEntityDocumentErrorCode::key_length_limit_exceeded:
+        return GoldSrcWorldspawnErrorCode::key_length_limit_exceeded;
+    case GoldSrcEntityDocumentErrorCode::value_length_limit_exceeded:
+        return GoldSrcWorldspawnErrorCode::value_length_limit_exceeded;
+    case GoldSrcEntityDocumentErrorCode::entity_count_limit_exceeded:
+    case GoldSrcEntityDocumentErrorCode::pair_count_limit_exceeded:
+    case GoldSrcEntityDocumentErrorCode::total_pair_count_limit_exceeded:
+        return GoldSrcWorldspawnErrorCode::pair_count_limit_exceeded;
+    case GoldSrcEntityDocumentErrorCode::unable_to_retain_document:
+        return GoldSrcWorldspawnErrorCode::unable_to_retain_references;
     }
-    const auto begin = cursor;
-    ++cursor;
-    std::string value;
-    try {
-        value.reserve(std::min(maximum_bytes, entity_lump.size() - cursor));
-        while (cursor < entity_lump.size()) {
-            const auto byte = entity_lump[cursor];
-            if (byte == std::byte{'"'}) {
-                ++cursor;
-                return QuotedTokenResult{
-                    QuotedToken{std::move(value), begin},
-                    std::nullopt,
-                };
-            }
-            if (byte == std::byte{0}) {
-                return QuotedTokenResult{
-                    std::nullopt,
-                    GoldSrcWorldspawnError{
-                        GoldSrcWorldspawnErrorCode::nul_in_key_or_value,
-                        cursor,
-                        std::nullopt,
-                        "NUL is not valid inside a worldspawn key or value",
-                    },
-                };
-            }
-            if (value.size() == maximum_bytes) {
-                return QuotedTokenResult{
-                    std::nullopt,
-                    GoldSrcWorldspawnError{
-                        key
-                            ? GoldSrcWorldspawnErrorCode::key_length_limit_exceeded
-                            : GoldSrcWorldspawnErrorCode::value_length_limit_exceeded,
-                        cursor,
-                        std::nullopt,
-                        "Worldspawn quoted token exceeds its configured byte limit",
-                    },
-                };
-            }
-            value.push_back(static_cast<char>(
-                std::to_integer<unsigned char>(byte)));
-            ++cursor;
-        }
-    } catch (const std::bad_alloc&) {
-        return QuotedTokenResult{
-            std::nullopt,
-            GoldSrcWorldspawnError{
-                GoldSrcWorldspawnErrorCode::unable_to_retain_references,
-                begin,
-                std::nullopt,
-                "Unable to retain bounded worldspawn token metadata",
-            },
-        };
-    } catch (const std::length_error&) {
-        return QuotedTokenResult{
-            std::nullopt,
-            GoldSrcWorldspawnError{
-                GoldSrcWorldspawnErrorCode::unable_to_retain_references,
-                begin,
-                std::nullopt,
-                "Worldspawn token exceeds an owning container limit",
-            },
-        };
-    }
-    return QuotedTokenResult{
-        std::nullopt,
-        GoldSrcWorldspawnError{
-            GoldSrcWorldspawnErrorCode::unterminated_quote,
-            begin,
-            std::nullopt,
-            "Worldspawn quoted token is unterminated",
-        },
-    };
+    return GoldSrcWorldspawnErrorCode::unexpected_token;
 }
 
 } // namespace
@@ -400,94 +332,78 @@ GoldSrcEntityLumpParser::parse_worldspawn_wad_references(
             "Entity lump exceeds the configured inert-parser limit");
     }
 
-    std::size_t cursor = 0U;
-    const auto skip_whitespace = [&entity_lump, &cursor]() {
-        while (cursor < entity_lump.size()) {
-            const auto byte = std::to_integer<unsigned char>(entity_lump[cursor]);
-            if (!ascii_whitespace(static_cast<char>(byte))) {
-                break;
-            }
-            ++cursor;
-        }
-    };
-    skip_whitespace();
-    if (cursor >= entity_lump.size() || entity_lump[cursor] != std::byte{'{'}) {
+    std::size_t first_token_offset = 0U;
+    while (first_token_offset < entity_lump.size() && ascii_whitespace(
+        static_cast<char>(
+            std::to_integer<unsigned char>(entity_lump[first_token_offset])))) {
+        ++first_token_offset;
+    }
+    if (first_token_offset >= entity_lump.size() ||
+        entity_lump[first_token_offset] != std::byte{'{'}) {
         return fail(GoldSrcWorldspawnErrorCode::missing_first_entity,
-            cursor,
+            first_token_offset,
             std::nullopt,
             "Entity lump does not begin with a first entity");
     }
-    ++cursor;
+
+    const GoldSrcEntityDocumentLimits document_limits{
+        limits.maximum_entity_lump_bytes,
+        1U,
+        limits.maximum_pair_count,
+        limits.maximum_key_bytes,
+        limits.maximum_value_bytes,
+        limits.maximum_pair_count,
+    };
+    auto document = GoldSrcEntityDocumentParser::parse_first_entity(
+        entity_lump, document_limits);
+    if (!document) {
+        return fail(worldspawn_error_code(document.error->code),
+            document.error->byte_offset,
+            document.error->pair_index,
+            "Canonical inert entity grammar rejected the first entity");
+    }
+    if (document.document->empty()) {
+        return fail(GoldSrcWorldspawnErrorCode::missing_first_entity,
+            first_token_offset,
+            std::nullopt,
+            "Entity lump does not contain a first entity");
+    }
 
     std::vector<std::string> normalized_keys;
-    std::optional<std::string> classname;
-    std::optional<std::string> preferred_wad;
-    std::optional<std::string> fallback_wad;
-    std::size_t pair_count = 0U;
+    std::optional<std::string_view> classname;
+    std::optional<std::string_view> preferred_wad;
+    std::optional<std::string_view> fallback_wad;
+    const auto pairs = document.document->entities()[0U].pairs();
     try {
         normalized_keys.reserve(std::min(limits.maximum_pair_count,
             static_cast<std::size_t>(32U)));
-        while (true) {
-            skip_whitespace();
-            if (cursor >= entity_lump.size()) {
-                return fail(GoldSrcWorldspawnErrorCode::missing_closing_brace,
-                    cursor,
-                    std::nullopt,
-                    "First entity does not close before the entity-lump boundary");
-            }
-            if (entity_lump[cursor] == std::byte{'}'}) {
-                ++cursor;
-                break;
-            }
-            if (pair_count == limits.maximum_pair_count) {
-                return fail(GoldSrcWorldspawnErrorCode::pair_count_limit_exceeded,
-                    cursor,
-                    pair_count,
-                    "First entity exceeds the configured key/value pair limit");
-            }
-            auto key = parse_quoted(
-                entity_lump, cursor, limits.maximum_key_bytes, true);
-            if (!key.token) {
-                return GoldSrcWadReferenceParseResult{
-                    std::nullopt,
-                    std::move(key.error),
-                };
-            }
-            skip_whitespace();
-            auto value = parse_quoted(
-                entity_lump, cursor, limits.maximum_value_bytes, false);
-            if (!value.token) {
-                return GoldSrcWadReferenceParseResult{
-                    std::nullopt,
-                    std::move(value.error),
-                };
-            }
-            auto normalized_key = uppercase_ascii_copy(key.token->value);
+        for (std::size_t pair_index = 0U; pair_index < pairs.size(); ++pair_index) {
+            const auto& pair = pairs[pair_index];
+            auto normalized_key = uppercase_ascii_copy(pair.key);
             if (std::find(normalized_keys.begin(), normalized_keys.end(),
                     normalized_key) != normalized_keys.end()) {
                 return fail(GoldSrcWorldspawnErrorCode::duplicate_key,
-                    key.token->begin_offset,
-                    pair_count,
+                    pair.key_byte_offset,
+                    pair_index,
                     "Duplicate ASCII-case-insensitive key makes worldspawn ambiguous");
             }
             normalized_keys.push_back(normalized_key);
             if (normalized_key == "CLASSNAME") {
-                classname = std::move(value.token->value);
+                classname = pair.value;
             } else if (normalized_key == "_WAD") {
-                preferred_wad = std::move(value.token->value);
+                preferred_wad = pair.value;
             } else if (normalized_key == "WAD") {
-                fallback_wad = std::move(value.token->value);
+                fallback_wad = pair.value;
             }
-            ++pair_count;
         }
     } catch (const std::bad_alloc&) {
         return fail(GoldSrcWorldspawnErrorCode::unable_to_retain_references,
-            cursor,
+            first_token_offset,
             std::nullopt,
             "Unable to retain bounded inert worldspawn metadata");
     } catch (const std::length_error&) {
         return fail(GoldSrcWorldspawnErrorCode::unable_to_retain_references,
-            cursor,
+            first_token_offset,
             std::nullopt,
             "Worldspawn metadata exceeds an owning container limit");
     }

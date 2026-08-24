@@ -109,7 +109,17 @@ namespace {
 bool valid_world_render_package_stage_configuration(
     const WorldRenderPackageStageConfig& config) noexcept
 {
-    return valid_world_texture_import_stage_configuration(
+    const bool scene_configuration_valid =
+        !config.build_world_spatial_scene ||
+        (bsp::valid_goldsrc_bsp_import_limits(config.bsp) &&
+            brush_models::valid_goldsrc_brush_render_library_limits(
+                config.brush_library) &&
+            brush_models::valid_goldsrc_world_scene_build_config(
+                config.world_scene) &&
+            brush_models::valid_goldsrc_world_scene_build_limits(
+                config.world_scene_limits));
+    return scene_configuration_valid &&
+        valid_world_texture_import_stage_configuration(
                config.world_textures) &&
         lightmaps::valid_goldsrc_world_lightmap_import_limits(
             config.lightmaps) &&
@@ -145,6 +155,7 @@ public:
         WorldRenderPackageTraceCallback trace_callback)
         : config_{std::move(config)},
           trace_callback_{std::move(trace_callback)},
+          environment_{environment},
           configuration_valid_{
               valid_world_render_package_stage_configuration(config_) &&
               environment != nullptr && environment->root_count() > 0U},
@@ -259,6 +270,8 @@ public:
         drain_world_texture_events();
         state_ = WorldRenderPackageStageState::cancelled;
         result_.reset();
+        scene_result_.reset();
+        spawn_camera_result_.reset();
         error_.reset();
         WorldRenderPackageStageEvent event;
         event.type = WorldRenderPackageStageEventType::cancelled;
@@ -416,6 +429,127 @@ public:
                 "Unable to retain immutable render package", now);
             return;
         }
+
+        if (config_.build_world_spatial_scene) {
+            ++bsp_scene_parse_count_;
+            auto parsed = bsp::GoldSrcBspParser::parse(
+                source_bytes,
+                config_.bsp,
+                bsp::GoldSrcBspParseOptions{
+                    config_.world_scene.brushes ==
+                    brush_models::GoldSrcWorldSceneBrushMode::static_initial});
+            if (!parsed || !parsed.document) {
+                const auto code = parsed.error
+                    ? std::optional{parsed.error->code}
+                    : std::nullopt;
+                if (config_.world_scene.brushes ==
+                        brush_models::GoldSrcWorldSceneBrushMode::static_initial &&
+                    parsed.error && parsed.error->source_model_index) {
+                    ++brush_library_build_count_;
+                    const auto brush_code = parsed.error->code ==
+                            bsp::GoldSrcBspErrorCode::geometry_limit_exceeded
+                        ? brush_models::GoldSrcBrushRenderLibraryErrorCode::
+                              aggregate_limit_exceeded
+                        : brush_models::GoldSrcBrushRenderLibraryErrorCode::
+                              invalid_model_geometry;
+                    fail(
+                        WorldRenderPackageStageErrorCode::
+                            brush_render_library_build_failed,
+                        WorldRenderPackageStageState::render_package_failed,
+                        parsed.error->context,
+                        now,
+                        std::nullopt,
+                        std::nullopt,
+                        std::nullopt,
+                        std::nullopt,
+                        brush_code);
+                    return;
+                }
+                fail(
+                    WorldRenderPackageStageErrorCode::
+                        world_scene_bsp_parse_failed,
+                    WorldRenderPackageStageState::render_package_failed,
+                    parsed.error
+                        ? std::string_view{parsed.error->context}
+                        : std::string_view{
+                              "Canonical BSP parser returned no document"},
+                    now,
+                    std::nullopt,
+                    std::nullopt,
+                    std::nullopt,
+                    code);
+                return;
+            }
+
+            std::optional<world_scene_render::BrushSubmodelRenderLibrary>
+                brush_library;
+            if (config_.world_scene.brushes ==
+                brush_models::GoldSrcWorldSceneBrushMode::static_initial) {
+                ++brush_library_build_count_;
+                auto built_library =
+                    brush_models::GoldSrcBrushRenderLibraryBuilder::build(
+                        *parsed.document,
+                        source_bytes,
+                        environment_,
+                        config_.brush_library);
+                if (!built_library || !built_library.library) {
+                    const auto code = built_library.error
+                        ? std::optional{built_library.error->code}
+                        : std::nullopt;
+                    fail(
+                        WorldRenderPackageStageErrorCode::
+                            brush_render_library_build_failed,
+                        WorldRenderPackageStageState::render_package_failed,
+                        "Brush render-library construction failed",
+                        now,
+                        std::nullopt,
+                        std::nullopt,
+                        std::nullopt,
+                        std::nullopt,
+                        code);
+                    return;
+                }
+                brush_library.emplace(std::move(*built_library.library));
+            }
+
+            auto built_scene = brush_models::GoldSrcWorldSceneBuilder::build(
+                *parsed.document,
+                result_,
+                std::move(brush_library),
+                config_.world_scene,
+                config_.world_scene_limits);
+            if (!built_scene || !built_scene.scene_package) {
+                const auto code = built_scene.error
+                    ? std::optional{built_scene.error->code}
+                    : std::nullopt;
+                fail(
+                    WorldRenderPackageStageErrorCode::world_scene_build_failed,
+                    WorldRenderPackageStageState::render_package_failed,
+                    "World spatial-scene construction failed",
+                    now,
+                    std::nullopt,
+                    std::nullopt,
+                    std::nullopt,
+                    std::nullopt,
+                    std::nullopt,
+                    code);
+                return;
+            }
+            try {
+                scene_result_ = std::make_shared<
+                    world_scene_render::WorldSceneRenderPackage>(
+                    std::move(*built_scene.scene_package));
+                spawn_camera_result_ = std::move(built_scene.spawn_camera);
+            } catch (...) {
+                fail(
+                    WorldRenderPackageStageErrorCode::unable_to_retain_package,
+                    WorldRenderPackageStageState::render_package_failed,
+                    "Unable to retain immutable world spatial scene",
+                    now);
+                return;
+            }
+            ++world_scene_publication_count_;
+        }
         state_ = WorldRenderPackageStageState::world_render_package_ready;
         ++render_package_publication_count_;
         const auto& statistics = result_->statistics();
@@ -495,7 +629,14 @@ public:
         const std::optional<lightmaps::GoldSrcWorldLightmapImportErrorCode>
             lightmap_code = std::nullopt,
         const std::optional<WorldTextureImportStageErrorCode>
-            texture_code = std::nullopt) noexcept
+            texture_code = std::nullopt,
+        const std::optional<bsp::GoldSrcBspErrorCode>
+            bsp_code = std::nullopt,
+        const std::optional<
+            brush_models::GoldSrcBrushRenderLibraryErrorCode>
+            brush_library_code = std::nullopt,
+        const std::optional<brush_models::GoldSrcWorldSceneBuildErrorCode>
+            world_scene_code = std::nullopt) noexcept
     {
         if (terminal_state(state_)) {
             return;
@@ -510,6 +651,8 @@ public:
         }
         state_ = terminal;
         result_.reset();
+        scene_result_.reset();
+        spawn_camera_result_.reset();
         error_.reset();
         try {
             error_.emplace();
@@ -517,6 +660,9 @@ public:
             error_->world_texture_code = texture_code;
             error_->lightmap_code = lightmap_code;
             error_->render_package_code = package_code;
+            error_->bsp_code = bsp_code;
+            error_->brush_library_code = brush_library_code;
+            error_->world_scene_code = world_scene_code;
             error_->context = std::move(retained_context);
         } catch (...) {
         }
@@ -595,6 +741,8 @@ public:
 
     WorldRenderPackageStageConfig config_;
     WorldRenderPackageTraceCallback trace_callback_;
+    std::shared_ptr<const local_resources::LocalResourceEnvironment>
+        environment_;
     bool trace_callback_active_{false};
     bool configuration_valid_{false};
     WorldTextureImportStage world_texture_stage_;
@@ -603,11 +751,18 @@ public:
     std::size_t event_size_{0U};
     WorldRenderPackageStageState state_{WorldRenderPackageStageState::idle};
     std::shared_ptr<const world_render::WorldRenderPackage> result_;
+    std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>
+        scene_result_;
+    std::optional<brush_models::GoldSrcSpawnCameraExtractionResult>
+        spawn_camera_result_;
     std::optional<WorldRenderPackageStageError> error_;
     std::optional<WorldRenderPackageStageTimePoint> last_update_;
     std::size_t lightmap_import_count_{0U};
     std::size_t lightmap_set_publication_count_{0U};
     std::size_t render_package_publication_count_{0U};
+    std::size_t bsp_scene_parse_count_{0U};
+    std::size_t brush_library_build_count_{0U};
+    std::size_t world_scene_publication_count_{0U};
     bool network_cleanup_done_{false};
 };
 
@@ -696,6 +851,18 @@ WorldRenderPackageStage::result() const noexcept
     return implementation_->result_;
 }
 
+const std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>&
+WorldRenderPackageStage::scene_result() const noexcept
+{
+    return implementation_->scene_result_;
+}
+
+const std::optional<brush_models::GoldSrcSpawnCameraExtractionResult>&
+WorldRenderPackageStage::spawn_camera_result() const noexcept
+{
+    return implementation_->spawn_camera_result_;
+}
+
 const std::optional<WorldRenderPackageStageError>&
 WorldRenderPackageStage::error() const noexcept
 {
@@ -780,6 +947,22 @@ std::size_t WorldRenderPackageStage::render_package_publication_count()
     const noexcept
 {
     return implementation_->render_package_publication_count_;
+}
+
+std::size_t WorldRenderPackageStage::bsp_scene_parse_count() const noexcept
+{
+    return implementation_->bsp_scene_parse_count_;
+}
+
+std::size_t WorldRenderPackageStage::brush_library_build_count() const noexcept
+{
+    return implementation_->brush_library_build_count_;
+}
+
+std::size_t WorldRenderPackageStage::world_scene_publication_count()
+    const noexcept
+{
+    return implementation_->world_scene_publication_count_;
 }
 
 } // namespace hlclient::goldsrc

@@ -24,6 +24,11 @@ class IClientSceneSource {
 public:
     virtual ~IClientSceneSource();
 
+    // Windowed runtimes publish the current drawable extent before update().
+    // Sources that do not perform view-dependent CPU work keep the default
+    // no-op implementation.
+    [[nodiscard]] virtual SceneUpdateResult set_render_extent(
+        renderer::RenderExtent extent);
     [[nodiscard]] virtual SceneUpdateResult update(FrameTime elapsed) = 0;
     [[nodiscard]] virtual const ClientWorldState& world_state() const noexcept = 0;
 

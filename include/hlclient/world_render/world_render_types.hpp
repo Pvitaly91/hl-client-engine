@@ -57,6 +57,23 @@ struct WorldDrawBatch {
     std::size_t source_surface_count{0U};
 };
 
+// Exact renderer-neutral range for one source world surface after the
+// deterministic material batching pass.  M4.3 batches remain available for
+// full-world rendering; visibility code uses these one-to-one ranges without
+// rebuilding or re-uploading geometry.
+struct WorldRenderSurfaceRange {
+    std::size_t source_world_surface_index{0U};
+    std::uint32_t first_index{0U};
+    std::uint32_t index_count{0U};
+    std::size_t render_material_index{0U};
+    assets::WorldBounds bounds{};
+    std::size_t source_batch_index{0U};
+    assets::WorldTextureAlphaMode alpha_mode{
+        assets::WorldTextureAlphaMode::opaque};
+    WorldRenderLightmapMode lightmap_mode{WorldRenderLightmapMode::unlit_white};
+    std::optional<std::size_t> lightmap_atlas_page_index;
+};
+
 enum class WorldRenderBaseTextureCoordinateSpace {
     normalized_source_rows_no_cpu_flip,
 };
@@ -120,6 +137,8 @@ public:
     [[nodiscard]] std::span<const std::uint32_t> indices() const noexcept;
     [[nodiscard]] std::span<const WorldRenderMaterial> materials() const noexcept;
     [[nodiscard]] std::span<const WorldDrawBatch> draw_batches() const noexcept;
+    [[nodiscard]] std::span<const WorldRenderSurfaceRange> surface_ranges()
+        const noexcept;
     [[nodiscard]] const assets::WorldBounds& bounds() const noexcept;
     [[nodiscard]] const WorldRenderCoordinateMetadata& coordinate_metadata() const noexcept;
     [[nodiscard]] const WorldRenderStatistics& statistics() const noexcept;
@@ -137,6 +156,7 @@ private:
         std::vector<std::uint32_t> indices,
         std::vector<WorldRenderMaterial> materials,
         std::vector<WorldDrawBatch> draw_batches,
+        std::vector<WorldRenderSurfaceRange> surface_ranges,
         assets::WorldBounds bounds,
         WorldRenderCoordinateMetadata coordinate_metadata,
         WorldRenderStatistics statistics,
@@ -148,6 +168,7 @@ private:
     std::vector<std::uint32_t> indices_;
     std::vector<WorldRenderMaterial> materials_;
     std::vector<WorldDrawBatch> draw_batches_;
+    std::vector<WorldRenderSurfaceRange> surface_ranges_;
     assets::WorldBounds bounds_{};
     WorldRenderCoordinateMetadata coordinate_metadata_{};
     WorldRenderStatistics statistics_{};

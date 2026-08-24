@@ -399,6 +399,36 @@ bool valid_goldsrc_bsp_import_limits(const GoldSrcBspImportLimits& limits) noexc
            limits.maximum_texture_texels <= kGoldSrcBspHardMaximumTextureTexels;
 }
 
+assets::AssetSourceFingerprint goldsrc_bsp_source_fingerprint(
+    const std::span<const std::byte> source) noexcept
+{
+    constexpr std::uint64_t first_offset = 14'695'981'039'346'656'037ULL;
+    constexpr std::uint64_t first_prime = 1'099'511'628'211ULL;
+    constexpr std::uint64_t second_offset = 7'806'984'959'868'165'187ULL;
+    constexpr std::uint64_t second_prime = 14'029'467'366'897'019'727ULL;
+    std::uint64_t first = first_offset;
+    std::uint64_t second = second_offset;
+    const auto add = [](std::uint64_t& hash,
+                         const std::uint8_t value,
+                         const std::uint64_t prime) noexcept {
+        hash ^= value;
+        hash *= prime;
+    };
+    for (const auto value : source) {
+        const auto byte = std::to_integer<std::uint8_t>(value);
+        add(first, byte, first_prime);
+        add(second, byte, second_prime);
+    }
+    auto size = static_cast<std::uint64_t>(source.size());
+    for (std::size_t index = 0U; index < sizeof(size); ++index) {
+        const auto byte = static_cast<std::uint8_t>(size & 0xFFU);
+        add(first, byte, first_prime);
+        add(second, byte, second_prime);
+        size >>= 8U;
+    }
+    return {first, second};
+}
+
 std::string_view to_string(const GoldSrcBspErrorCode code) noexcept
 {
     switch (code) {
@@ -451,8 +481,10 @@ class ParserState final {
 public:
     ParserState(
         const std::span<const std::byte> source,
-        const GoldSrcBspImportLimits& limits) noexcept
-        : source_{source}, limits_{limits}
+        const GoldSrcBspImportLimits& limits,
+        const GoldSrcBspParseOptions& options) noexcept
+        : source_{source}, limits_{limits},
+          materialize_brush_submodels_{options.materialize_brush_submodels}
     {
     }
 
@@ -1734,6 +1766,30 @@ private:
                     index,
                     "BSP model bounds or face range is invalid");
             }
+            const auto first_face = static_cast<std::size_t>(
+                static_cast<std::uint32_t>(model.first_face));
+            const auto face_count = static_cast<std::size_t>(
+                static_cast<std::uint32_t>(model.face_count));
+            const auto face_end = first_face + face_count;
+            for (std::size_t previous_index = 0U;
+                 previous_index < index;
+                 ++previous_index) {
+                const auto& previous = models_[previous_index];
+                const auto previous_first = static_cast<std::size_t>(
+                    static_cast<std::uint32_t>(previous.first_face));
+                const auto previous_count = static_cast<std::size_t>(
+                    static_cast<std::uint32_t>(previous.face_count));
+                const auto previous_end = previous_first + previous_count;
+                if (face_count != 0U && previous_count != 0U &&
+                    first_face < previous_end && previous_first < face_end) {
+                    return fail(
+                        GoldSrcBspErrorCode::invalid_model_reference,
+                        GoldSrcBspLumpId::models,
+                        record_offset + 56U,
+                        index,
+                        "BSP model render-face range overlaps an earlier model");
+                }
+            }
             if (model.visible_leaf_count < 0 ||
                 static_cast<std::uint64_t>(model.visible_leaf_count) >
                     static_cast<std::uint64_t>(leaves_.size())) {
@@ -1781,9 +1837,11 @@ private:
         return true;
     }
 
-    [[nodiscard]] std::optional<GoldSrcBspParsedDocument> build_world()
+    [[nodiscard]] std::optional<assets::WorldAsset> build_model_geometry(
+        const std::size_t model_index,
+        std::size_t& polygon_edge_pair_tests)
     {
-        const auto& world_model = models_.front();
+        const auto& world_model = models_[model_index];
         const auto world_first_face = static_cast<std::size_t>(
             static_cast<std::uint32_t>(world_model.first_face));
         const auto world_face_count = static_cast<std::size_t>(
@@ -1792,18 +1850,24 @@ private:
             static_cast<void>(fail(
                 GoldSrcBspErrorCode::degenerate_face,
                 GoldSrcBspLumpId::models,
-                lumps_[goldsrc_bsp_lump_index(GoldSrcBspLumpId::models)].offset + 60U,
-                0U,
-                "World model 0 contains no source faces"));
+                absolute_record_offset(
+                    GoldSrcBspLumpId::models,
+                    model_index,
+                    kGoldSrcBspModelWireSize) + 60U,
+                model_index,
+                "BSP render model contains no source faces"));
             return std::nullopt;
         }
         if (world_face_count > limits_.maximum_output_surfaces) {
             static_cast<void>(fail(
                 GoldSrcBspErrorCode::geometry_limit_exceeded,
                 GoldSrcBspLumpId::models,
-                lumps_[goldsrc_bsp_lump_index(GoldSrcBspLumpId::models)].offset + 60U,
-                0U,
-                "World surface count exceeds the configured output limit"));
+                absolute_record_offset(
+                    GoldSrcBspLumpId::models,
+                    model_index,
+                    kGoldSrcBspModelWireSize) + 60U,
+                model_index,
+                "BSP model surface count exceeds the configured output limit"));
             return std::nullopt;
         }
 
@@ -1851,9 +1915,12 @@ private:
             static_cast<void>(fail(
                 GoldSrcBspErrorCode::geometry_limit_exceeded,
                 GoldSrcBspLumpId::models,
-                lumps_[goldsrc_bsp_lump_index(GoldSrcBspLumpId::models)].offset + 56U,
-                0U,
-                "World geometry or material output exceeds configured limits"));
+                absolute_record_offset(
+                    GoldSrcBspLumpId::models,
+                    model_index,
+                    kGoldSrcBspModelWireSize) + 56U,
+                model_index,
+                "BSP model geometry or material output exceeds configured limits"));
             return std::nullopt;
         }
 
@@ -1878,7 +1945,6 @@ private:
         sorted_polygon.reserve(limits_.maximum_face_edges);
         bool has_world_bounds = false;
         assets::WorldBounds world_bounds{};
-        std::size_t polygon_edge_pair_tests = 0U;
 
         for (std::size_t local_face = 0U; local_face < world_face_count; ++local_face) {
             const auto source_face_index = world_first_face + local_face;
@@ -2168,9 +2234,12 @@ private:
             static_cast<void>(fail(
                 GoldSrcBspErrorCode::unable_to_retain_world,
                 GoldSrcBspLumpId::models,
-                lumps_[goldsrc_bsp_lump_index(GoldSrcBspLumpId::models)].offset,
-                0U,
-                "Transactional world construction produced inconsistent owning counts"));
+                absolute_record_offset(
+                    GoldSrcBspLumpId::models,
+                    model_index,
+                    kGoldSrcBspModelWireSize),
+                model_index,
+                "Transactional BSP model construction produced inconsistent owning counts"));
             return std::nullopt;
         }
         world.bounds = world_bounds;
@@ -2178,7 +2247,7 @@ private:
             kGoldSrcBspVersion,
             static_cast<std::uint64_t>(models_.size()),
             static_cast<std::uint64_t>(faces_.size()),
-            static_cast<std::uint64_t>(world_face_count),
+            model_index == 0U ? static_cast<std::uint64_t>(world_face_count) : 0U,
             static_cast<std::uint64_t>(faces_.size() - world_face_count),
             static_cast<std::uint64_t>(world.surfaces.size()),
             static_cast<std::uint64_t>(world.vertices.size()),
@@ -2202,14 +2271,198 @@ private:
             }
         }
 
+        return world;
+    }
+
+    [[nodiscard]] std::optional<GoldSrcBspParsedDocument> build_world()
+    {
+        const auto& world_model = models_.front();
+        std::size_t polygon_edge_pair_tests = 0U;
+        auto world = build_model_geometry(0U, polygon_edge_pair_tests);
+        if (!world) {
+            return std::nullopt;
+        }
+        const auto source_fingerprint = goldsrc_bsp_source_fingerprint(source_);
+        world->source_content_fingerprint = source_fingerprint;
+
+        std::size_t retained_vertex_count = world->vertices.size();
+        std::size_t retained_index_count = world->indices.size();
+        std::size_t retained_surface_count = world->surfaces.size();
+        std::size_t retained_material_count = world->materials.size();
+        std::vector<GoldSrcBspBrushSubmodelAsset> brush_submodels;
+        if (materialize_brush_submodels_) {
+            brush_submodels.reserve(models_.size() - 1U);
+            for (std::size_t model_index = 1U;
+                 model_index < models_.size();
+                 ++model_index) {
+                auto geometry =
+                    build_model_geometry(model_index, polygon_edge_pair_tests);
+                if (!geometry) {
+                    if (error_) {
+                        error_->source_model_index =
+                            static_cast<std::uint32_t>(model_index);
+                    }
+                    return std::nullopt;
+                }
+                geometry->source_content_fingerprint = source_fingerprint;
+
+                std::size_t next_vertex_count = 0U;
+                std::size_t next_index_count = 0U;
+                std::size_t next_surface_count = 0U;
+                std::size_t next_material_count = 0U;
+                if (!checked_add(
+                        retained_vertex_count,
+                        geometry->vertices.size(),
+                        next_vertex_count) ||
+                    !checked_add(
+                        retained_index_count,
+                        geometry->indices.size(),
+                        next_index_count) ||
+                    !checked_add(
+                        retained_surface_count,
+                        geometry->surfaces.size(),
+                        next_surface_count) ||
+                    !checked_add(
+                        retained_material_count,
+                        geometry->materials.size(),
+                        next_material_count) ||
+                    next_vertex_count > limits_.maximum_output_vertices ||
+                    next_index_count > limits_.maximum_output_indices ||
+                    next_surface_count > limits_.maximum_output_surfaces ||
+                    next_material_count > limits_.maximum_output_materials) {
+                    static_cast<void>(fail(
+                        GoldSrcBspErrorCode::geometry_limit_exceeded,
+                        GoldSrcBspLumpId::models,
+                        absolute_record_offset(
+                            GoldSrcBspLumpId::models,
+                            model_index,
+                            kGoldSrcBspModelWireSize) + 56U,
+                        model_index,
+                        "Aggregate world and brush-model geometry exceeds configured limits"));
+                    if (error_) {
+                        error_->source_model_index =
+                            static_cast<std::uint32_t>(model_index);
+                    }
+                    return std::nullopt;
+                }
+                retained_vertex_count = next_vertex_count;
+                retained_index_count = next_index_count;
+                retained_surface_count = next_surface_count;
+                retained_material_count = next_material_count;
+
+                const auto& source_model = models_[model_index];
+                brush_submodels.push_back(GoldSrcBspBrushSubmodelAsset{
+                    static_cast<std::uint32_t>(model_index),
+                    source_model.origin,
+                    assets::WorldBounds{
+                        source_model.minimums, source_model.maximums},
+                    source_model.headnodes[0U],
+                    std::move(*geometry),
+                });
+            }
+        }
+
+        GoldSrcBspSpatialSource spatial_source;
+        spatial_source.submodel_face_ordinals.reserve(faces_.size());
+        for (std::size_t model_index = 1U;
+             model_index < models_.size();
+             ++model_index) {
+            const auto& model = models_[model_index];
+            const auto first_face = static_cast<std::uint32_t>(model.first_face);
+            const auto face_count = static_cast<std::uint32_t>(model.face_count);
+            for (std::uint32_t face_offset = 0U;
+                 face_offset < face_count;
+                 ++face_offset) {
+                spatial_source.submodel_face_ordinals.push_back(
+                    first_face + face_offset);
+            }
+        }
+        spatial_source.planes.reserve(planes_.size());
+        for (const auto& plane : planes_) {
+            spatial_source.planes.push_back(
+                spatial::GoldSrcSpatialSourcePlane{
+                    plane.normal,
+                    plane.distance,
+                    plane.type,
+                });
+        }
+        spatial_source.nodes.reserve(nodes_.size());
+        for (const auto& node : nodes_) {
+            spatial_source.nodes.push_back(
+                spatial::GoldSrcSpatialSourceNode{
+                    node.plane_index,
+                    {static_cast<std::int32_t>(node.children[0U]),
+                        static_cast<std::int32_t>(node.children[1U])},
+                    assets::WorldBounds{
+                        assets::AssetVector3{
+                            static_cast<float>(node.minimums[0U]),
+                            static_cast<float>(node.minimums[1U]),
+                            static_cast<float>(node.minimums[2U]),
+                        },
+                        assets::AssetVector3{
+                            static_cast<float>(node.maximums[0U]),
+                            static_cast<float>(node.maximums[1U]),
+                            static_cast<float>(node.maximums[2U]),
+                        },
+                    },
+                    static_cast<std::uint32_t>(node.first_face),
+                    static_cast<std::uint32_t>(node.face_count),
+                });
+        }
+        spatial_source.leaves.reserve(leaves_.size());
+        for (const auto& leaf : leaves_) {
+            spatial_source.leaves.push_back(
+                spatial::GoldSrcSpatialSourceLeaf{
+                    leaf.contents,
+                    leaf.visibility_offset,
+                    assets::WorldBounds{
+                        assets::AssetVector3{
+                            static_cast<float>(leaf.minimums[0U]),
+                            static_cast<float>(leaf.minimums[1U]),
+                            static_cast<float>(leaf.minimums[2U]),
+                        },
+                        assets::AssetVector3{
+                            static_cast<float>(leaf.maximums[0U]),
+                            static_cast<float>(leaf.maximums[1U]),
+                            static_cast<float>(leaf.maximums[2U]),
+                        },
+                    },
+                    static_cast<std::uint32_t>(leaf.first_marksurface),
+                    static_cast<std::uint32_t>(leaf.marksurface_count),
+                });
+        }
+        spatial_source.marksurface_face_ordinals.reserve(marksurfaces_.size());
+        for (const auto source_face_ordinal : marksurfaces_) {
+            spatial_source.marksurface_face_ordinals.push_back(
+                static_cast<std::uint32_t>(source_face_ordinal));
+        }
+        const auto visibility = lump_bytes(GoldSrcBspLumpId::visibility);
+        spatial_source.visibility_bytes.assign(
+            visibility.begin(), visibility.end());
+        spatial_source.world_model = spatial::GoldSrcSpatialSourceModel{
+            assets::WorldBounds{world_model.minimums, world_model.maximums},
+            world_model.headnodes[0U],
+            world_model.visible_leaf_count,
+        };
+        spatial_source.source_face_count =
+            static_cast<std::uint32_t>(faces_.size());
+
+        const auto entities = lump_bytes(GoldSrcBspLumpId::entities);
+        std::vector<std::byte> entity_lump_bytes;
+        entity_lump_bytes.assign(entities.begin(), entities.end());
+
         return GoldSrcBspParsedDocument{
-            std::move(world),
+            std::move(*world),
+            std::move(spatial_source),
+            std::move(brush_submodels),
+            std::move(entity_lump_bytes),
             lump_element_counts_,
         };
     }
 
     std::span<const std::byte> source_;
     const GoldSrcBspImportLimits& limits_;
+    bool materialize_brush_submodels_{true};
     std::array<LumpRange, kGoldSrcBspLumpCount> lumps_{};
     std::array<std::size_t, kGoldSrcBspLumpCount> lump_element_counts_{};
     std::vector<Plane> planes_;
@@ -2231,10 +2484,11 @@ private:
 
 GoldSrcBspParseResult GoldSrcBspParser::parse(
     const std::span<const std::byte> source,
-    const GoldSrcBspImportLimits& limits)
+    const GoldSrcBspImportLimits& limits,
+    const GoldSrcBspParseOptions& options)
 {
     try {
-        ParserState parser{source, limits};
+        ParserState parser{source, limits, options};
         return parser.run();
     } catch (const std::bad_alloc&) {
         return failure_result(GoldSrcBspError{

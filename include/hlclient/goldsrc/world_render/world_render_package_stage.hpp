@@ -1,5 +1,8 @@
 #pragma once
 
+#include <hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp>
+#include <hlclient/goldsrc/brush_models/goldsrc_world_scene_builder.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp>
 #include <hlclient/goldsrc/lightmaps/goldsrc_world_lightmap_import.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import_stage.hpp>
 #include <hlclient/world_render/world_render_package_builder.hpp>
@@ -30,6 +33,13 @@ struct WorldRenderPackageStageConfig {
     WorldTextureImportStageConfig world_textures;
     lightmaps::GoldSrcWorldLightmapImportLimits lightmaps;
     world_render::WorldRenderPackageLimits render_package;
+    // Opt-in M4.4 continuation. The historical M4.3 package boundary remains
+    // byte-for-byte compatible when this is false.
+    bool build_world_spatial_scene{false};
+    bsp::GoldSrcBspImportLimits bsp;
+    brush_models::GoldSrcBrushRenderLibraryLimits brush_library;
+    brush_models::GoldSrcWorldSceneBuildConfig world_scene;
+    brush_models::GoldSrcWorldSceneBuildLimits world_scene_limits;
     std::size_t maximum_stage_events{
         kDefaultMaximumWorldRenderPackageStageEvents};
 };
@@ -63,6 +73,9 @@ enum class WorldRenderPackageStageErrorCode {
     retained_bsp_source_missing,
     lightmap_import_failed,
     render_package_build_failed,
+    world_scene_bsp_parse_failed,
+    brush_render_library_build_failed,
+    world_scene_build_failed,
     event_backpressure,
     unable_to_retain_package,
 };
@@ -75,6 +88,11 @@ struct WorldRenderPackageStageError {
         lightmap_code;
     std::optional<world_render::WorldRenderPackageErrorCode>
         render_package_code;
+    std::optional<bsp::GoldSrcBspErrorCode> bsp_code;
+    std::optional<brush_models::GoldSrcBrushRenderLibraryErrorCode>
+        brush_library_code;
+    std::optional<brush_models::GoldSrcWorldSceneBuildErrorCode>
+        world_scene_code;
     std::string context;
 };
 
@@ -185,6 +203,12 @@ public:
     [[nodiscard]] bool terminal() const noexcept;
     [[nodiscard]] const std::shared_ptr<
         const world_render::WorldRenderPackage>& result() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const
+        world_scene_render::WorldSceneRenderPackage>& scene_result()
+        const noexcept;
+    [[nodiscard]] const std::optional<
+        brush_models::GoldSrcSpawnCameraExtractionResult>&
+    spawn_camera_result() const noexcept;
     [[nodiscard]] const std::optional<WorldRenderPackageStageError>& error()
         const noexcept;
     [[nodiscard]] const network::NetworkAddress& remote_endpoint()
@@ -204,6 +228,9 @@ public:
     [[nodiscard]] std::size_t lightmap_import_count() const noexcept;
     [[nodiscard]] std::size_t lightmap_set_publication_count() const noexcept;
     [[nodiscard]] std::size_t render_package_publication_count() const noexcept;
+    [[nodiscard]] std::size_t bsp_scene_parse_count() const noexcept;
+    [[nodiscard]] std::size_t brush_library_build_count() const noexcept;
+    [[nodiscard]] std::size_t world_scene_publication_count() const noexcept;
 
 private:
     class Implementation;
@@ -230,6 +257,12 @@ private:
         return "lightmap_import_failed";
     case WorldRenderPackageStageErrorCode::render_package_build_failed:
         return "render_package_build_failed";
+    case WorldRenderPackageStageErrorCode::world_scene_bsp_parse_failed:
+        return "world_scene_bsp_parse_failed";
+    case WorldRenderPackageStageErrorCode::brush_render_library_build_failed:
+        return "brush_render_library_build_failed";
+    case WorldRenderPackageStageErrorCode::world_scene_build_failed:
+        return "world_scene_build_failed";
     case WorldRenderPackageStageErrorCode::event_backpressure:
         return "event_backpressure";
     case WorldRenderPackageStageErrorCode::unable_to_retain_package:

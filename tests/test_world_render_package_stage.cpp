@@ -13,6 +13,7 @@
 #include <hlclient/goldsrc/world_render/world_render_package_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/resource_consistency/provider.hpp>
+#include <hlclient/world_preview/world_preview_scene_source.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -49,6 +50,9 @@ namespace network = hlclient::network;
 namespace readiness_fixture = hlclient::tests::readiness_fixture;
 namespace response_fixture = hlclient::test::resource_client_response_fixture;
 namespace user_fixture = hlclient::test::user_info_fixture;
+namespace visibility = hlclient::world_visibility;
+namespace world_preview = hlclient::world_preview;
+namespace world_scene_render = hlclient::world_scene_render;
 
 struct SentDatagram {
   network::NetworkAddress destination;
@@ -364,6 +368,155 @@ embedded_lightmapped_bsp(const std::size_t lighting_byte_count = 75U) {
   return bytes;
 }
 
+[[nodiscard]] std::vector<std::byte> embedded_lightmapped_bsp_with_entity_tail(
+    const std::string_view entity_tail) {
+  fixture::SyntheticBspBuilder builder;
+  auto entities = std::string{"{\n\"classname\" \"worldspawn\"\n}\n"};
+  entities.append(entity_tail);
+  builder.lump(fixture::SyntheticBspLumpId::entities) = bytes_of(entities);
+  auto embedded = fixture::synthetic_embedded_texture("EMBEDDED", 16U, 16U);
+  constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+  embedded.trailing_byte_count = pixel_byte_count + 2U + (256U * 3U);
+  const std::array<std::optional<fixture::SyntheticBspMipTexture>, 1U> textures{
+      embedded};
+  builder.set_texture_directory(textures);
+
+  fixture::SyntheticBspFace face;
+  face.light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+  face.light_offset = 0;
+  builder.set_faces(std::span{&face, 1U});
+  auto &lighting = builder.lump(fixture::SyntheticBspLumpId::lighting);
+  lighting.resize(75U, std::byte{0x40U});
+
+  auto bytes = builder.build();
+  populate_embedded_palette(bytes);
+  return bytes;
+}
+
+[[nodiscard]] std::vector<std::byte> embedded_lightmapped_bsp_with_bad_pvs() {
+  fixture::SyntheticBspBuilder builder;
+  builder.lump(fixture::SyntheticBspLumpId::entities) =
+      bytes_of("{\n\"classname\" \"worldspawn\"\n}\n");
+  auto embedded = fixture::synthetic_embedded_texture("EMBEDDED", 16U, 16U);
+  constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+  embedded.trailing_byte_count = pixel_byte_count + 2U + (256U * 3U);
+  const std::array<std::optional<fixture::SyntheticBspMipTexture>, 1U> textures{
+      embedded};
+  builder.set_texture_directory(textures);
+
+  fixture::SyntheticBspFace face;
+  face.light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+  face.light_offset = 0;
+  builder.set_faces(std::span{&face, 1U});
+  auto &lighting = builder.lump(fixture::SyntheticBspLumpId::lighting);
+  lighting.resize(75U, std::byte{0x40U});
+
+  std::array<fixture::SyntheticBspLeaf, 2U> leaves{};
+  leaves[0U].contents = -2;
+  leaves[0U].visibility_offset = -1;
+  leaves[0U].marksurface_count = 0U;
+  leaves[1U].contents = -1;
+  leaves[1U].visibility_offset = 0;
+  leaves[1U].marksurface_count = 1U;
+  builder.set_leaves(leaves);
+  builder.lump(fixture::SyntheticBspLumpId::visibility) = {std::byte{0U}};
+
+  auto bytes = builder.build();
+  populate_embedded_palette(bytes);
+  return bytes;
+}
+
+[[nodiscard]] std::vector<std::byte>
+embedded_lightmapped_bsp_with_brush_scene() {
+  fixture::SyntheticBspBuilder builder;
+  builder.lump(fixture::SyntheticBspLumpId::entities) = bytes_of(R"({
+"classname" "worldspawn"
+}
+{
+"classname" "func_wall"
+"model" "*1"
+"origin" "0 0 -1"
+}
+{
+"classname" "func_wall"
+"model" "*1"
+"origin" "8 0 -1"
+"rendermode" "5"
+}
+{
+"classname" "info_player_start"
+"origin" "8 8 -1"
+"angle" "90"
+}
+)");
+
+  auto embedded = fixture::synthetic_embedded_texture("EMBEDDED", 16U, 16U);
+  constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+  embedded.trailing_byte_count = pixel_byte_count + 2U + (256U * 3U);
+  const std::array<std::optional<fixture::SyntheticBspMipTexture>, 1U> textures{
+      embedded};
+  builder.set_texture_directory(textures);
+
+  constexpr std::size_t lightmap_bytes_per_quad = 5U * 5U * 3U;
+  std::array faces{fixture::SyntheticBspFace{},
+                   fixture::SyntheticBspFace{}};
+  faces[0U].light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+  faces[0U].light_offset = 0;
+  faces[1U].light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+  faces[1U].light_offset =
+      static_cast<std::int32_t>(lightmap_bytes_per_quad);
+
+  std::array models{fixture::SyntheticBspModel{},
+                    fixture::SyntheticBspModel{}};
+  models[0U].first_face = 0;
+  models[0U].face_count = 1;
+  models[0U].visibility_leaf_count = 9;
+  models[1U].first_face = 1;
+  models[1U].face_count = 1;
+  models[1U].visibility_leaf_count = 0;
+
+  std::array<fixture::SyntheticBspLeaf, 10U> leaves{};
+  leaves[0U].contents = -2;
+  leaves[0U].visibility_offset = -1;
+  leaves[0U].marksurface_count = 0U;
+  leaves[1U].contents = -1;
+  leaves[1U].visibility_offset = 0;
+  leaves[1U].marksurface_count = 1U;
+  for (std::size_t leaf_index = 2U; leaf_index < leaves.size(); ++leaf_index) {
+    leaves[leaf_index].contents = -1;
+    leaves[leaf_index].visibility_offset = -1;
+    leaves[leaf_index].marksurface_count = 0U;
+  }
+  constexpr std::array<std::uint16_t, 1U> marksurfaces{0U};
+
+  builder.set_faces(faces)
+      .set_leaves(leaves)
+      .set_marksurfaces(marksurfaces)
+      .set_models(models);
+  // Leaf 1 uses a real GoldSrc zero-run compressed two-byte row. The other
+  // addressable leaves retain the explicit all-visible row profile.
+  builder.lump(fixture::SyntheticBspLumpId::visibility) = {
+      std::byte{0x01U}, std::byte{0x00U}, std::byte{0x01U}};
+  auto &lighting = builder.lump(fixture::SyntheticBspLumpId::lighting);
+  lighting.resize(2U * lightmap_bytes_per_quad, std::byte{0x40U});
+
+  auto bytes = builder.build();
+  populate_embedded_palette(bytes);
+  return bytes;
+}
+
+[[nodiscard]] std::vector<std::byte>
+embedded_lightmapped_bsp_with_malformed_brush_geometry() {
+  auto bytes = embedded_lightmapped_bsp_with_brush_scene();
+  // Flip only model 1's face plane side. All references remain structurally
+  // valid, model 0 still materializes, and the brush winding is rejected by
+  // the shared geometry codec.
+  return fixture::SyntheticBspCorruptor{std::move(bytes)}
+      .write_i16(fixture::SyntheticBspLumpId::faces,
+                 bsp::kGoldSrcBspFaceWireSize + 2U, 1)
+      .take();
+}
+
 [[nodiscard]] std::vector<std::byte> unresolved_external_bsp() {
   fixture::SyntheticBspBuilder builder;
   builder.lump(fixture::SyntheticBspLumpId::entities) =
@@ -597,6 +750,326 @@ TEST_CASE("World render package stage publishes one complete CPU package",
   CHECK(harness.stage.render_package_publication_count() == 1U);
 }
 
+TEST_CASE("World render package stage publishes one M4.4 CPU spatial scene",
+          "[world-render-package][stage][world-spatial-scene][success]") {
+  STATIC_REQUIRE_FALSE(HasRendererHandle<goldsrc::WorldRenderPackageStage>);
+  STATIC_REQUIRE_FALSE(
+      HasRendererHandle<hlclient::world_scene_render::WorldSceneRenderPackage>);
+
+  fixture::ScopedLocalResourceTestRoot root;
+  write_stage_prerequisites(root, embedded_lightmapped_bsp());
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  auto config = test_config();
+  config.build_world_spatial_scene = true;
+  WorldRenderPackageStageHarness harness{root, registries, config};
+  harness.begin_protocol();
+  harness.finish();
+
+  REQUIRE(harness.stage.state() ==
+          goldsrc::WorldRenderPackageStageState::world_render_package_ready);
+  REQUIRE(harness.stage.result());
+  REQUIRE(harness.stage.scene_result());
+  CHECK_FALSE(harness.stage.error());
+  const auto &scene = *harness.stage.scene_result();
+  CHECK(scene.world_package() == harness.stage.result());
+  CHECK(scene.statistics().world_surface_count == 1U);
+  CHECK(scene.statistics().brush_model_count == 0U);
+  CHECK(scene.statistics().brush_instance_count == 0U);
+  CHECK(scene.spatial_package().statistics().plane_count == 1U);
+  CHECK(scene.spatial_package().statistics().node_count == 1U);
+  CHECK(scene.spatial_package().statistics().leaf_count == 2U);
+  CHECK(harness.stage.bsp_scene_parse_count() == 1U);
+  CHECK(harness.stage.brush_library_build_count() == 0U);
+  CHECK(harness.stage.world_scene_publication_count() == 1U);
+  CHECK(harness.stage.render_package_publication_count() == 1U);
+  CHECK_FALSE(harness.stage.spawn_camera_result());
+  check_terminal_ownership_and_transport(harness);
+
+  const auto scene_identity = scene.resource_identity();
+  const auto sent = harness.transport.sent.size();
+  harness.stage.update(harness.next_update + 5s);
+  CHECK(harness.stage.scene_result()->resource_identity() == scene_identity);
+  CHECK(harness.stage.world_scene_publication_count() == 1U);
+  CHECK(harness.stage.bsp_scene_parse_count() == 1U);
+  CHECK(harness.transport.sent.size() == sent);
+}
+
+TEST_CASE("World render package stage composes brushes spawn and CPU visibility",
+          "[world-render-package][stage][world-spatial-scene][brush]"
+          "[visibility][spawn]") {
+  STATIC_REQUIRE_FALSE(HasRendererHandle<goldsrc::WorldRenderPackageStage>);
+  STATIC_REQUIRE_FALSE(
+      HasRendererHandle<world_scene_render::WorldSceneRenderPackage>);
+  STATIC_REQUIRE_FALSE(
+      HasRendererHandle<world_preview::WorldPreviewSceneSource>);
+
+  fixture::ScopedLocalResourceTestRoot root;
+  write_stage_prerequisites(root,
+                            embedded_lightmapped_bsp_with_brush_scene());
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  auto config = test_config();
+  config.build_world_spatial_scene = true;
+  config.world_scene.brushes =
+      goldsrc::brush_models::GoldSrcWorldSceneBrushMode::static_initial;
+  config.world_scene.extract_spawn = true;
+  WorldRenderPackageStageHarness harness{root, registries, config};
+  harness.begin_protocol();
+  harness.finish();
+
+  REQUIRE(harness.stage.state() ==
+          goldsrc::WorldRenderPackageStageState::world_render_package_ready);
+  REQUIRE(harness.stage.result());
+  REQUIRE(harness.stage.scene_result());
+  CHECK_FALSE(harness.stage.error());
+  const auto &scene = *harness.stage.scene_result();
+  CHECK(scene.world_package() == harness.stage.result());
+  CHECK(scene.statistics().world_surface_count == 1U);
+  CHECK(scene.statistics().brush_model_count == 1U);
+  CHECK(scene.statistics().brush_surface_count == 1U);
+  CHECK(scene.statistics().brush_instance_count == 2U);
+  CHECK(scene.statistics().supported_brush_instance_count == 1U);
+  CHECK(scene.statistics().unsupported_brush_instance_count == 1U);
+  REQUIRE(scene.brush_instances().size() == 2U);
+  CHECK(scene.brush_instances()[0U].support_status ==
+        world_scene_render::BrushSubmodelRenderSupportStatus::
+            supported_static_opaque);
+  CHECK(scene.brush_instances()[1U].support_status ==
+        world_scene_render::BrushSubmodelRenderSupportStatus::
+            unsupported_rendermode);
+  CHECK(scene.spatial_package().statistics().unique_pvs_row_count == 2U);
+  const auto retained_pvs_row =
+      scene.spatial_package().pvs_table().row_for_leaf(1U);
+  REQUIRE(retained_pvs_row);
+  REQUIRE(retained_pvs_row->size() == 2U);
+  CHECK((*retained_pvs_row)[0U] == std::byte{0x01U});
+  CHECK((*retained_pvs_row)[1U] == std::byte{0x00U});
+  const auto all_visible_pvs_row =
+      scene.spatial_package().pvs_table().row_for_leaf(2U);
+  REQUIRE(all_visible_pvs_row);
+  REQUIRE(all_visible_pvs_row->size() == 2U);
+  CHECK((*all_visible_pvs_row)[0U] == std::byte{0xFFU});
+  CHECK((*all_visible_pvs_row)[1U] == std::byte{0x01U});
+
+  CHECK(harness.stage.bsp_scene_parse_count() == 1U);
+  CHECK(harness.stage.brush_library_build_count() == 1U);
+  CHECK(harness.stage.world_scene_publication_count() == 1U);
+  CHECK(harness.stage.render_package_publication_count() == 1U);
+  REQUIRE(harness.stage.spawn_camera_result());
+  const auto &spawn = *harness.stage.spawn_camera_result();
+  REQUIRE(spawn.descriptor);
+  CHECK(spawn.descriptor->source_class == goldsrc::brush_models::
+        GoldSrcSpawnCameraSourceClass::info_player_start);
+  CHECK(spawn.descriptor->source_entity_ordinal == 3U);
+  CHECK(spawn.descriptor->position.x == 8.0F);
+  CHECK(spawn.descriptor->position.y == 8.0F);
+  CHECK(spawn.descriptor->position.z == -1.0F);
+
+  world_preview::WorldPreviewSceneOptions preview_options;
+  preview_options.camera_mode = world_preview::WorldPreviewCameraMode::spawn;
+  preview_options.visibility_mode = visibility::WorldVisibilityMode::pvs_only;
+  preview_options.brush_submodels =
+      world_preview::WorldPreviewBrushSubmodelsMode::static_instances;
+  preview_options.spawn_camera =
+      world_preview::WorldPreviewSpawnCameraDescriptor{
+          spawn.descriptor->position,
+          spawn.descriptor->forward,
+          spawn.descriptor->up,
+      };
+  world_preview::WorldPreviewSceneSource preview{
+      harness.stage.scene_result(), preview_options};
+  CHECK(preview.spawn_camera_applied());
+  REQUIRE(preview.world_state().world_visibility());
+  const auto &visible = *preview.world_state().world_visibility();
+  CHECK(visible.requested_mode() == visibility::WorldVisibilityMode::pvs_only);
+  CHECK(visible.applied_mode() == visibility::WorldVisibilityMode::pvs_only);
+  CHECK(visible.fallback_reason() == visibility::WorldPvsFallbackReason::none);
+  REQUIRE(visible.camera_leaf_index());
+  CHECK(*visible.camera_leaf_index() == 1U);
+  REQUIRE(visible.visible_leaf_indices().size() == 1U);
+  CHECK(visible.visible_leaf_indices()[0U] == 1U);
+  REQUIRE(visible.visible_world_surface_indices().size() == 1U);
+  CHECK(visible.visible_world_surface_indices()[0U] == 0U);
+  REQUIRE(visible.visible_brush_instance_indices().size() == 1U);
+  CHECK(visible.visible_brush_instance_indices()[0U] == 0U);
+  CHECK(visible.statistics().total_brush_instance_count == 2U);
+  CHECK(visible.statistics().supported_brush_instance_count == 1U);
+  CHECK(visible.statistics().visible_brush_instance_count == 1U);
+  REQUIRE(preview.world_state().visible_draw_list());
+  const auto &draw_list = *preview.world_state().visible_draw_list();
+  CHECK(draw_list.statistics().world_command_count == 1U);
+  CHECK(draw_list.statistics().brush_command_count == 1U);
+  CHECK(draw_list.statistics().command_count == 2U);
+  REQUIRE(draw_list.commands().size() == 2U);
+  CHECK(draw_list.commands()[1U].object_kind ==
+        visibility::WorldVisibleObjectKind::brush_instance_surface);
+  REQUIRE(draw_list.commands()[1U].source_instance_index);
+  CHECK(*draw_list.commands()[1U].source_instance_index == 0U);
+
+  check_terminal_ownership_and_transport(harness);
+  const auto terminal_state = harness.stage.state();
+  const auto terminal_sent = harness.transport.sent.size();
+  const auto terminal_cleanup = harness.stage.cleanup_count();
+  const auto terminal_releases = harness.connection_releases;
+  const auto scene_identity = harness.stage.scene_result()->resource_identity();
+  harness.stage.update(harness.next_update + 5s);
+  harness.stage.cancel(harness.next_update + 6s);
+  REQUIRE(preview.update(std::chrono::duration<double>{0.0}));
+  CHECK(harness.stage.state() == terminal_state);
+  CHECK(harness.stage.scene_result()->resource_identity() == scene_identity);
+  CHECK(harness.transport.sent.size() == terminal_sent);
+  CHECK(harness.stage.cleanup_count() == terminal_cleanup);
+  CHECK(harness.connection_releases == terminal_releases);
+  CHECK(harness.stage.world_scene_publication_count() == 1U);
+}
+
+TEST_CASE("World render package stage translates submodel parse limits to the brush boundary",
+          "[world-render-package][stage][world-spatial-scene][brush]"
+          "[failure][regression]") {
+  enum class Scenario {
+    invalid_geometry,
+    aggregate_limit,
+  };
+
+  Scenario scenario{Scenario::invalid_geometry};
+  fixture::ScopedLocalResourceTestRoot root;
+  auto config = test_config();
+  config.build_world_spatial_scene = true;
+  config.world_scene.brushes =
+      goldsrc::brush_models::GoldSrcWorldSceneBrushMode::static_initial;
+  SECTION("malformed model 1 geometry is a typed brush failure") {
+    scenario = Scenario::invalid_geometry;
+    write_stage_prerequisites(
+        root, embedded_lightmapped_bsp_with_malformed_brush_geometry());
+  }
+  SECTION("aggregate retained geometry is a typed brush limit failure") {
+    scenario = Scenario::aggregate_limit;
+    write_stage_prerequisites(root,
+                              embedded_lightmapped_bsp_with_brush_scene());
+    // Model 0 retains four vertices. The brush adds four more, so seven is a
+    // valid per-model limit but rejects the aggregate at source model 1.
+    config.bsp.maximum_output_vertices = 7U;
+  }
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  WorldRenderPackageStageHarness harness{root, registries, config};
+  harness.begin_protocol();
+  harness.finish();
+
+  CHECK(harness.stage.state() ==
+        goldsrc::WorldRenderPackageStageState::render_package_failed);
+  CHECK_FALSE(harness.stage.result());
+  CHECK_FALSE(harness.stage.scene_result());
+  REQUIRE(harness.stage.error());
+  CHECK(harness.stage.error()->code ==
+        goldsrc::WorldRenderPackageStageErrorCode::
+            brush_render_library_build_failed);
+  CHECK_FALSE(harness.stage.error()->bsp_code);
+  REQUIRE(harness.stage.error()->brush_library_code);
+  CHECK(*harness.stage.error()->brush_library_code ==
+        (scenario == Scenario::aggregate_limit
+             ? goldsrc::brush_models::GoldSrcBrushRenderLibraryErrorCode::
+                   aggregate_limit_exceeded
+             : goldsrc::brush_models::GoldSrcBrushRenderLibraryErrorCode::
+                   invalid_model_geometry));
+  CHECK(harness.stage.bsp_scene_parse_count() == 1U);
+  CHECK(harness.stage.brush_library_build_count() == 1U);
+  CHECK(harness.stage.world_scene_publication_count() == 0U);
+  CHECK(harness.stage.render_package_publication_count() == 0U);
+  check_terminal_ownership_and_transport(harness);
+}
+
+TEST_CASE("World render package stage keeps model zero parse failures at the BSP boundary",
+          "[world-render-package][stage][world-spatial-scene][failure]"
+          "[regression]") {
+  fixture::ScopedLocalResourceTestRoot root;
+  write_stage_prerequisites(root,
+                            embedded_lightmapped_bsp_with_brush_scene());
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  auto config = test_config();
+  config.build_world_spatial_scene = true;
+  config.world_scene.brushes =
+      goldsrc::brush_models::GoldSrcWorldSceneBrushMode::static_initial;
+  config.bsp.maximum_output_vertices = 3U;
+  WorldRenderPackageStageHarness harness{root, registries, config};
+  harness.begin_protocol();
+  harness.finish();
+
+  CHECK(harness.stage.state() ==
+        goldsrc::WorldRenderPackageStageState::render_package_failed);
+  CHECK_FALSE(harness.stage.result());
+  CHECK_FALSE(harness.stage.scene_result());
+  REQUIRE(harness.stage.error());
+  CHECK(harness.stage.error()->code ==
+        goldsrc::WorldRenderPackageStageErrorCode::
+            world_scene_bsp_parse_failed);
+  REQUIRE(harness.stage.error()->bsp_code);
+  CHECK(*harness.stage.error()->bsp_code ==
+        bsp::GoldSrcBspErrorCode::geometry_limit_exceeded);
+  CHECK_FALSE(harness.stage.error()->brush_library_code);
+  CHECK(harness.stage.bsp_scene_parse_count() == 1U);
+  CHECK(harness.stage.brush_library_build_count() == 0U);
+  CHECK(harness.stage.world_scene_publication_count() == 0U);
+  CHECK(harness.stage.render_package_publication_count() == 0U);
+  check_terminal_ownership_and_transport(harness);
+}
+
+TEST_CASE("World render package stage retains typed M4.4 scene failures",
+          "[world-render-package][stage][world-spatial-scene][failure]") {
+  enum class Scenario {
+    malformed_pvs,
+    malformed_entity_tail,
+  };
+
+  Scenario scenario{Scenario::malformed_pvs};
+  fixture::ScopedLocalResourceTestRoot root;
+  auto config = test_config();
+  config.build_world_spatial_scene = true;
+
+  SECTION("malformed PVS fails the spatial scene after M4.3 package build") {
+    scenario = Scenario::malformed_pvs;
+    write_stage_prerequisites(root, embedded_lightmapped_bsp_with_bad_pvs());
+  }
+  SECTION("malformed inert entity tail fails canonical scene composition") {
+    scenario = Scenario::malformed_entity_tail;
+    config.world_scene.brushes =
+        goldsrc::brush_models::GoldSrcWorldSceneBrushMode::static_initial;
+    write_stage_prerequisites(
+        root,
+        embedded_lightmapped_bsp_with_entity_tail(
+            "{\n\"classname\" \"func_wall\"\n\"model\" \"*1\"\n"));
+  }
+
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  WorldRenderPackageStageHarness harness{root, registries, config};
+  harness.begin_protocol();
+  harness.finish();
+
+  CHECK(harness.stage.state() ==
+        goldsrc::WorldRenderPackageStageState::render_package_failed);
+  CHECK_FALSE(harness.stage.result());
+  CHECK_FALSE(harness.stage.scene_result());
+  REQUIRE(harness.stage.error());
+  CHECK(harness.stage.error()->code ==
+        goldsrc::WorldRenderPackageStageErrorCode::world_scene_build_failed);
+  REQUIRE(harness.stage.error()->world_scene_code);
+  CHECK(*harness.stage.error()->world_scene_code ==
+        (scenario == Scenario::malformed_pvs
+             ? goldsrc::brush_models::GoldSrcWorldSceneBuildErrorCode::
+                   spatial_package_build_failed
+             : goldsrc::brush_models::GoldSrcWorldSceneBuildErrorCode::
+                   entity_document_parse_failed));
+  CHECK(harness.stage.bsp_scene_parse_count() == 1U);
+  CHECK(harness.stage.brush_library_build_count() ==
+        (scenario == Scenario::malformed_entity_tail ? 1U : 0U));
+  CHECK(harness.stage.world_scene_publication_count() == 0U);
+  CHECK(harness.stage.render_package_publication_count() == 0U);
+  check_terminal_ownership_and_transport(harness);
+}
+
 TEST_CASE("World render package stage preserves typed prerequisite failures",
           "[world-render-package][stage][failure]") {
   enum class Scenario {
@@ -668,6 +1141,13 @@ TEST_CASE(
   REQUIRE(bsp::register_builtin_asset_importers(registries));
   auto config = test_config();
   config.maximum_stage_events = 4U;
+  SECTION("historical M4.3 package boundary") {}
+  SECTION("M4.4 spatial-scene continuation requested") {
+    config.build_world_spatial_scene = true;
+    config.world_scene.brushes =
+        goldsrc::brush_models::GoldSrcWorldSceneBrushMode::static_initial;
+    config.world_scene.extract_spawn = true;
+  }
   WorldRenderPackageStageHarness harness{root, registries, config};
   harness.begin_protocol();
   harness.finish(false);
@@ -682,6 +1162,11 @@ TEST_CASE(
   CHECK(harness.stage.lightmap_import_count() == 0U);
   CHECK(harness.stage.lightmap_set_publication_count() == 0U);
   CHECK(harness.stage.render_package_publication_count() == 0U);
+  CHECK_FALSE(harness.stage.scene_result());
+  CHECK_FALSE(harness.stage.spawn_camera_result());
+  CHECK(harness.stage.bsp_scene_parse_count() == 0U);
+  CHECK(harness.stage.brush_library_build_count() == 0U);
+  CHECK(harness.stage.world_scene_publication_count() == 0U);
   check_terminal_ownership_and_transport(harness);
 }
 
@@ -696,10 +1181,27 @@ TEST_CASE("World render package stage cancellation and timeout are idempotent",
   fixture::ScopedLocalResourceTestRoot root;
   write_stage_prerequisites(root, embedded_lightmapped_bsp());
   auto config = test_config();
-  SECTION("cooperative cancellation") { scenario = Scenario::cancellation; }
-  SECTION("manual-clock local texture timeout") {
-    scenario = Scenario::timeout;
-    config.world_textures.texture_import.timeout = 1ms;
+  SECTION("historical M4.3 package boundary") {
+    SECTION("cooperative cancellation") {
+      scenario = Scenario::cancellation;
+    }
+    SECTION("manual-clock local texture timeout") {
+      scenario = Scenario::timeout;
+      config.world_textures.texture_import.timeout = 1ms;
+    }
+  }
+  SECTION("M4.4 spatial-scene continuation requested") {
+    config.build_world_spatial_scene = true;
+    config.world_scene.brushes =
+        goldsrc::brush_models::GoldSrcWorldSceneBrushMode::static_initial;
+    config.world_scene.extract_spawn = true;
+    SECTION("cooperative cancellation") {
+      scenario = Scenario::cancellation;
+    }
+    SECTION("manual-clock local texture timeout") {
+      scenario = Scenario::timeout;
+      config.world_textures.texture_import.timeout = 1ms;
+    }
   }
 
   assets::AssetImporterRegistries registries;
@@ -720,8 +1222,13 @@ TEST_CASE("World render package stage cancellation and timeout are idempotent",
              ? goldsrc::WorldRenderPackageStageState::cancelled
              : goldsrc::WorldRenderPackageStageState::timed_out));
   CHECK_FALSE(harness.stage.result());
+  CHECK_FALSE(harness.stage.scene_result());
+  CHECK_FALSE(harness.stage.spawn_camera_result());
   CHECK(harness.stage.lightmap_set_publication_count() == 0U);
   CHECK(harness.stage.render_package_publication_count() == 0U);
+  CHECK(harness.stage.bsp_scene_parse_count() == 0U);
+  CHECK(harness.stage.brush_library_build_count() == 0U);
+  CHECK(harness.stage.world_scene_publication_count() == 0U);
   if (scenario == Scenario::cancellation) {
     CHECK_FALSE(harness.stage.error());
     CHECK(harness.event_count(

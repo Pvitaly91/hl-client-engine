@@ -1,9 +1,11 @@
 # OpenGL world renderer
 
 The M4.3 OpenGL backend is the first graphical consumer of the neutral
-`WorldRenderPackage`. It targets OpenGL 3.3 Core through the committed GLAD2
-loader and receives only `RenderScene`; it performs no BSP/WAD parsing,
-filesystem lookup, asset dispatch, or network work.
+`WorldRenderPackage`. M4.4 extends the same backend with renderer-neutral
+visible draw commands and an optional aggregate static brush package. It
+targets OpenGL 3.3 Core through the committed GLAD2 loader and receives only
+`RenderScene`; it performs no BSP/WAD/PVS/entity parsing, filesystem lookup,
+asset dispatch, or network work.
 
 ## Resource ownership and cache
 
@@ -16,6 +18,13 @@ the renderer-local cache:
 - a new identity/revision destroys the old world resources and uploads once;
 - resources are not uploaded every frame and there is no global cache;
 - a partial upload is transactional and never becomes the active world.
+
+M4.4 gives the composed `WorldSceneRenderPackage` a separate stable resource
+identity/revision. That identity controls world/brush GPU resources. A changed
+`WorldVisibilitySet`/`WorldVisibleDrawList` revision changes command selection
+and statistics only; moving the camera or selecting a different PVS never
+causes a geometry or texture re-upload. One aggregate brush VAO/VBO/EBO and
+its texture/lightmap resources are shared by all supported instances.
 
 The renderer must be shut down, including failed partial resources, before its
 SDL OpenGL context is destroyed.
@@ -79,9 +88,11 @@ are bounded and do not print the full source.
 Format-neutral camera math supplies a right-handed look-at matrix and OpenGL
 clip-space perspective projection. The convention and matrix upload transpose
 choice are explicit in code and covered by canonical projection tests.
-GoldSrc source coordinates remain Z-up, the model matrix is identity, base UVs
-use normalized raw S/T with repeat, and lightmap UVs address atlas texel centers
-without a CPU vertical flip.
+GoldSrc source coordinates remain Z-up. World commands use the identity model;
+brush commands use their validated entity-origin-relative model matrix and the
+shader receives `projection * view * model`. Base UVs use normalized raw S/T
+with repeat, and lightmap UVs address atlas texel centers without a CPU
+vertical flip.
 
 Every frame sets the viewport, clear color, and depth clear; enables depth
 testing with `GL_LEQUAL` and depth writes; disables blending; and selects no
@@ -94,6 +105,12 @@ lightmap page/fallback, sets the masked and lightmap uniforms, and calls
 `glDrawElements` for the exact checked byte offset
 `first_index * sizeof(uint32_t)`. Masked draws keep blending disabled and depth
 writes enabled. M4.3 has no translucent pass.
+
+When an M4.4 visible draw list is present, the backend instead issues its exact
+checked per-surface ranges in stable opaque-world, masked-world, opaque-brush,
+masked-brush order. The historical M4.3 full-batch path remains the fallback
+when no draw list is supplied. Unsupported or nonzero brush rendermodes never
+enter the draw list; blending remains disabled.
 
 ## Failure and diagnostics
 
@@ -108,6 +125,17 @@ rendered frames, draw calls, triangles, and base/lightmap binds without
 copying the package or exposing texture pixels. Resize updates the viewport.
 The null renderer consumes the same expanded scene but uploads nothing.
 
-M4.3 does not perform PVS or frustum traversal, render brush entities, animate
-light styles, implement dynamic lights, implement water/sky/animated-texture
-effects, or derive a gameplay camera. Those remain later milestones.
+Actual-context frame tests inspect the bounded `GL_VERSION` result after a
+context is current. They execute on real OpenGL 3.3-or-newer contexts and may
+skip only when the context is unavailable or actually older; the requested SDL
+version alone is not treated as capability evidence. Production still rejects
+an actual context below OpenGL 3.3 Core. This gate is not an unconditional
+headless-host skip.
+
+PVS decompression, BSP traversal, frustum resolution, and entity interpretation
+remain CPU responsibilities upstream of the renderer. M4.4 renders only
+supported static initial opaque brush instances. It does not animate light
+styles, implement runtime doors/platforms/rotators, blending, dynamic lights,
+water/sky/animated-texture effects, gameplay input, or a gameplay camera. See
+[world visibility](WORLD_VISIBILITY.md) and
+[brush-submodel rendering](BRUSH_SUBMODEL_RENDERING.md).

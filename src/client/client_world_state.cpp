@@ -1,6 +1,11 @@
 #include <hlclient/client/client_world_state.hpp>
 
 #include <hlclient/world_render/world_render_types.hpp>
+#include <hlclient/world_scene_render/world_scene_render_types.hpp>
+#include <hlclient/world_visibility/world_visible_draw_list.hpp>
+#include <hlclient/world_visibility/world_visibility_types.hpp>
+
+#include <utility>
 
 namespace hlclient::client {
 
@@ -28,14 +33,71 @@ void ClientWorldState::set_connection_requested(const bool requested) noexcept
 void ClientWorldState::set_static_world(
     std::shared_ptr<const world_render::WorldRenderPackage> package) noexcept
 {
+    world_scene_.reset();
+    scene_revision_ = 0U;
+    clear_world_visibility();
     static_world_ = std::move(package);
     world_revision_ = static_world_ ? static_world_->resource_revision() : 0U;
+}
+
+void ClientWorldState::set_world_scene(
+    std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>
+        package) noexcept
+{
+    clear_world_visibility();
+    world_scene_ = std::move(package);
+    if (world_scene_) {
+        static_world_ = world_scene_->world_package();
+        world_revision_ = static_world_ ? static_world_->resource_revision() : 0U;
+        scene_revision_ = world_scene_->resource_revision();
+    } else {
+        static_world_.reset();
+        world_revision_ = 0U;
+        scene_revision_ = 0U;
+    }
 }
 
 void ClientWorldState::clear_static_world() noexcept
 {
     static_world_.reset();
+    world_scene_.reset();
     world_revision_ = 0U;
+    scene_revision_ = 0U;
+    clear_world_visibility();
+}
+
+bool ClientWorldState::set_world_visibility(
+    std::shared_ptr<const world_visibility::WorldVisibilitySet> visibility,
+    std::shared_ptr<const world_visibility::WorldVisibleDrawList> draw_list) noexcept
+{
+    if (!visibility && !draw_list) {
+        clear_world_visibility();
+        return true;
+    }
+    if (!world_scene_ || !visibility || !draw_list ||
+        visibility->revision() == 0U ||
+        visibility->revision() != draw_list->visibility_revision() ||
+        visibility->scene_identity() != draw_list->scene_identity() ||
+        !visibility->result_signature() ||
+        visibility->result_signature() != draw_list->result_signature()) {
+        return false;
+    }
+    const auto expected_identity =
+        world_scene_->visibility_scene_identity();
+    if (visibility->scene_identity() != expected_identity) {
+        return false;
+    }
+    world_visibility_ = std::move(visibility);
+    visible_draw_list_ = std::move(draw_list);
+    visibility_revision_ = world_visibility_->revision();
+    return true;
+}
+
+void ClientWorldState::clear_world_visibility() noexcept
+{
+    world_visibility_.reset();
+    visible_draw_list_.reset();
+    visibility_revision_ = 0U;
 }
 
 void ClientWorldState::set_camera(const RenderCameraState& camera) noexcept
@@ -70,6 +132,24 @@ ClientWorldState::static_world() const noexcept
     return static_world_;
 }
 
+const std::shared_ptr<const world_scene_render::WorldSceneRenderPackage>&
+ClientWorldState::world_scene() const noexcept
+{
+    return world_scene_;
+}
+
+const std::shared_ptr<const world_visibility::WorldVisibilitySet>&
+ClientWorldState::world_visibility() const noexcept
+{
+    return world_visibility_;
+}
+
+const std::shared_ptr<const world_visibility::WorldVisibleDrawList>&
+ClientWorldState::visible_draw_list() const noexcept
+{
+    return visible_draw_list_;
+}
+
 const RenderCameraState& ClientWorldState::camera() const noexcept
 {
     return camera_;
@@ -78,6 +158,16 @@ const RenderCameraState& ClientWorldState::camera() const noexcept
 std::uint64_t ClientWorldState::world_revision() const noexcept
 {
     return world_revision_;
+}
+
+std::uint64_t ClientWorldState::scene_revision() const noexcept
+{
+    return scene_revision_;
+}
+
+std::uint64_t ClientWorldState::visibility_revision() const noexcept
+{
+    return visibility_revision_;
 }
 
 const PreviewRenderOptions& ClientWorldState::preview_render_options() const noexcept

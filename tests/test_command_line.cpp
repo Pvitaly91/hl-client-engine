@@ -520,7 +520,7 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
               std::string::npos);
     }
 
-    SECTION("view world selects the package boundary and OpenGL")
+    SECTION("view world selects the spatial scene boundary and historical defaults")
     {
         const std::array arguments{
             std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
@@ -537,8 +537,59 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         REQUIRE(result);
         CHECK(result.options->view_world);
         CHECK(result.options->stop_after ==
-              hlclient::core::ConnectionStopPoint::world_render_package);
+              hlclient::core::ConnectionStopPoint::world_spatial_scene);
         CHECK(result.options->renderer == RendererBackend::opengl);
+        CHECK(result.options->world_visibility ==
+              hlclient::core::WorldVisibilityOption::all);
+        CHECK(result.options->brush_submodels ==
+              hlclient::core::BrushSubmodelsOption::off);
+        CHECK(result.options->world_camera ==
+              hlclient::core::WorldCameraOption::static_camera);
+    }
+
+    SECTION("spatial scene accepts explicit PVS brush and spawn options")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"world-spatial-scene"},
+            std::string_view{"--renderer"}, std::string_view{"null"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+            std::string_view{"--visibility"}, std::string_view{"pvs-frustum"},
+            std::string_view{"--brush-submodels"}, std::string_view{"static"},
+            std::string_view{"--camera"}, std::string_view{"spawn"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::world_spatial_scene);
+        CHECK(result.options->renderer == RendererBackend::null);
+        CHECK(result.options->world_visibility ==
+              hlclient::core::WorldVisibilityOption::pvs_frustum);
+        CHECK(result.options->brush_submodels ==
+              hlclient::core::BrushSubmodelsOption::static_initial);
+        CHECK(result.options->world_camera ==
+              hlclient::core::WorldCameraOption::spawn);
+        CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
+    SECTION("visibility options are rejected outside a spatial route")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"connect-request"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--visibility"}, std::string_view{"pvs"},
+        };
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("world-spatial-scene") != std::string::npos);
     }
 
     SECTION("view world rejects NullRenderer")
@@ -967,6 +1018,33 @@ TEST_CASE("Command line parser reports malformed input", "[core][command-line]")
             std::string_view{"--decode-palette-file"},
             std::string_view{"--upload-textures"},
             std::string_view{"--render-map"},
+        };
+        for (const auto option : forbidden) {
+            CAPTURE(option);
+            const std::array arguments{option};
+            const auto result = parse_command_line(arguments);
+            CHECK_FALSE(result);
+            CHECK(result.error.find("Unknown command-line argument") !=
+                  std::string::npos);
+        }
+    }
+
+    SECTION("M4.4 unsafe spatial entity and gameplay options remain unavailable")
+    {
+        constexpr std::array forbidden{
+            std::string_view{"--entity-file"},
+            std::string_view{"--raw-pvs"},
+            std::string_view{"--force-visible"},
+            std::string_view{"--ignore-pvs-error"},
+            std::string_view{"--move-door"},
+            std::string_view{"--animate-brush"},
+            std::string_view{"--set-entity-origin"},
+            std::string_view{"--set-entity-angles"},
+            std::string_view{"--render-translucent-entities"},
+            std::string_view{"--enable-collision"},
+            std::string_view{"--spawn-player"},
+            std::string_view{"--send-usercmd"},
+            std::string_view{"--load-native-bsp-path"},
         };
         for (const auto option : forbidden) {
             CAPTURE(option);

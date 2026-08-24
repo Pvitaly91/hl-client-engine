@@ -30,6 +30,25 @@ enum class ConnectionStopPoint {
     world_geometry,
     world_textures,
     world_render_package,
+    world_spatial_scene,
+};
+
+enum class WorldVisibilityOption {
+    all,
+    frustum,
+    pvs,
+    pvs_frustum,
+};
+
+enum class BrushSubmodelsOption {
+    off,
+    static_initial,
+};
+
+enum class WorldCameraOption {
+    static_camera,
+    orbit,
+    spawn,
 };
 
 enum class AuthenticationProviderKind {
@@ -56,6 +75,9 @@ struct CommandLineOptions {
     std::string player_name{"Player"};
     std::string player_model{"ivan"};
     RendererBackend renderer{RendererBackend::opengl};
+    WorldVisibilityOption world_visibility{WorldVisibilityOption::all};
+    BrushSubmodelsOption brush_submodels{BrushSubmodelsOption::off};
+    WorldCameraOption world_camera{WorldCameraOption::static_camera};
 };
 
 struct CommandLineParseResult {

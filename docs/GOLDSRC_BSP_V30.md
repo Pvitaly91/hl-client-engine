@@ -3,6 +3,11 @@
 M4.1 implements a clean-room, read-only importer for Valve GoldSrc BSP version
 30. M4.2 leaves that owning CPU-world importer unchanged and adds a separate
 parser for texture-source ranges in the already approved BSP bytes. The
+M4.4 extension keeps that one wire parser and publishes owning canonical
+plane/node/leaf/marksurface/visibility records, entity-lump bytes, and one
+neutral geometry asset for each render submodel in `models[1..N]`. Spatial,
+entity, and renderer-neutral scene builders consume those validated records;
+they do not implement a second BSP layout decoder. The
 implementation uses the pinned public Half-Life SDK only to
 cross-check published constants and field meanings. Project code decodes every
 field from bounded bytes; it does not include, cast to, or copy SDK wire
@@ -45,6 +50,13 @@ by emitted materials, the M4.1 importer preserves their exact distinct source
 ordinals. The M4.2 texture-source parser treats those ordinals as aliases of
 one physical record, decodes it once when used, and preserves the lowest
 ordinal as canonical texture provenance.
+
+Each canonical parse also derives an opaque two-word content fingerprint from
+the complete validated BSP byte source. Model 0 and every materialized brush
+submodel retain the same fingerprint. Scene and brush-library composition use
+it only for equality, rejecting packages or retained bytes from another BSP
+even when their geometry layout and bounds happen to match. No source bytes or
+native path enter renderer-facing packages.
 
 Texture storage is classified without reading pixels:
 
@@ -94,11 +106,14 @@ Every edge vertex, surfedge edge, face plane/texinfo/range, node child/face,
 leaf marksurface/visibility, marksurface face, clipnode child/plane, model
 headnode, and model face range is cross-validated. Lighting and visibility
 offsets may be `-1` or a valid offset in the corresponding retained lump.
-Entity text is not parsed or exposed by the M4.1 importer, PVS is not
-decompressed, lighting samples are not decoded, and collision hull runtime
-state is not created. M4.2 has a separate inert parser that reads only the first
-entity's quoted metadata needed for WAD basenames; it does not change this
-importer output or instantiate entities.
+The M4.1 world-importer result remains model-0 geometry only. Its entity text
+is not interpreted, PVS is not decompressed, lighting samples are not decoded,
+and collision hull runtime state is not created. M4.4's canonical parsed
+document additionally retains entity bytes and spatial source records for
+later bounded CPU builders. Its entity document parser treats the complete
+lump as inert ordered quoted key/value records; the M4.2 worldspawn WAD reader
+uses that same tokenizer while preserving its first-entity basename-only
+sandbox. Neither path executes or instantiates an entity.
 
 Failures are transactional and typed with an error code, optional lump ID,
 bounded byte offset, optional element index, and bounded context. Errors never
@@ -126,3 +141,23 @@ global registry or cache.
 Automated coverage uses only original synthetic bytes, including an independent
 literal 482-byte BSP v30 quad and a separate mutation builder. No Valve or game
 BSP data is committed.
+
+## M4.4 spatial and submodel handoff
+
+The canonical parser retains GoldSrc node child ordering: child zero is the
+front half-space and child one the back half-space. Non-negative values name
+nodes; a negative value names leaf `-1 - child`. `models[0].headnode[0]` is the
+world root. Leaf zero remains addressable for traversal but is deliberately
+outside PVS bit numbering; PVS bit zero names source leaf one. Leaf
+`firstmarksurface`/`nummarksurfaces` ranges map source face ordinals to exact
+model-0 surface ordinals, with duplicate membership removed.
+
+Visibility rows remain compressed source data at this parser boundary. The
+separate spatial builder validates the graph, maps marksurfaces, and decodes
+bounded PVS rows as documented in [GoldSrc BSP spatial](GOLDSRC_BSP_SPATIAL.md)
+and [GoldSrc PVS](GOLDSRC_PVS.md).
+
+Brush models reuse the exact face reconstruction code used for model zero;
+their local geometry remains separate from entity instances and transforms.
+The parser does not infer doors, platforms, movement, triggers, or gameplay
+state. See [GoldSrc brush submodels](GOLDSRC_BRUSH_SUBMODELS.md).

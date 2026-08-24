@@ -213,6 +213,24 @@ that package and finalizes retained network/authentication state before opening
 the local diagnostic window. A positive `HLCLIENT_SMOKE_TEST_FRAMES` bounds its
 frame loop.
 
+The M4.4 spatial/scene boundary is also CPU-only and valid with the null
+renderer:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after world-spatial-scene `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve `
+  --visibility pvs-frustum --brush-submodels static
+```
+
+This builds canonical spatial/PVS state and the selected renderer-neutral
+static scene, but no SDL window, OpenGL context, or GPU resource. The defaults
+remain `--visibility all --brush-submodels off --camera static`, preserving the
+M4.3 route.
+
 For an entirely offline read-only preview, build and run the viewer target:
 
 ```powershell
@@ -222,13 +240,18 @@ cmake --build --preset vs2022-win32-debug --target hlclient_world_viewer
   --basedir "D:\Steam\steamapps\common\Half-Life" `
   --game valve `
   --map maps/boot_camp.bsp `
-  --camera static
+  --camera spawn `
+  --visibility pvs-frustum `
+  --brush-submodels static
 ```
 
 The viewer accepts a safe virtual map name rather than a native map path. It
 validates BSP, textures, lightmaps, and the CPU package before SDL/OpenGL
 initialization; it starts no network or stock process and writes no game data.
-Use `--camera orbit` for a slow bounds-derived diagnostic orbit. See
+Use `--camera static` for a deterministic bounds view, `--camera orbit` for a
+slow bounds-derived diagnostic orbit, or `--camera spawn` for inert initial
+spawn metadata with bounds fallback. Visibility accepts `all`, `frustum`,
+`pvs`, or `pvs-frustum`; brush submodels accept `off` or `static`. See
 [offline world viewer](WORLD_VIEWER.md).
 
 To perform the M1 connectionless challenge exchange without opening a window:
@@ -414,6 +437,12 @@ This OpenGL smoke still requires a usable graphical desktop and OpenGL driver.
 CI uses `--version`, `--help`, and `--renderer null` instead of assuming that a
 hosted runner has a suitable interactive graphics session.
 
+Renderer frame tests use the actual current `GL_VERSION`, parsed through a
+bounded test helper. They run on OpenGL 3.3-or-newer contexts and may report a
+capability skip on unavailable or genuinely legacy contexts. The SDL requested
+version alone does not enable the tests, and the gate is not an unconditional
+skip. Production also checks the actual context and requires OpenGL 3.3 Core.
+
 ## Build options
 
 `HLCLIENT_WARNINGS_AS_ERRORS` is off by default. Enable it during configure to
@@ -473,3 +502,8 @@ Update the native GPU driver and avoid Remote Desktop/software-display setups
 that expose only a legacy OpenGL implementation. The project requests an
 OpenGL 3.3 Core context. GLAD loads function pointers after the SDL context
 exists; it does not provide the driver itself.
+
+If graphical CTest cases skip, inspect the reported actual context rather than
+assuming that a successfully requested 3.3 context was supplied. A legacy
+driver is an accepted capability skip for those tests; it is not accepted by
+the production OpenGL renderer.

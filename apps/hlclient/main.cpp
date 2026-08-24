@@ -102,11 +102,81 @@ production_world_texture_import_config()
 }
 
 [[nodiscard]] hlclient::goldsrc::WorldRenderPackageStageConfig
-production_world_render_package_config()
+production_world_render_package_config(
+    const hlclient::core::CommandLineOptions& options)
 {
     hlclient::goldsrc::WorldRenderPackageStageConfig config;
     config.world_textures = production_world_texture_import_config();
+    config.build_world_spatial_scene =
+        options.stop_after ==
+        hlclient::core::ConnectionStopPoint::world_spatial_scene;
+    config.world_scene.brushes =
+        options.brush_submodels ==
+                hlclient::core::BrushSubmodelsOption::static_initial
+        ? hlclient::goldsrc::brush_models::GoldSrcWorldSceneBrushMode::
+              static_initial
+        : hlclient::goldsrc::brush_models::GoldSrcWorldSceneBrushMode::off;
+    config.world_scene.extract_spawn =
+        options.world_camera == hlclient::core::WorldCameraOption::spawn;
     return config;
+}
+
+[[nodiscard]] hlclient::world_preview::WorldPreviewSceneOptions
+world_preview_options(
+    const hlclient::core::CommandLineOptions& options,
+    const std::optional<
+        hlclient::goldsrc::brush_models::GoldSrcSpawnCameraExtractionResult>&
+        spawn_camera)
+{
+    hlclient::world_preview::WorldPreviewSceneOptions preview;
+    switch (options.world_visibility) {
+    case hlclient::core::WorldVisibilityOption::all:
+        preview.visibility_mode =
+            hlclient::world_visibility::WorldVisibilityMode::all;
+        break;
+    case hlclient::core::WorldVisibilityOption::frustum:
+        preview.visibility_mode =
+            hlclient::world_visibility::WorldVisibilityMode::frustum_only;
+        break;
+    case hlclient::core::WorldVisibilityOption::pvs:
+        preview.visibility_mode =
+            hlclient::world_visibility::WorldVisibilityMode::pvs_only;
+        break;
+    case hlclient::core::WorldVisibilityOption::pvs_frustum:
+        preview.visibility_mode =
+            hlclient::world_visibility::WorldVisibilityMode::pvs_and_frustum;
+        break;
+    }
+    preview.brush_submodels =
+        options.brush_submodels ==
+                hlclient::core::BrushSubmodelsOption::static_initial
+        ? hlclient::world_preview::WorldPreviewBrushSubmodelsMode::
+              static_instances
+        : hlclient::world_preview::WorldPreviewBrushSubmodelsMode::off;
+    switch (options.world_camera) {
+    case hlclient::core::WorldCameraOption::static_camera:
+        preview.camera_mode =
+            hlclient::world_preview::WorldPreviewCameraMode::static_camera;
+        break;
+    case hlclient::core::WorldCameraOption::orbit:
+        preview.camera_mode =
+            hlclient::world_preview::WorldPreviewCameraMode::orbit;
+        break;
+    case hlclient::core::WorldCameraOption::spawn:
+        preview.camera_mode =
+            hlclient::world_preview::WorldPreviewCameraMode::spawn;
+        break;
+    }
+    if (spawn_camera && spawn_camera->descriptor) {
+        const auto& descriptor = *spawn_camera->descriptor;
+        preview.spawn_camera =
+            hlclient::world_preview::WorldPreviewSpawnCameraDescriptor{
+                descriptor.position,
+                descriptor.forward,
+                descriptor.up,
+            };
+    }
+    return preview;
 }
 
 class BootstrapSceneSource final : public hlclient::client::IClientSceneSource {
@@ -236,15 +306,6 @@ private:
 #else
     return std::filesystem::path{text};
 #endif
-}
-
-[[nodiscard]] std::string path_as_utf8(const std::filesystem::path& path)
-{
-    const auto encoded = path.u8string();
-    return std::string{
-        reinterpret_cast<const char*>(encoded.data()),
-        encoded.size(),
-    };
 }
 
 void print_version()
@@ -2429,6 +2490,86 @@ void log_world_render_package_trace(
     return valid ? 0 : 1;
 }
 
+[[nodiscard]] int report_world_spatial_scene(
+    const hlclient::world_preview::WorldPreviewSceneSource& preview)
+{
+    const auto& state = preview.world_state();
+    const auto& scene = state.world_scene();
+    const auto& visibility = state.world_visibility();
+    const auto& draw_list = state.visible_draw_list();
+    if (!scene || !visibility || !draw_list) {
+        hlclient::core::log(
+            LogLevel::error,
+            "World spatial scene did not publish bounded visibility data");
+        return 1;
+    }
+
+    const auto& spatial = scene->spatial_package();
+    const auto& spatial_statistics = spatial.statistics();
+    const auto& visibility_statistics = visibility->statistics();
+    const auto& scene_statistics = scene->statistics();
+    const auto& draw_statistics = draw_list->statistics();
+    hlclient::core::log(
+        LogLevel::info,
+        "[spatial] nodes=" +
+            std::to_string(spatial_statistics.node_count) +
+            " leaves=" + std::to_string(spatial_statistics.leaf_count) +
+            " pvs-rows=" +
+            std::to_string(spatial_statistics.unique_pvs_row_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[visibility] mode=" +
+            std::string{hlclient::world_visibility::to_string(
+                visibility->applied_mode())});
+    hlclient::core::log(
+        LogLevel::info,
+        "[visibility] camera-leaf=" +
+            (visibility->camera_leaf_index()
+                    ? std::to_string(*visibility->camera_leaf_index())
+                    : std::string{"unavailable"}));
+    hlclient::core::log(
+        LogLevel::info,
+        "[visibility] world=" +
+            std::to_string(
+                visibility_statistics.visible_world_surface_count) +
+            "/" +
+            std::to_string(
+                visibility_statistics.total_world_surface_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[visibility] pvs-culled=" +
+            std::to_string(
+                visibility_statistics.world_surface_culled_by_pvs_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[visibility] frustum-culled=" +
+            std::to_string(
+                visibility_statistics.world_surface_culled_by_frustum_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[brush] models=" +
+            std::to_string(scene_statistics.brush_model_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[brush] instances=" +
+            std::to_string(scene_statistics.brush_instance_count) +
+            " supported=" +
+            std::to_string(scene_statistics.supported_brush_instance_count) +
+            " visible=" +
+            std::to_string(
+                visibility_statistics.visible_brush_instance_count) +
+            " unsupported=" +
+            std::to_string(
+                scene_statistics.unsupported_brush_instance_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[render] commands=" +
+            std::to_string(draw_statistics.command_count) +
+            " uploads=0 draws=0 triangles=" +
+            std::to_string(draw_statistics.triangle_count));
+    return 0;
+}
+
 [[nodiscard]] hlclient::network::UdpSocket open_challenge_socket(
     const hlclient::network::NetworkRuntime& runtime,
     const hlclient::network::NetworkAddress& remote_endpoint)
@@ -2635,6 +2776,20 @@ public:
         return handshake_.world_render_package_result();
     }
 
+    [[nodiscard]] const std::shared_ptr<const
+        hlclient::world_scene_render::WorldSceneRenderPackage>&
+    world_spatial_scene() const noexcept
+    {
+        return handshake_.world_spatial_scene_result();
+    }
+
+    [[nodiscard]] const std::optional<
+        hlclient::goldsrc::brush_models::GoldSrcSpawnCameraExtractionResult>&
+    world_spawn_camera() const noexcept
+    {
+        return handshake_.world_spawn_camera_result();
+    }
+
 private:
     std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment>
         local_resource_environment_;
@@ -2809,16 +2964,23 @@ int run_opengl_renderer(
         if (challenge_session != nullptr) {
             challenge_session->update(current_time);
         }
+        const auto pixel_extent = window.pixel_extent();
+        const hlclient::renderer::RenderExtent extent{
+            pixel_extent.width, pixel_extent.height};
+        const auto extent_update = scene_source.set_render_extent(extent);
+        if (!extent_update) {
+            throw std::runtime_error{
+                "Scene extent update failed: " + extent_update.error};
+        }
         const auto update = scene_source.update(current_time - previous_time);
         if (!update) {
             throw std::runtime_error{"Scene update failed: " + update.error};
         }
         previous_time = current_time;
 
-        const auto extent = window.pixel_extent();
         renderer.render(
             hlclient::client::build_render_scene(scene_source.world_state()),
-            hlclient::renderer::RenderExtent{extent.width, extent.height});
+            extent);
         window.swap_buffers();
 
         ++rendered_frames;
@@ -2826,6 +2988,28 @@ int run_opengl_renderer(
             (frame_limit && rendered_frames >= *frame_limit && challenge_session == nullptr)) {
             running = false;
         }
+    }
+
+    const auto& render_statistics = renderer.statistics();
+    if (render_statistics.scene_present) {
+        hlclient::core::log(
+            LogLevel::info,
+            "[render] commands=" +
+                std::to_string(render_statistics.rendered_command_count) +
+                " uploads=" +
+                std::to_string(render_statistics.scene_upload_count) +
+                " draws=" +
+                std::to_string(render_statistics.draw_call_count) +
+                " triangles=" +
+                std::to_string(render_statistics.triangle_count));
+        hlclient::core::log(
+            LogLevel::info,
+            "[render] visibility-revisions=" +
+                std::to_string(
+                    render_statistics.visibility_update_count) +
+                " brush-draws=" +
+                std::to_string(
+                    render_statistics.brush_draw_call_count));
     }
 
     if (challenge_session != nullptr) {
@@ -2855,7 +3039,10 @@ int run_asset_dispatch_stop(
     while (!session.terminal()) {
         session.update(hlclient::goldsrc::ChallengeExchangeClock::now());
         if (!session.terminal()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            // The coordinator owns the bounded retry/timeout lifecycle. Keep
+            // this CPU-only pump nonblocking while yielding the remainder of
+            // the current scheduler quantum between would-block updates.
+            std::this_thread::yield();
         }
     }
     return session.report_result(
@@ -2875,7 +3062,9 @@ int run(const hlclient::core::CommandLineOptions& options)
         hlclient::core::ConnectionStopPoint::world_textures;
     const bool world_render_package_requested =
         options.stop_after ==
-        hlclient::core::ConnectionStopPoint::world_render_package;
+            hlclient::core::ConnectionStopPoint::world_render_package ||
+        options.stop_after ==
+            hlclient::core::ConnectionStopPoint::world_spatial_scene;
     const bool world_texture_pipeline_requested =
         world_texture_requested || world_render_package_requested;
     const bool production_bsp_dispatch_requested =
@@ -2910,7 +3099,7 @@ int run(const hlclient::core::CommandLineOptions& options)
         }
         hlclient::core::log(
             LogLevel::info,
-            "Half-Life game directory: " + path_as_utf8(paths.paths->game_directory));
+            "Half-Life game directory validated");
 
         auto file_system_result =
             hlclient::filesystem::RootedFileSystem::create(paths.paths->game_directory);
@@ -3098,6 +3287,10 @@ int run(const hlclient::core::CommandLineOptions& options)
             stop_point =
                 hlclient::goldsrc::HandshakeStopPoint::world_render_package;
             break;
+        case hlclient::core::ConnectionStopPoint::world_spatial_scene:
+            stop_point =
+                hlclient::goldsrc::HandshakeStopPoint::world_spatial_scene;
+            break;
         }
         challenge_session = std::make_unique<HandshakeSession>(
             *address,
@@ -3115,7 +3308,7 @@ int run(const hlclient::core::CommandLineOptions& options)
                 ? production_world_texture_import_config()
                 : hlclient::goldsrc::WorldTextureImportStageConfig{},
             world_render_package_requested
-                ? production_world_render_package_config()
+                ? production_world_render_package_config(options)
                 : hlclient::goldsrc::WorldRenderPackageStageConfig{},
             options.net_trace);
     }
@@ -3127,7 +3320,9 @@ int run(const hlclient::core::CommandLineOptions& options)
          options.stop_after ==
              hlclient::core::ConnectionStopPoint::world_textures ||
          options.stop_after ==
-             hlclient::core::ConnectionStopPoint::world_render_package) &&
+             hlclient::core::ConnectionStopPoint::world_render_package ||
+         options.stop_after ==
+             hlclient::core::ConnectionStopPoint::world_spatial_scene) &&
         challenge_session) {
         const int cpu_result = run_asset_dispatch_stop(
             *challenge_session,
@@ -3136,8 +3331,44 @@ int run(const hlclient::core::CommandLineOptions& options)
             options.stop_after ==
                 hlclient::core::ConnectionStopPoint::world_textures,
             world_render_package_requested);
-        if (cpu_result != 0 || !options.view_world) {
+        if (cpu_result != 0) {
             return cpu_result;
+        }
+
+        const bool spatial_scene_requested =
+            options.stop_after ==
+            hlclient::core::ConnectionStopPoint::world_spatial_scene;
+        if (spatial_scene_requested) {
+            if (!challenge_session->world_spatial_scene()) {
+                hlclient::core::log(
+                    LogLevel::error,
+                    "World spatial-scene boundary completed without an "
+                    "immutable scene package");
+                return 1;
+            }
+            auto preview_scene = challenge_session->world_spatial_scene();
+            auto spawn_camera = challenge_session->world_spawn_camera();
+            auto preview_options =
+                world_preview_options(options, spawn_camera);
+
+            // The stage has already finalized its retained network boundary.
+            // Destroy every network/auth/resource owner before either the
+            // CPU-only visibility consumer or SDL/OpenGL preview begins.
+            challenge_session.reset();
+            resource_consistency_provider.reset();
+            local_resource_environment.reset();
+            hlclient::world_preview::WorldPreviewSceneSource preview_source{
+                std::move(preview_scene), std::move(preview_options)};
+            const int scene_result = report_world_spatial_scene(preview_source);
+            if (scene_result != 0 || !options.view_world) {
+                return scene_result;
+            }
+            return run_opengl_renderer(
+                preview_source, smoke_test_frame_limit(), nullptr);
+        }
+
+        if (!options.view_world) {
+            return 0;
         }
         if (!challenge_session->world_render_package()) {
             hlclient::core::log(

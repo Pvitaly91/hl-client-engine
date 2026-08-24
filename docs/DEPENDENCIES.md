@@ -56,6 +56,7 @@ hlclient_goldsrc_indexed_texture -> hlclient_asset_api -> hlclient_core
 hlclient_goldsrc_bsp
     -> hlclient_asset_api
     -> hlclient_goldsrc_indexed_texture
+    -> hlclient_goldsrc_spatial
 hlclient_goldsrc_wad3
     -> hlclient_asset_api
     -> hlclient_goldsrc_indexed_texture
@@ -82,10 +83,30 @@ hlclient_world_render_api -> hlclient_asset_api
 hlclient_world_render_package
     -> hlclient_world_render_api
     -> hlclient_asset_api
+hlclient_world_spatial -> hlclient_asset_api
+hlclient_goldsrc_spatial
+    -> hlclient_asset_api
+    -> hlclient_world_spatial
+hlclient_world_visibility
+    -> hlclient_world_spatial
+    -> hlclient_world_render_api
+    -> hlclient_renderer_api
+hlclient_world_scene_renderer
+    -> hlclient_world_render_api
+    -> hlclient_world_spatial
+    -> hlclient_world_visibility
+hlclient_goldsrc_brush_models
+    -> hlclient_goldsrc_bsp
+    -> hlclient_goldsrc_world_texture_import
+    -> hlclient_goldsrc_lightmaps
+    -> hlclient_world_render_package
+    -> hlclient_world_spatial
+    -> hlclient_world_scene_renderer
 hlclient_world_preview
     -> hlclient_client
     -> hlclient_scene_api
-    -> hlclient_world_render_api
+    -> hlclient_world_scene_renderer
+    -> hlclient_world_visibility
 hlclient_renderer_opengl
     -> hlclient_renderer_api
     -> hlclient_world_render_api
@@ -95,9 +116,11 @@ hlclient_renderer_opengl
 `hlclient_goldsrc_indexed_texture`, `hlclient_goldsrc_bsp`,
 `hlclient_goldsrc_wad3`, `hlclient_goldsrc_world_texture_import`,
 `hlclient_goldsrc_world_textures`,
-`hlclient_goldsrc_lightmaps`, and the world-render package/preview modules use
-only project-owned C++20 code and existing project contracts. No image,
-packing, math, shader-file, or scene-graph dependency is introduced. The
+`hlclient_goldsrc_lightmaps`, and the world-render, spatial, visibility,
+brush-model, scene-package, and preview modules use only project-owned C++20
+code and existing project contracts. M4.4 adds no external dependency: no
+image, packing, math, shader-file, BSP/PVS, entity, or scene-graph library is
+introduced. The
 OpenGL renderer reuses the already pinned SDL3, GLAD2, and system OpenGL
 boundaries. The pinned Valve SDK's public BSP/WAD tool declarations were
 reviewed as reference evidence, but no SDK source is compiled into these
@@ -283,7 +306,7 @@ sprites, sounds, textures, `client.dll`, and other game files remain supplied by
 the user under the terms governing their copy. Automated tests must use small,
 original test fixtures or synthetic byte sequences.
 
-For normal M3.2.1–M4.3 runtime, the local consistency provider, readiness
+For normal M3.2.1–M4.4 runtime, the local consistency provider, readiness
 environment, and approved selected-world source opener may read an explicit
 user-owned installation supplied through `--basedir` and `--game`. That is an
 opt-in, read-only runtime input, not a build dependency: there is no Steam
@@ -310,6 +333,14 @@ network/authentication lifetime before OpenGL upload. The standalone viewer
 starts from an explicit safe virtual map under the same read-only sandbox,
 performs no network or writes, and does not turn user assets into build
 dependencies. No game asset or screenshot is committed.
+
+M4.4 reuses those already approved BSP bytes and already opened declared WAD
+sources to build canonical spatial/PVS state and, only when explicitly
+selected, an aggregate static brush render library. Its owning scene retains no
+raw BSP/PVS/entity bytes, locator, file handle, compiler path, or native path.
+Changing camera visibility does not reopen an asset and does not re-upload the
+scene resources. No additional game file category or write/cache policy is
+introduced.
 
 This runtime policy is distinct from active stock-client/HLDS research. Research
 verifiers continue to require their isolated marked copy and reject primary or

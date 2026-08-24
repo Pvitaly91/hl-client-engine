@@ -50,6 +50,9 @@ struct FixtureOptions {
 {
     assets::WorldAsset world;
     world.identity.source_name = "maps/synthetic.bsp";
+    world.source_content_fingerprint =
+        assets::AssetSourceFingerprint{0x53594E5448455449ULL,
+            0x43574F524C444253ULL};
     world.bounds = {{0.0F, 0.0F, 0.0F}, {16.0F, 16.0F, 0.0F}};
     world.vertices = {
         {{0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, {0.0F, 0.0F}},

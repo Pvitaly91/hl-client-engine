@@ -284,7 +284,10 @@ assets::AssetProbeConfidence GoldSrcBspWorldImporter::probe(
 assets::WorldAssetResult GoldSrcBspWorldImporter::import(
     const assets::AssetSource& source) const
 {
-    auto parsed = GoldSrcBspParser::parse(source.bytes(), limits_);
+    auto parsed = GoldSrcBspParser::parse(
+        source.bytes(),
+        limits_,
+        GoldSrcBspParseOptions{false});
     if (!parsed) {
         const auto& parser_error = *parsed.error;
         const auto asset_error_code =

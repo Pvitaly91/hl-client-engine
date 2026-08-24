@@ -5,7 +5,8 @@ into a neutral, owning `WorldAsset`. It does not traverse the BSP tree to choose
 draw surfaces and does not emit geometry belonging only to brush submodels.
 All model ranges are still validated; omitted face counts are retained in
 statistics. Door, platform, and rotating-brush entity association belongs to a
-later milestone.
+later milestone. M4.4 preserves this M4.1 output byte-for-byte while applying
+the same parameterized reconstruction path separately to `models[1..N]`.
 
 ## Face reconstruction
 
@@ -119,5 +120,22 @@ lightmap extents from every raw S/T value in the exact face-local vertex range,
 normalizes base UVs only in the renderer-neutral package, and preserves source
 Z-up coordinates and triangle winding. See
 [GoldSrc world lightmaps](GOLDSRC_LIGHTMAPS.md) and the
-[world render package](WORLD_RENDER_PACKAGE.md). PVS traversal and brush
-submodels remain the next world milestone.
+[world render package](WORLD_RENDER_PACKAGE.md).
+
+## M4.4 geometry reuse and spatial membership
+
+M4.4 publishes each brush submodel as a separate owning local-space geometry
+asset. It uses the same validated planes, vertices, edges, surfedges, face
+ranges, texinfo, winding checks, and deterministic fan triangulation as model
+zero. No alternate face decoder or renderer-side BSP parsing is introduced,
+and the historical model-0 `WorldAsset` remains unchanged.
+
+The renderer-neutral spatial package maps leaf marksurfaces only to exact
+model-0 source-surface ordinals. Faces owned exclusively by brush submodels do
+not enter that membership table; instances instead retain transformed bounds
+and their bounded set of intersecting, non-solid PVS-addressable world leaves.
+Point and AABB queries follow the validated BSP node graph and remain CPU-only.
+Geometry construction itself still performs no visibility selection, entity
+behavior, collision runtime, filesystem access, or GPU work. See
+[GoldSrc BSP spatial](GOLDSRC_BSP_SPATIAL.md) and
+[GoldSrc brush submodels](GOLDSRC_BRUSH_SUBMODELS.md).

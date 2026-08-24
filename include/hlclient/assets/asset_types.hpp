@@ -13,6 +13,18 @@ struct AssetIdentity {
     std::string source_name;
 };
 
+// Renderer-neutral provenance for immutable source content. The pair is
+// intentionally format-agnostic: format importers define how it is derived,
+// while downstream packages use it only for exact source association.
+struct AssetSourceFingerprint {
+    std::uint64_t primary{0U};
+    std::uint64_t secondary{0U};
+
+    [[nodiscard]] friend bool operator==(
+        const AssetSourceFingerprint&,
+        const AssetSourceFingerprint&) = default;
+};
+
 struct AssetVector2 {
     float x{0.0F};
     float y{0.0F};
@@ -139,6 +151,7 @@ struct WorldAsset {
     WorldGeometrySourceProfile source_profile{
         WorldGeometrySourceProfile::unspecified};
     WorldGeometryStatistics statistics{};
+    std::optional<AssetSourceFingerprint> source_content_fingerprint;
 };
 
 enum class ImagePixelFormat {

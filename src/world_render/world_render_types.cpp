@@ -9,6 +9,7 @@ WorldRenderPackage::WorldRenderPackage(
     std::vector<std::uint32_t> indices,
     std::vector<WorldRenderMaterial> materials,
     std::vector<WorldDrawBatch> draw_batches,
+    std::vector<WorldRenderSurfaceRange> surface_ranges,
     const assets::WorldBounds bounds,
     const WorldRenderCoordinateMetadata coordinate_metadata,
     const WorldRenderStatistics statistics,
@@ -19,6 +20,7 @@ WorldRenderPackage::WorldRenderPackage(
       indices_{std::move(indices)},
       materials_{std::move(materials)},
       draw_batches_{std::move(draw_batches)},
+      surface_ranges_{std::move(surface_ranges)},
       bounds_{bounds},
       coordinate_metadata_{coordinate_metadata},
       statistics_{statistics},
@@ -54,6 +56,12 @@ std::span<const WorldRenderMaterial> WorldRenderPackage::materials() const noexc
 std::span<const WorldDrawBatch> WorldRenderPackage::draw_batches() const noexcept
 {
     return draw_batches_;
+}
+
+std::span<const WorldRenderSurfaceRange> WorldRenderPackage::surface_ranges()
+    const noexcept
+{
+    return surface_ranges_;
 }
 
 const assets::WorldBounds& WorldRenderPackage::bounds() const noexcept

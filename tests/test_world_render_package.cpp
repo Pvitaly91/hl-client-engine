@@ -105,6 +105,7 @@ TEST_CASE("World render package retains exact neutral geometry and UV bindings",
     CHECK(package.indices().size() == 6U);
     CHECK(package.materials().size() == 1U);
     CHECK(package.draw_batches().size() == 1U);
+    REQUIRE(package.surface_ranges().size() == 1U);
     CHECK(package.textured_world().textures.binding_count() ==
         package.textured_world().world.materials.size());
     CHECK(package.lightmaps().binding_count() ==
@@ -126,6 +127,13 @@ TEST_CASE("World render package retains exact neutral geometry and UV bindings",
     CHECK(package.bounds().maximum.x == 16.0F);
     CHECK(package.statistics().triangle_count == 2U);
     CHECK(package.statistics().source_surface_count == 1U);
+    CHECK(package.surface_ranges()[0].source_world_surface_index == 0U);
+    CHECK(package.surface_ranges()[0].first_index == 0U);
+    CHECK(package.surface_ranges()[0].index_count == 6U);
+    CHECK(package.surface_ranges()[0].render_material_index == 0U);
+    CHECK(package.surface_ranges()[0].source_batch_index == 0U);
+    CHECK(package.surface_ranges()[0].bounds.minimum.x == 0.0F);
+    CHECK(package.surface_ranges()[0].bounds.maximum.x == 16.0F);
     CHECK(package.resource_id() != 0U);
     CHECK(package.resource_revision() != 0U);
 }
@@ -180,6 +188,13 @@ TEST_CASE("World render package supports unlit, masked and multiple-page materia
         CHECK(built.package->statistics().triangle_count == 4U);
         CHECK(built.package->draw_batches()[0].first_index == 0U);
         CHECK(built.package->draw_batches()[1].first_index == 6U);
+        REQUIRE(built.package->surface_ranges().size() == 2U);
+        CHECK(built.package->surface_ranges()[0].first_index == 0U);
+        CHECK(built.package->surface_ranges()[0].index_count == 6U);
+        CHECK(built.package->surface_ranges()[0].source_batch_index == 0U);
+        CHECK(built.package->surface_ranges()[1].first_index == 6U);
+        CHECK(built.package->surface_ranges()[1].index_count == 6U);
+        CHECK(built.package->surface_ranges()[1].source_batch_index == 1U);
     }
 }
 
