@@ -29,6 +29,7 @@ enum class ConnectionStopPoint {
     asset_dispatch,
     world_geometry,
     world_textures,
+    world_render_package,
 };
 
 enum class AuthenticationProviderKind {
@@ -43,6 +44,7 @@ struct CommandLineOptions {
     bool show_help{false};
     bool show_version{false};
     bool net_trace{false};
+    bool view_world{false};
     std::optional<std::string> base_directory;
     std::string game_directory{"valve"};
     std::optional<std::string> connect_endpoint;

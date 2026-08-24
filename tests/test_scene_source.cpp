@@ -55,13 +55,14 @@ TEST_CASE("Client scene source updates state independently of render conversion"
     CHECK(connected.clear_color.blue == 0.14F);
 }
 
-TEST_CASE("Null renderer owns its last scene and records lifecycle statistics", "[renderer][null]")
+TEST_CASE("Null renderer records compact scene metadata and lifecycle statistics", "[renderer][null]")
 {
     hlclient::renderer::null::NullRenderer renderer;
     CHECK_FALSE(renderer.statistics().initialized);
     CHECK_FALSE(renderer.statistics().shutdown);
     CHECK(renderer.statistics().rendered_frames == 0U);
-    CHECK_FALSE(renderer.statistics().last_scene.has_value());
+    CHECK_FALSE(renderer.statistics().static_world_present);
+    CHECK_FALSE(renderer.statistics().package_revision.has_value());
 
     CHECK_THROWS_AS(renderer.render({}, {}), std::logic_error);
     renderer.initialize();
@@ -75,9 +76,10 @@ TEST_CASE("Null renderer owns its last scene and records lifecycle statistics", 
         scene.clear_color.red = 0.0F;
     }
 
-    REQUIRE(renderer.statistics().last_scene.has_value());
     CHECK(renderer.statistics().rendered_frames == 1U);
-    CHECK(renderer.statistics().last_scene->clear_color.red == 0.75F);
+    CHECK(renderer.statistics().last_clear_color.red == 0.75F);
+    CHECK_FALSE(renderer.statistics().static_world_present);
+    CHECK(renderer.statistics().camera_valid);
     CHECK(renderer.statistics().last_extent.width == 640);
     CHECK(renderer.statistics().last_extent.height == 480);
     CHECK(renderer.information().device == "Null Renderer");
@@ -88,7 +90,7 @@ TEST_CASE("Null renderer owns its last scene and records lifecycle statistics", 
     CHECK_FALSE(renderer.statistics().initialized);
     CHECK(renderer.statistics().shutdown);
     CHECK(submitted_statistics.rendered_frames == 1U);
-    CHECK(submitted_statistics.last_scene.has_value());
+    CHECK_FALSE(submitted_statistics.static_world_present);
     CHECK_THROWS_AS(renderer.render({}, {}), std::logic_error);
 }
 

@@ -255,8 +255,26 @@ TexturedWorldAssetState::environment() const noexcept
     return implementation_->dispatch_state_.environment();
 }
 
+std::optional<assets::TexturedWorldAsset>
+TexturedWorldAssetState::take_textured_world() noexcept
+{
+    auto imported = implementation_->dispatch_state_.take_imported_asset();
+    if (!imported) {
+        return std::nullopt;
+    }
+    auto* world = std::get_if<assets::WorldAsset>(&*imported);
+    if (world == nullptr) {
+        return std::nullopt;
+    }
+    return assets::TexturedWorldAsset{
+        std::move(*world),
+        std::move(implementation_->textures_)};
+}
+
 class WorldTextureImportStage::Implementation final {
 public:
+    friend class WorldTextureImportStage;
+
     Implementation(
         network::IDatagramTransport& transport,
         const network::NetworkAddress remote_endpoint,
@@ -276,9 +294,11 @@ public:
         ResourceClientResponseTraceCallback response_trace_callback,
         PrecacheManifestTraceCallback manifest_trace_callback,
         PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback,
-        WorldTextureImportTraceCallback trace_callback)
+        WorldTextureImportTraceCallback trace_callback,
+        const bool retain_connection_at_boundary)
         : config_{std::move(config)},
           trace_callback_{std::move(trace_callback)},
+          retain_connection_at_boundary_{retain_connection_at_boundary},
           configuration_valid_{
               valid_world_texture_import_stage_configuration(config_) &&
               environment != nullptr && environment->root_count() > 0U},
@@ -653,7 +673,9 @@ private:
         event.pixel_conversion_bytes = statistics.total_rgba_byte_count;
         event.occurred_at = now;
         push_event(event);
-        cleanup(now);
+        if (!retain_connection_at_boundary_) {
+            cleanup(now);
+        }
         emit_trace(terminal_trace(state_), event);
     }
 
@@ -824,6 +846,7 @@ public:
     WorldTextureImportStageConfig config_;
     WorldTextureImportTraceCallback trace_callback_;
     bool trace_callback_active_{false};
+    bool retain_connection_at_boundary_{false};
     bool configuration_valid_{false};
     PrecacheAssetDispatchStage asset_stage_;
     std::vector<std::optional<WorldTextureImportStageEvent>> event_slots_;
@@ -876,7 +899,50 @@ WorldTextureImportStage::WorldTextureImportStage(
           std::move(response_trace_callback),
           std::move(manifest_trace_callback),
           std::move(asset_dispatch_trace_callback),
-          std::move(trace_callback))}
+          std::move(trace_callback),
+          false)}
+{
+}
+
+WorldTextureImportStage::WorldTextureImportStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    std::shared_ptr<const local_resources::LocalResourceEnvironment>
+        environment,
+    const assets::AssetImporterRegistries& importer_registries,
+    WorldTextureImportStageConfig config,
+    resource_consistency::IResourceConsistencyProvider* consistency_provider,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback movement_trace_callback,
+    UserInfoSignonTraceCallback user_info_trace_callback,
+    ResourceTransitionTraceCallback transition_trace_callback,
+    ResourceListTraceCallback resource_list_trace_callback,
+    ResourceClientResponseTraceCallback response_trace_callback,
+    PrecacheManifestTraceCallback manifest_trace_callback,
+    PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback,
+    WorldTextureImportTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : implementation_{std::make_unique<Implementation>(
+          transport,
+          remote_endpoint,
+          std::move(environment),
+          importer_registries,
+          std::move(config),
+          consistency_provider,
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(movement_trace_callback),
+          std::move(user_info_trace_callback),
+          std::move(transition_trace_callback),
+          std::move(resource_list_trace_callback),
+          std::move(response_trace_callback),
+          std::move(manifest_trace_callback),
+          std::move(asset_dispatch_trace_callback),
+          std::move(trace_callback),
+          true)}
 {
 }
 
@@ -921,6 +987,31 @@ const std::optional<TexturedWorldAssetState>& WorldTextureImportStage::result()
     const noexcept
 {
     return implementation_->result_;
+}
+
+std::optional<TexturedWorldAssetState>
+WorldTextureImportStage::take_result() noexcept
+{
+    if (!implementation_->retain_connection_at_boundary_ ||
+        (implementation_->state_ !=
+                WorldTextureImportStageState::world_textures_ready &&
+            implementation_->state_ !=
+                WorldTextureImportStageState::world_textures_incomplete) ||
+        !implementation_->result_) {
+        return std::nullopt;
+    }
+    return std::exchange(implementation_->result_, std::nullopt);
+}
+
+void WorldTextureImportStage::finalize_retained_boundary(
+    const WorldTextureImportStageTimePoint now) noexcept
+{
+    if (!implementation_->retain_connection_at_boundary_ ||
+        implementation_->cleanup_done_ ||
+        implementation_->state_ == WorldTextureImportStageState::idle) {
+        return;
+    }
+    implementation_->cleanup(now);
 }
 
 const std::optional<WorldTextureImportStageError>& WorldTextureImportStage::error()

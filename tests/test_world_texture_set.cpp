@@ -188,6 +188,48 @@ TEST_CASE("World texture set construction is bounded and transactional",
         CHECK_FALSE(result.texture_set.has_value());
     }
 
+    SECTION("unknown texture alpha modes fail the immutable factory boundary")
+    {
+        auto texture = make_texture();
+        texture.alpha_mode = static_cast<assets::WorldTextureAlphaMode>(0x7fU);
+        auto result = assets::WorldTextureSet::create(
+            {std::move(texture)}, {resolved_binding(0U, 0U)}, {}, 1U);
+        REQUIRE_FALSE(result);
+        REQUIRE(result.error);
+        CHECK(result.error->code ==
+            assets::WorldTextureSetErrorCode::invalid_texture_asset);
+        CHECK_FALSE(result.texture_set.has_value());
+    }
+
+    SECTION("binding compatibility profiles are closed")
+    {
+        auto binding = resolved_binding(0U, 0U);
+        binding.compatibility_profile =
+            static_cast<assets::WorldTextureCompatibilityProfile>(0x7fU);
+        auto result = assets::WorldTextureSet::create(
+            {make_texture()}, {binding}, {}, 1U);
+        REQUIRE_FALSE(result);
+        REQUIRE(result.error);
+        CHECK(result.error->code ==
+            assets::WorldTextureSetErrorCode::invalid_material_binding);
+        CHECK_FALSE(result.texture_set.has_value());
+    }
+
+    SECTION("retained texture assets require at least one resolved binding")
+    {
+        auto result = assets::WorldTextureSet::create(
+            {make_texture(), make_texture()},
+            {resolved_binding(0U, 0U)},
+            {},
+            1U);
+        REQUIRE_FALSE(result);
+        REQUIRE(result.error);
+        CHECK(result.error->code ==
+            assets::WorldTextureSetErrorCode::invalid_texture_asset);
+        CHECK(result.error->element_index == 1U);
+        CHECK_FALSE(result.texture_set.has_value());
+    }
+
     SECTION("texture count accepts the exact limit and rejects limit plus one")
     {
         auto limits = assets::WorldTextureSetLimits{};

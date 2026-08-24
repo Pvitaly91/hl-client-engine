@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -640,20 +641,21 @@ TEST_CASE("Connect stage 14: every terminal coordinator state is idempotent",
         FakeDatagramTransport transport;
         auto prepared = prepared_request();
         REQUIRE(prepared);
-        GoldSrcHandshakeCoordinator coordinator{
+        auto coordinator = std::make_unique<GoldSrcHandshakeCoordinator>(
             transport,
             endpoint,
             HandshakeStopPoint::connect_request,
             std::move(prepared.value),
-            test_config()};
-        REQUIRE(coordinator.start(epoch));
-        deliver_challenge(transport, coordinator, endpoint, 107U, epoch + 1ms);
-        REQUIRE(coordinator.state() == GoldSrcHandshakeState::request_sent);
+            test_config());
+        REQUIRE(coordinator->start(epoch));
+        deliver_challenge(
+            transport, *coordinator, endpoint, 107U, epoch + 1ms);
+        REQUIRE(coordinator->state() == GoldSrcHandshakeState::request_sent);
         const auto send_count = transport.sent.size();
-        coordinator.update(epoch + 1s);
-        coordinator.cancel(epoch + 2s);
-        CHECK_FALSE(coordinator.start(epoch + 3s));
-        CHECK(coordinator.state() == GoldSrcHandshakeState::request_sent);
+        coordinator->update(epoch + 1s);
+        coordinator->cancel(epoch + 2s);
+        CHECK_FALSE(coordinator->start(epoch + 3s));
+        CHECK(coordinator->state() == GoldSrcHandshakeState::request_sent);
         CHECK(transport.sent.size() == send_count);
     }
 
@@ -662,20 +664,20 @@ TEST_CASE("Connect stage 14: every terminal coordinator state is idempotent",
         FakeDatagramTransport transport;
         auto prepared = prepared_request();
         REQUIRE(prepared);
-        GoldSrcHandshakeCoordinator coordinator{
+        auto coordinator = std::make_unique<GoldSrcHandshakeCoordinator>(
             transport,
             endpoint,
             HandshakeStopPoint::connect_request,
             std::move(prepared.value),
-            test_config()};
-        REQUIRE(coordinator.start(epoch));
-        coordinator.update(epoch + test_config().timeout);
-        REQUIRE(coordinator.state() == GoldSrcHandshakeState::timed_out);
+            test_config());
+        REQUIRE(coordinator->start(epoch));
+        coordinator->update(epoch + test_config().timeout);
+        REQUIRE(coordinator->state() == GoldSrcHandshakeState::timed_out);
         const auto send_count = transport.sent.size();
-        coordinator.update(epoch + 1s);
-        coordinator.cancel(epoch + 2s);
-        CHECK_FALSE(coordinator.start(epoch + 3s));
-        CHECK(coordinator.state() == GoldSrcHandshakeState::timed_out);
+        coordinator->update(epoch + 1s);
+        coordinator->cancel(epoch + 2s);
+        CHECK_FALSE(coordinator->start(epoch + 3s));
+        CHECK(coordinator->state() == GoldSrcHandshakeState::timed_out);
         CHECK(transport.sent.size() == send_count);
     }
 
@@ -684,37 +686,39 @@ TEST_CASE("Connect stage 14: every terminal coordinator state is idempotent",
         FakeDatagramTransport transport;
         auto prepared = prepared_request();
         REQUIRE(prepared);
-        GoldSrcHandshakeCoordinator coordinator{
+        auto coordinator = std::make_unique<GoldSrcHandshakeCoordinator>(
             transport,
             endpoint,
             HandshakeStopPoint::connect_request,
             std::move(prepared.value),
-            test_config()};
-        REQUIRE(coordinator.start(epoch));
-        coordinator.cancel(epoch + 1ms);
-        REQUIRE(coordinator.state() == GoldSrcHandshakeState::cancelled);
+            test_config());
+        REQUIRE(coordinator->start(epoch));
+        coordinator->cancel(epoch + 1ms);
+        REQUIRE(coordinator->state() == GoldSrcHandshakeState::cancelled);
         const auto send_count = transport.sent.size();
-        coordinator.cancel(epoch + 2ms);
-        coordinator.update(epoch + 1s);
-        CHECK_FALSE(coordinator.start(epoch + 2s));
-        CHECK(coordinator.state() == GoldSrcHandshakeState::cancelled);
+        coordinator->cancel(epoch + 2ms);
+        coordinator->update(epoch + 1s);
+        CHECK_FALSE(coordinator->start(epoch + 2s));
+        CHECK(coordinator->state() == GoldSrcHandshakeState::cancelled);
         CHECK(transport.sent.size() == send_count);
     }
 
     SECTION("configuration error")
     {
         FakeDatagramTransport transport;
-        GoldSrcHandshakeCoordinator coordinator{
+        auto coordinator = std::make_unique<GoldSrcHandshakeCoordinator>(
             transport,
             endpoint,
             HandshakeStopPoint::connect_request,
             std::nullopt,
-            test_config()};
-        REQUIRE(coordinator.state() == GoldSrcHandshakeState::configuration_error);
-        coordinator.update(epoch + 1ms);
-        coordinator.cancel(epoch + 2ms);
-        CHECK_FALSE(coordinator.start(epoch + 3ms));
-        CHECK(coordinator.state() == GoldSrcHandshakeState::configuration_error);
+            test_config());
+        REQUIRE(coordinator->state() ==
+            GoldSrcHandshakeState::configuration_error);
+        coordinator->update(epoch + 1ms);
+        coordinator->cancel(epoch + 2ms);
+        CHECK_FALSE(coordinator->start(epoch + 3ms));
+        CHECK(coordinator->state() ==
+            GoldSrcHandshakeState::configuration_error);
         CHECK(transport.sent.empty());
     }
 
@@ -724,20 +728,21 @@ TEST_CASE("Connect stage 14: every terminal coordinator state is idempotent",
         transport.failing_send_call = 2U;
         auto prepared = prepared_request();
         REQUIRE(prepared);
-        GoldSrcHandshakeCoordinator coordinator{
+        auto coordinator = std::make_unique<GoldSrcHandshakeCoordinator>(
             transport,
             endpoint,
             HandshakeStopPoint::connect_request,
             std::move(prepared.value),
-            test_config()};
-        REQUIRE(coordinator.start(epoch));
-        deliver_challenge(transport, coordinator, endpoint, 108U, epoch + 1ms);
-        REQUIRE(coordinator.state() == GoldSrcHandshakeState::network_error);
+            test_config());
+        REQUIRE(coordinator->start(epoch));
+        deliver_challenge(
+            transport, *coordinator, endpoint, 108U, epoch + 1ms);
+        REQUIRE(coordinator->state() == GoldSrcHandshakeState::network_error);
         const auto send_count = transport.sent.size();
-        coordinator.update(epoch + 1s);
-        coordinator.cancel(epoch + 2s);
-        CHECK_FALSE(coordinator.start(epoch + 3s));
-        CHECK(coordinator.state() == GoldSrcHandshakeState::network_error);
+        coordinator->update(epoch + 1s);
+        coordinator->cancel(epoch + 2s);
+        CHECK_FALSE(coordinator->start(epoch + 3s));
+        CHECK(coordinator->state() == GoldSrcHandshakeState::network_error);
         CHECK(transport.sent.size() == send_count);
     }
 
@@ -746,41 +751,44 @@ TEST_CASE("Connect stage 14: every terminal coordinator state is idempotent",
         FakeDatagramTransport transport;
         auto prepared = prepared_request();
         REQUIRE(prepared);
-        GoldSrcHandshakeCoordinator coordinator{
+        auto coordinator = std::make_unique<GoldSrcHandshakeCoordinator>(
             transport,
             endpoint,
             HandshakeStopPoint::connect_request,
             std::move(prepared.value),
-            test_config()};
-        REQUIRE(coordinator.start(epoch));
+            test_config());
+        REQUIRE(coordinator->start(epoch));
         transport.queue(endpoint, ascii_bytes("not a connectionless response"));
-        coordinator.update(epoch + 1ms);
-        REQUIRE(coordinator.state() == GoldSrcHandshakeState::protocol_error);
+        coordinator->update(epoch + 1ms);
+        REQUIRE(coordinator->state() == GoldSrcHandshakeState::protocol_error);
         const auto send_count = transport.sent.size();
-        coordinator.update(epoch + 1s);
-        coordinator.cancel(epoch + 2s);
-        CHECK_FALSE(coordinator.start(epoch + 3s));
-        CHECK(coordinator.state() == GoldSrcHandshakeState::protocol_error);
+        coordinator->update(epoch + 1s);
+        coordinator->cancel(epoch + 2s);
+        CHECK_FALSE(coordinator->start(epoch + 3s));
+        CHECK(coordinator->state() == GoldSrcHandshakeState::protocol_error);
         CHECK(transport.sent.size() == send_count);
     }
 
     SECTION("challenge-only success")
     {
         FakeDatagramTransport transport;
-        GoldSrcHandshakeCoordinator coordinator{
+        auto coordinator = std::make_unique<GoldSrcHandshakeCoordinator>(
             transport,
             endpoint,
             HandshakeStopPoint::challenge,
             std::nullopt,
-            test_config()};
-        REQUIRE(coordinator.start(epoch));
-        deliver_challenge(transport, coordinator, endpoint, 109U, epoch + 1ms);
-        REQUIRE(coordinator.state() == GoldSrcHandshakeState::challenge_received);
+            test_config());
+        REQUIRE(coordinator->start(epoch));
+        deliver_challenge(
+            transport, *coordinator, endpoint, 109U, epoch + 1ms);
+        REQUIRE(coordinator->state() ==
+            GoldSrcHandshakeState::challenge_received);
         const auto send_count = transport.sent.size();
-        coordinator.update(epoch + 1s);
-        coordinator.cancel(epoch + 2s);
-        CHECK_FALSE(coordinator.start(epoch + 3s));
-        CHECK(coordinator.state() == GoldSrcHandshakeState::challenge_received);
+        coordinator->update(epoch + 1s);
+        coordinator->cancel(epoch + 2s);
+        CHECK_FALSE(coordinator->start(epoch + 3s));
+        CHECK(coordinator->state() ==
+            GoldSrcHandshakeState::challenge_received);
         CHECK(transport.sent.size() == send_count);
     }
 }

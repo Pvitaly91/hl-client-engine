@@ -124,8 +124,10 @@ hlclient_add_library(
     include/hlclient/assets/asset_importer_registry.hpp
     include/hlclient/assets/asset_source.hpp
     include/hlclient/assets/asset_types.hpp
+    include/hlclient/assets/world_lightmap_types.hpp
     include/hlclient/assets/world_texture_types.hpp
     src/assets/asset_source.cpp
+    src/assets/world_lightmap_types.cpp
     src/assets/world_texture_types.cpp
 )
 add_library(hlclient::asset_api ALIAS hlclient_asset_api)
@@ -164,6 +166,19 @@ target_link_libraries(
     PUBLIC hlclient::asset_api hlclient::goldsrc_indexed_texture)
 set_property(
     TARGET hlclient_goldsrc_bsp
+    PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_lightmaps
+    include/hlclient/goldsrc/lightmaps/goldsrc_world_lightmap_import.hpp
+    src/goldsrc/lightmaps/goldsrc_world_lightmap_import.cpp
+)
+add_library(hlclient::goldsrc_lightmaps ALIAS hlclient_goldsrc_lightmaps)
+target_link_libraries(
+    hlclient_goldsrc_lightmaps
+    PUBLIC hlclient::asset_api)
+set_property(
+    TARGET hlclient_goldsrc_lightmaps
     PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
 
 hlclient_add_library(
@@ -433,10 +448,27 @@ set_property(
     PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
-    hlclient_goldsrc_world_textures
+    hlclient_goldsrc_world_texture_import
     include/hlclient/goldsrc/world_textures/world_texture_import.hpp
-    include/hlclient/goldsrc/world_textures/world_texture_import_stage.hpp
     src/goldsrc/world_textures/world_texture_import.cpp
+)
+add_library(
+    hlclient::goldsrc_world_texture_import ALIAS
+    hlclient_goldsrc_world_texture_import)
+target_link_libraries(
+    hlclient_goldsrc_world_texture_import
+    PUBLIC
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_wad3
+        hlclient::local_asset_source
+)
+set_property(
+    TARGET hlclient_goldsrc_world_texture_import
+    PROPERTY FOLDER "Engine/Assets/World Textures")
+
+hlclient_add_library(
+    hlclient_goldsrc_world_textures
+    include/hlclient/goldsrc/world_textures/world_texture_import_stage.hpp
     src/goldsrc/world_textures/world_texture_import_stage.cpp
 )
 add_library(
@@ -446,13 +478,59 @@ target_link_libraries(
     hlclient_goldsrc_world_textures
     PUBLIC
         hlclient::goldsrc_asset_dispatch
-        hlclient::goldsrc_bsp
-        hlclient::goldsrc_wad3
-        hlclient::local_asset_source
+        hlclient::goldsrc_world_texture_import
 )
 set_property(
     TARGET hlclient_goldsrc_world_textures
     PROPERTY FOLDER "Engine/Assets/World Textures")
+
+hlclient_add_library(
+    hlclient_world_render_api
+    include/hlclient/world_render/world_render_types.hpp
+    src/world_render/world_render_types.cpp
+)
+add_library(hlclient::world_render_api ALIAS hlclient_world_render_api)
+target_link_libraries(hlclient_world_render_api PUBLIC hlclient::asset_api)
+set_property(
+    TARGET hlclient_world_render_api PROPERTY FOLDER "Engine/Renderer/World")
+
+hlclient_add_library(
+    hlclient_world_render_package
+    include/hlclient/world_render/world_render_package_builder.hpp
+    src/world_render/world_render_package_builder.cpp
+)
+add_library(
+    hlclient::world_render_package ALIAS hlclient_world_render_package)
+target_link_libraries(
+    hlclient_world_render_package PUBLIC hlclient::world_render_api)
+set_property(
+    TARGET hlclient_world_render_package PROPERTY FOLDER "Engine/Renderer/World")
+
+add_library(hlclient_world_render INTERFACE)
+add_library(hlclient::world_render ALIAS hlclient_world_render)
+target_link_libraries(
+    hlclient_world_render
+    INTERFACE hlclient::world_render_api hlclient::world_render_package)
+set_property(
+    TARGET hlclient_world_render PROPERTY FOLDER "Engine/Renderer/World")
+
+hlclient_add_library(
+    hlclient_goldsrc_world_render
+    include/hlclient/goldsrc/world_render/world_render_package_stage.hpp
+    src/goldsrc/world_render/world_render_package_stage.cpp
+)
+add_library(
+    hlclient::goldsrc_world_render ALIAS hlclient_goldsrc_world_render)
+target_link_libraries(
+    hlclient_goldsrc_world_render
+    PUBLIC
+        hlclient::goldsrc_world_textures
+        hlclient::goldsrc_lightmaps
+        hlclient::world_render_package
+)
+set_property(
+    TARGET hlclient_goldsrc_world_render
+    PROPERTY FOLDER "Engine/Assets/World Render")
 
 hlclient_add_library(
     hlclient_auth
@@ -482,6 +560,7 @@ target_link_libraries(
         hlclient::goldsrc_resource_readiness
         hlclient::goldsrc_asset_dispatch
         hlclient::goldsrc_world_textures
+        hlclient::goldsrc_world_render
         hlclient::goldsrc_signon
         hlclient::network
     PRIVATE hlclient::core
@@ -508,17 +587,21 @@ hlclient_add_library(
     src/client/client_world_state.cpp
 )
 add_library(hlclient::client ALIAS hlclient_client)
-target_link_libraries(hlclient_client PRIVATE hlclient::core)
+target_link_libraries(
+    hlclient_client PRIVATE hlclient::core hlclient::world_render_api)
 set_property(TARGET hlclient_client PROPERTY FOLDER "Engine/Client")
 
 hlclient_add_library(
     hlclient_renderer_api
+    include/hlclient/renderer/render_camera_math.hpp
     include/hlclient/renderer/render_scene.hpp
     include/hlclient/renderer/renderer.hpp
+    src/renderer/render_camera_math.cpp
     src/renderer/renderer.cpp
 )
 add_library(hlclient::renderer_api ALIAS hlclient_renderer_api)
-target_link_libraries(hlclient_renderer_api PRIVATE hlclient::core)
+target_link_libraries(
+    hlclient_renderer_api PRIVATE hlclient::core hlclient::world_render_api)
 set_property(TARGET hlclient_renderer_api PROPERTY FOLDER "Engine/Renderer")
 
 hlclient_add_library(
@@ -533,6 +616,18 @@ target_link_libraries(
     PRIVATE hlclient::core
 )
 set_property(TARGET hlclient_scene_api PROPERTY FOLDER "Engine/Client")
+
+hlclient_add_library(
+    hlclient_world_preview
+    include/hlclient/world_preview/world_preview_scene_source.hpp
+    src/world_preview/world_preview_scene_source.cpp
+)
+add_library(hlclient::world_preview ALIAS hlclient_world_preview)
+target_link_libraries(
+    hlclient_world_preview
+    PUBLIC hlclient::scene_api hlclient::world_render_api)
+set_property(
+    TARGET hlclient_world_preview PROPERTY FOLDER "Engine/Renderer/World")
 
 hlclient_add_library(
     hlclient_renderer_null
@@ -556,7 +651,10 @@ add_library(hlclient::renderer_opengl ALIAS hlclient_renderer_opengl)
 target_link_libraries(
     hlclient_renderer_opengl
     PUBLIC hlclient::renderer_api
-    PRIVATE hlclient::platform hlclient::glad OpenGL::GL
+    PRIVATE
+        hlclient::world_render_api
+        hlclient::glad
+        OpenGL::GL
 )
 set_property(TARGET hlclient_renderer_opengl PROPERTY FOLDER "Engine/Renderer")
 
@@ -578,12 +676,15 @@ target_link_libraries(
         hlclient::goldsrc_resource_readiness
         hlclient::goldsrc_local_resources
         hlclient::goldsrc_world_textures
+        hlclient::goldsrc_world_render
         hlclient::resource_consistency_local
         hlclient::client
         hlclient::scene_api
         hlclient::renderer_api
         hlclient::renderer_null
         hlclient::renderer_opengl
+        hlclient::world_render
+        hlclient::world_preview
 )
 
 add_executable(
@@ -606,12 +707,35 @@ target_link_libraries(
     hlclient_world_texture_check
     PRIVATE
         hlclient::goldsrc_bsp
-        hlclient::goldsrc_world_textures
+        hlclient::goldsrc_world_texture_import
         hlclient::local_asset_source
         hlclient::local_resources
 )
 set_property(
     TARGET hlclient_world_texture_check PROPERTY FOLDER "Tools/Resources")
+
+add_executable(
+    hlclient_world_viewer
+    apps/hlclient_world_viewer/main.cpp
+)
+hlclient_enable_warnings(hlclient_world_viewer)
+target_link_libraries(
+    hlclient_world_viewer
+    PRIVATE
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_world_texture_import
+        hlclient::goldsrc_lightmaps
+        hlclient::world_render_package
+        hlclient::world_preview
+        hlclient::local_asset_source
+        hlclient::local_resources
+        hlclient::platform
+        hlclient::renderer_opengl
+)
+set_property(TARGET hlclient_world_viewer PROPERTY FOLDER "Tools/World")
+set_target_properties(
+    hlclient_world_viewer
+    PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 set_target_properties(
     hlclient
     PROPERTIES
@@ -626,6 +750,16 @@ add_custom_command(
             "$<TARGET_FILE:SDL3::SDL3-shared>"
             "$<TARGET_FILE_DIR:hlclient>"
     COMMENT "Copying the SDL3 runtime next to hlclient"
+    VERBATIM
+)
+
+add_custom_command(
+    TARGET hlclient_world_viewer
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:SDL3::SDL3-shared>"
+            "$<TARGET_FILE_DIR:hlclient_world_viewer>"
+    COMMENT "Copying the SDL3 runtime next to hlclient_world_viewer"
     VERBATIM
 )
 

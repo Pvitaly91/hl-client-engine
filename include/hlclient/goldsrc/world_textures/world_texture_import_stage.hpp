@@ -14,6 +14,8 @@
 
 namespace hlclient::goldsrc {
 
+class WorldRenderPackageStage;
+
 inline constexpr std::size_t kDefaultMaximumWorldTextureImportStageEvents =
     2'048U;
 inline constexpr std::size_t kMinimumWorldTextureImportStageEvents = 3U;
@@ -168,9 +170,14 @@ public:
     [[nodiscard]] const std::shared_ptr<
         const local_resources::LocalResourceEnvironment>&
     environment() const noexcept;
-
 private:
     friend class WorldTextureImportStage;
+    friend class WorldRenderPackageStage;
+    // Single-use ownership transfer for the later renderer-neutral package
+    // boundary. Keeping this private prevents public observers from calling
+    // world() after the transfer has consumed the retained asset.
+    [[nodiscard]] std::optional<assets::TexturedWorldAsset>
+    take_textured_world() noexcept;
     class Implementation;
     explicit TexturedWorldAssetState(
         std::unique_ptr<Implementation> implementation) noexcept;
@@ -239,6 +246,35 @@ public:
     [[nodiscard]] std::size_t texture_set_publication_count() const noexcept;
 
 private:
+    friend class WorldRenderPackageStage;
+
+    struct RetainConnectionAtBoundary final {};
+
+    WorldTextureImportStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        std::shared_ptr<const local_resources::LocalResourceEnvironment>
+            environment,
+        const assets::AssetImporterRegistries& importer_registries,
+        WorldTextureImportStageConfig config,
+        resource_consistency::IResourceConsistencyProvider*
+            consistency_provider,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback movement_trace_callback,
+        UserInfoSignonTraceCallback user_info_trace_callback,
+        ResourceTransitionTraceCallback transition_trace_callback,
+        ResourceListTraceCallback resource_list_trace_callback,
+        ResourceClientResponseTraceCallback response_trace_callback,
+        PrecacheManifestTraceCallback manifest_trace_callback,
+        PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback,
+        WorldTextureImportTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+    [[nodiscard]] std::optional<TexturedWorldAssetState> take_result() noexcept;
+    void finalize_retained_boundary(
+        WorldTextureImportStageTimePoint now) noexcept;
+
     class Implementation;
     std::unique_ptr<Implementation> implementation_;
 };

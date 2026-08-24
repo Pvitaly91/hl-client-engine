@@ -15,6 +15,7 @@
 #include <hlclient/goldsrc/local_resource_mapping.hpp>
 #include <hlclient/goldsrc/precache_manifest.hpp>
 #include <hlclient/goldsrc/precache_manifest_stage.hpp>
+#include <hlclient/goldsrc/world_render/world_render_package_stage.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import_stage.hpp>
 #include <hlclient/local_assets/local_asset_source.hpp>
 #include <hlclient/local_resources/local_resource_environment.hpp>
@@ -29,6 +30,7 @@
 #include <hlclient/renderer/null/null_renderer.hpp>
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
 #include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
+#include <hlclient/world_preview/world_preview_scene_source.hpp>
 
 #include <charconv>
 #include <chrono>
@@ -96,6 +98,14 @@ production_world_texture_import_config()
 {
     hlclient::goldsrc::WorldTextureImportStageConfig config;
     config.asset_dispatch = production_bsp_asset_dispatch_config();
+    return config;
+}
+
+[[nodiscard]] hlclient::goldsrc::WorldRenderPackageStageConfig
+production_world_render_package_config()
+{
+    hlclient::goldsrc::WorldRenderPackageStageConfig config;
+    config.world_textures = production_world_texture_import_config();
     return config;
 }
 
@@ -1319,6 +1329,47 @@ void log_world_texture_import_trace(
     }
 }
 
+void log_world_render_package_trace(
+    const hlclient::goldsrc::WorldRenderPackageTraceEvent& event)
+{
+    using Classification =
+        hlclient::goldsrc::WorldRenderPackageTraceClassification;
+    switch (event.classification) {
+    case Classification::stage_started:
+    case Classification::world_textures_ready:
+    case Classification::lightmap_import_started:
+    case Classification::lightmap_atlases_ready:
+    case Classification::render_package_build_started:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[render-package] progress: surfaces=" +
+                std::to_string(event.surface_count) +
+                ", atlas-pages=" +
+                std::to_string(event.atlas_page_count));
+        return;
+    case Classification::world_render_package_ready:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[render-package] publication: vertices=" +
+                std::to_string(event.vertex_count) +
+                ", indices=" + std::to_string(event.index_count) +
+                ", batches=" + std::to_string(event.batch_count));
+        return;
+    case Classification::world_textures_incomplete:
+    case Classification::lightmap_import_failed:
+    case Classification::render_package_failed:
+    case Classification::stage_timed_out:
+    case Classification::stage_cancelled:
+    case Classification::backpressure:
+    case Classification::network_failure:
+    case Classification::protocol_failure:
+        hlclient::core::log(
+            LogLevel::error,
+            "World-render-package stage ended before publication");
+        return;
+    }
+}
+
 [[nodiscard]] int report_handshake_result(
     const hlclient::goldsrc::GoldSrcHandshakeCoordinator& handshake)
 {
@@ -1997,6 +2048,33 @@ void log_world_texture_import_trace(
             LogLevel::error,
             "[texture] texture-stage event queue reached its hard bound");
         return 1;
+    case State::world_render_package_ready:
+        return 0;
+    case State::world_render_textures_incomplete:
+        hlclient::core::log(
+            LogLevel::error,
+            "[render-package] complete world textures are required");
+        return 1;
+    case State::world_render_lightmap_import_failed:
+        hlclient::core::log(
+            LogLevel::error,
+            "[render-package] strict GoldSrc lightmap import failed");
+        return 1;
+    case State::world_render_package_failed:
+        hlclient::core::log(
+            LogLevel::error,
+            "[render-package] renderer-neutral package validation failed");
+        return 1;
+    case State::world_render_timed_out:
+        hlclient::core::log(
+            LogLevel::error,
+            "[render-package] prerequisite pipeline timed out");
+        return 1;
+    case State::world_render_backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "[render-package] stage event queue reached its hard bound");
+        return 1;
     case State::timed_out:
         hlclient::core::log(LogLevel::error, "GoldSrc challenge exchange timed out");
         return 1;
@@ -2030,6 +2108,7 @@ void log_world_texture_import_trace(
     case State::waiting_for_precache_manifest:
     case State::waiting_for_asset_dispatch:
     case State::waiting_for_world_textures:
+    case State::waiting_for_world_render_package:
         hlclient::core::log(LogLevel::error, "GoldSrc handshake is not terminal");
         return 1;
     }
@@ -2319,6 +2398,37 @@ void log_world_texture_import_trace(
     return textures.complete_for_world_materials() ? 0 : 1;
 }
 
+[[nodiscard]] int report_world_render_package(
+    const hlclient::world_render::WorldRenderPackage& package)
+{
+    const auto& statistics = package.statistics();
+    const bool valid =
+        package.textured_world().textures.complete_for_world_materials() &&
+        package.lightmaps().complete_for_world_surfaces() &&
+        !package.vertices().empty() && !package.indices().empty() &&
+        !package.materials().empty() && !package.draw_batches().empty();
+    hlclient::core::log(
+        valid ? LogLevel::info : LogLevel::error,
+        std::string{"[render-package] completeness="} +
+            (valid ? "complete" : "incomplete"));
+    hlclient::core::log(
+        LogLevel::info,
+        "[render-package] vertices=" +
+            std::to_string(statistics.vertex_count) +
+            ", triangles=" + std::to_string(statistics.triangle_count) +
+            ", materials=" + std::to_string(statistics.material_count) +
+            ", batches=" + std::to_string(statistics.batch_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[render-package] lightmap-pages=" +
+            std::to_string(package.lightmaps().page_count()) +
+            ", cpu-bytes=" +
+            std::to_string(statistics.total_cpu_render_byte_count) +
+            ", revision=" +
+            std::to_string(package.resource_revision()));
+    return valid ? 0 : 1;
+}
+
 [[nodiscard]] hlclient::network::UdpSocket open_challenge_socket(
     const hlclient::network::NetworkRuntime& runtime,
     const hlclient::network::NetworkAddress& remote_endpoint)
@@ -2364,6 +2474,8 @@ public:
             asset_dispatch_config,
         hlclient::goldsrc::WorldTextureImportStageConfig
             world_texture_config,
+        hlclient::goldsrc::WorldRenderPackageStageConfig
+            world_render_package_config,
         const bool net_trace)
         : local_resource_environment_{
               std::move(local_resource_environment)},
@@ -2442,7 +2554,12 @@ public:
                  net_trace
                      ? hlclient::goldsrc::WorldTextureImportTraceCallback{
                            &log_world_texture_import_trace}
-                     : hlclient::goldsrc::WorldTextureImportTraceCallback{}}
+                     : hlclient::goldsrc::WorldTextureImportTraceCallback{},
+                 std::move(world_render_package_config),
+                 net_trace
+                     ? hlclient::goldsrc::WorldRenderPackageTraceCallback{
+                           &log_world_render_package_trace}
+                     : hlclient::goldsrc::WorldRenderPackageTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -2472,9 +2589,18 @@ public:
 
     [[nodiscard]] int report_result(
         const bool require_world_geometry = false,
-        const bool require_world_textures = false) const
+        const bool require_world_textures = false,
+        const bool require_world_render_package = false) const
     {
         const int handshake_result = report_handshake_result(handshake_);
+        if (handshake_.world_render_package_result()) {
+            const int package_result = report_world_render_package(
+                *handshake_.world_render_package_result());
+            return handshake_result != 0 ? handshake_result : package_result;
+        }
+        if (require_world_render_package) {
+            return handshake_result != 0 ? handshake_result : 1;
+        }
         if (handshake_.world_texture_result()) {
             const int texture_result = report_world_textures(
                 *handshake_.world_texture_result());
@@ -2500,6 +2626,13 @@ public:
         return report_local_resource_inventory(
             *handshake_.resource_client_response_result(),
             *local_resource_environment_);
+    }
+
+    [[nodiscard]] const std::shared_ptr<
+        const hlclient::world_render::WorldRenderPackage>&
+    world_render_package() const noexcept
+    {
+        return handshake_.world_render_package_result();
     }
 
 private:
@@ -2707,11 +2840,14 @@ int run_opengl_renderer(
 int run_asset_dispatch_stop(
     HandshakeSession& session,
     const bool require_world_geometry,
-    const bool require_world_textures)
+    const bool require_world_textures,
+    const bool require_world_render_package)
 {
     hlclient::core::log(
         LogLevel::info,
-        require_world_textures
+        require_world_render_package
+            ? "World-render-package stop is building immutable CPU render data without SDL or GPU work"
+        : require_world_textures
             ? "World-textures stop is resolving CPU mip levels without lightmap, renderer, or GPU work"
             : require_world_geometry
             ? "World-geometry stop is running without texture, lightmap, renderer, or GPU work"
@@ -2723,8 +2859,10 @@ int run_asset_dispatch_stop(
         }
     }
     return session.report_result(
-        require_world_geometry || require_world_textures,
-        require_world_textures);
+        require_world_geometry || require_world_textures ||
+            require_world_render_package,
+        require_world_textures || require_world_render_package,
+        require_world_render_package);
 }
 
 int run(const hlclient::core::CommandLineOptions& options)
@@ -2735,12 +2873,17 @@ int run(const hlclient::core::CommandLineOptions& options)
     const bool world_texture_requested =
         options.stop_after ==
         hlclient::core::ConnectionStopPoint::world_textures;
+    const bool world_render_package_requested =
+        options.stop_after ==
+        hlclient::core::ConnectionStopPoint::world_render_package;
+    const bool world_texture_pipeline_requested =
+        world_texture_requested || world_render_package_requested;
     const bool production_bsp_dispatch_requested =
         options.stop_after ==
             hlclient::core::ConnectionStopPoint::asset_dispatch ||
         options.stop_after ==
             hlclient::core::ConnectionStopPoint::world_geometry ||
-        world_texture_requested;
+        world_texture_pipeline_requested;
 
     hlclient::assets::AssetImporterRegistries asset_importers;
     const auto importer_registration =
@@ -2789,7 +2932,7 @@ int run(const hlclient::core::CommandLineOptions& options)
                    hlclient::core::ConnectionStopPoint::asset_dispatch ||
                options.stop_after ==
                    hlclient::core::ConnectionStopPoint::world_geometry ||
-               world_texture_requested) {
+               world_texture_pipeline_requested) {
         hlclient::core::log(
             LogLevel::info,
             "Approved asset dispatch initialized with the production GoldSrc "
@@ -2844,7 +2987,7 @@ int run(const hlclient::core::CommandLineOptions& options)
                 hlclient::local_resources::LocalResourceResolverLimits{};
             if (production_bsp_dispatch_requested) {
                 resolver_limits.maximum_file_size =
-                    world_texture_requested
+                    world_texture_pipeline_requested
                         ? hlclient::local_resources::
                               kHardMaximumLocalResourceFileSize
                         : kProductionGoldSrcBspMaximumSourceBytes;
@@ -2951,6 +3094,10 @@ int run(const hlclient::core::CommandLineOptions& options)
         case hlclient::core::ConnectionStopPoint::world_textures:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::world_textures;
             break;
+        case hlclient::core::ConnectionStopPoint::world_render_package:
+            stop_point =
+                hlclient::goldsrc::HandshakeStopPoint::world_render_package;
+            break;
         }
         challenge_session = std::make_unique<HandshakeSession>(
             *address,
@@ -2960,12 +3107,16 @@ int run(const hlclient::core::CommandLineOptions& options)
             resource_consistency_provider.get(),
             local_resource_environment,
             &asset_importers,
-            production_bsp_dispatch_requested && !world_texture_requested
+            production_bsp_dispatch_requested &&
+                    !world_texture_pipeline_requested
                 ? production_bsp_asset_dispatch_config()
                 : hlclient::goldsrc::PrecacheAssetDispatchStageConfig{},
-            world_texture_requested
+            world_texture_pipeline_requested
                 ? production_world_texture_import_config()
                 : hlclient::goldsrc::WorldTextureImportStageConfig{},
+            world_render_package_requested
+                ? production_world_render_package_config()
+                : hlclient::goldsrc::WorldRenderPackageStageConfig{},
             options.net_trace);
     }
 
@@ -2974,14 +3125,37 @@ int run(const hlclient::core::CommandLineOptions& options)
          options.stop_after ==
              hlclient::core::ConnectionStopPoint::world_geometry ||
          options.stop_after ==
-             hlclient::core::ConnectionStopPoint::world_textures) &&
+             hlclient::core::ConnectionStopPoint::world_textures ||
+         options.stop_after ==
+             hlclient::core::ConnectionStopPoint::world_render_package) &&
         challenge_session) {
-        return run_asset_dispatch_stop(
+        const int cpu_result = run_asset_dispatch_stop(
             *challenge_session,
             options.stop_after ==
                 hlclient::core::ConnectionStopPoint::world_geometry,
             options.stop_after ==
-                hlclient::core::ConnectionStopPoint::world_textures);
+                hlclient::core::ConnectionStopPoint::world_textures,
+            world_render_package_requested);
+        if (cpu_result != 0 || !options.view_world) {
+            return cpu_result;
+        }
+        if (!challenge_session->world_render_package()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "World preview requested without an immutable render package");
+            return 1;
+        }
+        auto preview_package = challenge_session->world_render_package();
+        // The preview is deliberately disconnected local rendering. Destroy
+        // the coordinator, UDP socket, consistency provider and verified
+        // resource environment before SDL or an OpenGL context can exist.
+        challenge_session.reset();
+        resource_consistency_provider.reset();
+        local_resource_environment.reset();
+        hlclient::world_preview::WorldPreviewSceneSource preview_source{
+            std::move(preview_package)};
+        return run_opengl_renderer(
+            preview_source, smoke_test_frame_limit(), nullptr);
     }
 
     const auto frame_limit = smoke_test_frame_limit();

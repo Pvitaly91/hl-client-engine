@@ -153,6 +153,13 @@ the same socket, driver, endpoint, authentication lifetime, manifest, world,
 approved BSP source, and local environment; it emits no packet after manifest
 publication.
 
+The operation lives in the CPU-only
+`hlclient_goldsrc_world_texture_import` target. Offline tools link that target
+directly and therefore do not inherit protocol transport or same-session stage
+libraries. `hlclient_goldsrc_world_textures` contains only the production
+same-session wrapper and depends on both the CPU operation and asset-dispatch
+stage.
+
 The composition defaults and accepted ceilings are:
 
 | Resource | Default | Supported ceiling |
@@ -230,3 +237,12 @@ OpenGL upload, renderer integration, or other GPU work. See
 [indexed miptex](GOLDSRC_INDEXED_TEXTURE.md),
 [GoldSrc WAD3](GOLDSRC_WAD3.md), and
 [CPU world geometry](CPU_WORLD_GEOMETRY.md).
+
+M4.3 is a separate continuation and does not weaken this historical stop. It
+requires a complete `WorldTextureSet`, transfers the owning textured world
+once, imports RGB lightmaps from the already retained approved BSP bytes, and
+builds the immutable package described in
+[GoldSrc world lightmaps](GOLDSRC_LIGHTMAPS.md) and
+[world render package](WORLD_RENDER_PACKAGE.md). The earlier
+`--stop-after world-textures` path still performs zero lightmap decode and zero
+renderer upload.

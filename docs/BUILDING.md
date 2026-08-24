@@ -159,15 +159,17 @@ Runtime output is organized per configuration:
 
 ```text
 build\bin\Debug\hlclient.exe
+build\bin\Debug\hlclient_world_viewer.exe
 build\bin\Debug\SDL3.dll
 build\lib\Debug\...
 ```
 
-The SDL3 shared-library target is built from the pinned source and a post-build
-command copies its configuration-matching DLL next to `hlclient.exe`. This is
-also done for Release and RelWithDebInfo. GLAD2 is a static project target and
-has no runtime DLL. Windows supplies `opengl32.dll`; the installed graphics
-driver must provide an OpenGL 3.3 Core-capable implementation.
+The SDL3 shared-library target is built from the pinned source and post-build
+commands copy its configuration-matching DLL next to `hlclient.exe` and the
+offline world viewer. This is also done for Release and RelWithDebInfo. GLAD2
+is a static project target and has no runtime DLL. Windows supplies
+`opengl32.dll`; the installed graphics driver must provide an OpenGL 3.3
+Core-capable implementation.
 
 No project resources need to be copied for the current client. Half-Life
 assets are optional unless `--basedir` is supplied, and are never copied into
@@ -192,6 +194,42 @@ The application can start with no game installation. To validate an installation
 ```powershell
 .\build\bin\Debug\hlclient.exe --basedir "C:\Games\Half-Life" --game valve
 ```
+
+The M4.3 CPU-only package boundary uses the same explicit connection/resource
+arguments as `world-textures` and accepts the null renderer:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after world-render-package `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve
+```
+
+This imports lightmaps and validates an immutable CPU render package but creates
+no SDL/OpenGL resources. `--view-world` requires `--renderer opengl`; it builds
+that package and finalizes retained network/authentication state before opening
+the local diagnostic window. A positive `HLCLIENT_SMOKE_TEST_FRAMES` bounds its
+frame loop.
+
+For an entirely offline read-only preview, build and run the viewer target:
+
+```powershell
+cmake --build --preset vs2022-win32-debug --target hlclient_world_viewer
+
+.\build\bin\Debug\hlclient_world_viewer.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" `
+  --game valve `
+  --map maps/boot_camp.bsp `
+  --camera static
+```
+
+The viewer accepts a safe virtual map name rather than a native map path. It
+validates BSP, textures, lightmaps, and the CPU package before SDL/OpenGL
+initialization; it starts no network or stock process and writes no game data.
+Use `--camera orbit` for a slow bounds-derived diagnostic orbit. See
+[offline world viewer](WORLD_VIEWER.md).
 
 To perform the M1 connectionless challenge exchange without opening a window:
 
@@ -421,12 +459,13 @@ available. Dependencies are pinned by immutable commit ID, so changing to an
 unreviewed branch or floating tag is not a supported workaround. A populated
 build cache may be used offline only after the same pinned sources were fetched.
 
-### F5 reports a missing SDL3 DLL
+### F5 or the viewer reports a missing SDL3 DLL
 
-Build `hlclient` for the currently selected solution configuration. The
-post-build deployment runs when that target is built. Confirm that both
-`hlclient.exe` and `SDL3.dll` are in `build\bin\<Configuration>`. Do not copy a
-DLL from another architecture or configuration.
+Build `hlclient` or `hlclient_world_viewer` for the currently selected solution
+configuration. The post-build deployment runs when either executable target is
+built. Confirm that the executable and `SDL3.dll` are in
+`build\bin\<Configuration>`. Do not copy a DLL from another architecture or
+configuration.
 
 ### OpenGL context creation fails
 

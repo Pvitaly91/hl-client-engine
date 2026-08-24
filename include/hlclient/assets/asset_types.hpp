@@ -94,8 +94,14 @@ struct WorldSurface {
     WorldBounds bounds{};
     std::optional<std::uint32_t> source_surface_ordinal;
     std::optional<std::uint32_t> lightmap_offset;
-    std::array<std::uint8_t, 4U> light_styles{};
+    std::array<std::uint8_t, 4U> light_styles{
+        0xFFU, 0xFFU, 0xFFU, 0xFFU};
     bool special_surface{false};
+    // Contiguous face-local vertex range emitted by the world importer. This
+    // is intentionally independent from the triangulated index range: later
+    // stages calculate source-face lightmap extents from every polygon corner.
+    std::uint32_t first_vertex{0};
+    std::uint32_t vertex_count{0};
 };
 
 enum class WorldGeometrySourceProfile {

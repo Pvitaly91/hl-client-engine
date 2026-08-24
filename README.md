@@ -6,19 +6,19 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.2's bounded GoldSrc indexed-miptex and WAD3
-texture pipeline on top of M4.1's strict BSP v30 importer and owning CPU world
-geometry. `--stop-after asset-dispatch` selects and imports the exact approved
-ServerInfo world; `--stop-after world-geometry` requires its non-empty
-`WorldAsset`. The later `--stop-after world-textures` retains that same approved
-BSP source, decodes used embedded textures, reduces inert worldspawn WAD
-metadata to safe basenames, resolves required user-owned WAD3 files through the
-sandboxed game-before-`valve` environment, and publishes owning RGBA8 mip levels
-plus one typed binding per world material. After manifest publication, all
-three continuations send no further network message and stop before lightmaps,
-renderer, or GPU work.
+The repository has implemented M4.3's first bounded static-world rendering path
+on top of M4.1 CPU BSP geometry and M4.2 embedded/WAD3 RGBA textures. The new
+CPU continuation decodes exact GoldSrc RGB lightmap samples, retains all four
+source style slots, packs deterministic padded multi-page atlases, and builds
+an immutable renderer-neutral `WorldRenderPackage` with normalized base UVs,
+texel-centered lightmap UVs, materials, and draw batches. The OpenGL 3.3 Core
+backend uploads that package transactionally and renders a bounds-derived Z-up
+diagnostic camera. `--stop-after world-render-package` remains CPU-only;
+`--view-world` cleans up the retained network/authentication lifetime before it
+opens the local preview. The standalone `hlclient_world_viewer` performs the
+same composition offline and read-only for an explicit user-owned map.
 
-Implemented M1–M4.2 bounded behavior includes the Protocol 48 challenge,
+Implemented M1–M4.3 bounded behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
@@ -525,6 +525,57 @@ and rejects content/metadata or created/deleted-file drift. It prints a summary
 digest and bounded counts, not paths or asset bytes. No user-owned local run is
 claimed.
 
+M4.3 adds the CPU render-package stop without changing any earlier stop:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after world-render-package `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve --net-trace
+```
+
+It validates complete base textures, decodes three-byte RGB lightmap samples,
+retains up to four ordered source style layers, builds deterministic
+one-pixel-padded atlases, and publishes one immutable package. Baseline
+rendering selects style slot 0; there is no gamma/overbright conversion or
+dynamic style blending. This stop creates no SDL window, OpenGL context, or GPU
+resource and sends no new semantic network message.
+
+The graphical continuation uses the same CPU package, but finalizes the
+retained network/driver/authentication lifetime before starting a local
+diagnostic preview:
+
+```powershell
+$env:HLCLIENT_SMOKE_TEST_FRAMES = "2"
+.\build\bin\Debug\hlclient.exe --renderer opengl --view-world `
+  --connect 127.0.0.1:27128 `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve
+Remove-Item Env:HLCLIENT_SMOKE_TEST_FRAMES
+```
+
+`--view-world` is intentionally not a gameplay connection and rejects the null
+renderer. It shows static model 0 with base textures, baseline lightmaps,
+masked alpha, depth testing, and a double-sided bounds preview. PVS/frustum
+culling, brush entities, spawn cameras, dynamic lights/styles, animated water,
+and sky remain outside M4.3.
+
+For a completely offline, read-only user-owned map preview:
+
+```powershell
+.\build\bin\Debug\hlclient_world_viewer.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" `
+  --game valve --map maps/crossfire.bsp --camera orbit
+```
+
+The viewer accepts a safe virtual map name, not a native map path; it starts no
+network or stock process and writes no game data. See the
+[viewer contract](docs/WORLD_VIEWER.md) for bounded verification usage.
+
 See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
 and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
 [local resource resolution](docs/LOCAL_RESOURCE_RESOLUTION.md), and the
@@ -537,7 +588,11 @@ and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.
 [CPU world geometry](docs/CPU_WORLD_GEOMETRY.md), the
 [GoldSrc indexed-miptex profile](docs/GOLDSRC_INDEXED_TEXTURE.md),
 [GoldSrc WAD3 profile](docs/GOLDSRC_WAD3.md), and
-[world texture resolution](docs/WORLD_TEXTURE_RESOLUTION.md).
+[world texture resolution](docs/WORLD_TEXTURE_RESOLUTION.md),
+[GoldSrc world lightmaps](docs/GOLDSRC_LIGHTMAPS.md), the
+[world render package](docs/WORLD_RENDER_PACKAGE.md), the
+[OpenGL world renderer](docs/OPENGL_WORLD_RENDERER.md), and the
+[offline world viewer](docs/WORLD_VIEWER.md).
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -784,7 +839,8 @@ they are licensed to use.
 The central data-flow invariants are:
 
 ```text
-Virtual filesystem -> Format importer -> Neutral CPU asset -> Asset manager
+Approved source -> Format importers -> Neutral CPU assets
+    -> WorldRenderPackage -> ClientWorldState -> RenderScene -> IRenderer
 
 GoldSrc network source --\
                          +-> ClientWorldState -> RenderScene -> IRenderer
@@ -813,11 +869,16 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
   `hlclient_asset_dispatch`, `hlclient_asset_manager`, `hlclient_scene_api`;
 - `hlclient_goldsrc_indexed_texture`, `hlclient_goldsrc_bsp`,
   `hlclient_goldsrc_wad3`, `hlclient_goldsrc_asset_dispatch`,
-  `hlclient_goldsrc_world_textures`;
+  `hlclient_goldsrc_world_texture_import`,
+  `hlclient_goldsrc_world_textures`, `hlclient_goldsrc_lightmaps`,
+  `hlclient_goldsrc_world_render`;
+- `hlclient_world_render_api`, `hlclient_world_render_package`,
+  `hlclient_world_preview`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
 - `hlclient_local_resource_check` and `hlclient_world_texture_check`
-  (network-free read-only diagnostics);
+  (network-free read-only diagnostics), plus `hlclient_world_viewer`
+  (network-free read-only OpenGL preview);
 - `hlclient_tests`;
 - SDL3, bzip2, Catch2, GLAD2, and the Half-Life SDK reference target under
   `ThirdParty`.
@@ -844,6 +905,10 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc indexed miptex](docs/GOLDSRC_INDEXED_TEXTURE.md),
 [GoldSrc WAD3](docs/GOLDSRC_WAD3.md),
 [world texture resolution](docs/WORLD_TEXTURE_RESOLUTION.md),
+[GoldSrc world lightmaps](docs/GOLDSRC_LIGHTMAPS.md),
+[world render package](docs/WORLD_RENDER_PACKAGE.md),
+[OpenGL world renderer](docs/OPENGL_WORLD_RENDERER.md),
+[offline world viewer](docs/WORLD_VIEWER.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
 
@@ -968,6 +1033,14 @@ deterministic declared-archive/game-root lookup; immutable complete/incomplete
 material bindings; bounded same-session stage coverage; and the network-free
 read-only checker. All automated asset bytes and local files are original
 synthetic fixtures; no installed game asset, renderer, or GPU is required.
+M4.3 adds exact face-local lightmap extents and RGB/style-range coverage,
+deterministic padding and multi-page atlas fixtures, texel-center/base-UV and
+package-validation tests, neutral camera/matrix/scene tests, package-stage
+lifetime/backpressure cases, null-renderer regressions, and OpenGL upload,
+state, cache, masked, culling, resize, and transactional-failure checks where a
+3.3 Core context is available. A synthetic graphical integration validates
+non-clear pixels without network or installed game data; the offline viewer is
+an optional user-owned verification path rather than a CI asset dependency.
 
 ## License
 

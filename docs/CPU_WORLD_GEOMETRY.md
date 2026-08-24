@@ -51,10 +51,13 @@ t = dot(position, texinfo.t.xyz) + texinfo.t.w
 
 They are not normalized by texture dimensions.
 
-`WorldSurface` retains its index range and material index plus computed face
-bounds, the source face ordinal, optional source light offset metadata, four
+`WorldSurface` retains both its index range and its exact contiguous face-local
+vertex range (`first_vertex`, `vertex_count`), plus material index, computed
+face bounds, source face ordinal, optional source light offset metadata, four
 light-style bytes, and the neutral special-surface flag derived from
-`TEX_SPECIAL`. It contains no native BSP struct or lightmap samples.
+`TEX_SPECIAL`. The explicit vertex range preserves face ownership for M4.3
+lightmap extent calculation; it does not change M4.1 vertex/index output. The
+surface contains no native BSP struct or lightmap samples.
 
 One `WorldMaterialReference` is created on first use of each texinfo by a world
 face. It owns the exact optional BSP texture-directory ordinal, optional
@@ -110,3 +113,11 @@ checker executable are supplied.
 The separate M4.2 checker and resolution policy are documented in
 [world texture resolution](WORLD_TEXTURE_RESOLUTION.md). They reuse this
 geometry unchanged and stop at owning CPU RGBA textures.
+
+M4.3 likewise consumes, but does not mutate, this geometry. It calculates
+lightmap extents from every raw S/T value in the exact face-local vertex range,
+normalizes base UVs only in the renderer-neutral package, and preserves source
+Z-up coordinates and triangle winding. See
+[GoldSrc world lightmaps](GOLDSRC_LIGHTMAPS.md) and the
+[world render package](WORLD_RENDER_PACKAGE.md). PVS traversal and brush
+submodels remain the next world milestone.

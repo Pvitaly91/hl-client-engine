@@ -42,6 +42,22 @@ namespace {
     };
 }
 
+[[nodiscard]] bool valid_texture_profile(
+    const WorldTextureAsset& texture) noexcept
+{
+    const bool source_kind_valid =
+        texture.source_kind == WorldTextureSourceKind::embedded_bsp ||
+        texture.source_kind == WorldTextureSourceKind::external_wad3;
+    const bool alpha_mode_valid =
+        texture.alpha_mode == WorldTextureAlphaMode::opaque ||
+        texture.alpha_mode == WorldTextureAlphaMode::masked_index_255;
+    return source_kind_valid && alpha_mode_valid &&
+        texture.compatibility_profile ==
+            WorldTextureCompatibilityProfile::goldsrc_indexed_miptex_v1 &&
+        texture.evidence_profile == WorldTextureEvidenceProfile::
+                                        valve_public_tools_and_synthetic_fixtures;
+}
+
 } // namespace
 
 std::string_view to_string(const WorldTextureSetErrorCode code) noexcept
@@ -121,10 +137,11 @@ WorldTextureSetCreateResult WorldTextureSet::create(
 
     for (std::size_t texture_index = 0U; texture_index < textures.size(); ++texture_index) {
         const auto& texture = textures[texture_index];
-        if (texture.name.empty() || texture.width == 0U || texture.height == 0U) {
+        if (texture.name.empty() || texture.width == 0U || texture.height == 0U ||
+            !valid_texture_profile(texture)) {
             return fail(WorldTextureSetErrorCode::invalid_texture_asset,
                 texture_index,
-                "Texture asset must have a name and positive level-zero dimensions");
+                "Texture asset name, dimensions or closed compatibility profile is invalid");
         }
         for (std::size_t level = 0U; level < texture.mip_levels.size(); ++level) {
             const auto& mip = texture.mip_levels[level];
@@ -164,53 +181,82 @@ WorldTextureSetCreateResult WorldTextureSet::create(
     }
     statistics.total_rgba_byte_count = total_rgba_bytes;
 
-    bool complete = true;
-    for (std::size_t binding_index = 0U; binding_index < bindings.size(); ++binding_index) {
-        const auto& binding = bindings[binding_index];
-        if (binding.material_index != binding_index) {
-            return fail(WorldTextureSetErrorCode::invalid_material_binding,
-                binding_index,
-                "Material bindings must retain exact world material order");
-        }
-        const bool resolved = is_resolved(binding.status);
-        if (resolved != binding.texture_asset_index.has_value() ||
-            (binding.texture_asset_index && *binding.texture_asset_index >= textures.size())) {
-            return fail(WorldTextureSetErrorCode::invalid_material_binding,
-                binding_index,
-                "Resolved binding status and texture asset index disagree");
-        }
-        if (resolved) {
-            const auto& texture = textures[*binding.texture_asset_index];
-            if ((binding.status == WorldMaterialTextureBindingStatus::resolved_embedded &&
-                    texture.source_kind != WorldTextureSourceKind::embedded_bsp) ||
-                (binding.status == WorldMaterialTextureBindingStatus::resolved_wad3 &&
-                    texture.source_kind != WorldTextureSourceKind::external_wad3)) {
+    try {
+        std::vector<std::uint8_t> referenced_textures(
+            textures.size(), std::uint8_t{0U});
+        bool complete = true;
+        for (std::size_t binding_index = 0U; binding_index < bindings.size();
+             ++binding_index) {
+            const auto& binding = bindings[binding_index];
+            if (binding.material_index != binding_index) {
                 return fail(WorldTextureSetErrorCode::invalid_material_binding,
                     binding_index,
-                    "Resolved binding source status disagrees with its texture asset");
+                    "Material bindings must retain exact world material order");
             }
-        } else {
-            complete = false;
-            ++statistics.unresolved_material_count;
-            if (binding.status ==
-                WorldMaterialTextureBindingStatus::missing_bsp_texture_reference) {
-                ++statistics.missing_bsp_reference_count;
+            if (binding.compatibility_profile !=
+                    WorldTextureCompatibilityProfile::
+                        goldsrc_indexed_miptex_v1 ||
+                binding.evidence_profile != WorldTextureEvidenceProfile::
+                                                valve_public_tools_and_synthetic_fixtures) {
+                return fail(WorldTextureSetErrorCode::invalid_material_binding,
+                    binding_index,
+                    "Material binding compatibility or evidence profile is invalid");
             }
-            if (binding.status ==
-                WorldMaterialTextureBindingStatus::external_texture_dimension_mismatch) {
-                ++statistics.dimension_mismatch_count;
+            const bool resolved = is_resolved(binding.status);
+            if (resolved != binding.texture_asset_index.has_value() ||
+                (binding.texture_asset_index &&
+                    *binding.texture_asset_index >= textures.size())) {
+                return fail(WorldTextureSetErrorCode::invalid_material_binding,
+                    binding_index,
+                    "Resolved binding status and texture asset index disagree");
+            }
+            if (resolved) {
+                const auto texture_index = *binding.texture_asset_index;
+                const auto& texture = textures[texture_index];
+                if ((binding.status ==
+                            WorldMaterialTextureBindingStatus::resolved_embedded &&
+                        texture.source_kind !=
+                            WorldTextureSourceKind::embedded_bsp) ||
+                    (binding.status ==
+                            WorldMaterialTextureBindingStatus::resolved_wad3 &&
+                        texture.source_kind !=
+                            WorldTextureSourceKind::external_wad3)) {
+                    return fail(WorldTextureSetErrorCode::invalid_material_binding,
+                        binding_index,
+                        "Resolved binding source status disagrees with its texture asset");
+                }
+                referenced_textures[texture_index] = 1U;
+            } else {
+                complete = false;
+                ++statistics.unresolved_material_count;
+                if (binding.status ==
+                    WorldMaterialTextureBindingStatus::
+                        missing_bsp_texture_reference) {
+                    ++statistics.missing_bsp_reference_count;
+                }
+                if (binding.status ==
+                    WorldMaterialTextureBindingStatus::
+                        external_texture_dimension_mismatch) {
+                    ++statistics.dimension_mismatch_count;
+                }
             }
         }
-    }
-    for (const auto& archive : archive_metadata) {
-        if (archive.status == WorldTextureArchiveStatus::resolved) {
-            ++statistics.wad_archive_resolved_count;
-        } else if (archive.status == WorldTextureArchiveStatus::missing) {
-            ++statistics.wad_archive_missing_count;
+        for (std::size_t texture_index = 0U;
+             texture_index < referenced_textures.size(); ++texture_index) {
+            if (referenced_textures[texture_index] == 0U) {
+                return fail(WorldTextureSetErrorCode::invalid_texture_asset,
+                    texture_index,
+                    "Every retained texture asset must be referenced by a material binding");
+            }
         }
-    }
+        for (const auto& archive : archive_metadata) {
+            if (archive.status == WorldTextureArchiveStatus::resolved) {
+                ++statistics.wad_archive_resolved_count;
+            } else if (archive.status == WorldTextureArchiveStatus::missing) {
+                ++statistics.wad_archive_missing_count;
+            }
+        }
 
-    try {
         return WorldTextureSetCreateResult{
             WorldTextureSet{std::move(textures),
                 std::move(bindings),

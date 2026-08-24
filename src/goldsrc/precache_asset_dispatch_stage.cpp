@@ -236,6 +236,13 @@ ApprovedAssetDispatchState::imported_asset() const noexcept
     return implementation_->dispatch_result_.asset;
 }
 
+std::optional<assets::ImportedAsset>
+ApprovedAssetDispatchState::take_imported_asset() noexcept
+{
+    return std::exchange(
+        implementation_->dispatch_result_.asset, std::nullopt);
+}
+
 std::uint64_t ApprovedAssetDispatchState::source_byte_count() const noexcept
 {
     return implementation_->source_.byte_count();

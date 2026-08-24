@@ -21,6 +21,7 @@ class PrecacheAssetDispatchStageTestAccess;
 } // namespace detail
 
 class WorldTextureImportStage;
+class TexturedWorldAssetState;
 
 using PrecacheAssetDispatchStageClock = PrecacheManifestStageClock;
 using PrecacheAssetDispatchStageTimePoint = PrecacheManifestStageTimePoint;
@@ -210,10 +211,13 @@ public:
 
 private:
     friend class PrecacheAssetDispatchStage;
+    friend class TexturedWorldAssetState;
     class Implementation;
 
     explicit ApprovedAssetDispatchState(
         std::unique_ptr<Implementation> implementation) noexcept;
+    [[nodiscard]] std::optional<assets::ImportedAsset>
+    take_imported_asset() noexcept;
 
     std::unique_ptr<Implementation> implementation_;
 };

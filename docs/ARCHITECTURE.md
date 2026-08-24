@@ -15,19 +15,27 @@ by casting packet bytes to host structs.
 
 ```text
 GoldSrc network source --\
-                         +-> ClientWorldState -> RenderScene -> IRenderer
-hl.exe bridge source ----/                         |           |
-                                               OpenGL       Null
+                         +-> validated CPU assets -> WorldRenderPackage --\
+hl.exe bridge source ----/                                              +-> ClientWorldState
+test/offline source -----------------------------------------------------/          |
+                                                                           RenderScene
+                                                                               |
+                                                                         IRenderer
+                                                                        /         \
+                                                                    OpenGL       Null
 ```
 
 Each arrow is a translation boundary:
 
 1. `hlclient_network` receives bytes without interpreting GoldSrc semantics.
 2. `hlclient_goldsrc` bounds-checks and decodes those bytes into protocol values.
-3. A concrete `IClientSceneSource` applies accepted input to
-   `ClientWorldState`, an engine-owned representation of client-visible state.
-4. `hlclient_scene_api` derives an immutable or frame-local `RenderScene`.
-5. An `IRenderer` backend consumes only `RenderScene` and renderer resources.
+3. Format-specific importers produce validated owning CPU assets; the pure
+   builder translates complete world assets to an immutable neutral package.
+4. A concrete `IClientSceneSource` applies accepted input or a shared package
+   to `ClientWorldState`, an engine-owned representation of client-visible
+   state.
+5. `hlclient_scene_api` derives an immutable or frame-local `RenderScene`.
+6. An `IRenderer` backend consumes only `RenderScene` and renderer resources.
 
 This is an invariant, not a suggested layering style. In particular:
 
@@ -92,8 +100,13 @@ records, decodes embedded indexed miptex data, parses inert first-entity WAD
 metadata to safe basenames, opens required WAD3 sources through the retained
 local environment, and publishes a neutral owning texture set with exact
 material bindings. Missing assets may yield a typed incomplete set; malformed
-bytes fail transactionally. No post-manifest packet, lightmap, renderer, or GPU
-work is added. The sign-on target still sees only the path-free provider API.
+bytes fail transactionally. M4.3 then decodes the retained BSP RGB lighting
+lump into deterministic four-layer padded atlases and transfers the complete
+textured world plus lightmaps into an immutable renderer-neutral
+`WorldRenderPackage`. Its CPU-only stage finalizes the retained network and
+authentication lifetime once; only afterward may a bounds-derived local scene
+upload the package to OpenGL. No post-manifest semantic packet is added. The
+sign-on target still sees only the path-free provider API.
 Custom/player-resource
 grammar, server-info second-client slot evidence, snapshots, movement
 application, and commands remain future increments behind the same boundaries.
@@ -124,19 +137,26 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_goldsrc_bsp` | strict BSP v30 byte grammar, structural validation, world-model face reconstruction, exact texture ordinals, used physical texture-source ranges, inert worldspawn WAD-basename parsing, and owning CPU `WorldAsset` | filesystem/local-resource APIs, WAD opening/catalogs, network/sign-on, `AssetManager`, SDL, OpenGL, renderer/GPU work |
 | `hlclient_goldsrc_wad3` | strict bounded WAD3 header/directory catalog, uncompressed type-`0x43` lookup, normalized duplicate rejection, and shared miptex adapter | filesystem/local-resource resolution, compiler-path interpretation, network, SDL, OpenGL, renderer/GPU work |
 | `hlclient_goldsrc_asset_dispatch` | evidence-derived resource role/plan, approved source facade, selected-world manifest continuation, and same-session terminal dispatch state | format parsing, download/cache, renderer/GPU work, extra network messages |
-| `hlclient_goldsrc_world_textures` | retained-BSP texture resolution, sandboxed declared-WAD source opening, incremental decode, exact material bindings, immutable complete/incomplete texture sets, and same-session terminal stage | downloads/cache, entity instantiation, lightmaps, texture effects/animation, `AssetManager`, SDL, OpenGL, renderer/GPU work, extra network messages |
+| `hlclient_goldsrc_world_texture_import` | network-free retained-BSP texture resolution, sandboxed declared-WAD source opening, incremental decode, exact material bindings, and immutable complete/incomplete texture sets | sign-on/stage state, sockets, downloads/cache, entity instantiation, lightmaps, texture effects/animation, `AssetManager`, SDL, OpenGL, renderer/GPU work |
+| `hlclient_goldsrc_world_textures` | same-session terminal stage that composes asset dispatch with the CPU-only world-texture import target | texture codec duplication, SDL, OpenGL, renderer/GPU work, extra network messages after the manifest boundary |
+| `hlclient_goldsrc_lightmaps` | exact face-local GoldSrc lightmap extents, RGB/style-slot decode, deterministic padded multi-page atlases, and immutable per-surface bindings | filesystem, network, SDL, OpenGL, gamma/overbright, dynamic lighting |
+| `hlclient_goldsrc_world_render` | same-session texture/lightmap/package stage, bounded events and terminal publication, and exactly-once retained network/authentication cleanup | new semantic TX, SDL/OpenGL initialization, package drawing, gameplay continuation |
+| `hlclient_world_render_api` | renderer-neutral world vertices, materials, batches, coordinate metadata, and immutable package contract | GoldSrc/network types, SDL, OpenGL handles, filesystem |
+| `hlclient_world_render_package` | complete-texture/lightmap validation, checked UV/material/batch construction, package limits, and stable renderer resource identity/revision | parsers, native paths, SDL/OpenGL upload, network state |
+| `hlclient_world_preview` | deterministic bounds-derived static/orbit camera and neutral scene-source composition | entity/spawn parsing, gameplay input/usercmds, network mutation, GPU calls |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter, bounded local-file loading, and metadata-manifest CLI exit policy | discovery, caching, Steam integration, fallback search, protocol parsing |
-| `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/sign-on/resource composition, selected manifest/asset/world-texture continuations, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, native path/handle policy, runtime application, OpenGL, SDL, render state |
+| `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/sign-on/resource composition, selected manifest/asset/world-texture/render-package continuations, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, native path/handle policy, runtime application, OpenGL, SDL, render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_asset_api` | owning asset sources, neutral CPU geometry/textures/bindings, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
 | `hlclient_scene_api` | scene-source contract and world-state-to-render-scene conversion | concrete network/injection providers, graphics calls |
 | `hlclient_renderer_api` | neutral render scene and renderer contract | SDL or GoldSrc headers in its public API |
-| `hlclient_renderer_opengl` | OpenGL 3.3 Core implementation using GLAD | packet parsing or client connection state |
+| `hlclient_renderer_opengl` | OpenGL 3.3 Core package cache/upload, built-in shaders, camera matrices, depth/masked/static-world batch drawing, and RAII GPU ownership using GLAD | packet/format parsing, filesystem lookup, client connection state, gameplay/PVS logic |
 | `hlclient_renderer_null` | headless renderer lifecycle and frame statistics | SDL, OpenGL, GLAD, Winsock, SDK types |
 | `hlclient_local_resource_check` | network-free, read-only diagnostic composition for an explicit user-owned root | stock process launch, path/digest output, file mutation, protocol transport |
 | `hlclient_world_texture_check` | network-free, read-only BSP/WAD texture composition for one explicit safe virtual map | stock process launch, writes, downloads/cache, renderer/GPU work, native-path or asset-byte output |
+| `hlclient_world_viewer` | network-free, read-only BSP/WAD/lightmap/package composition and local diagnostic OpenGL preview for one safe virtual map | stock/network process launch, writes, downloads/cache, native map-path input, gameplay |
 | `hlclient` | composition root and frame loop | reusable subsystem implementation |
 | `hlclient_tests` | deterministic unit/integration tests with local resources | public Internet or installed-game requirements |
 
@@ -144,7 +164,7 @@ Public dependencies should point inward toward stable project-owned contracts.
 Private implementation dependencies may point outward to SDL, GLAD, OpenGL,
 Winsock, or SDK headers without exposing them to unrelated consumers.
 
-The M4.2 target direction remains deliberately acyclic:
+The M4.3 target direction remains deliberately acyclic:
 
 ```text
 hlclient_hash_md5 -> hlclient_core
@@ -176,18 +196,48 @@ hlclient_goldsrc_asset_dispatch
     -> hlclient_local_asset_source
     -> hlclient_asset_dispatch
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
-hlclient_goldsrc_world_textures
-    -> hlclient_goldsrc_asset_dispatch
+hlclient_goldsrc_world_texture_import
     -> hlclient_goldsrc_bsp
     -> hlclient_goldsrc_wad3
     -> hlclient_local_asset_source
+hlclient_goldsrc_world_textures
+    -> hlclient_goldsrc_asset_dispatch
+    -> hlclient_goldsrc_world_texture_import
+hlclient_goldsrc_lightmaps
+    -> hlclient_asset_api
+hlclient_goldsrc_world_render
+    -> hlclient_goldsrc_world_textures
+    -> hlclient_goldsrc_lightmaps
+    -> hlclient_world_render_package
+hlclient_world_render_package
+    -> hlclient_world_render_api
+    -> hlclient_asset_api
+hlclient_world_preview
+    -> hlclient_client
+    -> hlclient_scene_api
+    -> hlclient_world_render_api
+hlclient_renderer_opengl
+    -> hlclient_renderer_api
+    -> hlclient_world_render_api
+    -> hlclient_glad + OpenGL::GL
 ```
+
+The offline `hlclient_world_texture_check` and `hlclient_world_viewer`
+composition roots link `hlclient_goldsrc_world_texture_import`, never the
+same-session `hlclient_goldsrc_world_textures` stage. This makes their
+generated link closure exclude `hlclient_network`, Winsock, netchan, sign-on,
+resource-transition, and asset-dispatch stage libraries. The lightmap target
+likewise links only `hlclient_asset_api`; its private implementation reads the
+clean-room inline BSP v30 header constants and does not acquire the BSP parser
+library or any network-bearing target.
 
 The corresponding Visual Studio folders include `Engine/Core/Hash`,
 `Engine/Resources/Local`, `Engine/Resource Consistency`,
 `Engine/Assets/Source`, `Engine/Assets/Dispatch`,
-`Engine/Assets/Formats/GoldSrc`, `Engine/Assets/World Textures`, and
-`Engine/Resources/GoldSrc`; the diagnostic belongs under `Tools/Resources`.
+`Engine/Assets/Formats/GoldSrc`, `Engine/Assets/World Textures`,
+`Engine/Assets/World Render`, `Engine/Renderer/World`, and
+`Engine/Resources/GoldSrc`; the offline graphical diagnostic belongs under
+`Tools/World`.
 In particular, `hlclient_goldsrc_signon` does not acquire a filesystem or
 concrete local-provider dependency.
 
@@ -217,10 +267,21 @@ same contract without SDL, a window, a graphics context, or a GPU. Another
 renderer backend must be able to consume the same scene without changing
 GoldSrc decoding.
 
+`RenderScene` carries clear color, a validated Z-up camera, and an optional
+static package reference plus cull/baseline-style policy. The package contains
+format-neutral CPU vertices, indices, materials, batches, base mip levels, and
+four-layer lightmap pages. Stable resource identity/revision lets one renderer
+reuse the same upload and replace it transactionally when the world changes;
+there is no global cache or per-frame upload.
+
 Resource handles crossing this boundary must be project-owned opaque values,
-not raw OpenGL names. Asset decoding should produce CPU-side formats before a
-renderer-specific upload step. Destruction order must preserve the GL context
-until all GL resources and the renderer are released.
+not raw OpenGL names. Asset decoding produces CPU-side formats before a
+renderer-specific upload step. The OpenGL backend owns all shader, VAO, buffer,
+base-texture, lightmap-array, and white-fallback names through RAII; a failed
+partial upload cannot become active. Destruction order preserves the GL context
+until all renderer resources are released. See
+[world render package](WORLD_RENDER_PACKAGE.md) and
+[OpenGL world renderer](OPENGL_WORLD_RENDERER.md).
 
 ## Protocol and safety boundary
 
@@ -341,9 +402,11 @@ test behavior, but are not an active project-client-to-stock response success
 claim. M3.2.1 implements the local provider independently of that pending stock
 evidence, and M3.2.2 builds only local metadata readiness/manifest state on top
 of it. M3.1.4 remains conditional on sufficient evidence for the next complex
-server message; M4.1 and M4.2 add only the local BSP/CPU-world/texture
-continuation and do not consume that later network message or transmit after
-manifest publication.
+server message; M4.1 through M4.3 add only the local
+BSP/CPU-world/texture/lightmap/package continuation and do not consume that
+later network message or transmit after manifest publication. M4.3 explicitly
+releases the retained network/authentication lifetime before any unbounded
+diagnostic rendering.
 
 M2.3.3 splits netchan into pure base/fragment wire codecs and transform,
 transport-independent persistent reliable state, a transactional normal
@@ -523,6 +586,23 @@ a native path, and `AssetManager` is not used. Earlier asset/geometry routes do
 not enter this path. See
 [world texture resolution](WORLD_TEXTURE_RESOLUTION.md).
 
+M4.3 consumes that owning state without introducing new filesystem authority:
+
+```text
+retained approved BSP bytes + complete TexturedWorldAsset
+    -> GoldSrcWorldLightmapImporter -> WorldLightmapSet
+    -> WorldRenderPackageBuilder -> immutable WorldRenderPackage
+    -> ClientWorldState -> RenderScene -> IRenderer
+```
+
+The lighting importer receives a byte span, never a path. Package publication
+transfers local ownership once and then the stage finalizes the retained
+driver/authentication lifetime. The offline viewer begins at a caller-supplied
+safe virtual map name and follows the same resolver/source/importer chain with
+no network and no writes. See [GoldSrc world lightmaps](GOLDSRC_LIGHTMAPS.md),
+[world render package](WORLD_RENDER_PACKAGE.md), and
+[offline world viewer](WORLD_VIEWER.md).
+
 ## Clean-room and SDK boundary
 
 No runtime target may depend on `Pvitaly91/hl-engine`, its server code, or any
@@ -565,21 +645,27 @@ order:
    borrows the registries but never feeds its path through `AssetManager`;
 5. when a later stop point is explicit, acquire bounded authentication material
    through the configured provider and retain its optional session lifetime;
-6. only for response/manifest/asset-dispatch/world-geometry/world-textures
-   routes with explicit local selection, validate `--basedir`/`--game`, prepare
-   fixed-target consistency material through one sandboxed handle, close the
-   file, and retain the one-shot provider plus its validated environment;
+6. only for response/manifest/asset-dispatch/world-geometry/world-textures/
+   world-render-package/view-world routes with explicit local selection,
+   validate `--basedir`/`--game`, prepare fixed-target consistency material
+   through one sandboxed handle, close the file, and retain the one-shot
+   provider plus its validated environment;
 7. create one nonblocking UDP transport and the M1/M2 coordinator for the
    validated endpoint;
-8. for an explicit asset-dispatch, world-geometry, or world-textures stop,
+8. for an explicit asset-dispatch, world-geometry, world-textures, or
+   world-render-package stop,
    advance that retained coordinator headlessly until the selected-world source
    is dispatched; the texture route additionally retains the BSP bytes/world,
    opens required declared WADs one at a time, and publishes the owning texture
-   set; print the requested bounded result, release the optional lifetime
+   set; the package route also imports RGB lightmaps and builds one immutable
+   package; print the requested bounded result, release the optional lifetime
    exactly once, and return before selecting or initializing any renderer;
-9. for all other routes, select the built-in OpenGL or null renderer;
-10. for OpenGL only, initialize SDL and create the window/context before the
-    renderer;
+9. for `--view-world`, build the same package headlessly, finalize retained
+   driver/authentication state exactly once, and only then initialize SDL, an
+   OpenGL context, and the local bounds-derived preview; this preview is not a
+   connected gameplay session;
+10. for ordinary rendering routes, select the built-in OpenGL or null renderer,
+    initializing SDL/window/context before OpenGL only;
 11. poll events where applicable, advance the handshake coordinator, and let
     the selected stage-owned driver process the same socket until the requested
     opaque, initial-sign-on, pre-resource, delta-schema, movement-environment,
@@ -592,6 +678,11 @@ order:
     precache-manifest outcome, let driver terminal cleanup release its optional
     lifetime exactly once, then shut down renderer resources before their
     platform dependencies.
+
+The standalone viewer is a separate composition root: it begins with one safe
+virtual map under an explicit user-owned local environment, validates all CPU
+assets and builds the package before initializing SDL/OpenGL, performs no
+network operation or write, and destroys renderer resources before the context.
 
 Partially initialized states must unwind safely through RAII. Logging and error
 messages should identify the failed boundary without exposing secrets or

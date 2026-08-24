@@ -2156,6 +2156,8 @@ private:
                 face.light_styles,
                 (static_cast<std::uint32_t>(source_texinfo.flags) &
                  kGoldSrcBspTexSpecialFlag) != 0U,
+                static_cast<std::uint32_t>(first_output_vertex),
+                static_cast<std::uint32_t>(corner_count),
             });
         }
 

@@ -60,8 +60,11 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
         "Unable to request an OpenGL debug context");
 #endif
 
-    constexpr SDL_WindowFlags flags =
+    SDL_WindowFlags flags =
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (config.hidden) {
+        flags |= SDL_WINDOW_HIDDEN;
+    }
     implementation_->window = SDL_CreateWindow(
         config.title.c_str(),
         config.width,

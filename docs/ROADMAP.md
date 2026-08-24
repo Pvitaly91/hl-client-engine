@@ -704,17 +704,46 @@ collision, brush-submodel instances, and gameplay remain absent.
 
 ### M4.3 — Lightmaps, materials, and OpenGL world renderer
 
-**Status: planned.**
+**Status: completed.**
 
-Decode validated lightmap data, construct renderer-neutral material inputs, and
-translate CPU world assets into renderer-owned GPU resources.
+The exact face-local raw S/T range now drives the documented GoldSrc 16-unit
+lightmap extent formula. The bounded importer validates three-byte RGB samples,
+preserves as many as four ordered source style layers, and builds deterministic
+multi-page four-layer RGBA8 atlases with duplicated one-pixel borders.
+Renderer UVs normalize resolved base textures without a CPU flip and address
+lightmap texel centers; baseline rendering selects source style slot 0 without
+gamma, overbright, or invented dynamic-style blending.
+
+`WorldRenderPackageBuilder` transactionally combines complete owning geometry,
+textures, lightmaps, neutral materials, and deterministic batches under
+explicit CPU limits. `ClientWorldState`/`RenderScene` carry only a shared
+immutable package, neutral Z-up camera, cull mode, and baseline-style policy.
+The OpenGL 3.3 Core backend uploads one VAO/VBO/EBO, the four supplied mip
+levels of each base texture, and four-layer lightmap arrays; its built-in
+shader provides masked discard, depth-tested static base-times-lightmap draws,
+transactional resource replacement, and renderer-local revision caching.
+
+`world-render-package` is the CPU-only same-session stop. `--view-world`
+finalizes network/authentication state before a local bounds-derived preview,
+and `hlclient_world_viewer` provides the same graphical proof offline from a
+safe user-owned virtual map with no writes. The double-sided preview is
+deliberate because bounds do not identify an in-world spawn camera. M4.3 does
+not add PVS/frustum traversal, brush entities, dynamic styles/lights,
+water/sky/animation, gameplay input, or resource download/cache.
 
 ### M4.4 — PVS/culling and brush submodels
 
-**Status: planned.**
+**Status: next.**
 
 Add bounded visibility/culling runtime and explicit brush-submodel instances
 after their entity/transform evidence and rendering contracts are defined.
+
+### M4.5 — Runtime entities and models
+
+**Status: planned.**
+
+Apply validated runtime entity/model state only after the M4.4 visibility and
+brush-submodel boundary is complete. M4.3 does not begin this work.
 
 ## M5 — Entity snapshots
 

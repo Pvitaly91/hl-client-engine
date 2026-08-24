@@ -9,6 +9,7 @@ struct SdlWindowConfig {
     std::string title{"HL Client Engine"};
     int width{1280};
     int height{720};
+    bool hidden{false};
 };
 
 struct PixelExtent {

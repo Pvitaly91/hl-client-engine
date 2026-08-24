@@ -21,6 +21,7 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     CHECK_FALSE(result.options->show_help);
     CHECK_FALSE(result.options->show_version);
     CHECK_FALSE(result.options->net_trace);
+    CHECK_FALSE(result.options->view_world);
     CHECK_FALSE(result.options->base_directory.has_value());
     CHECK(result.options->game_directory == "valve");
     CHECK_FALSE(result.options->connect_endpoint.has_value());
@@ -475,6 +476,87 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         const auto result = parse_command_line(arguments);
         CHECK_FALSE(result);
         CHECK(result.error.find("requires --resource-consistency-provider local") !=
+              std::string::npos);
+    }
+
+    SECTION("world render package requires and schedules the local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"world-render-package"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+            std::string_view{"--renderer"}, std::string_view{"null"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::world_render_package);
+        CHECK_FALSE(result.options->view_world);
+        CHECK(result.options->renderer == RendererBackend::null);
+        CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
+    SECTION("world render package rejects a missing local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"world-render-package"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("requires --resource-consistency-provider local") !=
+              std::string::npos);
+    }
+
+    SECTION("view world selects the package boundary and OpenGL")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--view-world"},
+            std::string_view{"--renderer"}, std::string_view{"opengl"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->view_world);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::world_render_package);
+        CHECK(result.options->renderer == RendererBackend::opengl);
+    }
+
+    SECTION("view world rejects NullRenderer")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--view-world"},
+            std::string_view{"--renderer"}, std::string_view{"null"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("requires --renderer opengl") !=
               std::string::npos);
     }
 
@@ -939,6 +1021,8 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("asset-dispatch") != std::string_view::npos);
     CHECK(help.find("world-geometry") != std::string_view::npos);
     CHECK(help.find("world-textures") != std::string_view::npos);
+    CHECK(help.find("world-render-package") != std::string_view::npos);
+    CHECK(help.find("--view-world") != std::string_view::npos);
     CHECK(help.find("securely opens the") != std::string_view::npos);
     CHECK(help.find("valid BSP v30") != std::string_view::npos);
     CHECK(help.find("before renderer work") != std::string_view::npos);
@@ -958,6 +1042,34 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("--name") != std::string_view::npos);
     CHECK(help.find("--model") != std::string_view::npos);
     CHECK(help.find("--renderer") != std::string_view::npos);
+}
+
+TEST_CASE("Command line rejects renderer-native asset escape hatches",
+    "[core][command-line][security]")
+{
+    constexpr std::array prohibited{
+        std::string_view{"--shader-file"},
+        std::string_view{"--vertex-shader"},
+        std::string_view{"--fragment-shader"},
+        std::string_view{"--texture-path"},
+        std::string_view{"--lightmap-path"},
+        std::string_view{"--raw-render-package"},
+        std::string_view{"--load-gpu-resource"},
+        std::string_view{"--ignore-lightmap-error"},
+        std::string_view{"--force-white-textures"},
+        std::string_view{"--render-native-path"},
+        std::string_view{"--spawn-camera"},
+        std::string_view{"--enable-pvs"},
+        std::string_view{"--render-submodels"},
+    };
+
+    for (const auto option : prohibited) {
+        const std::array arguments{option};
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("Unknown command-line argument") !=
+              std::string::npos);
+    }
 }
 
 } // namespace

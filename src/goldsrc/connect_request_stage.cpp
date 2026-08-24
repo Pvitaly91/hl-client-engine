@@ -504,6 +504,38 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_world_render_package_state(
+    const WorldRenderPackageStageState state) noexcept
+{
+    switch (state) {
+    case WorldRenderPackageStageState::idle:
+    case WorldRenderPackageStageState::waiting_for_world_textures:
+    case WorldRenderPackageStageState::importing_lightmaps:
+    case WorldRenderPackageStageState::packing_lightmap_atlases:
+    case WorldRenderPackageStageState::building_render_package:
+        return GoldSrcHandshakeState::waiting_for_world_render_package;
+    case WorldRenderPackageStageState::world_render_package_ready:
+        return GoldSrcHandshakeState::world_render_package_ready;
+    case WorldRenderPackageStageState::world_textures_incomplete:
+        return GoldSrcHandshakeState::world_render_textures_incomplete;
+    case WorldRenderPackageStageState::lightmap_import_failed:
+        return GoldSrcHandshakeState::world_render_lightmap_import_failed;
+    case WorldRenderPackageStageState::render_package_failed:
+        return GoldSrcHandshakeState::world_render_package_failed;
+    case WorldRenderPackageStageState::timed_out:
+        return GoldSrcHandshakeState::world_render_timed_out;
+    case WorldRenderPackageStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case WorldRenderPackageStageState::backpressure:
+        return GoldSrcHandshakeState::world_render_backpressure;
+    case WorldRenderPackageStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case WorldRenderPackageStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] bool signon_start_network_failure(
     const std::optional<NetchanDriverErrorCode> driver_code) noexcept
 {
@@ -747,7 +779,9 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     PrecacheAssetDispatchStageConfig asset_dispatch_config,
     PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback,
     WorldTextureImportStageConfig world_texture_config,
-    WorldTextureImportTraceCallback world_texture_trace_callback)
+    WorldTextureImportTraceCallback world_texture_trace_callback,
+    WorldRenderPackageStageConfig world_render_package_config,
+    WorldRenderPackageTraceCallback world_render_package_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -779,7 +813,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::resource_response_boundary ||
                 stop_point_ == HandshakeStopPoint::precache_manifest ||
                 stop_point_ == HandshakeStopPoint::asset_dispatch ||
-                stop_point_ == HandshakeStopPoint::world_textures) {
+                stop_point_ == HandshakeStopPoint::world_textures ||
+                stop_point_ == HandshakeStopPoint::world_render_package) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -967,6 +1002,37 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                             std::move(world_texture_trace_callback));
                 }
             }
+            if (stop_point_ == HandshakeStopPoint::world_render_package) {
+                if (!local_resource_environment ||
+                    asset_importer_registries == nullptr) {
+                    configuration_error_ =
+                        "World-render-package mode requires a retained local resource environment and importer registries";
+                    state_ = GoldSrcHandshakeState::configuration_error;
+                } else {
+                    world_render_package_config.world_textures.asset_dispatch
+                        .manifest.response = std::move(resource_response_config);
+                    world_render_package_stage_ =
+                        std::make_unique<WorldRenderPackageStage>(
+                            transport,
+                            remote_endpoint,
+                            std::move(local_resource_environment),
+                            *asset_importer_registries,
+                            std::move(world_render_package_config),
+                            resource_consistency_provider,
+                            std::move(signon_trace_callback),
+                            std::move(pre_resource_trace_callback),
+                            std::move(delta_trace_callback),
+                            std::move(movement_environment_trace_callback),
+                            std::move(user_info_trace_callback),
+                            std::move(resource_transition_trace_callback),
+                            std::move(resource_list_trace_callback),
+                            std::move(resource_response_trace_callback),
+                            std::move(precache_manifest_trace_callback),
+                            std::move(asset_dispatch_trace_callback),
+                            std::move(world_texture_trace_callback),
+                            std::move(world_render_package_trace_callback));
+                }
+            }
         }
     } else if (authentication_session_) {
         configuration_error_ =
@@ -990,6 +1056,13 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (world_render_package_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_world_render_package) {
+        world_render_package_stage_->update(now);
+        synchronize_from_world_render_package();
+        release_authentication_session_if_terminal();
         return;
     }
     if (world_texture_stage_ &&
@@ -1089,6 +1162,13 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (world_render_package_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_world_render_package) {
+        world_render_package_stage_->cancel(now);
+        synchronize_from_world_render_package();
+        release_authentication_session_if_terminal();
         return;
     }
     if (world_texture_stage_ &&
@@ -1271,6 +1351,12 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::world_texture_decode_failed:
     case GoldSrcHandshakeState::world_texture_timed_out:
     case GoldSrcHandshakeState::world_texture_backpressure:
+    case GoldSrcHandshakeState::world_render_package_ready:
+    case GoldSrcHandshakeState::world_render_textures_incomplete:
+    case GoldSrcHandshakeState::world_render_lightmap_import_failed:
+    case GoldSrcHandshakeState::world_render_package_failed:
+    case GoldSrcHandshakeState::world_render_timed_out:
+    case GoldSrcHandshakeState::world_render_backpressure:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -1295,6 +1381,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_precache_manifest:
     case GoldSrcHandshakeState::waiting_for_asset_dispatch:
     case GoldSrcHandshakeState::waiting_for_world_textures:
+    case GoldSrcHandshakeState::waiting_for_world_render_package:
         return false;
     }
     return true;
@@ -1455,6 +1542,32 @@ GoldSrcHandshakeCoordinator::world_texture_error() const noexcept
     static const std::optional<WorldTextureImportStageError> empty;
     return world_texture_stage_ ? world_texture_stage_->error() : empty;
 }
+const std::shared_ptr<const world_render::WorldRenderPackage>&
+GoldSrcHandshakeCoordinator::world_render_package_result() const noexcept
+{
+    static const std::shared_ptr<const world_render::WorldRenderPackage> empty;
+    return world_render_package_stage_ ? world_render_package_stage_->result()
+                                       : empty;
+}
+const std::optional<WorldRenderPackageStageError>&
+GoldSrcHandshakeCoordinator::world_render_package_error() const noexcept
+{
+    static const std::optional<WorldRenderPackageStageError> empty;
+    return world_render_package_stage_ ? world_render_package_stage_->error()
+                                       : empty;
+}
+
+std::size_t GoldSrcHandshakeCoordinator::lightmap_import_count() const noexcept
+{
+    return world_render_package_stage_
+        ? world_render_package_stage_->lightmap_import_count()
+        : 0U;
+}
+
+std::size_t GoldSrcHandshakeCoordinator::renderer_upload_count() const noexcept
+{
+    return 0U;
+}
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
     return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
@@ -1519,6 +1632,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (world_texture_stage_ && world_texture_stage_->error()) {
         return world_texture_stage_->error()->context;
     }
+    if (world_render_package_stage_ && world_render_package_stage_->error()) {
+        return world_render_package_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -1556,7 +1672,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::resource_response_boundary &&
          stop_point_ != HandshakeStopPoint::precache_manifest &&
          stop_point_ != HandshakeStopPoint::asset_dispatch &&
-         stop_point_ != HandshakeStopPoint::world_textures)) {
+         stop_point_ != HandshakeStopPoint::world_textures &&
+         stop_point_ != HandshakeStopPoint::world_render_package)) {
         return;
     }
     if (!response_stage_) {
@@ -1594,7 +1711,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
           stop_point_ != HandshakeStopPoint::resource_response_boundary &&
            stop_point_ != HandshakeStopPoint::precache_manifest &&
            stop_point_ != HandshakeStopPoint::asset_dispatch &&
-           stop_point_ != HandshakeStopPoint::world_textures)) {
+           stop_point_ != HandshakeStopPoint::world_textures &&
+           stop_point_ != HandshakeStopPoint::world_render_package)) {
         return;
     }
     if (!challenge_exchange_.local_endpoint() ||
@@ -1617,7 +1735,9 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
          (stop_point_ == HandshakeStopPoint::asset_dispatch &&
           !asset_dispatch_stage_) ||
          (stop_point_ == HandshakeStopPoint::world_textures &&
-          !world_texture_stage_)) {
+          !world_texture_stage_) ||
+         (stop_point_ == HandshakeStopPoint::world_render_package &&
+          !world_render_package_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
             "Post-ACCEPT mode has no transport stage or stable local endpoint";
@@ -1758,6 +1878,19 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         synchronize_from_world_textures();
         if (!world_textures_started &&
             state_ == GoldSrcHandshakeState::waiting_for_world_textures) {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::world_render_package) {
+        const bool package_started = world_render_package_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime));
+        synchronize_from_world_render_package();
+        if (!package_started &&
+            state_ ==
+                GoldSrcHandshakeState::waiting_for_world_render_package) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -2120,6 +2253,28 @@ void GoldSrcHandshakeCoordinator::synchronize_from_world_textures()
     if (stage_error &&
         stage_error->code ==
             WorldTextureImportStageErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_world_render_package()
+{
+    if (!world_render_package_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "World-render-package mode has no package stage";
+        return;
+    }
+
+    while (world_render_package_stage_->poll_event()) {
+    }
+
+    state_ =
+        map_world_render_package_state(world_render_package_stage_->state());
+    const auto& stage_error = world_render_package_stage_->error();
+    if (stage_error &&
+        stage_error->code ==
+            WorldRenderPackageStageErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

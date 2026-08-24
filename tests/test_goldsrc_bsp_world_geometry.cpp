@@ -284,6 +284,10 @@ TEST_CASE("Face-local vertices, source face order, materials, and bounds are own
     CHECK(world.surfaces[1].source_surface_ordinal == 1U);
     CHECK(world.surfaces[0].first_index == 0U);
     CHECK(world.surfaces[1].first_index == 3U);
+    CHECK(world.surfaces[0].first_vertex == 0U);
+    CHECK(world.surfaces[0].vertex_count == 3U);
+    CHECK(world.surfaces[1].first_vertex == 3U);
+    CHECK(world.surfaces[1].vertex_count == 3U);
     CHECK(world.materials.size() == 1U);
     CHECK(world.surfaces[0].material_index == 0U);
     CHECK(world.surfaces[1].material_index == 0U);

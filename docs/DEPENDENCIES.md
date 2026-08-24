@@ -24,7 +24,7 @@ The project also links the Windows SDK/OpenGL system import library through
 CMake's `OpenGL::GL` target and links Winsock2 where required. Those operating
 system components are not vendored or redistributed by this repository.
 
-M3.2.1 through M4.2 add no third-party dependency. `hlclient_hash_md5` is an
+M3.2.1 through M4.3 add no third-party dependency. `hlclient_hash_md5` is an
 independently authored C++20 incremental compatibility module and does not use
 OpenSSL, Windows CryptoAPI, or another crypto package. MD5 is present only to
 reproduce GoldSrc compatibility material; it is not approved for security,
@@ -65,22 +65,54 @@ hlclient_goldsrc_asset_dispatch
     -> hlclient_local_asset_source
     -> hlclient_asset_dispatch
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
-hlclient_goldsrc_world_textures
-    -> hlclient_goldsrc_asset_dispatch
+hlclient_goldsrc_world_texture_import
     -> hlclient_goldsrc_bsp
     -> hlclient_goldsrc_wad3
     -> hlclient_local_asset_source
+hlclient_goldsrc_world_textures
+    -> hlclient_goldsrc_asset_dispatch
+    -> hlclient_goldsrc_world_texture_import
+hlclient_goldsrc_lightmaps
+    -> hlclient_asset_api
+hlclient_goldsrc_world_render
+    -> hlclient_goldsrc_world_textures
+    -> hlclient_goldsrc_lightmaps
+    -> hlclient_world_render_package
+hlclient_world_render_api -> hlclient_asset_api
+hlclient_world_render_package
+    -> hlclient_world_render_api
+    -> hlclient_asset_api
+hlclient_world_preview
+    -> hlclient_client
+    -> hlclient_scene_api
+    -> hlclient_world_render_api
+hlclient_renderer_opengl
+    -> hlclient_renderer_api
+    -> hlclient_world_render_api
+    -> hlclient_glad + OpenGL::GL
 ```
 
 `hlclient_goldsrc_indexed_texture`, `hlclient_goldsrc_bsp`,
-`hlclient_goldsrc_wad3`, and `hlclient_goldsrc_world_textures` use only
-project-owned C++20 code and existing project contracts. No image library, WAD
-decompressor, graphics library, or new runtime is introduced. The pinned Valve
-SDK's public BSP/WAD tool declarations were reviewed as reference evidence, but
-no SDK source is compiled into these targets and no SDK struct is used as a
-wire ABI. In particular, the sign-on target does not link the filesystem or
-concrete local-provider implementation, the resolver does not link the netchan
-driver, and the MD5 target does not depend on GoldSrc protocol types.
+`hlclient_goldsrc_wad3`, `hlclient_goldsrc_world_texture_import`,
+`hlclient_goldsrc_world_textures`,
+`hlclient_goldsrc_lightmaps`, and the world-render package/preview modules use
+only project-owned C++20 code and existing project contracts. No image,
+packing, math, shader-file, or scene-graph dependency is introduced. The
+OpenGL renderer reuses the already pinned SDL3, GLAD2, and system OpenGL
+boundaries. The pinned Valve SDK's public BSP/WAD tool declarations were
+reviewed as reference evidence, but no SDK source is compiled into these
+targets and no SDK struct is used as a wire ABI. In particular, the sign-on
+target does not link the filesystem or concrete local-provider implementation,
+the resolver does not link the netchan driver, and the MD5 target does not
+depend on GoldSrc protocol types.
+
+The offline world-texture checker and world viewer link the CPU-only
+`hlclient_goldsrc_world_texture_import` target. They do not link the
+same-session stage target, so their generated executable closure contains no
+`hlclient_network`, netchan, sign-on, resource-transition, asset-dispatch
+stage, or Winsock dependency. `hlclient_goldsrc_lightmaps` links only
+`hlclient_asset_api`; its implementation consumes inline BSP v30 wire
+constants without linking the BSP parser library.
 
 The bootstrap intentionally does not add Boost, Asio, Qt, ImGui, GLM, OpenAL,
 FMOD, Vulkan, DirectX renderer code, protobuf, or a JSON framework. UDP remains
@@ -101,10 +133,11 @@ project. Its targets are placed below `ThirdParty/SDL3` in Solution Explorer.
 It is needed for the window, event/input abstraction, OpenGL context and buffer
 presentation, timing, and the planned portable audio backend.
 
-The executable has a post-build deployment rule equivalent to copying
-`$<TARGET_FILE:SDL3::SDL3-shared>` into `$<TARGET_FILE_DIR:hlclient>`. Generator
-expressions select the correct Debug, Release, or RelWithDebInfo Win32 DLL, so
-Visual Studio F5 does not depend on `PATH` or a manually installed SDL runtime.
+The client and offline world viewer have post-build deployment rules equivalent
+to copying `$<TARGET_FILE:SDL3::SDL3-shared>` into their target-file
+directories. Generator expressions select the correct Debug, Release, or
+RelWithDebInfo Win32 DLL, so Visual Studio F5 and the viewer do not depend on
+`PATH` or a manually installed SDL runtime.
 
 SDL3 uses the permissive zlib license (SPDX identifier `Zlib`). Preserve its
 license notice in source or
@@ -250,7 +283,7 @@ sprites, sounds, textures, `client.dll`, and other game files remain supplied by
 the user under the terms governing their copy. Automated tests must use small,
 original test fixtures or synthetic byte sequences.
 
-For normal M3.2.1–M4.2 runtime, the local consistency provider, readiness
+For normal M3.2.1–M4.3 runtime, the local consistency provider, readiness
 environment, and approved selected-world source opener may read an explicit
 user-owned installation supplied through `--basedir` and `--game`. That is an
 opt-in, read-only runtime input, not a build dependency: there is no Steam
@@ -269,6 +302,14 @@ bytes, palette, file handle, resource locator, compiler path, or native path.
 Earlier stop points still open no WAD. The consistency provider's independent
 fixed target remains `tempdecal.wad`, selected by its compatibility profile
 rather than by server bytes or an arbitrary CLI path.
+
+The M4.3 continuation reads lightmap bytes only from the already approved BSP
+source, then transfers owning CPU geometry, textures, atlases, and materials
+into a path-free `WorldRenderPackage`. `--view-world` cleans up the retained
+network/authentication lifetime before OpenGL upload. The standalone viewer
+starts from an explicit safe virtual map under the same read-only sandbox,
+performs no network or writes, and does not turn user assets into build
+dependencies. No game asset or screenshot is committed.
 
 This runtime policy is distinct from active stock-client/HLDS research. Research
 verifiers continue to require their isolated marked copy and reject primary or

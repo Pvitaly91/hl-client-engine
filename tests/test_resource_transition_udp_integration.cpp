@@ -28,12 +28,14 @@
 #include <hlclient/resource_consistency/provider.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <bzlib.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -69,6 +71,13 @@ namespace response_fixture =
     hlclient::test::resource_client_response_fixture;
 namespace synthetic_bsp = hlclient::tests;
 namespace user_fixture = hlclient::test::user_info_fixture;
+namespace world_render = hlclient::world_render;
+
+template <typename Type>
+concept HasRendererHandle =
+    requires(Type& value) { value.renderer_handle(); } ||
+    requires(Type& value) { value.vao; } ||
+    requires(Type& value) { value.opengl_texture; };
 
 inline constexpr std::string_view kAuthenticationMarker =
     "TRANSITION_TEST_AUTH";
@@ -635,6 +644,7 @@ enum class PrecacheManifestCompletionMode {
     production_bsp_dispatch,
     production_bsp_malformed_rejection,
     production_world_textures,
+    production_world_render_package,
 };
 
 enum class ProductionBspIntegrationScenario {
@@ -2746,12 +2756,19 @@ struct PrecacheManifestIntegrationTraceCounts {
     std::size_t texture_sets_incomplete{0U};
     std::size_t wad_catalog_failures{0U};
     std::size_t texture_decode_failures{0U};
+    std::size_t render_package_stages_started{0U};
+    std::size_t render_world_textures_ready{0U};
+    std::size_t lightmap_imports_started{0U};
+    std::size_t lightmap_atlases_ready{0U};
+    std::size_t render_package_builds_started{0U};
+    std::size_t render_packages_ready{0U};
     std::size_t endpoint_mismatches{0U};
     std::optional<std::size_t> transmitted_at_response_boundary;
     std::optional<std::size_t> transmitted_at_manifest_publication;
     std::optional<std::size_t> transmitted_at_manifest_terminal;
     std::optional<std::size_t> transmitted_at_asset_terminal;
     std::optional<std::size_t> transmitted_at_texture_terminal;
+    std::optional<std::size_t> transmitted_at_render_package_terminal;
     std::optional<std::size_t> authentication_releases_at_manifest_terminal;
 };
 
@@ -2791,7 +2808,8 @@ void write_manifest_integration_files(
 
 void configure_two_face_production_geometry(
     synthetic_bsp::SyntheticBspBuilder& builder,
-    const bool distinct_materials = false)
+    const bool distinct_materials = false,
+    const bool include_rgb_lightmaps = false)
 {
     constexpr std::array vertices{
         synthetic_bsp::SyntheticBspVector3{0.0F, 0.0F, 0.0F},
@@ -2817,6 +2835,12 @@ void configure_two_face_production_geometry(
     faces[1].first_surfedge = 3;
     faces[1].surfedge_count = 3;
     faces[1].texinfo_index = distinct_materials ? 1 : 0;
+    if (include_rgb_lightmaps) {
+        faces[0].light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+        faces[0].light_offset = 0;
+        faces[1].light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+        faces[1].light_offset = 75;
+    }
     auto node = synthetic_bsp::SyntheticBspNode{};
     node.face_count = 2U;
     std::array leaves{
@@ -2838,6 +2862,14 @@ void configure_two_face_production_geometry(
         .set_leaves(leaves)
         .set_marksurfaces(marksurfaces)
         .set_models(std::span{&model, 1U});
+    if (include_rgb_lightmaps) {
+        auto& lighting =
+            builder.lump(synthetic_bsp::SyntheticBspLumpId::lighting);
+        lighting.resize(150U);
+        for (std::size_t index = 0U; index < lighting.size(); ++index) {
+            lighting[index] = static_cast<std::byte>(index + 1U);
+        }
+    }
 }
 
 [[nodiscard]] std::vector<std::byte> make_two_face_production_bsp()
@@ -2940,7 +2972,8 @@ void populate_embedded_texture_palette(
 }
 
 [[nodiscard]] std::vector<std::byte> production_world_texture_bsp_fixture(
-    const ProductionWorldTextureIntegrationScenario scenario)
+    const ProductionWorldTextureIntegrationScenario scenario,
+    const bool include_rgb_lightmaps = false)
 {
     synthetic_bsp::SyntheticBspBuilder builder;
     const bool has_external = production_texture_uses_wad(scenario);
@@ -2964,7 +2997,10 @@ void populate_embedded_texture_palette(
         bytes(entities);
 
     if (scenario == ProductionWorldTextureIntegrationScenario::mixed) {
-        configure_two_face_production_geometry(builder, true);
+        configure_two_face_production_geometry(
+            builder,
+            true,
+            include_rgb_lightmaps);
         std::array texinfo{
             synthetic_bsp::SyntheticBspTexinfo{},
             synthetic_bsp::SyntheticBspTexinfo{},
@@ -3294,6 +3330,283 @@ void check_production_world_texture_result(
     }
 }
 
+[[nodiscard]] std::array<std::byte, 4U> world_lightmap_pixel(
+    const assets::WorldLightmapImage& image,
+    const std::uint32_t x,
+    const std::uint32_t y)
+{
+    REQUIRE(x < image.width);
+    REQUIRE(y < image.height);
+    const auto offset =
+        (static_cast<std::size_t>(y) * image.width + x) * 4U;
+    REQUIRE(image.rgba_pixels.size() >= offset + 4U);
+    return {
+        image.rgba_pixels[offset],
+        image.rgba_pixels[offset + 1U],
+        image.rgba_pixels[offset + 2U],
+        image.rgba_pixels[offset + 3U],
+    };
+}
+
+void check_production_world_render_package(
+    const world_render::WorldRenderPackage& package,
+    const std::uint32_t expected_texture_root_id)
+{
+    const auto& textured = package.textured_world();
+    const auto& world = textured.world;
+    const auto& texture_set = textured.textures;
+
+    CHECK(world.identity.source_name == "maps/test_map.bsp");
+    CHECK(world.source_profile ==
+          assets::WorldGeometrySourceProfile::goldsrc_bsp_v30);
+    REQUIRE(world.vertices.size() == 6U);
+    REQUIRE(world.indices.size() == 6U);
+    REQUIRE(world.surfaces.size() == 2U);
+    REQUIRE(world.materials.size() == 2U);
+    constexpr std::array<std::uint32_t, 6U> expected_indices{
+        0U, 1U, 2U, 3U, 4U, 5U};
+    CHECK(std::ranges::equal(world.indices, expected_indices));
+    CHECK(world.statistics.emitted_surface_count == 2U);
+    CHECK(world.statistics.emitted_vertex_count == 6U);
+    CHECK(world.statistics.emitted_triangle_count == 2U);
+    CHECK(world.statistics.material_count == 2U);
+    CHECK(world.statistics.embedded_texture_reference_count == 1U);
+    CHECK(world.statistics.external_texture_reference_count == 1U);
+
+    for (std::size_t surface_index = 0U;
+         surface_index < world.surfaces.size();
+         ++surface_index) {
+        const auto& surface = world.surfaces[surface_index];
+        CHECK(surface.first_index == surface_index * 3U);
+        CHECK(surface.index_count == 3U);
+        CHECK(surface.material_index == surface_index);
+        CHECK(surface.first_vertex == surface_index * 3U);
+        CHECK(surface.vertex_count == 3U);
+        REQUIRE(surface.source_surface_ordinal);
+        CHECK(*surface.source_surface_ordinal == surface_index);
+        REQUIRE(surface.lightmap_offset);
+        CHECK(*surface.lightmap_offset == surface_index * 75U);
+        CHECK(surface.light_styles ==
+              std::array<std::uint8_t, 4U>{0U, 0xFFU, 0xFFU, 0xFFU});
+    }
+
+    CHECK(world.materials[0U].texture_name == "EMBEDDED");
+    CHECK(world.materials[0U].texture_storage ==
+          assets::WorldTextureStorage::embedded);
+    CHECK(world.materials[1U].texture_name == "WAD_EXTERNAL");
+    CHECK(world.materials[1U].texture_storage ==
+          assets::WorldTextureStorage::external_reference);
+
+    REQUIRE(texture_set.texture_count() == 2U);
+    REQUIRE(texture_set.binding_count() == 2U);
+    CHECK(texture_set.complete_for_world_materials());
+    CHECK(texture_set.statistics().embedded_texture_count == 1U);
+    CHECK(texture_set.statistics().wad3_texture_count == 1U);
+    CHECK(texture_set.statistics().total_mip_level_count == 8U);
+    CHECK(texture_set.statistics().unresolved_material_count == 0U);
+    for (std::size_t material_index = 0U;
+         material_index < texture_set.bindings().size();
+         ++material_index) {
+        const auto& binding = texture_set.bindings()[material_index];
+        CHECK(binding.material_index == material_index);
+        CHECK(binding.status ==
+              (material_index == 0U
+                   ? assets::WorldMaterialTextureBindingStatus::
+                         resolved_embedded
+                   : assets::WorldMaterialTextureBindingStatus::resolved_wad3));
+        REQUIRE(binding.texture_asset_index);
+        CHECK(*binding.texture_asset_index == material_index);
+        REQUIRE(binding.source_bsp_texture_index);
+        CHECK(*binding.source_bsp_texture_index == material_index);
+    }
+    check_production_world_texture_asset(
+        texture_set.textures()[0U],
+        "EMBEDDED",
+        assets::WorldTextureSourceKind::embedded_bsp,
+        0U);
+    check_production_world_texture_asset(
+        texture_set.textures()[1U],
+        "WAD_EXTERNAL",
+        assets::WorldTextureSourceKind::external_wad3,
+        17U);
+    REQUIRE(texture_set.archive_metadata().size() == 1U);
+    REQUIRE(texture_set.archive_metadata()[0U].source_root_ordinal);
+    CHECK(*texture_set.archive_metadata()[0U].source_root_ordinal ==
+          expected_texture_root_id);
+    CHECK(texture_set.archive_metadata()[0U].status ==
+          assets::WorldTextureArchiveStatus::resolved);
+    CHECK(texture_set.archive_metadata()[0U].textures_supplied_count == 1U);
+
+    const auto& lightmaps = package.lightmaps();
+    REQUIRE(lightmaps.binding_count() == 2U);
+    REQUIRE(lightmaps.page_count() == 1U);
+    CHECK(lightmaps.complete_for_world_surfaces());
+    CHECK(lightmaps.statistics().surface_binding_count == 2U);
+    CHECK(lightmaps.statistics().resolved_surface_count == 2U);
+    CHECK(lightmaps.statistics().unlit_surface_count == 0U);
+    CHECK(lightmaps.statistics().atlas_page_count == 1U);
+    CHECK(lightmaps.statistics().retained_source_style_count == 2U);
+    CHECK(lightmaps.statistics().total_source_sample_count == 50U);
+    CHECK(lightmaps.statistics().total_atlas_rgba_byte_count == 114'688U);
+
+    for (std::size_t surface_index = 0U;
+         surface_index < lightmaps.bindings().size();
+         ++surface_index) {
+        const auto& binding = lightmaps.bindings()[surface_index];
+        CHECK(binding.surface_index == surface_index);
+        CHECK(binding.status ==
+              assets::WorldSurfaceLightmapBindingStatus::resolved);
+        REQUIRE(binding.atlas_page_index);
+        CHECK(*binding.atlas_page_index == 0U);
+        CHECK(binding.sample_width == 5U);
+        CHECK(binding.sample_height == 5U);
+        CHECK(binding.source_styles.style_count == 1U);
+        CHECK(binding.source_styles.style_ids[0U] == 0U);
+        CHECK(binding.selected_static_source_style_slot == 0U);
+        CHECK(binding.padded_rectangle.x == surface_index * 7U);
+        CHECK(binding.padded_rectangle.y == 0U);
+        CHECK(binding.padded_rectangle.width == 7U);
+        CHECK(binding.padded_rectangle.height == 7U);
+        CHECK(binding.inner_rectangle.x == 1U + surface_index * 7U);
+        CHECK(binding.inner_rectangle.y == 1U);
+        CHECK(binding.inner_rectangle.width == 5U);
+        CHECK(binding.inner_rectangle.height == 5U);
+    }
+
+    const auto& page = lightmaps.pages()[0U];
+    CHECK(page.width == 1'024U);
+    CHECK(page.height == 7U);
+    for (std::size_t surface_index = 0U; surface_index < 2U; ++surface_index) {
+        const auto& binding = lightmaps.bindings()[surface_index];
+        const auto& image = page.style_slot_images[0U];
+        const auto first_source_byte =
+            static_cast<std::uint8_t>(1U + surface_index * 75U);
+        const std::array expected_first_pixel{
+            static_cast<std::byte>(first_source_byte),
+            static_cast<std::byte>(first_source_byte + 1U),
+            static_cast<std::byte>(first_source_byte + 2U),
+            std::byte{0xFFU},
+        };
+        const auto inner_top_left = world_lightmap_pixel(
+            image,
+            binding.inner_rectangle.x,
+            binding.inner_rectangle.y);
+        CHECK(inner_top_left == expected_first_pixel);
+
+        const auto inner_top_right = world_lightmap_pixel(
+            image,
+            binding.inner_rectangle.x + binding.inner_rectangle.width - 1U,
+            binding.inner_rectangle.y);
+        const auto inner_bottom_left = world_lightmap_pixel(
+            image,
+            binding.inner_rectangle.x,
+            binding.inner_rectangle.y + binding.inner_rectangle.height - 1U);
+        const auto inner_bottom_right = world_lightmap_pixel(
+            image,
+            binding.inner_rectangle.x + binding.inner_rectangle.width - 1U,
+            binding.inner_rectangle.y + binding.inner_rectangle.height - 1U);
+        CHECK(world_lightmap_pixel(
+                  image,
+                  binding.padded_rectangle.x,
+                  binding.padded_rectangle.y) == inner_top_left);
+        CHECK(world_lightmap_pixel(
+                  image,
+                  binding.padded_rectangle.x +
+                      binding.padded_rectangle.width - 1U,
+                  binding.padded_rectangle.y) == inner_top_right);
+        CHECK(world_lightmap_pixel(
+                  image,
+                  binding.padded_rectangle.x,
+                  binding.padded_rectangle.y +
+                      binding.padded_rectangle.height - 1U) ==
+              inner_bottom_left);
+        CHECK(world_lightmap_pixel(
+                  image,
+                  binding.padded_rectangle.x +
+                      binding.padded_rectangle.width - 1U,
+                  binding.padded_rectangle.y +
+                      binding.padded_rectangle.height - 1U) ==
+              inner_bottom_right);
+    }
+
+    REQUIRE(package.vertices().size() == 6U);
+    REQUIRE(package.indices().size() == 6U);
+    REQUIRE(package.materials().size() == 2U);
+    REQUIRE(package.draw_batches().size() == 2U);
+    CHECK(std::ranges::equal(package.indices(), expected_indices));
+    CHECK(package.statistics().vertex_count == 6U);
+    CHECK(package.statistics().index_count == 6U);
+    CHECK(package.statistics().triangle_count == 2U);
+    CHECK(package.statistics().material_count == 2U);
+    CHECK(package.statistics().batch_count == 2U);
+    CHECK(package.statistics().source_surface_count == 2U);
+    CHECK(package.statistics().opaque_batch_count == 2U);
+    CHECK(package.statistics().masked_batch_count == 0U);
+    CHECK(package.statistics().atlas_batch_count == 2U);
+    CHECK(package.statistics().unlit_batch_count == 0U);
+    CHECK(package.statistics().base_texture_rgba_byte_count == 2'720U);
+    CHECK(package.statistics().lightmap_rgba_byte_count == 114'688U);
+    CHECK(package.resource_id() != 0U);
+    CHECK(package.resource_revision() != 0U);
+
+    constexpr std::array<assets::AssetVector2, 6U> expected_base_uvs{{
+        {0.0F, 0.0F},
+        {4.0F, 0.0F},
+        {4.0F, 4.0F},
+        {0.0F, 0.0F},
+        {4.0F, 4.0F},
+        {0.0F, 4.0F},
+    }};
+    constexpr std::array<assets::AssetVector2, 6U> expected_lightmap_uvs{{
+        {1.5F / 1'024.0F, 1.5F / 7.0F},
+        {5.5F / 1'024.0F, 1.5F / 7.0F},
+        {5.5F / 1'024.0F, 5.5F / 7.0F},
+        {8.5F / 1'024.0F, 1.5F / 7.0F},
+        {12.5F / 1'024.0F, 5.5F / 7.0F},
+        {8.5F / 1'024.0F, 5.5F / 7.0F},
+    }};
+    for (std::size_t vertex_index = 0U;
+         vertex_index < package.vertices().size();
+         ++vertex_index) {
+        const auto& vertex = package.vertices()[vertex_index];
+        CHECK(std::isfinite(vertex.base_texture_coordinate.x));
+        CHECK(std::isfinite(vertex.base_texture_coordinate.y));
+        CHECK(std::isfinite(vertex.lightmap_atlas_coordinate.x));
+        CHECK(std::isfinite(vertex.lightmap_atlas_coordinate.y));
+        CHECK(vertex.base_texture_coordinate.x ==
+              Catch::Approx(expected_base_uvs[vertex_index].x));
+        CHECK(vertex.base_texture_coordinate.y ==
+              Catch::Approx(expected_base_uvs[vertex_index].y));
+        CHECK(vertex.lightmap_atlas_coordinate.x ==
+              Catch::Approx(expected_lightmap_uvs[vertex_index].x));
+        CHECK(vertex.lightmap_atlas_coordinate.y ==
+              Catch::Approx(expected_lightmap_uvs[vertex_index].y));
+    }
+
+    for (std::size_t material_index = 0U;
+         material_index < package.materials().size();
+         ++material_index) {
+        const auto& material = package.materials()[material_index];
+        const auto& batch = package.draw_batches()[material_index];
+        CHECK(material.material_index == material_index);
+        CHECK(material.base_texture_asset_index == material_index);
+        CHECK(material.base_texture_alpha_mode ==
+              assets::WorldTextureAlphaMode::opaque);
+        CHECK(material.lightmap_mode ==
+              world_render::WorldRenderLightmapMode::atlas);
+        REQUIRE(material.lightmap_atlas_page_index);
+        CHECK(*material.lightmap_atlas_page_index == 0U);
+        CHECK(batch.first_index == material_index * 3U);
+        CHECK(batch.index_count == 3U);
+        CHECK(batch.render_material_index == material_index);
+        CHECK(batch.lightmap_mode ==
+              world_render::WorldRenderLightmapMode::atlas);
+        REQUIRE(batch.lightmap_atlas_page_index);
+        CHECK(*batch.lightmap_atlas_page_index == 0U);
+        CHECK(batch.source_surface_count == 1U);
+    }
+}
+
 [[nodiscard]] std::vector<std::byte> production_bsp_fixture(
     const ProductionBspIntegrationScenario scenario)
 {
@@ -3509,9 +3822,14 @@ void run_precache_manifest_integration(
             ProductionWorldTextureIntegrationScenario::mixed)
 {
     INFO("fake-HLDS precache-manifest run " << run + 1U);
+    const bool production_world_render_package =
+        completion_mode ==
+        PrecacheManifestCompletionMode::production_world_render_package;
     const bool production_world_textures =
         completion_mode ==
         PrecacheManifestCompletionMode::production_world_textures;
+    const bool production_texture_pipeline =
+        production_world_textures || production_world_render_package;
     const bool production_bsp_dispatch =
         completion_mode != PrecacheManifestCompletionMode::manifest_only;
     const bool legacy_malformed_face_rejection =
@@ -3536,12 +3854,15 @@ void run_precache_manifest_integration(
     REQUIRE_FALSE((legacy_malformed_face_rejection &&
                    production_bsp_scenario !=
                        ProductionBspIntegrationScenario::valid_quad));
-    REQUIRE_FALSE((!production_world_textures &&
+    REQUIRE_FALSE((!production_texture_pipeline &&
                    production_texture_scenario !=
                        ProductionWorldTextureIntegrationScenario::mixed));
-    REQUIRE_FALSE((production_world_textures &&
+    REQUIRE_FALSE((production_texture_pipeline &&
                    production_bsp_scenario !=
                        ProductionBspIntegrationScenario::valid_quad));
+    REQUIRE_FALSE((production_world_render_package &&
+                   production_texture_scenario !=
+                       ProductionWorldTextureIntegrationScenario::mixed));
 
     // Alternate exact game-root selection and valve fallback while retaining
     // one validated environment for both consistency preparation and the
@@ -3561,9 +3882,10 @@ void run_precache_manifest_integration(
     std::vector<std::byte> production_world_bytes;
 
     if (production_bsp_dispatch) {
-        production_world_bytes = production_world_textures
+        production_world_bytes = production_texture_pipeline
             ? production_world_texture_bsp_fixture(
-                  production_texture_scenario)
+                  production_texture_scenario,
+                  production_world_render_package)
             : production_bsp_fixture(production_bsp_scenario);
         if (legacy_malformed_face_rejection) {
             const auto face_descriptor =
@@ -3582,7 +3904,7 @@ void run_precache_manifest_integration(
             selected_game,
             "maps/test_map.bsp",
             production_world_bytes);
-        if (production_world_textures &&
+        if (production_texture_pipeline &&
             production_texture_uses_wad(production_texture_scenario) &&
             production_texture_scenario !=
                 ProductionWorldTextureIntegrationScenario::missing_wad) {
@@ -3697,16 +4019,31 @@ void run_precache_manifest_integration(
     goldsrc::WorldTextureImportStageConfig world_texture_config;
     world_texture_config.asset_dispatch = asset_dispatch_config;
     world_texture_config.asset_dispatch.manifest = manifest_stage_config;
+    goldsrc::WorldRenderPackageStageConfig world_render_package_config;
+    if (production_world_render_package) {
+        world_render_package_config.world_textures =
+            std::move(world_texture_config);
+        world_render_package_config.maximum_stage_events = 257U;
+        CHECK(world_render_package_config.maximum_stage_events == 257U);
+        REQUIRE(goldsrc::valid_world_render_package_stage_configuration(
+            world_render_package_config));
+        // Keep the legacy sibling argument intentionally distinct. Package
+        // mode must consume the authoritative nested configuration above;
+        // the exact chunk-progress assertion detects any future overwrite.
+        world_texture_config = goldsrc::WorldTextureImportStageConfig{};
+    }
     const auto expected_remote = *server_endpoint;
 
     goldsrc::GoldSrcHandshakeCoordinator handshake{
         transport,
         *server_endpoint,
-        production_world_textures
-            ? goldsrc::HandshakeStopPoint::world_textures
-            : (production_bsp_dispatch
-                   ? goldsrc::HandshakeStopPoint::asset_dispatch
-                   : goldsrc::HandshakeStopPoint::precache_manifest),
+        production_world_render_package
+            ? goldsrc::HandshakeStopPoint::world_render_package
+            : (production_world_textures
+                   ? goldsrc::HandshakeStopPoint::world_textures
+                   : (production_bsp_dispatch
+                          ? goldsrc::HandshakeStopPoint::asset_dispatch
+                          : goldsrc::HandshakeStopPoint::precache_manifest)),
         std::move(prepared_request.request),
         challenge_config(),
         {},
@@ -3916,6 +4253,39 @@ void run_precache_manifest_integration(
             default:
                 break;
             }
+        },
+        std::move(world_render_package_config),
+        [&traces, expected_remote](
+            const goldsrc::WorldRenderPackageTraceEvent& event) {
+            if (event.endpoint != expected_remote) {
+                ++traces.endpoint_mismatches;
+            }
+            using Classification =
+                goldsrc::WorldRenderPackageTraceClassification;
+            switch (event.classification) {
+            case Classification::stage_started:
+                ++traces.render_package_stages_started;
+                break;
+            case Classification::world_textures_ready:
+                ++traces.render_world_textures_ready;
+                break;
+            case Classification::lightmap_import_started:
+                ++traces.lightmap_imports_started;
+                break;
+            case Classification::lightmap_atlases_ready:
+                ++traces.lightmap_atlases_ready;
+                break;
+            case Classification::render_package_build_started:
+                ++traces.render_package_builds_started;
+                break;
+            case Classification::world_render_package_ready:
+                ++traces.render_packages_ready;
+                traces.transmitted_at_render_package_terminal =
+                    event.transmitted_packet_count;
+                break;
+            default:
+                break;
+            }
         }};
 
     const auto epoch = goldsrc::ChallengeExchangeTimePoint{} +
@@ -4085,7 +4455,11 @@ void run_precache_manifest_integration(
         error);
     handshake.update(now + 1ms);
     CHECK_FALSE(handshake.terminal());
-    if (production_world_textures) {
+    if (production_world_render_package) {
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::
+                  waiting_for_world_render_package);
+    } else if (production_world_textures) {
         CHECK(handshake.state() ==
               goldsrc::GoldSrcHandshakeState::waiting_for_world_textures);
     } else if (production_bsp_dispatch) {
@@ -4172,6 +4546,183 @@ void run_precache_manifest_integration(
         handshake.update(terminal_time);
         REQUIRE(handshake.terminal());
         require_no_datagram(*server);
+    }
+
+    CHECK(handshake.lightmap_import_count() ==
+          (production_world_render_package ? 1U : 0U));
+    CHECK(handshake.renderer_upload_count() == 0U);
+
+    if (production_world_render_package) {
+        constexpr auto expected_terminal_state =
+            goldsrc::GoldSrcHandshakeState::world_render_package_ready;
+        CHECK(handshake.state() == expected_terminal_state);
+        CHECK_FALSE(handshake.world_render_package_error());
+        REQUIRE(handshake.world_render_package_result());
+        const auto retained_package =
+            handshake.world_render_package_result();
+        REQUIRE(retained_package);
+        check_production_world_render_package(
+            *retained_package,
+            expected_texture_root_id);
+
+        auto* package_stage = hlclient::goldsrc::detail::
+            GoldSrcHandshakeCoordinatorTestAccess::
+                world_render_package_stage(handshake);
+        REQUIRE(package_stage != nullptr);
+        CHECK(package_stage->state() ==
+              goldsrc::WorldRenderPackageStageState::
+                  world_render_package_ready);
+        CHECK(package_stage->result().get() == retained_package.get());
+        CHECK_FALSE(package_stage->error());
+        CHECK(package_stage->cleanup_count() == 1U);
+        CHECK(package_stage->manifest_publication_count() == 1U);
+        CHECK(package_stage->bsp_source_open_attempt_count() == 1U);
+        CHECK(package_stage->importer_dispatch_count() == 1U);
+        CHECK(package_stage->wad_source_open_attempt_count() == 1U);
+        CHECK(package_stage->texture_set_publication_count() == 1U);
+        CHECK(package_stage->lightmap_import_count() == 1U);
+        CHECK(package_stage->lightmap_set_publication_count() == 1U);
+        CHECK(package_stage->render_package_publication_count() == 1U);
+        REQUIRE(package_stage->local_endpoint());
+        CHECK(*package_stage->local_endpoint() == started.client_endpoint);
+        CHECK(package_stage->remote_endpoint() == expected_remote);
+
+        const auto expected_progress_events =
+            (production_world_bytes.size() + source_read_chunk_bytes - 1U) /
+            source_read_chunk_bytes;
+        CHECK(traces.initial_requests_queued == 1U);
+        CHECK(traces.transition_requests_queued == 1U);
+        CHECK(traces.resource_lists_decoded == 1U);
+        CHECK(traces.resource_responses_queued == 1U);
+        CHECK(traces.response_boundaries == 1U);
+        CHECK(traces.manifest_publications == 1U);
+        CHECK(traces.manifest_terminal_outcomes == 1U);
+        CHECK(traces.world_entries_selected == 1U);
+        CHECK(traces.asset_source_open_starts == 1U);
+        CHECK(traces.asset_source_progress_events == expected_progress_events);
+        CHECK(traces.asset_source_open_failures == 0U);
+        CHECK(traces.importer_probes_completed == 1U);
+        CHECK(traces.importers_selected == 1U);
+        CHECK(traces.assets_imported == 1U);
+        CHECK(traces.asset_import_failures == 0U);
+        CHECK(traces.world_geometry_ready == 1U);
+        CHECK(traces.texture_imports_started == 1U);
+        CHECK(traces.texture_progress_events >= 1U);
+        CHECK(traces.wad_source_open_starts == 1U);
+        CHECK(traces.wad_sources_ready == 1U);
+        CHECK(traces.texture_sets_ready == 1U);
+        CHECK(traces.texture_sets_incomplete == 0U);
+        CHECK(traces.wad_catalog_failures == 0U);
+        CHECK(traces.texture_decode_failures == 0U);
+        CHECK(traces.render_package_stages_started == 1U);
+        CHECK(traces.render_world_textures_ready == 1U);
+        CHECK(traces.lightmap_imports_started == 1U);
+        CHECK(traces.lightmap_atlases_ready == 1U);
+        CHECK(traces.render_package_builds_started == 1U);
+        CHECK(traces.render_packages_ready == 1U);
+        CHECK(traces.endpoint_mismatches == 0U);
+        CHECK(response_datagrams ==
+              (transport_scenario ==
+                       PrecacheManifestTransportScenario::baseline
+                   ? 1U
+                   : 2U));
+
+        REQUIRE(traces.transmitted_at_response_boundary);
+        REQUIRE(traces.transmitted_at_manifest_publication);
+        REQUIRE(traces.transmitted_at_manifest_terminal);
+        REQUIRE(traces.transmitted_at_asset_terminal);
+        REQUIRE(traces.transmitted_at_texture_terminal);
+        REQUIRE(traces.transmitted_at_render_package_terminal);
+        REQUIRE(traces.authentication_releases_at_manifest_terminal);
+        REQUIRE(package_stage
+                    ->transmitted_packet_count_at_manifest_publication());
+        const auto transmitted_at_manifest =
+            *traces.transmitted_at_manifest_publication;
+        CHECK(transmitted_at_manifest ==
+              *traces.transmitted_at_response_boundary);
+        CHECK(*traces.transmitted_at_manifest_terminal ==
+              transmitted_at_manifest);
+        CHECK(*traces.transmitted_at_asset_terminal ==
+              transmitted_at_manifest);
+        CHECK(*traces.transmitted_at_texture_terminal ==
+              transmitted_at_manifest);
+        CHECK(*traces.transmitted_at_render_package_terminal ==
+              transmitted_at_manifest);
+        CHECK(*package_stage
+                   ->transmitted_packet_count_at_manifest_publication() ==
+              transmitted_at_manifest);
+        CHECK(package_stage->transmitted_packet_count() ==
+              transmitted_at_manifest);
+        CHECK(*traces.authentication_releases_at_manifest_terminal == 0U);
+        // This guard travels inside the production auth-backed connection
+        // lifetime, so one destruction proves the retained connection/session
+        // lifetime was released exactly once by terminal cleanup.
+        CHECK(authentication_releases == 1U);
+        CHECK(prepared_provider.provider->consumed());
+        REQUIRE(handshake.local_endpoint());
+        CHECK(*handshake.local_endpoint() == started.client_endpoint);
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+        CHECK(can_open_synthetic_writer(
+            root.game_path(selected_game) / "tempdecal.wad"));
+        CHECK(can_open_synthetic_writer(
+            root.game_path(selected_game) / "texture_flow.wad"));
+
+        const auto retained_identity = retained_package->resource_identity();
+        const auto retained_vertex_count = retained_package->vertices().size();
+        const auto retained_base_texel =
+            retained_package->textured_world()
+                .textures.textures()[0U]
+                .mip_levels[0U]
+                .rgba_pixels[0U];
+        const auto& first_lightmap_binding =
+            retained_package->lightmaps().bindings()[0U];
+        const auto& retained_lightmap_image =
+            retained_package->lightmaps()
+                .pages()[0U]
+                .style_slot_images[0U];
+        const auto retained_lightmap_offset =
+            (static_cast<std::size_t>(
+                 first_lightmap_binding.inner_rectangle.y) *
+                 retained_lightmap_image.width +
+             first_lightmap_binding.inner_rectangle.x) *
+            4U;
+        REQUIRE(retained_lightmap_image.rgba_pixels.size() >
+                retained_lightmap_offset);
+        const auto retained_lightmap_texel =
+            retained_lightmap_image.rgba_pixels[retained_lightmap_offset];
+
+        handshake.update(terminal_time + 100ms);
+        handshake.cancel(terminal_time + 200ms);
+        handshake.cancel(terminal_time + 300ms);
+        CHECK(handshake.state() == expected_terminal_state);
+        CHECK(handshake.world_render_package_result().get() ==
+              retained_package.get());
+        CHECK(retained_package->resource_identity() == retained_identity);
+        CHECK(retained_package->vertices().size() == retained_vertex_count);
+        CHECK(retained_package->textured_world()
+                  .textures.textures()[0U]
+                  .mip_levels[0U]
+                  .rgba_pixels[0U] == retained_base_texel);
+        CHECK(retained_package->lightmaps()
+                  .pages()[0U]
+                  .style_slot_images[0U]
+                  .rgba_pixels[retained_lightmap_offset] ==
+              retained_lightmap_texel);
+        CHECK(package_stage->cleanup_count() == 1U);
+        CHECK(package_stage->manifest_publication_count() == 1U);
+        CHECK(package_stage->bsp_source_open_attempt_count() == 1U);
+        CHECK(package_stage->importer_dispatch_count() == 1U);
+        CHECK(package_stage->wad_source_open_attempt_count() == 1U);
+        CHECK(package_stage->texture_set_publication_count() == 1U);
+        CHECK(package_stage->lightmap_set_publication_count() == 1U);
+        CHECK(package_stage->render_package_publication_count() == 1U);
+        CHECK(package_stage->transmitted_packet_count() ==
+              transmitted_at_manifest);
+        CHECK(authentication_releases == 1U);
+        CHECK(traces.render_packages_ready == 1U);
+        require_no_datagram(*server);
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+        return;
     }
 
     if (production_world_textures) {
@@ -4760,6 +5311,19 @@ void run_world_texture_integration(
         64U,
         ProductionBspIntegrationScenario::valid_quad,
         scenario);
+}
+
+void run_world_render_package_integration(const std::size_t run)
+{
+    run_precache_manifest_integration(
+        run,
+        PrecacheManifestIntegrationScenario::complete,
+        PrecacheManifestTransportScenario::baseline,
+        false,
+        PrecacheManifestCompletionMode::production_world_render_package,
+        64U,
+        ProductionBspIntegrationScenario::valid_quad,
+        ProductionWorldTextureIntegrationScenario::mixed);
 }
 
 class ScopedChildProcess final {
@@ -5373,6 +5937,20 @@ TEST_CASE("Production world-texture fake HLDS covers required WAD and material v
             variants[index].texture,
             PrecacheManifestTransportScenario::baseline,
             variants[index].manifest);
+    }
+}
+
+TEST_CASE("Production fake HLDS publishes an immutable CPU world render package 20 of 20",
+          "[goldsrc][world-render-package][udp][production][full-flow][cpu-only][repeat-20]")
+{
+    STATIC_REQUIRE_FALSE(HasRendererHandle<goldsrc::WorldRenderPackageStage>);
+    STATIC_REQUIRE_FALSE(
+        HasRendererHandle<world_render::WorldRenderPackage>);
+
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production CPU world-render-package run " << run + 1U
+                                                         << "/20");
+        run_world_render_package_integration(run);
     }
 }
 

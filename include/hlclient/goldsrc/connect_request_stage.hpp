@@ -15,6 +15,7 @@
 #include <hlclient/goldsrc/resource_client_response_stage.hpp>
 #include <hlclient/goldsrc/resource_transition_stage.hpp>
 #include <hlclient/goldsrc/user_info_signon_stage.hpp>
+#include <hlclient/goldsrc/world_render/world_render_package_stage.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
@@ -51,6 +52,7 @@ enum class HandshakeStopPoint {
     precache_manifest,
     asset_dispatch,
     world_textures,
+    world_render_package,
 };
 
 enum class ConnectRequestStageState {
@@ -232,6 +234,13 @@ enum class GoldSrcHandshakeState {
     world_texture_decode_failed,
     world_texture_timed_out,
     world_texture_backpressure,
+    waiting_for_world_render_package,
+    world_render_package_ready,
+    world_render_textures_incomplete,
+    world_render_lightmap_import_failed,
+    world_render_package_failed,
+    world_render_timed_out,
+    world_render_backpressure,
     timed_out,
     cancelled,
     configuration_error,
@@ -285,7 +294,9 @@ public:
         PrecacheAssetDispatchStageConfig asset_dispatch_config = {},
         PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback = {},
         WorldTextureImportStageConfig world_texture_config = {},
-        WorldTextureImportTraceCallback world_texture_trace_callback = {});
+        WorldTextureImportTraceCallback world_texture_trace_callback = {},
+        WorldRenderPackageStageConfig world_render_package_config = {},
+        WorldRenderPackageTraceCallback world_render_package_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -347,6 +358,15 @@ public:
     world_texture_result() const noexcept;
     [[nodiscard]] const std::optional<WorldTextureImportStageError>&
     world_texture_error() const noexcept;
+    [[nodiscard]] const std::shared_ptr<
+        const world_render::WorldRenderPackage>&
+    world_render_package_result() const noexcept;
+    [[nodiscard]] const std::optional<WorldRenderPackageStageError>&
+    world_render_package_error() const noexcept;
+    // Explicit stop-boundary counters. The handshake pipeline is CPU-only and
+    // never owns or initializes a renderer, so its GPU upload count is always zero.
+    [[nodiscard]] std::size_t lightmap_import_count() const noexcept;
+    [[nodiscard]] std::size_t renderer_upload_count() const noexcept;
     // Non-null only after a successful netchan bootstrap. The returned object
     // is the same session that committed the M2.3.3 bootstrap ACKs; callers must use
     // the coordinator's original externally-owned datagram transport.
@@ -373,6 +393,7 @@ private:
     void synchronize_from_precache_manifest(ChallengeExchangeTimePoint now);
     void synchronize_from_asset_dispatch();
     void synchronize_from_world_textures();
+    void synchronize_from_world_render_package();
     void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
@@ -391,6 +412,7 @@ private:
     std::unique_ptr<PrecacheManifestStage> precache_manifest_stage_;
     std::unique_ptr<PrecacheAssetDispatchStage> asset_dispatch_stage_;
     std::unique_ptr<WorldTextureImportStage> world_texture_stage_;
+    std::unique_ptr<WorldRenderPackageStage> world_render_package_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;

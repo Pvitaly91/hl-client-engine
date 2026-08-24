@@ -43,6 +43,13 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             options.net_trace = true;
             continue;
         }
+        if (argument == "--view-world") {
+            if (options.view_world) {
+                return failure("--view-world may be specified only once");
+            }
+            options.view_world = true;
+            continue;
+        }
         if (!needs_value(argument)) {
             return failure("Unknown command-line argument: " + std::string{argument});
         }
@@ -102,6 +109,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::world_geometry;
             } else if (value == "world-textures") {
                 options.stop_after = ConnectionStopPoint::world_textures;
+            } else if (value == "world-render-package") {
+                options.stop_after = ConnectionStopPoint::world_render_package;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
                                " (expected challenge, connect-request, connect-response, "
@@ -109,7 +118,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                                "delta-schemas, movevars, user-info, or "
                                "resource-list-boundary, resource-list, or "
                                "resource-response-boundary, precache-manifest, or "
-                               "asset-dispatch, world-geometry, or world-textures)");
+                               "asset-dispatch, world-geometry, world-textures, or "
+                               "world-render-package)");
             }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
@@ -141,7 +151,17 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         }
     }
 
-    if ((stop_after_seen || connect_request_setting_seen) && !options.connect_endpoint) {
+    if (options.view_world) {
+        if (stop_after_seen &&
+            options.stop_after != ConnectionStopPoint::world_render_package) {
+            return failure(
+                "--view-world is compatible only with --stop-after "
+                "world-render-package");
+        }
+        options.stop_after = ConnectionStopPoint::world_render_package;
+    }
+    if ((stop_after_seen || options.view_world || connect_request_setting_seen) &&
+        !options.connect_endpoint) {
         return failure("Connect-request options require --connect <ip:port>");
     }
     if (resource_consistency_provider_seen && !options.connect_endpoint) {
@@ -160,7 +180,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "signon-boundary/pre-resource/delta-schemas/movevars/"
                        "user-info/resource-list-boundary/resource-list/"
                        "resource-response-boundary/precache-manifest/"
-                       "asset-dispatch/world-geometry/world-textures stop point");
+                       "asset-dispatch/world-geometry/world-textures/"
+                       "world-render-package stop point or --view-world");
     }
     if (options.authentication_provider && !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
@@ -183,7 +204,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::precache_manifest ||
          options.stop_after == ConnectionStopPoint::asset_dispatch ||
          options.stop_after == ConnectionStopPoint::world_geometry ||
-         options.stop_after == ConnectionStopPoint::world_textures) &&
+         options.stop_after == ConnectionStopPoint::world_textures ||
+         options.stop_after == ConnectionStopPoint::world_render_package) &&
         !options.authentication_provider) {
         return failure(
             "Netchan bootstrap and sign-on require the explicit "
@@ -222,6 +244,16 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             "The world-textures stop point requires "
             "--resource-consistency-provider local");
     }
+    if (options.stop_after == ConnectionStopPoint::world_render_package &&
+        options.resource_consistency_provider !=
+            ResourceConsistencyProviderKind::local) {
+        return failure(
+            "The world-render-package boundary requires "
+            "--resource-consistency-provider local");
+    }
+    if (options.view_world && options.renderer != RendererBackend::opengl) {
+        return failure("--view-world requires --renderer opengl");
+    }
 
     return CommandLineParseResult{std::move(options), {}};
 }
@@ -236,7 +268,8 @@ bool requires_local_resource_consistency_preparation(
             options.stop_after == ConnectionStopPoint::precache_manifest ||
             options.stop_after == ConnectionStopPoint::asset_dispatch ||
             options.stop_after == ConnectionStopPoint::world_geometry ||
-            options.stop_after == ConnectionStopPoint::world_textures);
+            options.stop_after == ConnectionStopPoint::world_textures ||
+            options.stop_after == ConnectionStopPoint::world_render_package);
 }
 
 std::string_view command_line_help() noexcept
@@ -255,7 +288,8 @@ Options:
                        delta-schemas, movevars, user-info, or
                        resource-list-boundary, resource-list, or
                        resource-response-boundary, precache-manifest, or
-                       asset-dispatch, world-geometry, or world-textures
+                       asset-dispatch, world-geometry, world-textures, or
+                       world-render-package
                        (default: challenge)
   --auth-provider <name>
                       Authentication provider for connect stages: file
@@ -265,11 +299,13 @@ Options:
                       Explicit read-only response provider: local; requires
                       --basedir and is prepared only for resource-response-boundary,
                       precache-manifest, asset-dispatch, world-geometry, or
-                      world-textures
+                      world-textures, or world-render-package
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
+  --view-world        Build the world render package, disconnect, then run the
+                      local diagnostic OpenGL preview
 
 Connect-request mode sends once without waiting. Connect-response mode waits
 boundedly for the immediate connectionless accept/reject only. Netchan-bootstrap
@@ -310,6 +346,10 @@ lightmap, renderer, or GPU work.
 World-textures continues only from an imported CPU world, decodes embedded and
 declared WAD3 textures into owning RGBA mip levels, and stops before lightmaps,
 renderer, or GPU work.
+World-render-package continues locally through RGB lightmaps and a neutral CPU
+render package without initializing SDL or uploading GPU resources. View-world
+uses that same validated package only after network cleanup and requires the
+OpenGL renderer.
 No mode implements authentication generation.
 )";
 }

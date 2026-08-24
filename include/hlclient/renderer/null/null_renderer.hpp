@@ -11,7 +11,11 @@ struct NullRendererStatistics {
     bool initialized{false};
     bool shutdown{false};
     std::uint64_t rendered_frames{0};
-    std::optional<RenderScene> last_scene;
+    ClearColor last_clear_color{};
+    bool static_world_present{false};
+    std::optional<std::uint64_t> package_resource_id;
+    std::optional<std::uint64_t> package_revision;
+    bool camera_valid{false};
     RenderExtent last_extent{};
 
     [[nodiscard]] friend bool operator==(

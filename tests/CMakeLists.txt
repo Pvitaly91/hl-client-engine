@@ -30,6 +30,8 @@ add_executable(hlclient_tests
     test_goldsrc_bsp_world_geometry.cpp
     test_goldsrc_bsp_models.cpp
     test_goldsrc_bsp_spatial_structure.cpp
+    test_goldsrc_lightmap_extents.cpp
+    test_goldsrc_lightmap_import.cpp
     test_goldsrc_bsp_importer.cpp
     test_goldsrc_bsp_mutation_corpus.cpp
     test_goldsrc_bsp_embedded_textures.cpp
@@ -57,6 +59,11 @@ add_executable(hlclient_tests
     test_world_texture_resolution.cpp
     test_world_texture_set.cpp
     test_world_texture_import_stage.cpp
+    test_world_lightmap_atlas.cpp
+    test_world_render_package.cpp
+    test_world_render_package_stage.cpp
+    test_render_camera_math.cpp
+    test_world_preview_scene.cpp
     test_precache_slot_tables.cpp
     test_precache_manifest.cpp
     test_precache_asset_dispatch_plan.cpp
@@ -80,6 +87,7 @@ add_executable(hlclient_tests
     test_netchan_sequence.cpp
     test_netchan_session.cpp
     test_netchan_udp_integration.cpp
+    test_opengl_world_renderer.cpp
     test_scene_source.cpp
     test_service_message_stream.cpp
     test_pre_resource_service_stream.cpp
@@ -117,6 +125,7 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc
         hlclient_goldsrc_bsp
         hlclient_goldsrc_indexed_texture
+        hlclient_goldsrc_lightmaps
         hlclient_goldsrc_wad3
         hlclient_goldsrc_client
         hlclient_goldsrc_asset_dispatch
@@ -125,12 +134,18 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_netchan
         hlclient_goldsrc_signon
         hlclient_goldsrc_world_textures
+        hlclient_goldsrc_world_render
         hlclient_hash_md5
         hlclient_local_resources
         hlclient_local_asset_source
         hlclient_network
         hlclient_scene_api
         hlclient_renderer_null
+        hlclient_renderer_opengl
+        hlclient_platform
+        hlclient_glad
+        hlclient_world_render
+        hlclient_world_preview
         hlclient_resource_consistency_api
         hlclient_resource_consistency_local
 )

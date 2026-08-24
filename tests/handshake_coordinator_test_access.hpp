@@ -11,6 +11,12 @@ public:
     {
         return coordinator.asset_dispatch_stage_.get();
     }
+
+    [[nodiscard]] static WorldRenderPackageStage* world_render_package_stage(
+        GoldSrcHandshakeCoordinator& coordinator) noexcept
+    {
+        return coordinator.world_render_package_stage_.get();
+    }
 };
 
 } // namespace hlclient::goldsrc::detail
