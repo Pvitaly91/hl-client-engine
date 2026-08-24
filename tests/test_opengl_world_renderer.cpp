@@ -19,15 +19,18 @@
 #include <hlclient/world_render/world_render_package_builder.hpp>
 
 #include <glad/gl.h>
+#include <SDL3/SDL_video.h>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -49,6 +52,90 @@ namespace opengl = hlclient::renderer::opengl;
 namespace renderer = hlclient::renderer;
 namespace wad3 = hlclient::goldsrc::wad3;
 namespace world_render = hlclient::world_render;
+
+struct ActualOpenGlVersion {
+    std::uint32_t major{0U};
+    std::uint32_t minor{0U};
+};
+
+[[nodiscard]] bool parse_version_component(
+    const std::string_view text,
+    std::size_t& cursor,
+    std::uint32_t& value) noexcept
+{
+    if (cursor >= text.size() || text[cursor] < '0' || text[cursor] > '9') {
+        return false;
+    }
+
+    value = 0U;
+    while (cursor < text.size() && text[cursor] >= '0' &&
+           text[cursor] <= '9') {
+        const auto digit = static_cast<std::uint32_t>(text[cursor] - '0');
+        if (value >
+            ((std::numeric_limits<std::uint32_t>::max)() - digit) / 10U) {
+            return false;
+        }
+        value = (value * 10U) + digit;
+        ++cursor;
+    }
+    return true;
+}
+
+[[nodiscard]] std::optional<ActualOpenGlVersion>
+parse_actual_open_gl_version(const std::string_view text) noexcept
+{
+    ActualOpenGlVersion version;
+    std::size_t cursor = 0U;
+    if (!parse_version_component(text, cursor, version.major) ||
+        cursor >= text.size() || text[cursor] != '.') {
+        return std::nullopt;
+    }
+    ++cursor;
+    if (!parse_version_component(text, cursor, version.minor)) {
+        return std::nullopt;
+    }
+    if (cursor < text.size() && text[cursor] != '.' && text[cursor] != ' ') {
+        return std::nullopt;
+    }
+    return version;
+}
+
+[[nodiscard]] constexpr bool supports_required_open_gl_version(
+    const ActualOpenGlVersion version) noexcept
+{
+    return version.major > 3U ||
+        (version.major == 3U && version.minor >= 3U);
+}
+
+[[nodiscard]] std::optional<ActualOpenGlVersion>
+current_actual_open_gl_version() noexcept
+{
+    const auto address = SDL_GL_GetProcAddress("glGetString");
+    if (address == nullptr) {
+        return std::nullopt;
+    }
+    static_assert(
+        sizeof(PFNGLGETSTRINGPROC) == sizeof(SDL_FunctionPointer));
+    const auto get_string = std::bit_cast<PFNGLGETSTRINGPROC>(address);
+    const auto* version_bytes = get_string(GL_VERSION);
+    if (version_bytes == nullptr) {
+        return std::nullopt;
+    }
+
+    constexpr std::size_t maximum_version_bytes = 256U;
+    const auto* version_text =
+        reinterpret_cast<const char*>(version_bytes);
+    std::size_t byte_count = 0U;
+    while (byte_count < maximum_version_bytes &&
+           version_text[byte_count] != '\0') {
+        ++byte_count;
+    }
+    if (byte_count == 0U || byte_count == maximum_version_bytes) {
+        return std::nullopt;
+    }
+    return parse_actual_open_gl_version(
+        std::string_view{version_text, byte_count});
+}
 
 class HiddenOpenGlContext final {
 public:
@@ -694,11 +781,48 @@ TEST_CASE("OpenGL renderer error classifications are bounded and stable",
         "unable_to_retain_resources");
 }
 
+TEST_CASE("OpenGL actual-version capability parsing is bounded",
+          "[renderer][opengl][capability]")
+{
+    const auto legacy = parse_actual_open_gl_version("1.1.0");
+    REQUIRE(legacy.has_value());
+    CHECK(legacy->major == 1U);
+    CHECK(legacy->minor == 1U);
+    CHECK_FALSE(supports_required_open_gl_version(*legacy));
+
+    const auto insufficient = parse_actual_open_gl_version("3.2");
+    REQUIRE(insufficient.has_value());
+    CHECK_FALSE(supports_required_open_gl_version(*insufficient));
+
+    const auto required =
+        parse_actual_open_gl_version("3.3.0 - Build 1");
+    REQUIRE(required.has_value());
+    CHECK(supports_required_open_gl_version(*required));
+
+    const auto newer = parse_actual_open_gl_version("4.6 Mesa");
+    REQUIRE(newer.has_value());
+    CHECK(supports_required_open_gl_version(*newer));
+
+    CHECK_FALSE(parse_actual_open_gl_version("").has_value());
+    CHECK_FALSE(
+        parse_actual_open_gl_version("OpenGL 3.3").has_value());
+    CHECK_FALSE(parse_actual_open_gl_version("3").has_value());
+    CHECK_FALSE(parse_actual_open_gl_version("3.x").has_value());
+    CHECK_FALSE(parse_actual_open_gl_version(
+                    "42949672960.3")
+                    .has_value());
+}
+
 TEST_CASE("OpenGL renderer uploads, caches and draws a synthetic static world",
           "[renderer][opengl][world-frame]")
 {
     auto context = try_create_context();
     if (!context) {
+        SKIP("OpenGL 3.3 context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
         SKIP("OpenGL 3.3 context unavailable on this host");
     }
     context->initialize_renderer();
@@ -857,6 +981,11 @@ TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",
 
     auto context = try_create_context();
     if (!context) {
+        SKIP("OpenGL 3.3 context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
         SKIP("OpenGL 3.3 context unavailable on this host");
     }
     context->initialize_renderer();

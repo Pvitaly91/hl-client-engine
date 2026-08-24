@@ -114,6 +114,7 @@ add_executable(hlclient_tests
 target_link_libraries(hlclient_tests
     PRIVATE
         Catch2::Catch2WithMain
+        SDL3::SDL3-shared
         hlclient::bzip2
         hlclient_app_support
         hlclient_auth
