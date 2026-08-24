@@ -20,6 +20,8 @@ namespace detail {
 class PrecacheAssetDispatchStageTestAccess;
 } // namespace detail
 
+class WorldTextureImportStage;
+
 using PrecacheAssetDispatchStageClock = PrecacheManifestStageClock;
 using PrecacheAssetDispatchStageTimePoint = PrecacheManifestStageTimePoint;
 
@@ -280,6 +282,35 @@ public:
 
 private:
     friend class detail::PrecacheAssetDispatchStageTestAccess;
+    friend class WorldTextureImportStage;
+
+    struct RetainConnectionAtBoundary final {};
+
+    PrecacheAssetDispatchStage(
+        network::IDatagramTransport& transport,
+        network::NetworkAddress remote_endpoint,
+        std::shared_ptr<const local_resources::LocalResourceEnvironment>
+            environment,
+        const assets::AssetImporterRegistries& importer_registries,
+        PrecacheAssetDispatchStageConfig config,
+        resource_consistency::IResourceConsistencyProvider*
+            consistency_provider,
+        InitialSignonTraceCallback initial_trace_callback,
+        PreResourceSignonTraceCallback pre_resource_trace_callback,
+        DeltaDescriptionTraceCallback delta_trace_callback,
+        MovementEnvironmentTraceCallback movement_trace_callback,
+        UserInfoSignonTraceCallback user_info_trace_callback,
+        ResourceTransitionTraceCallback transition_trace_callback,
+        ResourceListTraceCallback resource_list_trace_callback,
+        ResourceClientResponseTraceCallback response_trace_callback,
+        PrecacheManifestTraceCallback manifest_trace_callback,
+        PrecacheAssetDispatchTraceCallback trace_callback,
+        RetainConnectionAtBoundary);
+    [[nodiscard]] std::optional<ApprovedAssetDispatchState>
+    take_result() noexcept;
+    void finalize_retained_boundary(
+        PrecacheAssetDispatchStageTimePoint now) noexcept;
+
     class Implementation;
     std::unique_ptr<Implementation> implementation_;
 };

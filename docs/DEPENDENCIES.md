@@ -24,12 +24,13 @@ The project also links the Windows SDK/OpenGL system import library through
 CMake's `OpenGL::GL` target and links Winsock2 where required. Those operating
 system components are not vendored or redistributed by this repository.
 
-M3.2.1 through M4.1 add no third-party dependency. `hlclient_hash_md5` is an independently
-authored C++20 incremental compatibility module and does not use OpenSSL,
-Windows CryptoAPI, or another crypto package. MD5 is present only to reproduce
-GoldSrc compatibility material; it is not approved for security, authenticity,
-integrity, or trust decisions. `hlclient_local_resources` uses private Windows
-SDK file-handle APIs (`CreateFileW` and handle metadata/final-path queries) for
+M3.2.1 through M4.2 add no third-party dependency. `hlclient_hash_md5` is an
+independently authored C++20 incremental compatibility module and does not use
+OpenSSL, Windows CryptoAPI, or another crypto package. MD5 is present only to
+reproduce GoldSrc compatibility material; it is not approved for security,
+authenticity, integrity, or trust decisions. `hlclient_local_resources` uses
+private Windows SDK file-handle APIs (`CreateFileW` and handle
+metadata/final-path queries) for
 the Win32 read-only sandbox. Those APIs do not add a redistributed runtime.
 
 The local-resource target direction remains project-owned and acyclic:
@@ -51,21 +52,35 @@ hlclient_goldsrc_resource_readiness
 hlclient_local_asset_source
     -> hlclient_asset_api
     -> hlclient_local_resources
-hlclient_goldsrc_bsp -> hlclient_asset_api -> hlclient_core
+hlclient_goldsrc_indexed_texture -> hlclient_asset_api -> hlclient_core
+hlclient_goldsrc_bsp
+    -> hlclient_asset_api
+    -> hlclient_goldsrc_indexed_texture
+hlclient_goldsrc_wad3
+    -> hlclient_asset_api
+    -> hlclient_goldsrc_indexed_texture
 hlclient_asset_dispatch -> hlclient_asset_api
 hlclient_goldsrc_asset_dispatch
     -> hlclient_goldsrc_resource_readiness
     -> hlclient_local_asset_source
     -> hlclient_asset_dispatch
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
+hlclient_goldsrc_world_textures
+    -> hlclient_goldsrc_asset_dispatch
+    -> hlclient_goldsrc_bsp
+    -> hlclient_goldsrc_wad3
+    -> hlclient_local_asset_source
 ```
 
-`hlclient_goldsrc_bsp` uses only project-owned C++20 code and the neutral asset
-API. The pinned Valve SDK's public BSP declarations were reviewed as reference
-evidence, but no SDK source is compiled into the importer and no SDK struct is
-used as a wire ABI. In particular, the sign-on target does not link the filesystem or concrete
-local-provider implementation, the resolver does not link the netchan driver,
-and the MD5 target does not depend on GoldSrc protocol types.
+`hlclient_goldsrc_indexed_texture`, `hlclient_goldsrc_bsp`,
+`hlclient_goldsrc_wad3`, and `hlclient_goldsrc_world_textures` use only
+project-owned C++20 code and existing project contracts. No image library, WAD
+decompressor, graphics library, or new runtime is introduced. The pinned Valve
+SDK's public BSP/WAD tool declarations were reviewed as reference evidence, but
+no SDK source is compiled into these targets and no SDK struct is used as a
+wire ABI. In particular, the sign-on target does not link the filesystem or
+concrete local-provider implementation, the resolver does not link the netchan
+driver, and the MD5 target does not depend on GoldSrc protocol types.
 
 The bootstrap intentionally does not add Boost, Asio, Qt, ImGui, GLM, OpenAL,
 FMOD, Vulkan, DirectX renderer code, protobuf, or a JSON framework. UDP remains
@@ -235,19 +250,25 @@ sprites, sounds, textures, `client.dll`, and other game files remain supplied by
 the user under the terms governing their copy. Automated tests must use small,
 original test fixtures or synthetic byte sequences.
 
-For normal M3.2.1–M4.1 runtime, the local consistency provider, readiness
+For normal M3.2.1–M4.2 runtime, the local consistency provider, readiness
 environment, and approved selected-world source opener may read an explicit
 user-owned installation supplied through `--basedir` and `--game`. That is an
 opt-in, read-only runtime input, not a build dependency: there is no Steam
 library/registry/environment auto-discovery, stock executable launch,
-configuration mutation, download, cache write, dependent-resource loading, or
-renderer use. M3.2.3 may read one selected world file and dispatch its owning
-bytes to explicitly registered importers; M4.1 production registers the
-project-owned `goldsrc-bsp-v30` importer and retains only neutral CPU geometry
-and texture-reference metadata. It does not decode texture pixels, load WADs,
-or retain source bytes. The consistency
-provider's fixed target remains `tempdecal.wad`, selected by its compatibility
-profile rather than by server bytes or an arbitrary CLI path.
+configuration mutation, download, cache write, or renderer use. M3.2.3 may read
+one selected world file and dispatch its owning bytes to explicitly registered
+importers; M4.1 production registers the project-owned `goldsrc-bsp-v30`
+importer and retains neutral CPU geometry plus texture-reference metadata.
+
+Only the explicit M4.2 `world-textures` route follows dependent texture
+metadata. It retains the already approved BSP bytes, reduces compiler WAD
+references to safe basenames, resolves those names through the existing
+game-before-`valve` sandbox, and opens at most one verified WAD source at a
+time. The output owns neutral RGBA8 mip levels/bindings and retains no source
+bytes, palette, file handle, resource locator, compiler path, or native path.
+Earlier stop points still open no WAD. The consistency provider's independent
+fixed target remains `tempdecal.wad`, selected by its compatibility profile
+rather than by server bytes or an arbitrary CLI path.
 
 This runtime policy is distinct from active stock-client/HLDS research. Research
 verifiers continue to require their isolated marked copy and reject primary or

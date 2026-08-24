@@ -675,10 +675,32 @@ lightmaps, PVS/collision runtime, renderer upload, and gameplay remain absent.
 
 ### M4.2 — Embedded/WAD texture resolution and import
 
-**Status: next.**
+**Status: completed.**
 
-Resolve validated texture references and import bounded embedded or user-owned
-WAD texture data without changing the CPU geometry/security boundary.
+One shared bounded miptex parser validates the exact 40-byte header, four
+indexed mip levels, 256-color palette, alignment suffix, RGBA8 conversion, and
+masked index-255 alpha for both embedded BSP records and WAD3 lumps. The BSP
+source continuation retains exact material texture ordinals, bounds physical
+records by the next distinct directory offset, aliases duplicate offsets, and
+decodes only used model-0 sources.
+
+An inert first-entity parser extracts only `_wad`/`wad` metadata, discards all
+compiler prefixes, and publishes safe deduplicated `.wad` basenames in
+declaration order. Required user-owned archives resolve through the existing
+game-before-`valve` sandbox and exact-root verified source opener. The strict
+WAD3 catalog supports uncompressed type-`0x43` miptex entries, rejects
+normalized duplicates, and cross-checks names and dimensions before using the
+same decoder. The owning `WorldTextureSet` retains four RGBA8 levels, source
+provenance, one typed binding per material, archive metadata, completeness, and
+bounded statistics.
+
+The explicit `world-textures` stop preserves the same session and sends no
+post-manifest packet. Missing archives/textures publish a typed incomplete set
+and nonzero CLI result; malformed input publishes no partial set. A
+network-free read-only checker and drift-detecting wrapper are available for an
+explicit user-owned map, with no successful local installation run claimed.
+Lightmaps, texture animation/effects, renderer materials, OpenGL upload, PVS,
+collision, brush-submodel instances, and gameplay remain absent.
 
 ### M4.3 — Lightmaps, materials, and OpenGL world renderer
 

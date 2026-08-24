@@ -15,6 +15,7 @@
 #include <hlclient/goldsrc/resource_client_response_stage.hpp>
 #include <hlclient/goldsrc/resource_transition_stage.hpp>
 #include <hlclient/goldsrc/user_info_signon_stage.hpp>
+#include <hlclient/goldsrc/world_textures/world_texture_import_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_address.hpp>
 
@@ -49,6 +50,7 @@ enum class HandshakeStopPoint {
     resource_response_boundary,
     precache_manifest,
     asset_dispatch,
+    world_textures,
 };
 
 enum class ConnectRequestStageState {
@@ -218,6 +220,18 @@ enum class GoldSrcHandshakeState {
     asset_import_failed,
     asset_dispatch_timed_out,
     asset_dispatch_backpressure,
+    waiting_for_world_textures,
+    world_textures_ready,
+    world_textures_incomplete,
+    world_texture_geometry_unavailable,
+    world_texture_worldspawn_parse_failed,
+    world_texture_wad_reference_invalid,
+    world_texture_wad_source_unavailable,
+    world_texture_wad_source_open_failed,
+    world_texture_wad_catalog_failed,
+    world_texture_decode_failed,
+    world_texture_timed_out,
+    world_texture_backpressure,
     timed_out,
     cancelled,
     configuration_error,
@@ -269,7 +283,9 @@ public:
         const assets::AssetImporterRegistries* asset_importer_registries =
             nullptr,
         PrecacheAssetDispatchStageConfig asset_dispatch_config = {},
-        PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback = {});
+        PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback = {},
+        WorldTextureImportStageConfig world_texture_config = {},
+        WorldTextureImportTraceCallback world_texture_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -327,6 +343,10 @@ public:
     asset_dispatch_result() const noexcept;
     [[nodiscard]] const std::optional<PrecacheAssetDispatchStageError>&
     asset_dispatch_error() const noexcept;
+    [[nodiscard]] const std::optional<TexturedWorldAssetState>&
+    world_texture_result() const noexcept;
+    [[nodiscard]] const std::optional<WorldTextureImportStageError>&
+    world_texture_error() const noexcept;
     // Non-null only after a successful netchan bootstrap. The returned object
     // is the same session that committed the M2.3.3 bootstrap ACKs; callers must use
     // the coordinator's original externally-owned datagram transport.
@@ -352,6 +372,7 @@ private:
     void synchronize_from_resource_client_response();
     void synchronize_from_precache_manifest(ChallengeExchangeTimePoint now);
     void synchronize_from_asset_dispatch();
+    void synchronize_from_world_textures();
     void release_authentication_session_if_terminal();
 
     HandshakeStopPoint stop_point_;
@@ -369,6 +390,7 @@ private:
     std::optional<ResourceClientResponseStage> resource_client_response_stage_;
     std::unique_ptr<PrecacheManifestStage> precache_manifest_stage_;
     std::unique_ptr<PrecacheAssetDispatchStage> asset_dispatch_stage_;
+    std::unique_ptr<WorldTextureImportStage> world_texture_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
     std::string configuration_error_;

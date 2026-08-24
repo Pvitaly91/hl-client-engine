@@ -32,6 +32,11 @@ add_executable(hlclient_tests
     test_goldsrc_bsp_spatial_structure.cpp
     test_goldsrc_bsp_importer.cpp
     test_goldsrc_bsp_mutation_corpus.cpp
+    test_goldsrc_bsp_embedded_textures.cpp
+    test_goldsrc_indexed_texture.cpp
+    test_goldsrc_wad3_catalog.cpp
+    test_goldsrc_wad3_texture.cpp
+    test_goldsrc_worldspawn_wad_references.cpp
     test_handshake_connect_response.cpp
     test_handshake_netchan.cpp
     test_info_string.cpp
@@ -49,6 +54,9 @@ add_executable(hlclient_tests
     test_local_resource_readiness.cpp
     test_local_resource_correlation.cpp
     test_world_resource_selection.cpp
+    test_world_texture_resolution.cpp
+    test_world_texture_set.cpp
+    test_world_texture_import_stage.cpp
     test_precache_slot_tables.cpp
     test_precache_manifest.cpp
     test_precache_asset_dispatch_plan.cpp
@@ -108,12 +116,15 @@ target_link_libraries(hlclient_tests
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_goldsrc_bsp
+        hlclient_goldsrc_indexed_texture
+        hlclient_goldsrc_wad3
         hlclient_goldsrc_client
         hlclient_goldsrc_asset_dispatch
         hlclient_goldsrc_resource_readiness
         hlclient_goldsrc_local_resources
         hlclient_goldsrc_netchan
         hlclient_goldsrc_signon
+        hlclient_goldsrc_world_textures
         hlclient_hash_md5
         hlclient_local_resources
         hlclient_local_asset_source

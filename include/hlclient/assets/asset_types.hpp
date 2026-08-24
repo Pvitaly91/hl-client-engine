@@ -78,6 +78,9 @@ struct WorldMaterialReference {
     WorldTextureStorage texture_storage{WorldTextureStorage::missing};
     std::int32_t source_texture_flags{0};
     std::optional<std::uint32_t> source_texinfo_index;
+    // Exact BSP miptex-directory ordinal retained for later format-neutral
+    // texture resolution. It is metadata only; M4.1 performs no pixel decode.
+    std::optional<std::uint32_t> source_texture_index;
     WorldMaterialCompatibilityProfile compatibility_profile{
         WorldMaterialCompatibilityProfile::source_texture_reference_v1};
     WorldMaterialEvidenceProfile evidence_profile{

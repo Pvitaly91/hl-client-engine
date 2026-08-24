@@ -57,10 +57,12 @@ light-style bytes, and the neutral special-surface flag derived from
 `TEX_SPECIAL`. It contains no native BSP struct or lightmap samples.
 
 One `WorldMaterialReference` is created on first use of each texinfo by a world
-face. It owns optional texture name/dimensions, missing/external/embedded
-storage state, raw source texture flags, source texinfo ordinal, and named
-compatibility/evidence profiles. It contains no pixels, palette, WAD path,
-shader, OpenGL handle, or lightmap texture.
+face. It owns the exact optional BSP texture-directory ordinal, optional
+texture name/dimensions, missing/external/embedded storage state, raw source
+texture flags, source texinfo ordinal, and named compatibility/evidence
+profiles. M4.2 uses that ordinal to cross-check the retained BSP source instead
+of matching material names heuristically. The reference contains no pixels,
+palette, WAD path, shader, OpenGL handle, or lightmap texture.
 
 `WorldAsset` owns identity, coordinate semantics, computed geometry bounds,
 optional declared model bounds, vertices, indices, surfaces, materials, source
@@ -78,8 +80,9 @@ retained socket, resource response, manifest, verified-locator source opening,
 and importer dispatch. It additionally requires non-empty CPU geometry and
 prints only bounded counts, texture-storage totals, and finite-bounds status.
 Both stops send no packet after manifest publication and perform no texture,
-WAD, lightmap, PVS, collision, renderer, or GPU work. Texture names, entity
-text, raw BSP bytes, and native paths are not logged.
+WAD, lightmap, PVS, collision, renderer, or GPU work. M4.2 adds a later explicit
+`world-textures` stop; the two M4.1 stops do not invoke it. Texture names,
+entity text, raw BSP bytes, and native paths are not logged.
 
 For these two production stops, local resolution and same-handle source opening
 share the parser's 32 MiB default source ceiling. A 1,024-event dispatch queue
@@ -103,3 +106,7 @@ deleted-file drift fails closed. No user-owned BSP, entity text, texture data,
 native path, or raw checker output is committed or printed. A user-owned stock
 map run is intentionally pending until an explicit local root and optional
 checker executable are supplied.
+
+The separate M4.2 checker and resolution policy are documented in
+[world texture resolution](WORLD_TEXTURE_RESOLUTION.md). They reuse this
+geometry unchanged and stop at owning CPU RGBA textures.

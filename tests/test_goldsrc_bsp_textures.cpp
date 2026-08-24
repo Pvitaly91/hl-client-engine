@@ -40,6 +40,7 @@ TEST_CASE("Texture directory reports external, embedded, and missing metadata st
         CHECK(material.width == 64U);
         CHECK(material.height == 64U);
         CHECK(material.texture_storage == assets::WorldTextureStorage::external_reference);
+        CHECK(material.source_texture_index == 0U);
         CHECK(result.document->world_asset.statistics.external_texture_reference_count == 1U);
     }
 
@@ -57,6 +58,7 @@ TEST_CASE("Texture directory reports external, embedded, and missing metadata st
         CHECK(material.width == 16U);
         CHECK(material.height == 16U);
         CHECK(material.texture_storage == assets::WorldTextureStorage::embedded);
+        CHECK(material.source_texture_index == 0U);
         CHECK(result.document->world_asset.statistics.embedded_texture_reference_count == 1U);
         CHECK(result.document->world_asset.vertices.size() == 4U);
     }
@@ -75,6 +77,7 @@ TEST_CASE("Texture directory reports external, embedded, and missing metadata st
         CHECK_FALSE(material.width.has_value());
         CHECK_FALSE(material.height.has_value());
         CHECK(material.texture_storage == assets::WorldTextureStorage::missing);
+        CHECK(material.source_texture_index == 0U);
         CHECK(result.document->world_asset.statistics.missing_texture_reference_count == 1U);
     }
 }
@@ -271,6 +274,7 @@ TEST_CASE("Duplicate miptex offsets retain distinct directory ordinals",
     CHECK(result.document->lump_element_counts[bsp::goldsrc_bsp_lump_index(
               bsp::GoldSrcBspLumpId::textures)] == 2U);
     CHECK(result.document->world_asset.materials[0].texture_name == "SHARED");
+    CHECK(result.document->world_asset.materials[0].source_texture_index == 1U);
 }
 
 } // namespace

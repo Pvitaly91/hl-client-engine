@@ -2067,6 +2067,7 @@ private:
                     texture.storage,
                     source_texinfo.flags,
                     static_cast<std::uint32_t>(source_texinfo_index),
+                    static_cast<std::uint32_t>(texture_index),
                     assets::WorldMaterialCompatibilityProfile::source_texture_reference_v1,
                     assets::WorldMaterialEvidenceProfile::validated_source_metadata,
                 });

@@ -263,11 +263,13 @@ public:
         ResourceListTraceCallback resource_list_trace_callback,
         ResourceClientResponseTraceCallback response_trace_callback,
         PrecacheManifestTraceCallback manifest_trace_callback,
-        PrecacheAssetDispatchTraceCallback trace_callback)
+        PrecacheAssetDispatchTraceCallback trace_callback,
+        const bool retain_connection_at_boundary)
         : config_{std::move(config)},
           environment_{std::move(environment)},
           dispatcher_{importer_registries},
           trace_callback_{std::move(trace_callback)},
+          retain_connection_at_boundary_{retain_connection_at_boundary},
           configuration_valid_{
               valid_precache_asset_dispatch_stage_configuration(config_) &&
               environment_ != nullptr && environment_->root_count() > 0U},
@@ -933,7 +935,9 @@ public:
         event.dispatch_state = dispatch_state;
         event.occurred_at = now;
         push_event(event);
-        cleanup(now);
+        if (!retain_connection_at_boundary_) {
+            cleanup(now);
+        }
         emit_trace(trace, event);
     }
 
@@ -1196,6 +1200,7 @@ public:
     PrecacheAssetDispatchTraceCallback trace_callback_;
     bool trace_callback_active_{false};
     bool importer_callback_active_{false};
+    bool retain_connection_at_boundary_{false};
     bool configuration_valid_{false};
     PrecacheManifestStage manifest_stage_;
     std::vector<std::optional<PrecacheAssetDispatchStageEvent>> event_slots_;
@@ -1261,7 +1266,48 @@ PrecacheAssetDispatchStage::PrecacheAssetDispatchStage(
           std::move(resource_list_trace_callback),
           std::move(response_trace_callback),
           std::move(manifest_trace_callback),
-          std::move(trace_callback))}
+          std::move(trace_callback),
+          false)}
+{
+}
+
+PrecacheAssetDispatchStage::PrecacheAssetDispatchStage(
+    network::IDatagramTransport& transport,
+    const network::NetworkAddress remote_endpoint,
+    std::shared_ptr<const local_resources::LocalResourceEnvironment>
+        environment,
+    const assets::AssetImporterRegistries& importer_registries,
+    PrecacheAssetDispatchStageConfig config,
+    resource_consistency::IResourceConsistencyProvider* consistency_provider,
+    InitialSignonTraceCallback initial_trace_callback,
+    PreResourceSignonTraceCallback pre_resource_trace_callback,
+    DeltaDescriptionTraceCallback delta_trace_callback,
+    MovementEnvironmentTraceCallback movement_trace_callback,
+    UserInfoSignonTraceCallback user_info_trace_callback,
+    ResourceTransitionTraceCallback transition_trace_callback,
+    ResourceListTraceCallback resource_list_trace_callback,
+    ResourceClientResponseTraceCallback response_trace_callback,
+    PrecacheManifestTraceCallback manifest_trace_callback,
+    PrecacheAssetDispatchTraceCallback trace_callback,
+    RetainConnectionAtBoundary)
+    : implementation_{std::make_unique<Implementation>(
+          transport,
+          remote_endpoint,
+          std::move(environment),
+          importer_registries,
+          std::move(config),
+          consistency_provider,
+          std::move(initial_trace_callback),
+          std::move(pre_resource_trace_callback),
+          std::move(delta_trace_callback),
+          std::move(movement_trace_callback),
+          std::move(user_info_trace_callback),
+          std::move(transition_trace_callback),
+          std::move(resource_list_trace_callback),
+          std::move(response_trace_callback),
+          std::move(manifest_trace_callback),
+          std::move(trace_callback),
+          true)}
 {
 }
 
@@ -1309,6 +1355,29 @@ const std::optional<ApprovedAssetDispatchState>&
 PrecacheAssetDispatchStage::result() const noexcept
 {
     return implementation_->result_;
+}
+
+std::optional<ApprovedAssetDispatchState>
+PrecacheAssetDispatchStage::take_result() noexcept
+{
+    if (!implementation_->retain_connection_at_boundary_ ||
+        implementation_->state_ !=
+            PrecacheAssetDispatchStageState::asset_imported ||
+        !implementation_->result_) {
+        return std::nullopt;
+    }
+    return std::exchange(implementation_->result_, std::nullopt);
+}
+
+void PrecacheAssetDispatchStage::finalize_retained_boundary(
+    const PrecacheAssetDispatchStageTimePoint now) noexcept
+{
+    if (!implementation_->retain_connection_at_boundary_ ||
+        implementation_->cleanup_done_ ||
+        implementation_->state_ == PrecacheAssetDispatchStageState::idle) {
+        return;
+    }
+    implementation_->cleanup(now);
 }
 
 const std::optional<PrecacheAssetDispatchStageError>&

@@ -124,24 +124,62 @@ hlclient_add_library(
     include/hlclient/assets/asset_importer_registry.hpp
     include/hlclient/assets/asset_source.hpp
     include/hlclient/assets/asset_types.hpp
+    include/hlclient/assets/world_texture_types.hpp
     src/assets/asset_source.cpp
+    src/assets/world_texture_types.cpp
 )
 add_library(hlclient::asset_api ALIAS hlclient_asset_api)
 target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
 set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
 
 hlclient_add_library(
+    hlclient_goldsrc_indexed_texture
+    include/hlclient/goldsrc/indexed_texture/goldsrc_indexed_texture_decoder.hpp
+    src/goldsrc/indexed_texture/goldsrc_indexed_texture_decoder.cpp
+)
+add_library(
+    hlclient::goldsrc_indexed_texture ALIAS
+    hlclient_goldsrc_indexed_texture)
+target_link_libraries(
+    hlclient_goldsrc_indexed_texture PUBLIC hlclient::asset_api)
+set_property(
+    TARGET hlclient_goldsrc_indexed_texture
+    PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
+
+hlclient_add_library(
     hlclient_goldsrc_bsp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_format.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp
+    include/hlclient/goldsrc/bsp/goldsrc_bsp_texture_source_parser.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp
+    include/hlclient/goldsrc/bsp/goldsrc_worldspawn_wad_references.hpp
     src/goldsrc/bsp/goldsrc_bsp_parser.cpp
+    src/goldsrc/bsp/goldsrc_bsp_texture_source_parser.cpp
     src/goldsrc/bsp/goldsrc_bsp_world_importer.cpp
+    src/goldsrc/bsp/goldsrc_worldspawn_wad_references.cpp
 )
 add_library(hlclient::goldsrc_bsp ALIAS hlclient_goldsrc_bsp)
-target_link_libraries(hlclient_goldsrc_bsp PUBLIC hlclient::asset_api)
+target_link_libraries(
+    hlclient_goldsrc_bsp
+    PUBLIC hlclient::asset_api hlclient::goldsrc_indexed_texture)
 set_property(
     TARGET hlclient_goldsrc_bsp
+    PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_wad3
+    include/hlclient/goldsrc/wad3/goldsrc_wad3_catalog.hpp
+    include/hlclient/goldsrc/wad3/goldsrc_wad3_format.hpp
+    include/hlclient/goldsrc/wad3/goldsrc_wad3_texture.hpp
+    src/goldsrc/wad3/goldsrc_wad3_catalog.cpp
+    src/goldsrc/wad3/goldsrc_wad3_texture.cpp
+)
+add_library(hlclient::goldsrc_wad3 ALIAS hlclient_goldsrc_wad3)
+target_link_libraries(
+    hlclient_goldsrc_wad3
+    PUBLIC hlclient::asset_api hlclient::goldsrc_indexed_texture)
+set_property(
+    TARGET hlclient_goldsrc_wad3
     PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
 
 hlclient_add_library(
@@ -395,6 +433,28 @@ set_property(
     PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
+    hlclient_goldsrc_world_textures
+    include/hlclient/goldsrc/world_textures/world_texture_import.hpp
+    include/hlclient/goldsrc/world_textures/world_texture_import_stage.hpp
+    src/goldsrc/world_textures/world_texture_import.cpp
+    src/goldsrc/world_textures/world_texture_import_stage.cpp
+)
+add_library(
+    hlclient::goldsrc_world_textures ALIAS
+    hlclient_goldsrc_world_textures)
+target_link_libraries(
+    hlclient_goldsrc_world_textures
+    PUBLIC
+        hlclient::goldsrc_asset_dispatch
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_wad3
+        hlclient::local_asset_source
+)
+set_property(
+    TARGET hlclient_goldsrc_world_textures
+    PROPERTY FOLDER "Engine/Assets/World Textures")
+
+hlclient_add_library(
     hlclient_auth
     include/hlclient/auth/authentication_provider.hpp
     src/auth/authentication_provider.cpp
@@ -421,6 +481,7 @@ target_link_libraries(
         hlclient::goldsrc_netchan
         hlclient::goldsrc_resource_readiness
         hlclient::goldsrc_asset_dispatch
+        hlclient::goldsrc_world_textures
         hlclient::goldsrc_signon
         hlclient::network
     PRIVATE hlclient::core
@@ -516,6 +577,7 @@ target_link_libraries(
         hlclient::goldsrc_client
         hlclient::goldsrc_resource_readiness
         hlclient::goldsrc_local_resources
+        hlclient::goldsrc_world_textures
         hlclient::resource_consistency_local
         hlclient::client
         hlclient::scene_api
@@ -534,6 +596,22 @@ target_link_libraries(
     PRIVATE hlclient::resource_consistency_local)
 set_property(
     TARGET hlclient_local_resource_check PROPERTY FOLDER "Tools/Resources")
+
+add_executable(
+    hlclient_world_texture_check
+    apps/hlclient_world_texture_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_world_texture_check)
+target_link_libraries(
+    hlclient_world_texture_check
+    PRIVATE
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_world_textures
+        hlclient::local_asset_source
+        hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_world_texture_check PROPERTY FOLDER "Tools/Resources")
 set_target_properties(
     hlclient
     PROPERTIES

@@ -6,17 +6,19 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.1's strict GoldSrc BSP v30 importer and
-owning CPU world geometry on top of M3.2.3's approved asset-source opening,
-M3.2.2's immutable metadata-only precache manifest, and M3.2.1's sandboxed
-local-resource foundation. `--stop-after asset-dispatch` selects the exact
-ServerInfo world entry, reopens its locator in the exact validated root, reads
-it incrementally from one verified handle, and dispatches the production BSP
-importer without sending a new network message. `--stop-after world-geometry`
-requires the imported non-empty `WorldAsset`, reports bounded CPU counts, and
-stops before texture, lightmap, renderer, or GPU work.
+The repository has implemented M4.2's bounded GoldSrc indexed-miptex and WAD3
+texture pipeline on top of M4.1's strict BSP v30 importer and owning CPU world
+geometry. `--stop-after asset-dispatch` selects and imports the exact approved
+ServerInfo world; `--stop-after world-geometry` requires its non-empty
+`WorldAsset`. The later `--stop-after world-textures` retains that same approved
+BSP source, decodes used embedded textures, reduces inert worldspawn WAD
+metadata to safe basenames, resolves required user-owned WAD3 files through the
+sandboxed game-before-`valve` environment, and publishes owning RGBA8 mip levels
+plus one typed binding per world material. After manifest publication, all
+three continuations send no further network message and stop before lightmaps,
+renderer, or GPU work.
 
-Implemented M1–M4.1 bounded behavior includes the Protocol 48 challenge,
+Implemented M1–M4.2 bounded behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
@@ -464,6 +466,37 @@ metadata, surfaces, and finite bounds. Only model 0 geometry is emitted.
 Entities, PVS, collision runtime, brush-submodel instances, embedded/WAD
 texture pixels, palettes, lightmaps, and renderer resources remain absent.
 
+M4.2 adds a later texture-resolution stop on the same retained composition:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after world-textures `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve --net-trace
+```
+
+Only BSP physical texture records used by model 0 materials enter M4.2 miptex
+parsing. Duplicate directory offsets alias one physical record; missing BSP
+entries are never guessed by name. The first entity is parsed as inert quoted
+metadata only, and
+compiler WAD prefixes are discarded permanently. Required `.wad` basenames are
+searched in declaration order through the existing safe local environment.
+WAD3 accepts the exact 12-byte header, bounded 32-byte directory entries,
+uncompressed type `0x43` miptex records, unique ASCII-insensitive miptex names,
+and exact BSP name/dimension matches. The shared decoder validates four indexed
+mips and a 256-color palette, then incrementally emits four owning RGBA8 levels;
+names beginning with `{` make palette index 255 transparent without replacing
+its RGB.
+
+Missing BSP references or WAD lists/archives/textures and exact-dimension
+mismatches publish typed incomplete material bindings, and the CLI exits
+nonzero. Unsafe resolution, malformed WAD3/miptex bytes, unsupported
+compression, cancellation, or timeout publish no partial texture set.
+Embedded-only worlds open no WAD. No texture animation, water/sky effects,
+lightmaps, renderer material, OpenGL upload, or other GPU work occurs.
+
 Normal runtime may read an explicitly supplied user-owned Steam installation
 with zero writes and no stock process launch. Active stock `hl.exe`/HLDS
 research remains restricted to an isolated marked copy. The local provider and
@@ -477,6 +510,21 @@ deterministic summaries, and fails on target-content, size, write-time, or
 created/deleted-file drift while printing metadata only. No local stock-map run
 is claimed by this repository change.
 
+The optional M4.2 network-free checker can verify a complete local texture set:
+
+```powershell
+.\scripts\verify_local_world_textures.ps1 `
+  -ToolPath .\build\bin\Debug\hlclient_world_texture_check.exe `
+  -Basedir "D:\Steam\steamapps\common\Half-Life" `
+  -Game valve -Map maps/<name>.bsp
+```
+
+Its wrapper snapshots the selected map, root-level WAD files, and both approved
+search-root inventories, runs the checker twice, requires identical summaries,
+and rejects content/metadata or created/deleted-file drift. It prints a summary
+digest and bounded counts, not paths or asset bytes. No user-owned local run is
+claimed.
+
 See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
 and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
 [local resource resolution](docs/LOCAL_RESOURCE_RESOLUTION.md), and the
@@ -486,7 +534,10 @@ and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.
 [approved asset sources](docs/APPROVED_ASSET_SOURCE.md), and
 [asset importer dispatch](docs/ASSET_IMPORTER_DISPATCH.md), the
 [GoldSrc BSP v30 profile](docs/GOLDSRC_BSP_V30.md), and
-[CPU world geometry](docs/CPU_WORLD_GEOMETRY.md).
+[CPU world geometry](docs/CPU_WORLD_GEOMETRY.md), the
+[GoldSrc indexed-miptex profile](docs/GOLDSRC_INDEXED_TEXTURE.md),
+[GoldSrc WAD3 profile](docs/GOLDSRC_WAD3.md), and
+[world texture resolution](docs/WORLD_TEXTURE_RESOLUTION.md).
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -760,10 +811,13 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
   `hlclient_app_support`, `hlclient_client`;
 - `hlclient_asset_api`, `hlclient_local_asset_source`,
   `hlclient_asset_dispatch`, `hlclient_asset_manager`, `hlclient_scene_api`;
-- `hlclient_goldsrc_bsp`, `hlclient_goldsrc_asset_dispatch`;
+- `hlclient_goldsrc_indexed_texture`, `hlclient_goldsrc_bsp`,
+  `hlclient_goldsrc_wad3`, `hlclient_goldsrc_asset_dispatch`,
+  `hlclient_goldsrc_world_textures`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
-- `hlclient_local_resource_check` (network-free read-only diagnostic);
+- `hlclient_local_resource_check` and `hlclient_world_texture_check`
+  (network-free read-only diagnostics);
 - `hlclient_tests`;
 - SDL3, bzip2, Catch2, GLAD2, and the Half-Life SDK reference target under
   `ThirdParty`.
@@ -787,6 +841,9 @@ See [Architecture](docs/ARCHITECTURE.md),
 [Local consistency provider](docs/LOCAL_RESOURCE_CONSISTENCY_PROVIDER.md),
 [Resource-consistency provider API](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
 [Authentication provider](docs/AUTHENTICATION_PROVIDER.md),
+[GoldSrc indexed miptex](docs/GOLDSRC_INDEXED_TEXTURE.md),
+[GoldSrc WAD3](docs/GOLDSRC_WAD3.md),
+[world texture resolution](docs/WORLD_TEXTURE_RESOLUTION.md),
 [Dependencies](docs/DEPENDENCIES.md), and [Roadmap](docs/ROADMAP.md) for the
 detailed contracts.
 
@@ -904,6 +961,13 @@ parser or renderer work. M4.1 adds the production `goldsrc-bsp-v30` importer,
 strict synthetic BSP grammar/mutation coverage, world-model-only face-loop
 reconstruction, raw texel UVs, metadata-only texture states, owning CPU world
 geometry, and same-session fake-HLDS import coverage without post-manifest TX.
+M4.2 adds shared miptex grammar and incremental four-level RGBA conversion;
+BSP physical-record/alias extraction; inert worldspawn basename isolation;
+strict WAD3 catalog, compression, type, duplicate, and dimension policies;
+deterministic declared-archive/game-root lookup; immutable complete/incomplete
+material bindings; bounded same-session stage coverage; and the network-free
+read-only checker. All automated asset bytes and local files are original
+synthetic fixtures; no installed game asset, renderer, or GPU is required.
 
 ## License
 

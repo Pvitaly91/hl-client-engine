@@ -13,12 +13,27 @@ PrecacheManifestEntry
     -> ApprovedAssetSource
 ```
 
-The production continuation opens one resource on demand: the exact model
-entry selected as the world by `WorldResourceSelection`. It does not scan or
-preload the remaining manifest, maintain a source cache, or follow dependent
-asset names. M4.1 passes the resulting approved owning bytes directly to the
-production GoldSrc BSP v30 importer; the importer never reopens the virtual
-name or asks for a native path.
+The production continuation first opens one resource on demand: the exact
+model entry selected as the world by `WorldResourceSelection`. It does not scan
+or preload the remaining manifest or maintain a source cache. M4.1 passes the
+resulting approved owning bytes directly to the production GoldSrc BSP v30
+importer; the importer never reopens the virtual name or asks for a native
+path. M4.2 retains those same bytes through texture-source extraction and
+embedded decoding, so the BSP is still opened only once.
+
+The M4.2 dependent WAD chain reuses the same verified local source opener but
+does not pretend a compiler reference was part of the manifest:
+
+```text
+inert worldspawn value -> safe WAD basename
+    -> LocalResourceEnvironment resolver
+    -> exact-root LocalResourceLocator
+    -> LocalAssetSourceOpener
+    -> owning LocalAssetSource -> WAD3 parser
+```
+
+Only the safe basename becomes a virtual name. The resolved handle is closed
+after identity capture and the locator is verified again while reading the WAD.
 
 ## Security boundary
 
@@ -52,8 +67,10 @@ conversions are rejected.
 The M4.1 production `asset-dispatch`/`world-geometry` composition explicitly
 raises only its resolver and source-open byte limit to the BSP parser's 32 MiB
 default and uses 1,024 stage-event slots, which covers 512 default-size progress
-chunks plus lifecycle events. Earlier response/manifest stop points retain the
-generic 16 MiB profile.
+chunks plus lifecycle events. M4.2's `world-textures` route uses that same BSP
+source profile and separately permits one declared WAD source of at most
+64 MiB, still opened incrementally with one active source. Earlier
+response/manifest stop points retain the generic 16 MiB profile.
 
 The operation publishes the owning source atomically only after validation.
 Cancellation, timeout, missing/replaced locators, size drift, short reads,
@@ -64,10 +81,19 @@ partial source.
 ## Scope
 
 M4.1 adds BSP v30 parsing only after this boundary has published a fully
-validated owning source. It does not add MDL, SPR, WAV, or WAD parsing;
-download/cache behavior; background prefetch; dependent texture lookup;
-renderer/GPU integration; or an `AssetManager` path-based bypass. The importer
-retains only neutral identity and CPU output, never the approved source bytes.
-A same-identity, same-size content rewrite completed before the verified reopen
-remains outside the locator's identity/size evidence; the source boundary does
-not invent hashing as a trust mechanism.
+validated owning source. M4.2 adds a separate, explicit dependent-texture route
+after successful CPU geometry. Compiler-recorded WAD prefixes are reduced by
+the inert parser to safe basenames only. Each required basename is resolved in
+the retained game-before-`valve` environment and opened through a newly bound,
+exact-root verified locator; no compiler or native path crosses into the
+texture API. Simply missing archives may produce a typed incomplete texture
+set. Unsafe resolution, verified-open failure, malformed WAD3, or malformed
+miptex fails transactionally.
+
+The earlier `asset-dispatch` and `world-geometry` routes still do not follow
+dependent names or open WADs. M4.2 does not add MDL, SPR, or WAV parsing;
+download/cache behavior; background prefetch; renderer/GPU integration; or an
+`AssetManager` path-based bypass. A same-identity, same-size content rewrite
+completed before a verified reopen remains outside the locator's
+identity/size evidence; the source boundary does not invent hashing as a trust
+mechanism. See [world texture resolution](WORLD_TEXTURE_RESOLUTION.md).

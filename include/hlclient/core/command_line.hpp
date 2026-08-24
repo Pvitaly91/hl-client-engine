@@ -28,6 +28,7 @@ enum class ConnectionStopPoint {
     precache_manifest,
     asset_dispatch,
     world_geometry,
+    world_textures,
 };
 
 enum class AuthenticationProviderKind {

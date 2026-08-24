@@ -6,6 +6,7 @@
 #include "resource_client_response_test_fixture.hpp"
 #include "resource_list_test_fixture.hpp"
 #include "synthetic_goldsrc_bsp_fixture.hpp"
+#include "synthetic_goldsrc_wad3_fixture.hpp"
 #include "user_info_test_fixture.hpp"
 
 #include "../src/goldsrc/precache_asset_dispatch_stage_test_access.hpp"
@@ -633,6 +634,7 @@ enum class PrecacheManifestCompletionMode {
     manifest_only,
     production_bsp_dispatch,
     production_bsp_malformed_rejection,
+    production_world_textures,
 };
 
 enum class ProductionBspIntegrationScenario {
@@ -645,6 +647,22 @@ enum class ProductionBspIntegrationScenario {
     geometry_output_limit,
     stale_selected_locator,
     source_changed_during_read,
+};
+
+enum class ProductionWorldTextureIntegrationScenario {
+    embedded_only,
+    external_only,
+    mixed,
+    missing,
+    masked_external,
+    missing_wad,
+    missing_texture_in_valid_wad,
+    malformed_wad_header,
+    unsupported_wad_compression,
+    invalid_wad_palette,
+    dimension_mismatch,
+    game_root_override,
+    duplicate_wad_declarations,
 };
 
 [[nodiscard]] std::vector<std::byte> manifest_first_semantic_payload()
@@ -2719,11 +2737,21 @@ struct PrecacheManifestIntegrationTraceCounts {
     std::size_t importers_selected{0U};
     std::size_t assets_imported{0U};
     std::size_t asset_import_failures{0U};
+    std::size_t world_geometry_ready{0U};
+    std::size_t texture_imports_started{0U};
+    std::size_t texture_progress_events{0U};
+    std::size_t wad_source_open_starts{0U};
+    std::size_t wad_sources_ready{0U};
+    std::size_t texture_sets_ready{0U};
+    std::size_t texture_sets_incomplete{0U};
+    std::size_t wad_catalog_failures{0U};
+    std::size_t texture_decode_failures{0U};
     std::size_t endpoint_mismatches{0U};
     std::optional<std::size_t> transmitted_at_response_boundary;
     std::optional<std::size_t> transmitted_at_manifest_publication;
     std::optional<std::size_t> transmitted_at_manifest_terminal;
     std::optional<std::size_t> transmitted_at_asset_terminal;
+    std::optional<std::size_t> transmitted_at_texture_terminal;
     std::optional<std::size_t> authentication_releases_at_manifest_terminal;
 };
 
@@ -2761,9 +2789,10 @@ void write_manifest_integration_files(
     root.write(game, "generic/test.dat", "synthetic generic metadata");
 }
 
-[[nodiscard]] std::vector<std::byte> make_two_face_production_bsp()
+void configure_two_face_production_geometry(
+    synthetic_bsp::SyntheticBspBuilder& builder,
+    const bool distinct_materials = false)
 {
-    synthetic_bsp::SyntheticBspBuilder builder;
     constexpr std::array vertices{
         synthetic_bsp::SyntheticBspVector3{0.0F, 0.0F, 0.0F},
         synthetic_bsp::SyntheticBspVector3{64.0F, 0.0F, 0.0F},
@@ -2787,6 +2816,7 @@ void write_manifest_integration_files(
     faces[0].surfedge_count = 3;
     faces[1].first_surfedge = 3;
     faces[1].surfedge_count = 3;
+    faces[1].texinfo_index = distinct_materials ? 1 : 0;
     auto node = synthetic_bsp::SyntheticBspNode{};
     node.face_count = 2U;
     std::array leaves{
@@ -2808,7 +2838,460 @@ void write_manifest_integration_files(
         .set_leaves(leaves)
         .set_marksurfaces(marksurfaces)
         .set_models(std::span{&model, 1U});
+}
+
+[[nodiscard]] std::vector<std::byte> make_two_face_production_bsp()
+{
+    synthetic_bsp::SyntheticBspBuilder builder;
+    configure_two_face_production_geometry(builder);
     return builder.build();
+}
+
+void populate_embedded_texture_palette(
+    std::vector<std::byte>& bsp_bytes,
+    const std::size_t texture_ordinal)
+{
+    const auto texture_lump = static_cast<std::size_t>(
+        synthetic_bsp::synthetic_read_i32le(
+            bsp_bytes,
+            synthetic_bsp::synthetic_lump_descriptor_offset(
+                synthetic_bsp::SyntheticBspLumpId::textures)));
+    const auto record_relative = static_cast<std::size_t>(
+        synthetic_bsp::synthetic_read_i32le(
+            bsp_bytes,
+            texture_lump + 4U + (texture_ordinal * 4U)));
+    const auto record = texture_lump + record_relative;
+    constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+    const auto palette_count = record + 40U + pixel_byte_count;
+    synthetic_bsp::synthetic_write_u16le(
+        bsp_bytes,
+        palette_count,
+        256U);
+    for (std::size_t index = 0U; index < 256U; ++index) {
+        bsp_bytes[palette_count + 2U + (index * 3U)] =
+            static_cast<std::byte>(index);
+        bsp_bytes[palette_count + 2U + (index * 3U) + 1U] =
+            static_cast<std::byte>(255U - index);
+        bsp_bytes[palette_count + 2U + (index * 3U) + 2U] =
+            static_cast<std::byte>(index ^ 0x5AU);
+    }
+}
+
+[[nodiscard]] constexpr bool production_texture_uses_wad(
+    const ProductionWorldTextureIntegrationScenario scenario) noexcept
+{
+    return scenario !=
+               ProductionWorldTextureIntegrationScenario::embedded_only &&
+        scenario != ProductionWorldTextureIntegrationScenario::missing;
+}
+
+[[nodiscard]] constexpr bool production_texture_fails_fatally(
+    const ProductionWorldTextureIntegrationScenario scenario) noexcept
+{
+    return scenario ==
+               ProductionWorldTextureIntegrationScenario::
+                   malformed_wad_header ||
+        scenario == ProductionWorldTextureIntegrationScenario::
+                        unsupported_wad_compression ||
+        scenario ==
+               ProductionWorldTextureIntegrationScenario::invalid_wad_palette;
+}
+
+[[nodiscard]] constexpr bool production_texture_is_incomplete(
+    const ProductionWorldTextureIntegrationScenario scenario) noexcept
+{
+    return scenario == ProductionWorldTextureIntegrationScenario::missing ||
+        scenario == ProductionWorldTextureIntegrationScenario::missing_wad ||
+        scenario == ProductionWorldTextureIntegrationScenario::
+                        missing_texture_in_valid_wad ||
+        scenario ==
+               ProductionWorldTextureIntegrationScenario::dimension_mismatch;
+}
+
+[[nodiscard]] constexpr std::string_view production_external_texture_name(
+    const ProductionWorldTextureIntegrationScenario scenario) noexcept
+{
+    return scenario ==
+               ProductionWorldTextureIntegrationScenario::masked_external
+        ? std::string_view{"{MASKED"}
+        : std::string_view{"WAD_EXTERNAL"};
+}
+
+[[nodiscard]] constexpr std::string_view production_texture_wad_basename(
+    const ProductionWorldTextureIntegrationScenario scenario) noexcept
+{
+    return scenario == ProductionWorldTextureIntegrationScenario::missing_wad
+        ? std::string_view{"absent_flow.wad"}
+        : std::string_view{"texture_flow.wad"};
+}
+
+[[nodiscard]] constexpr std::uint8_t production_external_texture_seed(
+    const ProductionWorldTextureIntegrationScenario scenario) noexcept
+{
+    if (scenario ==
+        ProductionWorldTextureIntegrationScenario::masked_external) {
+        return 0U;
+    }
+    if (scenario ==
+        ProductionWorldTextureIntegrationScenario::game_root_override) {
+        return 23U;
+    }
+    return 17U;
+}
+
+[[nodiscard]] std::vector<std::byte> production_world_texture_bsp_fixture(
+    const ProductionWorldTextureIntegrationScenario scenario)
+{
+    synthetic_bsp::SyntheticBspBuilder builder;
+    const bool has_external = production_texture_uses_wad(scenario);
+    const bool has_embedded =
+        scenario == ProductionWorldTextureIntegrationScenario::embedded_only ||
+        scenario == ProductionWorldTextureIntegrationScenario::mixed;
+
+    std::string entities{"{\n\"classname\" \"worldspawn\"\n"};
+    if (has_external) {
+        entities += "\"_wad\" \"C:\\compiler\\";
+        entities += production_texture_wad_basename(scenario);
+        if (scenario == ProductionWorldTextureIntegrationScenario::
+                            duplicate_wad_declarations) {
+            entities += ";D:\\other\\TEXTURE_FLOW.WAD;\"\n";
+        } else {
+            entities += ";\"\n";
+        }
+    }
+    entities += "}\n";
+    builder.lump(synthetic_bsp::SyntheticBspLumpId::entities) =
+        bytes(entities);
+
+    if (scenario == ProductionWorldTextureIntegrationScenario::mixed) {
+        configure_two_face_production_geometry(builder, true);
+        std::array texinfo{
+            synthetic_bsp::SyntheticBspTexinfo{},
+            synthetic_bsp::SyntheticBspTexinfo{},
+        };
+        texinfo[1U].miptex_index = 1;
+        builder.set_texinfo(texinfo);
+    }
+
+    if (scenario == ProductionWorldTextureIntegrationScenario::missing) {
+        const std::array<std::optional<synthetic_bsp::SyntheticBspMipTexture>,
+                         1U>
+            textures{std::nullopt};
+        builder.set_texture_directory(textures);
+    } else if (scenario ==
+               ProductionWorldTextureIntegrationScenario::embedded_only) {
+        auto embedded = synthetic_bsp::synthetic_embedded_texture(
+            "EMBEDDED", 16U, 16U);
+        constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+        embedded.trailing_byte_count = pixel_byte_count + 2U + (256U * 3U);
+        const std::array<std::optional<synthetic_bsp::SyntheticBspMipTexture>,
+                         1U>
+            textures{embedded};
+        builder.set_texture_directory(textures);
+    } else if (scenario == ProductionWorldTextureIntegrationScenario::mixed) {
+        auto embedded = synthetic_bsp::synthetic_embedded_texture(
+            "EMBEDDED", 16U, 16U);
+        constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+        embedded.trailing_byte_count = pixel_byte_count + 2U + (256U * 3U);
+        auto external = synthetic_bsp::synthetic_external_texture(
+            production_external_texture_name(scenario));
+        external.width = 16U;
+        external.height = 16U;
+        const std::array<std::optional<synthetic_bsp::SyntheticBspMipTexture>,
+                         2U>
+            textures{embedded, external};
+        builder.set_texture_directory(textures);
+    } else {
+        auto external = synthetic_bsp::synthetic_external_texture(
+            production_external_texture_name(scenario));
+        external.width = 16U;
+        external.height = 16U;
+        const std::array<std::optional<synthetic_bsp::SyntheticBspMipTexture>,
+                         1U>
+            textures{external};
+        builder.set_texture_directory(textures);
+    }
+
+    auto bsp_bytes = builder.build();
+    if (has_embedded) {
+        populate_embedded_texture_palette(bsp_bytes, 0U);
+    }
+    return bsp_bytes;
+}
+
+[[nodiscard]] synthetic_bsp::SyntheticWad3Fixture
+production_world_texture_wad_fixture(
+    const ProductionWorldTextureIntegrationScenario scenario,
+    const std::optional<std::uint8_t> seed_override = std::nullopt)
+{
+    auto entry = synthetic_bsp::SyntheticWad3Entry{};
+    const auto texture_name =
+        scenario == ProductionWorldTextureIntegrationScenario::
+                        missing_texture_in_valid_wad
+            ? std::string_view{"OTHER"}
+            : production_external_texture_name(scenario);
+    const auto width =
+        scenario ==
+                ProductionWorldTextureIntegrationScenario::dimension_mismatch
+            ? 32U
+            : 16U;
+    const auto seed = seed_override.value_or(
+        production_external_texture_seed(scenario));
+    entry.name = texture_name;
+    entry.payload = synthetic_bsp::synthetic_goldsrc_miptex(
+        texture_name, width, 16U, seed);
+    if (scenario == ProductionWorldTextureIntegrationScenario::
+                        unsupported_wad_compression) {
+        entry.compression = 1U;
+    }
+    if (scenario ==
+        ProductionWorldTextureIntegrationScenario::invalid_wad_palette) {
+        synthetic_bsp::synthetic_wad3_write_u8(entry.payload, 380U, 0xFFU);
+        synthetic_bsp::synthetic_wad3_write_u8(entry.payload, 381U, 0x00U);
+    }
+    auto fixture = synthetic_bsp::synthetic_wad3({std::move(entry)});
+    if (scenario ==
+        ProductionWorldTextureIntegrationScenario::malformed_wad_header) {
+        fixture.bytes[0U] = std::byte{'X'};
+    }
+    return fixture;
+}
+
+void check_production_world_texture_asset(
+    const assets::WorldTextureAsset& texture,
+    const std::string_view expected_name,
+    const assets::WorldTextureSourceKind expected_source_kind,
+    const std::uint8_t first_index,
+    const assets::WorldTextureAlphaMode expected_alpha_mode =
+        assets::WorldTextureAlphaMode::opaque)
+{
+    CHECK(texture.name == expected_name);
+    CHECK(texture.width == 16U);
+    CHECK(texture.height == 16U);
+    CHECK(texture.source_kind == expected_source_kind);
+    CHECK(texture.alpha_mode == expected_alpha_mode);
+    CHECK(texture.compatibility_profile ==
+          assets::WorldTextureCompatibilityProfile::
+              goldsrc_indexed_miptex_v1);
+    CHECK(texture.evidence_profile ==
+          assets::WorldTextureEvidenceProfile::
+              valve_public_tools_and_synthetic_fixtures);
+    for (std::size_t level = 0U;
+         level < assets::kWorldTextureMipLevelCount;
+         ++level) {
+        const auto expected_width = 16U >> level;
+        const auto expected_height = 16U >> level;
+        const auto& mip = texture.mip_levels[level];
+        CHECK(mip.width == expected_width);
+        CHECK(mip.height == expected_height);
+        CHECK(mip.pixel_format == assets::WorldTexturePixelFormat::rgba8);
+        REQUIRE(mip.rgba_pixels.size() ==
+                expected_width * expected_height * 4U);
+        const auto palette_index = static_cast<std::uint8_t>(
+            first_index +
+            (expected_source_kind ==
+                     assets::WorldTextureSourceKind::external_wad3
+                 ? level
+                 : 0U));
+        CHECK(mip.rgba_pixels[0U] == static_cast<std::byte>(palette_index));
+        CHECK(mip.rgba_pixels[1U] ==
+              static_cast<std::byte>(255U - palette_index));
+        CHECK(mip.rgba_pixels[2U] ==
+              static_cast<std::byte>(palette_index ^ 0x5AU));
+        CHECK(mip.rgba_pixels[3U] == std::byte{255U});
+    }
+    if (expected_alpha_mode ==
+        assets::WorldTextureAlphaMode::masked_index_255) {
+        const auto transparent = 255U * 4U;
+        REQUIRE(texture.mip_levels[0U].rgba_pixels.size() > transparent + 3U);
+        CHECK(texture.mip_levels[0U].rgba_pixels[transparent] ==
+              std::byte{255U});
+        CHECK(texture.mip_levels[0U].rgba_pixels[transparent + 1U] ==
+              std::byte{0U});
+        CHECK(texture.mip_levels[0U].rgba_pixels[transparent + 2U] ==
+              std::byte{0xA5U});
+        CHECK(texture.mip_levels[0U].rgba_pixels[transparent + 3U] ==
+              std::byte{0U});
+    }
+}
+
+void check_production_world_texture_result(
+    const goldsrc::TexturedWorldAssetState& textured,
+    const ProductionWorldTextureIntegrationScenario scenario,
+    const std::shared_ptr<const
+        hlclient::local_resources::LocalResourceEnvironment>& environment,
+    const std::size_t expected_bsp_byte_count,
+    const std::uint32_t expected_root_id)
+{
+    const bool expect_complete = !production_texture_is_incomplete(scenario);
+    const bool uses_wad = production_texture_uses_wad(scenario);
+    const auto expected_material_count =
+        scenario == ProductionWorldTextureIntegrationScenario::mixed
+            ? 2U
+            : 1U;
+    const auto expected_texture_count =
+        scenario == ProductionWorldTextureIntegrationScenario::mixed
+            ? 2U
+            : (production_texture_is_incomplete(scenario)
+                   ? 0U
+                   : 1U);
+
+    CHECK(textured.environment().get() == environment.get());
+    CHECK(textured.dispatch_state().environment().get() == environment.get());
+    CHECK(textured.dispatch_state().source_byte_count() ==
+          expected_bsp_byte_count);
+    CHECK(textured.dispatch_state().dispatch_result().state ==
+          assets::AssetDispatchState::imported);
+    CHECK(textured.dispatch_state().dispatch_result().selected_category ==
+          assets::AssetImporterCategory::world);
+    CHECK(textured.dispatch_state().dispatch_result().selected_importer_id ==
+          "world:goldsrc-bsp-v30");
+
+    const auto& world = textured.world();
+    const auto& texture_set = textured.textures();
+    CHECK(world.materials.size() == expected_material_count);
+    CHECK(texture_set.binding_count() == expected_material_count);
+    CHECK(texture_set.texture_count() == expected_texture_count);
+    CHECK(texture_set.complete_for_world_materials() == expect_complete);
+    CHECK(texture_set.statistics().material_binding_count ==
+          expected_material_count);
+    CHECK(texture_set.statistics().decoded_texture_count ==
+          expected_texture_count);
+    CHECK(texture_set.statistics().unresolved_material_count ==
+          (expect_complete ? 0U : 1U));
+    CHECK(texture_set.statistics().total_mip_level_count ==
+          expected_texture_count * assets::kWorldTextureMipLevelCount);
+
+    if (scenario == ProductionWorldTextureIntegrationScenario::embedded_only ||
+        scenario == ProductionWorldTextureIntegrationScenario::mixed) {
+        REQUIRE(texture_set.bindings().size() >= 1U);
+        const auto& binding = texture_set.bindings()[0U];
+        CHECK(binding.material_index == 0U);
+        CHECK(binding.status ==
+              assets::WorldMaterialTextureBindingStatus::resolved_embedded);
+        REQUIRE(binding.texture_asset_index);
+        CHECK(*binding.texture_asset_index == 0U);
+        REQUIRE(binding.source_bsp_texture_index);
+        CHECK(*binding.source_bsp_texture_index == 0U);
+        CHECK_FALSE(binding.source_archive_ordinal);
+        REQUIRE(texture_set.textures().size() >= 1U);
+        check_production_world_texture_asset(
+            texture_set.textures()[0U],
+            "EMBEDDED",
+            assets::WorldTextureSourceKind::embedded_bsp,
+            0U);
+        REQUIRE(texture_set.textures()[0U].source_bsp_texture_index);
+        CHECK(*texture_set.textures()[0U].source_bsp_texture_index == 0U);
+        CHECK_FALSE(texture_set.textures()[0U].source_archive_ordinal);
+    }
+
+    if (uses_wad && expect_complete) {
+        const auto binding_index =
+            scenario == ProductionWorldTextureIntegrationScenario::mixed
+                ? 1U
+                : 0U;
+        REQUIRE(texture_set.bindings().size() > binding_index);
+        const auto& binding = texture_set.bindings()[binding_index];
+        CHECK(binding.material_index == binding_index);
+        CHECK(binding.status ==
+              assets::WorldMaterialTextureBindingStatus::resolved_wad3);
+        REQUIRE(binding.texture_asset_index);
+        CHECK(*binding.texture_asset_index == binding_index);
+        REQUIRE(binding.source_bsp_texture_index);
+        CHECK(*binding.source_bsp_texture_index == binding_index);
+        REQUIRE(binding.source_archive_ordinal);
+        CHECK(*binding.source_archive_ordinal == 0U);
+        REQUIRE(texture_set.textures().size() > binding_index);
+        check_production_world_texture_asset(
+            texture_set.textures()[binding_index],
+            production_external_texture_name(scenario),
+            assets::WorldTextureSourceKind::external_wad3,
+            production_external_texture_seed(scenario),
+            scenario ==
+                    ProductionWorldTextureIntegrationScenario::masked_external
+                ? assets::WorldTextureAlphaMode::masked_index_255
+                : assets::WorldTextureAlphaMode::opaque);
+        REQUIRE(texture_set.textures()[binding_index].source_bsp_texture_index);
+        CHECK(*texture_set.textures()[binding_index].source_bsp_texture_index ==
+              binding_index);
+        REQUIRE(texture_set.textures()[binding_index].source_archive_ordinal);
+        CHECK(*texture_set.textures()[binding_index].source_archive_ordinal ==
+              0U);
+    }
+
+    if (scenario == ProductionWorldTextureIntegrationScenario::missing) {
+        REQUIRE(texture_set.bindings().size() == 1U);
+        const auto& binding = texture_set.bindings()[0U];
+        CHECK(binding.material_index == 0U);
+        CHECK(binding.status ==
+              assets::WorldMaterialTextureBindingStatus::
+                  missing_bsp_texture_reference);
+        CHECK_FALSE(binding.texture_asset_index);
+        REQUIRE(binding.source_bsp_texture_index);
+        CHECK(*binding.source_bsp_texture_index == 0U);
+        CHECK_FALSE(binding.source_archive_ordinal);
+    }
+
+    if (scenario == ProductionWorldTextureIntegrationScenario::missing_wad ||
+        scenario == ProductionWorldTextureIntegrationScenario::
+                        missing_texture_in_valid_wad ||
+        scenario ==
+               ProductionWorldTextureIntegrationScenario::dimension_mismatch) {
+        REQUIRE(texture_set.bindings().size() == 1U);
+        const auto& binding = texture_set.bindings()[0U];
+        CHECK(binding.material_index == 0U);
+        const auto expected_status =
+            scenario == ProductionWorldTextureIntegrationScenario::missing_wad
+                ? assets::WorldMaterialTextureBindingStatus::
+                      external_wad_archive_missing
+                : (scenario == ProductionWorldTextureIntegrationScenario::
+                                       missing_texture_in_valid_wad
+                       ? assets::WorldMaterialTextureBindingStatus::
+                             external_texture_not_found
+                       : assets::WorldMaterialTextureBindingStatus::
+                             external_texture_dimension_mismatch);
+        CHECK(binding.status == expected_status);
+        CHECK_FALSE(binding.texture_asset_index);
+        REQUIRE(binding.source_bsp_texture_index);
+        CHECK(*binding.source_bsp_texture_index == 0U);
+        if (scenario ==
+            ProductionWorldTextureIntegrationScenario::dimension_mismatch) {
+            REQUIRE(binding.source_archive_ordinal);
+            CHECK(*binding.source_archive_ordinal == 0U);
+        } else {
+            CHECK_FALSE(binding.source_archive_ordinal);
+        }
+    }
+
+    if (uses_wad) {
+        REQUIRE(texture_set.archive_metadata().size() == 1U);
+        const auto& archive = texture_set.archive_metadata()[0U];
+        CHECK(archive.declaration_ordinal == 0U);
+        CHECK(archive.basename_byte_count ==
+              production_texture_wad_basename(scenario).size());
+        const bool missing_archive =
+            scenario == ProductionWorldTextureIntegrationScenario::missing_wad;
+        if (missing_archive) {
+            CHECK_FALSE(archive.source_root_ordinal);
+        } else {
+            REQUIRE(archive.source_root_ordinal);
+            CHECK(*archive.source_root_ordinal == expected_root_id);
+        }
+        CHECK(archive.status ==
+              (missing_archive
+                   ? assets::WorldTextureArchiveStatus::missing
+                   : assets::WorldTextureArchiveStatus::resolved));
+        CHECK(archive.catalog_entry_count == (missing_archive ? 0U : 1U));
+        CHECK(archive.textures_supplied_count ==
+              (expect_complete ? 1U : 0U));
+        CHECK(archive.source_byte_count ==
+              (missing_archive
+                   ? 0U
+                   : production_world_texture_wad_fixture(scenario)
+                         .bytes.size()));
+    } else {
+        CHECK(texture_set.archive_metadata().empty());
+    }
 }
 
 [[nodiscard]] std::vector<std::byte> production_bsp_fixture(
@@ -3020,9 +3503,15 @@ void run_precache_manifest_integration(
         PrecacheManifestCompletionMode::manifest_only,
     const std::size_t source_read_chunk_bytes = 7U,
     const ProductionBspIntegrationScenario production_bsp_scenario =
-        ProductionBspIntegrationScenario::valid_quad)
+        ProductionBspIntegrationScenario::valid_quad,
+    const ProductionWorldTextureIntegrationScenario
+        production_texture_scenario =
+            ProductionWorldTextureIntegrationScenario::mixed)
 {
     INFO("fake-HLDS precache-manifest run " << run + 1U);
+    const bool production_world_textures =
+        completion_mode ==
+        PrecacheManifestCompletionMode::production_world_textures;
     const bool production_bsp_dispatch =
         completion_mode != PrecacheManifestCompletionMode::manifest_only;
     const bool legacy_malformed_face_rejection =
@@ -3047,6 +3536,12 @@ void run_precache_manifest_integration(
     REQUIRE_FALSE((legacy_malformed_face_rejection &&
                    production_bsp_scenario !=
                        ProductionBspIntegrationScenario::valid_quad));
+    REQUIRE_FALSE((!production_world_textures &&
+                   production_texture_scenario !=
+                       ProductionWorldTextureIntegrationScenario::mixed));
+    REQUIRE_FALSE((production_world_textures &&
+                   production_bsp_scenario !=
+                       ProductionBspIntegrationScenario::valid_quad));
 
     // Alternate exact game-root selection and valve fallback while retaining
     // one validated environment for both consistency preparation and the
@@ -3057,11 +3552,19 @@ void run_precache_manifest_integration(
     const bool use_game_root = (run % 2U) == 0U;
     const std::string_view selected_game = use_game_root ? game : "valve";
     const std::uint32_t expected_root_id = use_game_root ? 0U : 1U;
+    const std::uint32_t expected_texture_root_id =
+        production_texture_scenario ==
+                ProductionWorldTextureIntegrationScenario::game_root_override
+            ? 0U
+            : expected_root_id;
     write_manifest_integration_files(root, selected_game, scenario);
     std::vector<std::byte> production_world_bytes;
+
     if (production_bsp_dispatch) {
-        production_world_bytes = production_bsp_fixture(
-            production_bsp_scenario);
+        production_world_bytes = production_world_textures
+            ? production_world_texture_bsp_fixture(
+                  production_texture_scenario)
+            : production_bsp_fixture(production_bsp_scenario);
         if (legacy_malformed_face_rejection) {
             const auto face_descriptor =
                 hlclient::tests::synthetic_lump_descriptor_offset(
@@ -3079,6 +3582,37 @@ void run_precache_manifest_integration(
             selected_game,
             "maps/test_map.bsp",
             production_world_bytes);
+        if (production_world_textures &&
+            production_texture_uses_wad(production_texture_scenario) &&
+            production_texture_scenario !=
+                ProductionWorldTextureIntegrationScenario::missing_wad) {
+            if (production_texture_scenario ==
+                ProductionWorldTextureIntegrationScenario::
+                    game_root_override) {
+                root.write(
+                    game,
+                    "texture_flow.wad",
+                    production_world_texture_wad_fixture(
+                        production_texture_scenario,
+                        std::uint8_t{23U})
+                        .bytes);
+                root.write(
+                    "valve",
+                    "texture_flow.wad",
+                    production_world_texture_wad_fixture(
+                        production_texture_scenario,
+                        std::uint8_t{7U})
+                        .bytes);
+            } else {
+                root.write(
+                    selected_game,
+                    production_texture_wad_basename(
+                        production_texture_scenario),
+                    production_world_texture_wad_fixture(
+                        production_texture_scenario)
+                        .bytes);
+            }
+        }
     }
     const auto before = snapshot_synthetic_root(root.path());
 
@@ -3160,14 +3694,19 @@ void run_precache_manifest_integration(
     asset_dispatch_config.source_open.read_chunk_bytes =
         source_read_chunk_bytes;
     asset_dispatch_config.source_open.maximum_chunks_per_update = 1U;
+    goldsrc::WorldTextureImportStageConfig world_texture_config;
+    world_texture_config.asset_dispatch = asset_dispatch_config;
+    world_texture_config.asset_dispatch.manifest = manifest_stage_config;
     const auto expected_remote = *server_endpoint;
 
     goldsrc::GoldSrcHandshakeCoordinator handshake{
         transport,
         *server_endpoint,
-        production_bsp_dispatch
-            ? goldsrc::HandshakeStopPoint::asset_dispatch
-            : goldsrc::HandshakeStopPoint::precache_manifest,
+        production_world_textures
+            ? goldsrc::HandshakeStopPoint::world_textures
+            : (production_bsp_dispatch
+                   ? goldsrc::HandshakeStopPoint::asset_dispatch
+                   : goldsrc::HandshakeStopPoint::precache_manifest),
         std::move(prepared_request.request),
         challenge_config(),
         {},
@@ -3324,6 +3863,54 @@ void run_precache_manifest_integration(
             case Classification::import_failed:
                 ++traces.asset_import_failures;
                 traces.transmitted_at_asset_terminal =
+                    event.transmitted_packet_count;
+                break;
+            default:
+                break;
+            }
+        },
+        std::move(world_texture_config),
+        [&traces, expected_remote](
+            const goldsrc::WorldTextureImportTraceEvent& event) {
+            if (event.endpoint != expected_remote) {
+                ++traces.endpoint_mismatches;
+            }
+            using Classification =
+                goldsrc::WorldTextureImportTraceClassification;
+            switch (event.classification) {
+            case Classification::world_geometry_ready:
+                ++traces.world_geometry_ready;
+                break;
+            case Classification::texture_import_started:
+                ++traces.texture_imports_started;
+                break;
+            case Classification::texture_import_progress:
+                ++traces.texture_progress_events;
+                break;
+            case Classification::wad_source_open_started:
+                ++traces.wad_source_open_starts;
+                break;
+            case Classification::wad_source_ready:
+                ++traces.wad_sources_ready;
+                break;
+            case Classification::world_textures_ready:
+                ++traces.texture_sets_ready;
+                traces.transmitted_at_texture_terminal =
+                    event.transmitted_packet_count;
+                break;
+            case Classification::world_textures_incomplete:
+                ++traces.texture_sets_incomplete;
+                traces.transmitted_at_texture_terminal =
+                    event.transmitted_packet_count;
+                break;
+            case Classification::wad_catalog_failed:
+                ++traces.wad_catalog_failures;
+                traces.transmitted_at_texture_terminal =
+                    event.transmitted_packet_count;
+                break;
+            case Classification::texture_decode_failed:
+                ++traces.texture_decode_failures;
+                traces.transmitted_at_texture_terminal =
                     event.transmitted_packet_count;
                 break;
             default:
@@ -3498,7 +4085,10 @@ void run_precache_manifest_integration(
         error);
     handshake.update(now + 1ms);
     CHECK_FALSE(handshake.terminal());
-    if (production_bsp_dispatch) {
+    if (production_world_textures) {
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::waiting_for_world_textures);
+    } else if (production_bsp_dispatch) {
         CHECK(handshake.state() ==
               goldsrc::GoldSrcHandshakeState::waiting_for_asset_dispatch);
     } else {
@@ -3518,7 +4108,7 @@ void run_precache_manifest_integration(
         // processing on the same retained coordinator and transport.
         auto local_update_time = now + 2ms;
         for (std::size_t update = 0U;
-             update < 256U && !handshake.terminal();
+             update < 4'096U && !handshake.terminal();
              ++update) {
             if (production_bsp_scenario ==
                     ProductionBspIntegrationScenario::stale_selected_locator &&
@@ -3582,6 +4172,178 @@ void run_precache_manifest_integration(
         handshake.update(terminal_time);
         REQUIRE(handshake.terminal());
         require_no_datagram(*server);
+    }
+
+    if (production_world_textures) {
+        const bool fatal_texture_failure =
+            production_texture_fails_fatally(production_texture_scenario);
+        const bool expect_complete =
+            !production_texture_is_incomplete(production_texture_scenario) &&
+            !fatal_texture_failure;
+        const bool uses_wad =
+            production_texture_uses_wad(production_texture_scenario);
+        const bool opens_wad_source =
+            uses_wad &&
+            production_texture_scenario !=
+                ProductionWorldTextureIntegrationScenario::missing_wad;
+        const bool wad_catalog_failure =
+            production_texture_scenario ==
+                ProductionWorldTextureIntegrationScenario::
+                    malformed_wad_header ||
+            production_texture_scenario ==
+                ProductionWorldTextureIntegrationScenario::
+                    unsupported_wad_compression;
+        const auto expected_terminal_state = fatal_texture_failure
+            ? (wad_catalog_failure
+                   ? goldsrc::GoldSrcHandshakeState::
+                         world_texture_wad_catalog_failed
+                   : goldsrc::GoldSrcHandshakeState::
+                         world_texture_decode_failed)
+            : (expect_complete
+                   ? goldsrc::GoldSrcHandshakeState::world_textures_ready
+                   : goldsrc::GoldSrcHandshakeState::
+                         world_textures_incomplete);
+        CHECK(handshake.state() == expected_terminal_state);
+        if (fatal_texture_failure) {
+            CHECK_FALSE(handshake.world_texture_result());
+            REQUIRE(handshake.world_texture_error());
+            CHECK(handshake.world_texture_error()->code ==
+                  goldsrc::WorldTextureImportStageErrorCode::
+                      texture_import_failed);
+            REQUIRE(handshake.world_texture_error()->texture_import_code);
+            CHECK(*handshake.world_texture_error()->texture_import_code ==
+                  (wad_catalog_failure
+                       ? goldsrc::WorldTextureImportErrorCode::
+                             wad_catalog_failed
+                       : goldsrc::WorldTextureImportErrorCode::
+                             wad_texture_decode_failed));
+        } else {
+            CHECK_FALSE(handshake.world_texture_error());
+            REQUIRE(handshake.world_texture_result());
+            check_production_world_texture_result(
+                *handshake.world_texture_result(),
+                production_texture_scenario,
+                environment,
+                production_world_bytes.size(),
+                expected_texture_root_id);
+            const auto& manifest = handshake.world_texture_result()
+                                       ->dispatch_state()
+                                       .manifest();
+            if (scenario == PrecacheManifestIntegrationScenario::
+                                world_ready_missing_sound) {
+                CHECK(manifest.completeness() ==
+                      goldsrc::PrecacheManifestCompleteness::
+                          world_ready_but_incomplete);
+                CHECK_FALSE(
+                    manifest.complete_for_supported_local_profile());
+                CHECK(manifest.world_geometry_ready());
+                CHECK(manifest.readiness_summary().missing_count() == 1U);
+            } else {
+                CHECK(manifest.completeness() ==
+                      goldsrc::PrecacheManifestCompleteness::
+                          complete_for_supported_local_profile);
+                CHECK(manifest.complete_for_supported_local_profile());
+            }
+        }
+
+        const auto expected_progress_events =
+            (production_world_bytes.size() + source_read_chunk_bytes - 1U) /
+            source_read_chunk_bytes;
+        CHECK(traces.initial_requests_queued == 1U);
+        CHECK(traces.transition_requests_queued == 1U);
+        CHECK(traces.resource_lists_decoded == 1U);
+        CHECK(traces.resource_responses_queued == 1U);
+        CHECK(traces.response_boundaries == 1U);
+        CHECK(traces.manifest_publications == 1U);
+        CHECK(traces.manifest_terminal_outcomes == 1U);
+        CHECK(traces.world_entries_selected == 1U);
+        CHECK(traces.asset_source_open_starts == 1U);
+        CHECK(traces.asset_source_progress_events == expected_progress_events);
+        CHECK(traces.asset_source_open_failures == 0U);
+        CHECK(traces.importer_probes_completed == 1U);
+        CHECK(traces.importers_selected == 1U);
+        CHECK(traces.assets_imported == 1U);
+        CHECK(traces.asset_import_failures == 0U);
+        CHECK(traces.world_geometry_ready == 1U);
+        CHECK(traces.texture_imports_started == 1U);
+        CHECK(traces.texture_progress_events >= 1U);
+        CHECK(traces.wad_source_open_starts ==
+              (opens_wad_source ? 1U : 0U));
+        CHECK(traces.wad_sources_ready == (opens_wad_source ? 1U : 0U));
+        CHECK(traces.texture_sets_ready == (expect_complete ? 1U : 0U));
+        CHECK(traces.texture_sets_incomplete ==
+              (!expect_complete && !fatal_texture_failure ? 1U : 0U));
+        CHECK(traces.wad_catalog_failures ==
+              (wad_catalog_failure ? 1U : 0U));
+        CHECK(traces.texture_decode_failures ==
+              (fatal_texture_failure && !wad_catalog_failure ? 1U : 0U));
+        CHECK(traces.texture_sets_ready + traces.texture_sets_incomplete +
+                  traces.wad_catalog_failures +
+                  traces.texture_decode_failures ==
+              1U);
+        CHECK(traces.endpoint_mismatches == 0U);
+        CHECK(response_datagrams ==
+              (transport_scenario == PrecacheManifestTransportScenario::baseline
+                   ? 1U
+                   : 2U));
+        REQUIRE(traces.transmitted_at_response_boundary);
+        REQUIRE(traces.transmitted_at_manifest_publication);
+        REQUIRE(traces.transmitted_at_manifest_terminal);
+        REQUIRE(traces.transmitted_at_asset_terminal);
+        REQUIRE(traces.transmitted_at_texture_terminal);
+        REQUIRE(traces.authentication_releases_at_manifest_terminal);
+        CHECK(*traces.transmitted_at_manifest_publication ==
+              *traces.transmitted_at_response_boundary);
+        CHECK(*traces.transmitted_at_manifest_terminal ==
+              *traces.transmitted_at_response_boundary);
+        CHECK(*traces.transmitted_at_asset_terminal ==
+              *traces.transmitted_at_manifest_publication);
+        CHECK(*traces.transmitted_at_texture_terminal ==
+              *traces.transmitted_at_asset_terminal);
+        CHECK(*traces.authentication_releases_at_manifest_terminal == 0U);
+        CHECK(authentication_releases == 1U);
+        CHECK(prepared_provider.provider->consumed());
+        REQUIRE(handshake.local_endpoint());
+        CHECK(*handshake.local_endpoint() == started.client_endpoint);
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+        CHECK(can_open_synthetic_writer(
+            root.game_path(selected_game) / "tempdecal.wad"));
+        if (production_texture_scenario ==
+            ProductionWorldTextureIntegrationScenario::missing_wad) {
+            CHECK_FALSE(std::filesystem::exists(
+                root.game_path(game) / "absent_flow.wad"));
+            CHECK_FALSE(std::filesystem::exists(
+                root.game_path("valve") / "absent_flow.wad"));
+        } else if (production_texture_scenario ==
+                   ProductionWorldTextureIntegrationScenario::
+                       game_root_override) {
+            CHECK(can_open_synthetic_writer(
+                root.game_path(game) / "texture_flow.wad"));
+            CHECK(can_open_synthetic_writer(
+                root.game_path("valve") / "texture_flow.wad"));
+        } else if (uses_wad) {
+            CHECK(can_open_synthetic_writer(
+                root.game_path(selected_game) /
+                production_texture_wad_basename(
+                    production_texture_scenario)));
+        }
+
+        const auto texture_publications_before =
+            traces.texture_sets_ready + traces.texture_sets_incomplete +
+            traces.wad_catalog_failures + traces.texture_decode_failures;
+        const auto progress_before = traces.texture_progress_events;
+        handshake.update(terminal_time + 100ms);
+        handshake.cancel(terminal_time + 200ms);
+        CHECK(handshake.state() == expected_terminal_state);
+        CHECK(authentication_releases == 1U);
+        CHECK(traces.texture_sets_ready + traces.texture_sets_incomplete +
+                  traces.wad_catalog_failures +
+                  traces.texture_decode_failures ==
+              texture_publications_before);
+        CHECK(traces.texture_progress_events == progress_before);
+        require_no_datagram(*server);
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+        return;
     }
 
     if (production_bsp_dispatch) {
@@ -3979,6 +4741,25 @@ void run_precache_manifest_integration(
     if (!verify_stale_locator) {
         CHECK(snapshot_synthetic_root(root.path()) == before);
     }
+}
+
+void run_world_texture_integration(
+    const std::size_t run,
+    const ProductionWorldTextureIntegrationScenario scenario,
+    const PrecacheManifestTransportScenario transport_scenario =
+        PrecacheManifestTransportScenario::baseline,
+    const PrecacheManifestIntegrationScenario manifest_scenario =
+        PrecacheManifestIntegrationScenario::complete)
+{
+    run_precache_manifest_integration(
+        run,
+        manifest_scenario,
+        transport_scenario,
+        false,
+        PrecacheManifestCompletionMode::production_world_textures,
+        64U,
+        ProductionBspIntegrationScenario::valid_quad,
+        scenario);
 }
 
 class ScopedChildProcess final {
@@ -4468,6 +5249,130 @@ TEST_CASE("Production BSP fake HLDS covers required one-shot import variants",
         run_variant(
             ProductionBspIntegrationScenario::source_changed_during_read,
             8U);
+    }
+}
+
+TEST_CASE("Production fake HLDS resolves embedded world textures 20 of 20",
+          "[goldsrc][world-textures][embedded][udp][production][full-flow][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production embedded world-texture run " << run + 1U << "/20");
+        run_world_texture_integration(
+            run,
+            ProductionWorldTextureIntegrationScenario::embedded_only);
+    }
+}
+
+TEST_CASE("Production fake HLDS resolves external WAD3 world textures 20 of 20",
+          "[goldsrc][world-textures][wad3][udp][production][full-flow][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production external world-texture run " << run + 1U << "/20");
+        run_world_texture_integration(
+            run,
+            ProductionWorldTextureIntegrationScenario::external_only);
+    }
+}
+
+TEST_CASE("Production fake HLDS resolves mixed embedded and WAD3 textures 20 of 20",
+          "[goldsrc][world-textures][mixed][udp][production][full-flow][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production mixed world-texture run " << run + 1U << "/20");
+        run_world_texture_integration(
+            run,
+            ProductionWorldTextureIntegrationScenario::mixed);
+    }
+}
+
+TEST_CASE("Production fake HLDS publishes missing textures as incomplete 20 of 20",
+          "[goldsrc][world-textures][missing][incomplete][udp][production][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production incomplete world-texture run " << run + 1U << "/20");
+        run_world_texture_integration(
+            run,
+            ProductionWorldTextureIntegrationScenario::missing);
+    }
+}
+
+TEST_CASE("Production world textures survive a dropped resource response 20 of 20",
+          "[goldsrc][world-textures][mixed][udp][production][drop-response][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production dropped-response world-texture run " << run + 1U
+                                                               << "/20");
+        run_world_texture_integration(
+            run,
+            ProductionWorldTextureIntegrationScenario::mixed,
+            PrecacheManifestTransportScenario::dropped_response);
+    }
+}
+
+TEST_CASE("Production world textures survive a dropped covering ACK 20 of 20",
+          "[goldsrc][world-textures][mixed][udp][production][drop-ack][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production dropped-ACK world-texture run " << run + 1U
+                                                         << "/20");
+        run_world_texture_integration(
+            run,
+            ProductionWorldTextureIntegrationScenario::mixed,
+            PrecacheManifestTransportScenario::dropped_acknowledgement);
+    }
+}
+
+TEST_CASE("Production world-texture fake HLDS covers required WAD and material variants",
+          "[goldsrc][world-textures][udp][production][variants][negative]")
+{
+    struct Variant {
+        ProductionWorldTextureIntegrationScenario texture;
+        PrecacheManifestIntegrationScenario manifest;
+        std::string_view label;
+    };
+    constexpr std::array<Variant, 10U> variants{{
+        {ProductionWorldTextureIntegrationScenario::masked_external,
+         PrecacheManifestIntegrationScenario::complete,
+         "transparent masked texture"},
+        {ProductionWorldTextureIntegrationScenario::missing_wad,
+         PrecacheManifestIntegrationScenario::complete,
+         "truly missing WAD"},
+        {ProductionWorldTextureIntegrationScenario::
+             missing_texture_in_valid_wad,
+         PrecacheManifestIntegrationScenario::complete,
+         "missing texture in valid WAD"},
+        {ProductionWorldTextureIntegrationScenario::dimension_mismatch,
+         PrecacheManifestIntegrationScenario::complete,
+         "BSP and WAD dimension mismatch"},
+        {ProductionWorldTextureIntegrationScenario::game_root_override,
+         PrecacheManifestIntegrationScenario::complete,
+         "game root overrides valve fallback"},
+        {ProductionWorldTextureIntegrationScenario::
+             duplicate_wad_declarations,
+         PrecacheManifestIntegrationScenario::complete,
+         "duplicate WAD declarations deduplicate"},
+        {ProductionWorldTextureIntegrationScenario::mixed,
+         PrecacheManifestIntegrationScenario::world_ready_missing_sound,
+         "world-ready incomplete manifest continues to textures"},
+        {ProductionWorldTextureIntegrationScenario::malformed_wad_header,
+         PrecacheManifestIntegrationScenario::complete,
+         "malformed WAD header"},
+        {ProductionWorldTextureIntegrationScenario::
+             unsupported_wad_compression,
+         PrecacheManifestIntegrationScenario::complete,
+         "unsupported WAD compression"},
+        {ProductionWorldTextureIntegrationScenario::invalid_wad_palette,
+         PrecacheManifestIntegrationScenario::complete,
+         "invalid WAD texture palette"},
+    }};
+
+    for (std::size_t index = 0U; index < variants.size(); ++index) {
+        INFO("production world-texture variant: " << variants[index].label);
+        run_world_texture_integration(
+            200U + (index * 2U),
+            variants[index].texture,
+            PrecacheManifestTransportScenario::baseline,
+            variants[index].manifest);
     }
 }
 

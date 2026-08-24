@@ -2,9 +2,11 @@
 
 M3.2.3 connects an approved owning `AssetSource` to the typed importer
 registries. M4.1 registers the first production format implementation,
-`GoldSrcBspWorldImporter`, in the caller-owned world registry. Format
-recognition remains importer-owned: signature, version, and structure are
-primary evidence; the extension is only a hint.
+`GoldSrcBspWorldImporter`, in the caller-owned world registry. M4.2 begins only
+after that importer has published a validated owning `WorldAsset`; it is a
+typed GoldSrc texture-resolution stage, not another importer-registry category.
+Format recognition remains importer-owned: signature, version, and structure
+are primary evidence; the extension is only a hint.
 
 ## Roles and plans
 
@@ -90,3 +92,18 @@ and transactional; its output owns CPU geometry and texture-reference metadata
 without retaining source bytes or native paths. See
 [GoldSrc BSP v30](GOLDSRC_BSP_V30.md) and
 [CPU world geometry](CPU_WORLD_GEOMETRY.md).
+
+For the explicit `world-textures` route, the parent stage keeps the approved
+BSP source alive alongside the imported world, then invokes the separate
+texture operation. That operation cross-checks exact BSP texture ordinals,
+decodes used embedded records, and opens only required safe WAD basenames
+through the retained local environment. It does not register a generic image
+importer, re-probe the BSP, route WADs through `AssetManager`, or change the
+result of `asset-dispatch`/`world-geometry`.
+
+The texture stage preserves the same session and sends no packet after manifest
+publication. It may publish a typed incomplete owning set for missing archives
+or textures, but malformed input and policy failures publish no partial set.
+The CLI returns success only for complete world-material bindings and exits
+before renderer initialization. See
+[world texture resolution](WORLD_TEXTURE_RESOLUTION.md).

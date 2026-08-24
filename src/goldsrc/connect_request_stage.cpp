@@ -460,6 +460,50 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_world_texture_state(
+    const WorldTextureImportStageState state) noexcept
+{
+    switch (state) {
+    case WorldTextureImportStageState::idle:
+    case WorldTextureImportStageState::waiting_for_world_geometry:
+    case WorldTextureImportStageState::parsing_texture_sources:
+    case WorldTextureImportStageState::decoding_embedded_textures:
+    case WorldTextureImportStageState::resolving_wad_archives:
+    case WorldTextureImportStageState::decoding_external_textures:
+    case WorldTextureImportStageState::building_texture_set:
+        return GoldSrcHandshakeState::waiting_for_world_textures;
+    case WorldTextureImportStageState::world_textures_ready:
+        return GoldSrcHandshakeState::world_textures_ready;
+    case WorldTextureImportStageState::world_textures_incomplete:
+        return GoldSrcHandshakeState::world_textures_incomplete;
+    case WorldTextureImportStageState::world_geometry_unavailable:
+        return GoldSrcHandshakeState::world_texture_geometry_unavailable;
+    case WorldTextureImportStageState::worldspawn_parse_failed:
+        return GoldSrcHandshakeState::world_texture_worldspawn_parse_failed;
+    case WorldTextureImportStageState::wad_reference_invalid:
+        return GoldSrcHandshakeState::world_texture_wad_reference_invalid;
+    case WorldTextureImportStageState::wad_source_unavailable:
+        return GoldSrcHandshakeState::world_texture_wad_source_unavailable;
+    case WorldTextureImportStageState::wad_source_open_failed:
+        return GoldSrcHandshakeState::world_texture_wad_source_open_failed;
+    case WorldTextureImportStageState::wad_catalog_failed:
+        return GoldSrcHandshakeState::world_texture_wad_catalog_failed;
+    case WorldTextureImportStageState::texture_decode_failed:
+        return GoldSrcHandshakeState::world_texture_decode_failed;
+    case WorldTextureImportStageState::timed_out:
+        return GoldSrcHandshakeState::world_texture_timed_out;
+    case WorldTextureImportStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case WorldTextureImportStageState::backpressure:
+        return GoldSrcHandshakeState::world_texture_backpressure;
+    case WorldTextureImportStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case WorldTextureImportStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] bool signon_start_network_failure(
     const std::optional<NetchanDriverErrorCode> driver_code) noexcept
 {
@@ -701,7 +745,9 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     PrecacheManifestTraceCallback precache_manifest_trace_callback,
     const assets::AssetImporterRegistries* asset_importer_registries,
     PrecacheAssetDispatchStageConfig asset_dispatch_config,
-    PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback)
+    PrecacheAssetDispatchTraceCallback asset_dispatch_trace_callback,
+    WorldTextureImportStageConfig world_texture_config,
+    WorldTextureImportTraceCallback world_texture_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -732,7 +778,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::resource_list ||
                 stop_point_ == HandshakeStopPoint::resource_response_boundary ||
                 stop_point_ == HandshakeStopPoint::precache_manifest ||
-                stop_point_ == HandshakeStopPoint::asset_dispatch) {
+                stop_point_ == HandshakeStopPoint::asset_dispatch ||
+                stop_point_ == HandshakeStopPoint::world_textures) {
                 response_stage_.emplace(
                     transport,
                     remote_endpoint,
@@ -890,6 +937,36 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                             std::move(asset_dispatch_trace_callback));
                 }
             }
+            if (stop_point_ == HandshakeStopPoint::world_textures) {
+                if (!local_resource_environment ||
+                    asset_importer_registries == nullptr) {
+                    configuration_error_ =
+                        "World-textures mode requires a retained local resource environment and importer registries";
+                    state_ = GoldSrcHandshakeState::configuration_error;
+                } else {
+                    world_texture_config.asset_dispatch.manifest.response =
+                        std::move(resource_response_config);
+                    world_texture_stage_ =
+                        std::make_unique<WorldTextureImportStage>(
+                            transport,
+                            remote_endpoint,
+                            std::move(local_resource_environment),
+                            *asset_importer_registries,
+                            std::move(world_texture_config),
+                            resource_consistency_provider,
+                            std::move(signon_trace_callback),
+                            std::move(pre_resource_trace_callback),
+                            std::move(delta_trace_callback),
+                            std::move(movement_environment_trace_callback),
+                            std::move(user_info_trace_callback),
+                            std::move(resource_transition_trace_callback),
+                            std::move(resource_list_trace_callback),
+                            std::move(resource_response_trace_callback),
+                            std::move(precache_manifest_trace_callback),
+                            std::move(asset_dispatch_trace_callback),
+                            std::move(world_texture_trace_callback));
+                }
+            }
         }
     } else if (authentication_session_) {
         configuration_error_ =
@@ -913,6 +990,13 @@ bool GoldSrcHandshakeCoordinator::start(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (world_texture_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_world_textures) {
+        world_texture_stage_->update(now);
+        synchronize_from_world_textures();
+        release_authentication_session_if_terminal();
         return;
     }
     if (asset_dispatch_stage_ &&
@@ -1005,6 +1089,13 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (world_texture_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_world_textures) {
+        world_texture_stage_->cancel(now);
+        synchronize_from_world_textures();
+        release_authentication_session_if_terminal();
         return;
     }
     if (asset_dispatch_stage_ &&
@@ -1169,6 +1260,17 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::asset_import_failed:
     case GoldSrcHandshakeState::asset_dispatch_timed_out:
     case GoldSrcHandshakeState::asset_dispatch_backpressure:
+    case GoldSrcHandshakeState::world_textures_ready:
+    case GoldSrcHandshakeState::world_textures_incomplete:
+    case GoldSrcHandshakeState::world_texture_geometry_unavailable:
+    case GoldSrcHandshakeState::world_texture_worldspawn_parse_failed:
+    case GoldSrcHandshakeState::world_texture_wad_reference_invalid:
+    case GoldSrcHandshakeState::world_texture_wad_source_unavailable:
+    case GoldSrcHandshakeState::world_texture_wad_source_open_failed:
+    case GoldSrcHandshakeState::world_texture_wad_catalog_failed:
+    case GoldSrcHandshakeState::world_texture_decode_failed:
+    case GoldSrcHandshakeState::world_texture_timed_out:
+    case GoldSrcHandshakeState::world_texture_backpressure:
     case GoldSrcHandshakeState::timed_out:
     case GoldSrcHandshakeState::cancelled:
     case GoldSrcHandshakeState::configuration_error:
@@ -1192,6 +1294,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_resource_response:
     case GoldSrcHandshakeState::waiting_for_precache_manifest:
     case GoldSrcHandshakeState::waiting_for_asset_dispatch:
+    case GoldSrcHandshakeState::waiting_for_world_textures:
         return false;
     }
     return true;
@@ -1340,6 +1443,18 @@ GoldSrcHandshakeCoordinator::asset_dispatch_error() const noexcept
     static const std::optional<PrecacheAssetDispatchStageError> empty;
     return asset_dispatch_stage_ ? asset_dispatch_stage_->error() : empty;
 }
+const std::optional<TexturedWorldAssetState>&
+GoldSrcHandshakeCoordinator::world_texture_result() const noexcept
+{
+    static const std::optional<TexturedWorldAssetState> empty;
+    return world_texture_stage_ ? world_texture_stage_->result() : empty;
+}
+const std::optional<WorldTextureImportStageError>&
+GoldSrcHandshakeCoordinator::world_texture_error() const noexcept
+{
+    static const std::optional<WorldTextureImportStageError> empty;
+    return world_texture_stage_ ? world_texture_stage_->error() : empty;
+}
 NetchanSession* GoldSrcHandshakeCoordinator::netchan_session() noexcept
 {
     return netchan_stage_ ? netchan_stage_->persistent_session() : nullptr;
@@ -1401,6 +1516,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
     if (asset_dispatch_stage_ && asset_dispatch_stage_->error()) {
         return asset_dispatch_stage_->error()->context;
     }
+    if (world_texture_stage_ && world_texture_stage_->error()) {
+        return world_texture_stage_->error()->context;
+    }
     if (challenge_exchange_.error()) {
         return challenge_exchange_.error()->context;
     }
@@ -1437,7 +1555,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::resource_list &&
          stop_point_ != HandshakeStopPoint::resource_response_boundary &&
          stop_point_ != HandshakeStopPoint::precache_manifest &&
-         stop_point_ != HandshakeStopPoint::asset_dispatch)) {
+         stop_point_ != HandshakeStopPoint::asset_dispatch &&
+         stop_point_ != HandshakeStopPoint::world_textures)) {
         return;
     }
     if (!response_stage_) {
@@ -1473,8 +1592,9 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
           stop_point_ != HandshakeStopPoint::resource_list_boundary &&
           stop_point_ != HandshakeStopPoint::resource_list &&
           stop_point_ != HandshakeStopPoint::resource_response_boundary &&
-          stop_point_ != HandshakeStopPoint::precache_manifest &&
-          stop_point_ != HandshakeStopPoint::asset_dispatch)) {
+           stop_point_ != HandshakeStopPoint::precache_manifest &&
+           stop_point_ != HandshakeStopPoint::asset_dispatch &&
+           stop_point_ != HandshakeStopPoint::world_textures)) {
         return;
     }
     if (!challenge_exchange_.local_endpoint() ||
@@ -1495,7 +1615,9 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
          (stop_point_ == HandshakeStopPoint::precache_manifest &&
           !precache_manifest_stage_) ||
          (stop_point_ == HandshakeStopPoint::asset_dispatch &&
-          !asset_dispatch_stage_)) {
+          !asset_dispatch_stage_) ||
+         (stop_point_ == HandshakeStopPoint::world_textures &&
+          !world_texture_stage_)) {
         state_ = GoldSrcHandshakeState::configuration_error;
         configuration_error_ =
             "Post-ACCEPT mode has no transport stage or stable local endpoint";
@@ -1624,6 +1746,18 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         synchronize_from_asset_dispatch();
         if (!asset_dispatch_started &&
             state_ == GoldSrcHandshakeState::waiting_for_asset_dispatch) {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::world_textures) {
+        const bool world_textures_started = world_texture_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime));
+        synchronize_from_world_textures();
+        if (!world_textures_started &&
+            state_ == GoldSrcHandshakeState::waiting_for_world_textures) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -1965,6 +2099,27 @@ void GoldSrcHandshakeCoordinator::synchronize_from_asset_dispatch()
          stage_error->local_source_open_code ==
              local_assets::LocalAssetSourceOpenErrorCode::
                  invalid_configuration)) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_world_textures()
+{
+    if (!world_texture_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "World-textures mode has no texture import stage";
+        return;
+    }
+
+    while (world_texture_stage_->poll_event()) {
+    }
+
+    state_ = map_world_texture_state(world_texture_stage_->state());
+    const auto& stage_error = world_texture_stage_->error();
+    if (stage_error &&
+        stage_error->code ==
+            WorldTextureImportStageErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }
