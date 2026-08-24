@@ -616,11 +616,12 @@ snapshot, and atomically publishes an owning source. Production opens only the
 exact selected world entry; it never preloads the complete manifest.
 
 Pure registry probes and deterministic cross-category dispatch preserve M0.1's
-confidence/priority/tie rules. The production composition intentionally has no
-format importer, so a safely opened world reaches the typed no-importer
-boundary. The same retained sign-on lifetime is finalized once without any new
-semantic network message. No GoldSrc format parser, download/cache behavior,
-renderer, or GPU integration is part of this milestone.
+confidence/priority/tie rules. At the M3.2.3 boundary, production intentionally
+had no format importer and a safely opened world reached typed no-match; M4.1
+supersedes that production composition while explicit empty-registry tests
+retain the boundary. The same retained sign-on lifetime is finalized once
+without any new semantic network message. No GoldSrc format parser,
+download/cache behavior, renderer, or GPU integration belonged to M3.2.3.
 
 See [approved asset sources](APPROVED_ASSET_SOURCE.md) and
 [asset importer dispatch](ASSET_IMPORTER_DISPATCH.md).
@@ -661,12 +662,37 @@ and parser tests cover corrupt offsets, counts, dimensions, and lump lengths.
 
 ### M4.1 — GoldSrc BSP importer and CPU world geometry
 
+**Status: completed.**
+
+The first real production format importer strictly decodes BSP version 30's
+124-byte header and 15 lumps, validates every retained range/reference and
+finite float, reconstructs exact world-model surfedge loops, and emits owning
+flat-normal CPU geometry, raw texel-unit UVs, material-reference metadata, and
+finite bounds. `asset-dispatch` now imports valid BSP input and the explicit
+`world-geometry` stop reports bounded CPU counts on the same session with no
+post-manifest TX. Model 0 is the only emitted brush model. Texture pixels,
+lightmaps, PVS/collision runtime, renderer upload, and gameplay remain absent.
+
+### M4.2 — Embedded/WAD texture resolution and import
+
 **Status: next.**
 
-Add the first real production format importer: a bounded GoldSrc BSP decoder
-that converts validated source bytes into neutral CPU `WorldAsset` geometry.
-Renderer upload, live world activation, dependent WAD loading, and gameplay
-remain later work.
+Resolve validated texture references and import bounded embedded or user-owned
+WAD texture data without changing the CPU geometry/security boundary.
+
+### M4.3 — Lightmaps, materials, and OpenGL world renderer
+
+**Status: planned.**
+
+Decode validated lightmap data, construct renderer-neutral material inputs, and
+translate CPU world assets into renderer-owned GPU resources.
+
+### M4.4 — PVS/culling and brush submodels
+
+**Status: planned.**
+
+Add bounded visibility/culling runtime and explicit brush-submodel instances
+after their entity/transform evidence and rendering contracts are defined.
 
 ## M5 — Entity snapshots
 

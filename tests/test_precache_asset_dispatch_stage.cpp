@@ -1,18 +1,24 @@
 #include "delta_test_fixture.hpp"
+#include "local_asset_source_test_access.hpp"
 #include "local_resource_readiness_test_fixture.hpp"
 #include "local_resource_test_fixture.hpp"
 #include "move_vars_test_fixture.hpp"
 #include "resource_client_response_test_fixture.hpp"
 #include "resource_list_test_fixture.hpp"
 #include "synthetic_asset_importers.hpp"
+#include "synthetic_goldsrc_bsp_fixture.hpp"
 #include "user_info_test_fixture.hpp"
+
+#include "../src/goldsrc/precache_asset_dispatch_stage_test_access.hpp"
 
 #include <hlclient/auth/authentication_provider.hpp>
 #include <hlclient/goldsrc/challenge_protocol.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
 #include <hlclient/goldsrc/precache_asset_dispatch_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
+#include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
 #include <hlclient/resource_consistency/provider.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -26,6 +32,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -43,6 +50,7 @@ namespace {
 using namespace std::chrono_literals;
 namespace assets = hlclient::assets;
 namespace auth = hlclient::auth;
+namespace bsp = hlclient::goldsrc::bsp;
 namespace consistency = hlclient::resource_consistency;
 namespace delta_fixture = hlclient::test::delta_fixture;
 namespace goldsrc = hlclient::goldsrc;
@@ -370,7 +378,8 @@ server_packet(const std::uint32_t packet_sequence, const bool reliable,
   };
 }
 
-[[nodiscard]] std::vector<std::byte> first_semantic_payload() {
+[[nodiscard]] std::vector<std::byte> first_semantic_payload(
+    const std::string_view map_name = "maps/test_alpha.bsp") {
   std::vector<std::byte> post_delta;
   move_fixture::append_move_vars_body(post_delta);
   move_fixture::append_confirmed_controls(post_delta);
@@ -378,7 +387,7 @@ server_packet(const std::uint32_t packet_sequence, const bool reliable,
                     user_fixture::kExactUserInfoMessage.begin(),
                     user_fixture::kExactUserInfoMessage.end());
   return delta_fixture::service_payload(schemas(), goldsrc::kMoveVarsOpcode,
-                                        post_delta);
+                                         post_delta, map_name);
 }
 
 [[nodiscard]] std::vector<std::byte> resource_semantic_payload(
@@ -655,10 +664,53 @@ public:
 
 void write_complete_resources(
     const hlclient::tests::ScopedLocalResourceTestRoot &root,
-    const std::span<const std::byte> world_bytes) {
-  root.write("valve", "maps/test_alpha.bsp", world_bytes);
+    const std::span<const std::byte> world_bytes,
+    const std::string_view world_name = "maps/test_alpha.bsp") {
+  root.write("valve", world_name, world_bytes);
   root.write("valve", "models/test_model.mdl", "model");
   root.write("valve", "sound/test_sound.wav", "sound");
+}
+
+struct SyntheticRootSnapshotEntry {
+  std::string relative_name;
+  std::uintmax_t byte_count{0U};
+  std::filesystem::file_time_type write_time{};
+  std::string contents;
+  bool directory{false};
+
+  friend bool operator==(const SyntheticRootSnapshotEntry &,
+                         const SyntheticRootSnapshotEntry &) = default;
+};
+
+[[nodiscard]] std::vector<SyntheticRootSnapshotEntry>
+snapshot_synthetic_root(const std::filesystem::path &root) {
+  std::vector<SyntheticRootSnapshotEntry> snapshot;
+  for (const auto &entry : std::filesystem::recursive_directory_iterator{root}) {
+    std::error_code error;
+    const bool directory = entry.is_directory(error);
+    REQUIRE_FALSE(error);
+    const bool regular = entry.is_regular_file(error);
+    REQUIRE_FALSE(error);
+
+    SyntheticRootSnapshotEntry item;
+    item.relative_name =
+        std::filesystem::relative(entry.path(), root).generic_string();
+    item.directory = directory;
+    if (regular) {
+      item.write_time = entry.last_write_time(error);
+      REQUIRE_FALSE(error);
+      item.byte_count = entry.file_size(error);
+      REQUIRE_FALSE(error);
+      std::ifstream stream{entry.path(), std::ios::binary};
+      REQUIRE(stream);
+      item.contents.assign(std::istreambuf_iterator<char>{stream},
+                           std::istreambuf_iterator<char>{});
+      REQUIRE_FALSE(stream.bad());
+    }
+    snapshot.push_back(std::move(item));
+  }
+  std::ranges::sort(snapshot, {}, &SyntheticRootSnapshotEntry::relative_name);
+  return snapshot;
 }
 
 void check_post_manifest_terminal_invariants(
@@ -692,12 +744,68 @@ const std::array kCompleteEntries{
     resource_list_test_fixture::EntrySpec{0U, "test_sound.wav", 4U, 2U, 0U},
 };
 
+const std::array kProductionEntries{
+    resource_list_test_fixture::EntrySpec{2U, "maps/test_map.bsp", 37U,
+                                          0x00ff'ffffU, 0U},
+    resource_list_test_fixture::EntrySpec{2U, "models/test_model.mdl", 9U, 1U,
+                                          0U},
+    resource_list_test_fixture::EntrySpec{0U, "test_sound.wav", 4U, 2U, 0U},
+};
+
 const std::array kWorldOnlyEntry{
     resource_list_test_fixture::EntrySpec{2U, "maps/test_alpha.bsp", 37U, 0U,
                                           0U},
 };
 
-TEST_CASE("Precache asset dispatch reaches the production importer boundary "
+void check_literal_bsp_world(
+    const assets::WorldAsset &world,
+    const std::string_view expected_source_name = "maps/test_alpha.bsp") {
+  CHECK(world.identity.source_name == expected_source_name);
+  CHECK(world.coordinate_space ==
+        assets::WorldCoordinateSpace::source_native_goldsrc_z_up);
+  CHECK(world.texture_coordinate_space ==
+        assets::WorldTextureCoordinateSpace::texel_units);
+  CHECK(world.source_profile ==
+        assets::WorldGeometrySourceProfile::goldsrc_bsp_v30);
+  REQUIRE(world.vertices.size() == 4U);
+  REQUIRE(world.indices.size() == 6U);
+  REQUIRE(world.surfaces.size() == 1U);
+  REQUIRE(world.materials.size() == 1U);
+  constexpr std::array<std::uint32_t, 6U> expected_indices{0U, 1U, 2U,
+                                                          0U, 2U, 3U};
+  CHECK(std::ranges::equal(world.indices, expected_indices));
+  CHECK(world.vertices[0U].position.x == 0.0F);
+  CHECK(world.vertices[0U].position.y == 0.0F);
+  CHECK(world.vertices[0U].position.z == 0.0F);
+  CHECK(world.vertices[1U].position.x == 64.0F);
+  CHECK(world.vertices[2U].position.y == 64.0F);
+  CHECK(world.vertices[3U].position.x == 0.0F);
+  CHECK(world.vertices[3U].position.y == 64.0F);
+  for (const auto &vertex : world.vertices) {
+    CHECK(vertex.normal.x == 0.0F);
+    CHECK(vertex.normal.y == 0.0F);
+    CHECK(vertex.normal.z == 1.0F);
+    CHECK(vertex.texture_coordinate.x == vertex.position.x);
+    CHECK(vertex.texture_coordinate.y == vertex.position.y);
+  }
+  CHECK(world.bounds.minimum.x == 0.0F);
+  CHECK(world.bounds.minimum.y == 0.0F);
+  CHECK(world.bounds.minimum.z == 0.0F);
+  CHECK(world.bounds.maximum.x == 64.0F);
+  CHECK(world.bounds.maximum.y == 64.0F);
+  CHECK(world.bounds.maximum.z == 0.0F);
+  CHECK(world.materials.front().texture_storage ==
+        assets::WorldTextureStorage::external_reference);
+  CHECK(world.statistics.source_version == 30);
+  CHECK(world.statistics.source_model_count == 1U);
+  CHECK(world.statistics.world_model_source_face_count == 1U);
+  CHECK(world.statistics.emitted_surface_count == 1U);
+  CHECK(world.statistics.emitted_vertex_count == 4U);
+  CHECK(world.statistics.emitted_triangle_count == 2U);
+  CHECK(world.statistics.external_texture_reference_count == 1U);
+}
+
+TEST_CASE("Precache asset dispatch reaches the explicit empty-registry boundary "
           "for a complete manifest",
           "[goldsrc][asset-dispatch][stage][boundary]") {
   hlclient::tests::ScopedLocalResourceTestRoot root;
@@ -857,6 +965,84 @@ TEST_CASE(
   CHECK(harness.stage.importer_dispatch_count() == dispatches);
   CHECK(counts.probe_count == 1U);
   CHECK(counts.import_count == 1U);
+}
+
+TEST_CASE("Production GoldSrc BSP importer publishes owning CPU world geometry",
+          "[goldsrc][bsp][asset-dispatch][stage][production]") {
+  hlclient::tests::ScopedLocalResourceTestRoot root;
+  const auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
+  write_complete_resources(root, world_bytes);
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  CHECK(registries.worlds.size() == 1U);
+
+  auto config = test_config();
+  config.source_open.read_chunk_bytes = 7U;
+  config.source_open.maximum_chunks_per_update = 1U;
+  DispatchStageHarness harness{shared_environment(root), registries,
+                               std::move(config)};
+  const auto boundary = harness.reach_manifest(kCompleteEntries);
+  harness.finish(boundary.next_update);
+
+  REQUIRE(harness.stage.state() ==
+          goldsrc::PrecacheAssetDispatchStageState::asset_imported);
+  REQUIRE(harness.stage.result());
+  CHECK_FALSE(harness.stage.error());
+  const auto &result = *harness.stage.result();
+  CHECK(result.dispatch_result().state == assets::AssetDispatchState::imported);
+  CHECK(result.dispatch_result().selected_category ==
+        assets::AssetImporterCategory::world);
+  CHECK(result.dispatch_result().selected_importer_id ==
+        "world:goldsrc-bsp-v30");
+  REQUIRE(result.imported_asset());
+  const auto *world =
+      std::get_if<assets::WorldAsset>(&*result.imported_asset());
+  REQUIRE(world);
+  check_literal_bsp_world(*world);
+  CHECK(harness.stage.manifest_publication_count() == 1U);
+  CHECK(harness.stage.source_open_attempt_count() == 1U);
+  CHECK(harness.stage.importer_dispatch_count() == 1U);
+  CHECK(boundary.resource_response_transmit_count == 1U);
+  CHECK(event_count(harness.events,
+                    goldsrc::PrecacheAssetDispatchStageEventType::
+                        asset_imported) == 1U);
+  check_post_manifest_terminal_invariants(harness, boundary);
+
+  const auto retained_identity = world->identity.source_name;
+  root.write("valve", "maps/test_alpha.bsp", "replacement");
+  CHECK(world->identity.source_name == retained_identity);
+  check_literal_bsp_world(*world);
+}
+
+TEST_CASE("Production GoldSrc BSP registry leaves version 29 at the no-match boundary",
+          "[goldsrc][bsp][asset-dispatch][stage][unsupported-version]") {
+  hlclient::tests::ScopedLocalResourceTestRoot root;
+  auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
+  hlclient::tests::synthetic_write_i32le(world_bytes, 0U, 29);
+  write_complete_resources(root, world_bytes);
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  DispatchStageHarness harness{shared_environment(root), registries};
+
+  const auto boundary = harness.reach_manifest(kCompleteEntries);
+  harness.finish(boundary.next_update);
+
+  CHECK(harness.stage.state() ==
+        goldsrc::PrecacheAssetDispatchStageState::importer_boundary_reached);
+  REQUIRE(harness.stage.result());
+  CHECK_FALSE(harness.stage.error());
+  const auto &dispatch = harness.stage.result()->dispatch_result();
+  CHECK(dispatch.state == assets::AssetDispatchState::importer_not_registered);
+  CHECK(dispatch.top_candidates.empty());
+  CHECK(dispatch.selected_importer_id.empty());
+  CHECK_FALSE(harness.stage.result()->imported_asset());
+  CHECK(harness.stage.source_open_attempt_count() == 1U);
+  CHECK(harness.stage.importer_dispatch_count() == 1U);
+  CHECK(event_count(
+            harness.events,
+            goldsrc::PrecacheAssetDispatchStageEventType::
+                importer_boundary_reached) == 1U);
+  check_post_manifest_terminal_invariants(harness, boundary);
 }
 
 TEST_CASE("Importer callbacks cannot re-enter asset dispatch stage mutation",
@@ -1138,6 +1324,59 @@ TEST_CASE("Precache asset dispatch rejects a stale selected-world locator",
   check_post_manifest_terminal_invariants(harness, boundary);
 }
 
+TEST_CASE("Precache asset dispatch rejects source metadata drift after read progress",
+          "[goldsrc][bsp][asset-dispatch][stage][toctou]") {
+  hlclient::tests::ScopedLocalResourceTestRoot root;
+  const auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
+  write_complete_resources(root, world_bytes);
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  auto config = test_config();
+  config.source_open.read_chunk_bytes = 8U;
+  config.source_open.maximum_chunks_per_update = 1U;
+  DispatchStageHarness harness{shared_environment(root), registries,
+                               std::move(config)};
+
+  const auto boundary = harness.reach_manifest(kCompleteEntries);
+  auto now = boundary.next_update;
+  bool mutation_injected = false;
+  for (std::size_t update = 0U; update < 16U && !mutation_injected; ++update) {
+    harness.stage.update(now);
+    drain_events(harness.stage, harness.events);
+    auto *operation = hlclient::goldsrc::detail::
+        PrecacheAssetDispatchStageTestAccess::source_open_operation(
+            harness.stage);
+    if (operation != nullptr && operation->progress_bytes() > 0U) {
+      hlclient::local_assets::detail::
+          LocalAssetSourceOpenOperationTestAccess::
+              simulate_final_change_metadata(*operation);
+      mutation_injected = true;
+    }
+    now += 1ms;
+  }
+  REQUIRE(mutation_injected);
+  harness.finish(now);
+
+  CHECK(harness.stage.state() ==
+        goldsrc::PrecacheAssetDispatchStageState::source_open_failed);
+  CHECK_FALSE(harness.stage.result());
+  REQUIRE(harness.stage.error());
+  CHECK(harness.stage.error()->code ==
+        goldsrc::PrecacheAssetDispatchStageErrorCode::source_open_failed);
+  CHECK(harness.stage.error()->source_open_code ==
+        goldsrc::ApprovedAssetSourceOpenErrorCode::source_changed_during_read);
+  CHECK(harness.stage.error()->local_source_open_code ==
+        hlclient::local_assets::LocalAssetSourceOpenErrorCode::
+            source_changed_during_read);
+  CHECK(harness.stage.source_open_attempt_count() == 1U);
+  CHECK(harness.stage.importer_dispatch_count() == 0U);
+  CHECK(event_count(
+            harness.events,
+            goldsrc::PrecacheAssetDispatchStageEventType::source_open_failed) ==
+        1U);
+  check_post_manifest_terminal_invariants(harness, boundary);
+}
+
 TEST_CASE("Precache asset dispatch cancellation is terminal and idempotent",
           "[goldsrc][asset-dispatch][stage][cancel]") {
   hlclient::tests::ScopedLocalResourceTestRoot root;
@@ -1325,6 +1564,75 @@ TEST_CASE("Synthetic world dispatch is stable across 20 fake-HLDS runs",
   }
 }
 
+TEST_CASE("Production BSP dispatch is stable across 20 chunked fake-HLDS runs",
+          "[goldsrc][bsp][asset-dispatch][stage][integration][repeat-20]") {
+  hlclient::tests::ScopedLocalResourceTestRoot root;
+  const auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
+  write_complete_resources(root, world_bytes);
+  const auto environment = shared_environment(root);
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+
+  for (std::size_t run = 0U; run < 20U; ++run) {
+    INFO("production BSP world-import run=" << run);
+    auto config = test_config();
+    config.source_open.read_chunk_bytes = 3U;
+    config.source_open.maximum_chunks_per_update = 1U;
+    DispatchStageHarness harness{environment, registries, std::move(config)};
+    const auto boundary = harness.reach_manifest(kCompleteEntries);
+    harness.finish(boundary.next_update);
+
+    REQUIRE(harness.stage.state() ==
+            goldsrc::PrecacheAssetDispatchStageState::asset_imported);
+    REQUIRE(harness.stage.result());
+    REQUIRE(harness.stage.result()->imported_asset());
+    const auto *world = std::get_if<assets::WorldAsset>(
+        &*harness.stage.result()->imported_asset());
+    REQUIRE(world);
+    check_literal_bsp_world(*world);
+    CHECK(harness.stage.manifest_publication_count() == 1U);
+    CHECK(harness.stage.source_open_attempt_count() == 1U);
+    CHECK(harness.stage.importer_dispatch_count() == 1U);
+    CHECK(boundary.resource_response_transmit_count == 1U);
+    check_post_manifest_terminal_invariants(harness, boundary);
+  }
+}
+
+TEST_CASE("Production BSP malformed rejection is stable across 20 fake-HLDS runs",
+          "[goldsrc][bsp][asset-dispatch][stage][integration][repeat-20]") {
+  auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
+  const auto face_descriptor = hlclient::tests::synthetic_lump_descriptor_offset(
+      hlclient::tests::SyntheticBspLumpId::faces);
+  const auto face_offset = static_cast<std::size_t>(
+      hlclient::tests::synthetic_read_i32le(world_bytes, face_descriptor));
+  hlclient::tests::synthetic_write_i16le(
+      std::span<std::byte>{world_bytes}, face_offset + 8U, 2);
+
+  hlclient::tests::ScopedLocalResourceTestRoot root;
+  write_complete_resources(root, world_bytes);
+  const auto environment = shared_environment(root);
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+
+  for (std::size_t run = 0U; run < 20U; ++run) {
+    INFO("malformed BSP rejection run=" << run);
+    DispatchStageHarness harness{environment, registries};
+    const auto boundary = harness.reach_manifest(kCompleteEntries);
+    harness.finish(boundary.next_update);
+
+    CHECK(harness.stage.state() ==
+          goldsrc::PrecacheAssetDispatchStageState::import_failed);
+    CHECK_FALSE(harness.stage.result());
+    REQUIRE(harness.stage.error());
+    CHECK(harness.stage.error()->asset_code ==
+          assets::AssetErrorCode::MalformedData);
+    CHECK(harness.stage.manifest_publication_count() == 1U);
+    CHECK(harness.stage.source_open_attempt_count() == 1U);
+    CHECK(harness.stage.importer_dispatch_count() == 1U);
+    check_post_manifest_terminal_invariants(harness, boundary);
+  }
+}
+
 TEST_CASE("No-importer dispatch boundary is stable across 20 fake-HLDS runs",
           "[goldsrc][asset-dispatch][stage][integration][repeat-20]") {
   hlclient::tests::ScopedLocalResourceTestRoot root;
@@ -1382,6 +1690,38 @@ TEST_CASE("World-ready incomplete dispatch is stable across 20 fake-HLDS runs",
   }
 }
 
+TEST_CASE("Production BSP imports from world-ready incomplete manifests across 20 runs",
+          "[goldsrc][bsp][asset-dispatch][stage][integration][repeat-20]") {
+  hlclient::tests::ScopedLocalResourceTestRoot root;
+  const auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
+  root.write("valve", "maps/test_alpha.bsp", world_bytes);
+  const auto environment = shared_environment(root);
+  assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+
+  for (std::size_t run = 0U; run < 20U; ++run) {
+    INFO("production world-ready incomplete run=" << run);
+    DispatchStageHarness harness{environment, registries};
+    const auto boundary = harness.reach_manifest(kCompleteEntries);
+    harness.finish(boundary.next_update);
+
+    REQUIRE(harness.stage.state() ==
+            goldsrc::PrecacheAssetDispatchStageState::asset_imported);
+    REQUIRE(harness.stage.result());
+    CHECK(harness.stage.result()->manifest().completeness() ==
+          goldsrc::PrecacheManifestCompleteness::world_ready_but_incomplete);
+    REQUIRE(harness.stage.result()->imported_asset());
+    const auto *world = std::get_if<assets::WorldAsset>(
+        &*harness.stage.result()->imported_asset());
+    REQUIRE(world);
+    check_literal_bsp_world(*world);
+    CHECK(harness.stage.manifest_publication_count() == 1U);
+    CHECK(harness.stage.source_open_attempt_count() == 1U);
+    CHECK(harness.stage.importer_dispatch_count() == 1U);
+    check_post_manifest_terminal_invariants(harness, boundary);
+  }
+}
+
 TEST_CASE("Stale replaced-world locators fail closed across 20 fake-HLDS runs",
           "[goldsrc][asset-dispatch][stage][integration][repeat-20]") {
   for (std::size_t run = 0U; run < 20U; ++run) {
@@ -1423,10 +1763,11 @@ TEST_CASE("Dropped response and ACK continuations remain one semantic dispatch "
           "across 20 runs each",
           "[goldsrc][asset-dispatch][stage][integration][loss][repeat-20]") {
   hlclient::tests::ScopedLocalResourceTestRoot root;
-  const auto world_bytes = synthetic::source_bytes<assets::WorldAsset>();
+  const auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
   write_complete_resources(root, world_bytes);
   const auto environment = shared_environment(root);
   assets::AssetImporterRegistries registries;
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
 
   const auto run_loss_mode = [&](const ResponseLossMode mode,
                                  const std::size_t expected_transmits) {
@@ -1438,12 +1779,16 @@ TEST_CASE("Dropped response and ACK continuations remain one semantic dispatch "
           harness.reach_manifest(kCompleteEntries, true, mode);
       harness.finish(boundary.next_update);
 
-      REQUIRE(
-          harness.stage.state() ==
-          goldsrc::PrecacheAssetDispatchStageState::importer_boundary_reached);
+      REQUIRE(harness.stage.state() ==
+              goldsrc::PrecacheAssetDispatchStageState::asset_imported);
       REQUIRE(harness.stage.result());
       CHECK(harness.stage.result()->dispatch_result().state ==
-            assets::AssetDispatchState::importer_not_registered);
+            assets::AssetDispatchState::imported);
+      REQUIRE(harness.stage.result()->imported_asset());
+      const auto *world = std::get_if<assets::WorldAsset>(
+          &*harness.stage.result()->imported_asset());
+      REQUIRE(world);
+      check_literal_bsp_world(*world);
       CHECK(boundary.resource_response_transmit_count == expected_transmits);
       CHECK(harness.stage.manifest_publication_count() == 1U);
       CHECK(harness.stage.source_open_attempt_count() == 1U);
@@ -1528,26 +1873,13 @@ TEST_CASE(
 TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
           "dispatch boundary",
           "[goldsrc][asset-dispatch][coordinator][integration]") {
-  hlclient::tests::ScopedLocalResourceTestRoot root;
-  const auto world_bytes = synthetic::source_bytes<assets::WorldAsset>(65U);
-  write_complete_resources(root, world_bytes);
-  auto environment = shared_environment(root);
-  synthetic::SyntheticImporterCounts importer_counts;
-  assets::AssetImporterRegistries registries;
-  REQUIRE(registries.worlds.register_importer(
-      std::make_unique<synthetic::SyntheticWorldImporter>("coordinator-world",
-                                                          importer_counts)));
-
-  FakeTransport transport;
-  const auto remote = network::NetworkAddress::loopback(27'017U);
-  ImmediateConsistencyProvider provider;
-  std::size_t authentication_releases = 0U;
-  auto prepared = prepared_request_with_session(authentication_releases);
   auto asset_config = test_config();
   asset_config.source_open.read_chunk_bytes = 4U;
   asset_config.source_open.maximum_chunks_per_update = 1U;
   bool expect_timeout = false;
+  bool production_bsp = false;
   SECTION("synthetic world import") {}
+  SECTION("production BSP world import") { production_bsp = true; }
   SECTION("minimum event capacity drains one-byte chunk progress") {
     asset_config.maximum_stage_events = 3U;
     asset_config.source_open.read_chunk_bytes = 1U;
@@ -1556,6 +1888,54 @@ TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
     expect_timeout = true;
     asset_config.source_open.timeout = 1ms;
   }
+
+  hlclient::tests::ScopedLocalResourceTestRoot root;
+  const std::string_view world_name =
+      production_bsp ? "maps/test_map.bsp" : "maps/test_alpha.bsp";
+  const auto world_bytes = production_bsp
+                               ? hlclient::tests::literal_minimal_goldsrc_bsp_v30()
+                               : synthetic::source_bytes<assets::WorldAsset>(65U);
+  write_complete_resources(root, world_bytes, world_name);
+  if (production_bsp) {
+    root.write("valve", "tempdecal.wad", "abc");
+  }
+  const auto root_before = production_bsp
+                               ? std::optional{snapshot_synthetic_root(root.path())}
+                               : std::nullopt;
+  auto environment = shared_environment(root);
+  synthetic::SyntheticImporterCounts importer_counts;
+  assets::AssetImporterRegistries registries;
+  if (!production_bsp) {
+    REQUIRE(registries.worlds.register_importer(
+        std::make_unique<synthetic::SyntheticWorldImporter>("coordinator-world",
+                                                            importer_counts)));
+  }
+  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  CHECK(registries.worlds.size() == (production_bsp ? 1U : 2U));
+
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27'017U);
+  ImmediateConsistencyProvider provider;
+  std::unique_ptr<consistency::PreparedLocalResourceConsistencyProvider>
+      production_provider;
+  if (production_bsp) {
+    auto prepared_provider =
+        consistency::PreparedLocalResourceConsistencyProvider::prepare(
+            *environment);
+    INFO((prepared_provider.error ? prepared_provider.error->context
+                                  : std::string{}));
+    REQUIRE(prepared_provider);
+    production_provider = std::move(prepared_provider.provider);
+    REQUIRE(production_provider);
+    CHECK_FALSE(production_provider->consumed());
+  }
+  consistency::IResourceConsistencyProvider *response_provider = &provider;
+  if (production_bsp) {
+    response_provider = production_provider.get();
+  }
+  REQUIRE(response_provider);
+  std::size_t authentication_releases = 0U;
+  auto prepared = prepared_request_with_session(authentication_releases);
   const auto resource_response_config = asset_config.manifest.response;
   std::size_t response_queues = 0U;
   std::size_t manifest_publications = 0U;
@@ -1595,7 +1975,7 @@ TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
       goldsrc::ResourceListStageConfig{},
       goldsrc::ResourceListTraceCallback{},
       resource_response_config,
-      &provider,
+      response_provider,
       [&response_queues](
           const goldsrc::ResourceClientResponseTraceEvent &event) {
         if (event.classification ==
@@ -1669,7 +2049,8 @@ TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
 
   transport.queue(
       remote, server_packet(1U, true, initial.header.sequence.sequence.value(),
-                            true, service_envelope(first_semantic_payload())));
+                            true,
+                            service_envelope(first_semantic_payload(world_name))));
   handshake.update(epoch + 4ms);
   handshake.update(epoch + 5ms);
   const auto transition = decode_sent(transport.sent.back());
@@ -1684,7 +2065,9 @@ TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
       remote,
       server_packet(
           2U, false, transition.header.sequence.sequence.value(), false,
-          service_envelope(resource_semantic_payload(kCompleteEntries))));
+          service_envelope(resource_semantic_payload(
+              production_bsp ? std::span{kProductionEntries}
+                             : std::span{kCompleteEntries}))));
   handshake.update(epoch + 6ms);
   const auto response = decode_sent(transport.sent.back());
   REQUIRE(response.header.sequence.flags.reliable);
@@ -1725,6 +2108,15 @@ TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
     REQUIRE(handshake.asset_dispatch_result()->imported_asset());
     CHECK(std::holds_alternative<assets::WorldAsset>(
         *handshake.asset_dispatch_result()->imported_asset()));
+    if (production_bsp) {
+      const auto *world = std::get_if<assets::WorldAsset>(
+          &*handshake.asset_dispatch_result()->imported_asset());
+      REQUIRE(world);
+      check_literal_bsp_world(*world, world_name);
+      CHECK(handshake.asset_dispatch_result()
+                ->dispatch_result()
+                .selected_importer_id == "world:goldsrc-bsp-v30");
+    }
   }
   CHECK(response_queues == 1U);
   CHECK(manifest_publications == 1U);
@@ -1734,11 +2126,18 @@ TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
   CHECK(importer_selected_events == (expect_timeout ? 0U : 1U));
   CHECK(imported_events == (expect_timeout ? 0U : 1U));
   CHECK(endpoint_mismatches == 0U);
-  CHECK(importer_counts.probe_count == (expect_timeout ? 0U : 1U));
-  CHECK(importer_counts.import_count == (expect_timeout ? 0U : 1U));
-  CHECK(provider.begin_count == 1U);
-  CHECK(provider.update_count == 1U);
-  CHECK(provider.lifetime_releases == 1U);
+  CHECK(importer_counts.probe_count ==
+        (expect_timeout || production_bsp ? 0U : 1U));
+  CHECK(importer_counts.import_count ==
+        (expect_timeout || production_bsp ? 0U : 1U));
+  if (production_bsp) {
+    REQUIRE(production_provider);
+    CHECK(production_provider->consumed());
+  } else {
+    CHECK(provider.begin_count == 1U);
+    CHECK(provider.update_count == 1U);
+    CHECK(provider.lifetime_releases == 1U);
+  }
   CHECK(authentication_releases == 1U);
   REQUIRE(sent_at_manifest_publication);
   CHECK(transport.sent.size() == *sent_at_manifest_publication);
@@ -1756,7 +2155,12 @@ TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
              : goldsrc::GoldSrcHandshakeState::asset_imported));
   CHECK(transport.sent.size() == terminal_sent);
   CHECK(authentication_releases == 1U);
-  CHECK(importer_counts.import_count == (expect_timeout ? 0U : 1U));
+  CHECK(importer_counts.import_count ==
+        (expect_timeout || production_bsp ? 0U : 1U));
+  if (production_bsp) {
+    REQUIRE(root_before);
+    CHECK(snapshot_synthetic_root(root.path()) == *root_before);
+  }
 }
 
 } // namespace

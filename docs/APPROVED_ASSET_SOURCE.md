@@ -16,7 +16,9 @@ PrecacheManifestEntry
 The production continuation opens one resource on demand: the exact model
 entry selected as the world by `WorldResourceSelection`. It does not scan or
 preload the remaining manifest, maintain a source cache, or follow dependent
-asset names.
+asset names. M4.1 passes the resulting approved owning bytes directly to the
+production GoldSrc BSP v30 importer; the importer never reopens the virtual
+name or asks for a native path.
 
 ## Security boundary
 
@@ -47,6 +49,12 @@ and one simultaneously open source. Hard limits are 64 MiB, 1 MiB per chunk,
 and one open source for this stage. Zero limits and unchecked integer
 conversions are rejected.
 
+The M4.1 production `asset-dispatch`/`world-geometry` composition explicitly
+raises only its resolver and source-open byte limit to the BSP parser's 32 MiB
+default and uses 1,024 stage-event slots, which covers 512 default-size progress
+chunks plus lifecycle events. Earlier response/manifest stop points retain the
+generic 16 MiB profile.
+
 The operation publishes the owning source atomically only after validation.
 Cancellation, timeout, missing/replaced locators, size drift, short reads,
 unexpected growth, metadata changes, allocation failure, and `AssetSource`
@@ -55,8 +63,11 @@ partial source.
 
 ## Scope
 
-This milestone does not add a BSP, MDL, SPR, WAV, or WAD parser; download or
-cache behavior; background prefetch; renderer/GPU integration; or an
-`AssetManager` path-based bypass. A same-identity, same-size content rewrite
-completed before the verified reopen is outside the locator's identity/size
-evidence; M3.2.3 does not invent hashing as a trust mechanism.
+M4.1 adds BSP v30 parsing only after this boundary has published a fully
+validated owning source. It does not add MDL, SPR, WAV, or WAD parsing;
+download/cache behavior; background prefetch; dependent texture lookup;
+renderer/GPU integration; or an `AssetManager` path-based bypass. The importer
+retains only neutral identity and CPU output, never the approved source bytes.
+A same-identity, same-size content rewrite completed before the verified reopen
+remains outside the locator's identity/size evidence; the source boundary does
+not invent hashing as a trust mechanism.

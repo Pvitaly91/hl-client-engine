@@ -1,5 +1,7 @@
 #include <hlclient/goldsrc/precache_asset_dispatch_stage.hpp>
 
+#include "precache_asset_dispatch_stage_test_access.hpp"
+
 #include <algorithm>
 #include <new>
 #include <utility>
@@ -241,6 +243,8 @@ std::uint64_t ApprovedAssetDispatchState::source_byte_count() const noexcept
 
 class PrecacheAssetDispatchStage::Implementation final {
 public:
+    friend class detail::PrecacheAssetDispatchStageTestAccess;
+
     Implementation(
         network::IDatagramTransport& transport,
         const network::NetworkAddress remote_endpoint,
@@ -1211,6 +1215,17 @@ public:
     std::size_t importer_dispatch_count_{0U};
     bool cleanup_done_{false};
 };
+
+local_assets::LocalAssetSourceOpenOperation*
+detail::PrecacheAssetDispatchStageTestAccess::source_open_operation(
+    PrecacheAssetDispatchStage& stage) noexcept
+{
+    if (!stage.implementation_ ||
+        !stage.implementation_->open_operation_) {
+        return nullptr;
+    }
+    return &stage.implementation_->open_operation_->operation_;
+}
 
 PrecacheAssetDispatchStage::PrecacheAssetDispatchStage(
     network::IDatagramTransport& transport,

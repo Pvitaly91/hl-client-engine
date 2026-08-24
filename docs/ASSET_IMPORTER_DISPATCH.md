@@ -1,9 +1,10 @@
 # Asset importer dispatch
 
-M3.2.3 connects an approved owning `AssetSource` to the existing typed importer
-registries without adding a production format parser. Format recognition
-remains importer-owned: signature, version, and structure are primary evidence;
-the extension is only a hint.
+M3.2.3 connects an approved owning `AssetSource` to the typed importer
+registries. M4.1 registers the first production format implementation,
+`GoldSrcBspWorldImporter`, in the caller-owned world registry. Format
+recognition remains importer-owned: signature, version, and structure are
+primary evidence; the extension is only a hint.
 
 ## Roles and plans
 
@@ -48,9 +49,12 @@ role, or evidence-profile disagreement before a registry probe. The retained
 registries must outlive the stage and remain structurally immutable during
 dispatch.
 
-No candidates produce `importer_not_registered`, which is an expected boundary
-for the production M3.2.3 composition because it intentionally registers no
-world importer. Once an importer has been selected, malformed data,
+No candidates produce `importer_not_registered`. That historical boundary
+remains covered by explicitly empty test registries, but a valid BSP v30 world
+now selects production ID `goldsrc-bsp-v30` at named priority `300`. The
+reusable `register_builtin_asset_importers` helper registers exactly that one
+world importer without a global registry. Once an importer has been selected,
+malformed data,
 `UnsupportedFormat`, an explicit import failure, or an exception is an import
 failure rather than a no-importer boundary.
 
@@ -65,6 +69,13 @@ source, probes the world registry, and publishes either `asset_imported` or
 locators, read failures, importer ambiguity, and selected-importer failures are
 nonzero outcomes.
 
+`--stop-after world-geometry` uses the same stage and retained session but
+accepts only an imported, non-empty `WorldAsset` with valid triangle indices,
+surfaces, and finite bounds. It reports bounded geometry/statistics only. A
+valid production BSP therefore ends as `asset_imported`, while malformed BSP,
+unsupported version, ambiguous importer, empty geometry, or source failure is
+nonzero.
+
 The local read sends no keepalive, spawn, download, or asset-ready command. The
 same socket, driver, endpoint, and authentication lifetime remain retained
 during the local operation and are finalized exactly once at its terminal
@@ -73,3 +84,9 @@ publication. The coordinator drains the bounded child event stream after each
 update; direct stage users can poll the same events and receive fail-closed
 backpressure if they do not. The CLI asset-dispatch route stops before renderer
 work, and the stage never calls `AssetManager`, a renderer, OpenGL, or GPU APIs.
+
+The BSP target itself depends only on the neutral asset API. Parsing is strict
+and transactional; its output owns CPU geometry and texture-reference metadata
+without retaining source bytes or native paths. See
+[GoldSrc BSP v30](GOLDSRC_BSP_V30.md) and
+[CPU world geometry](CPU_WORLD_GEOMETRY.md).

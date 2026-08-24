@@ -14,6 +14,10 @@
 
 namespace hlclient::goldsrc {
 
+namespace detail {
+class PrecacheAssetDispatchStageTestAccess;
+} // namespace detail
+
 inline constexpr std::size_t kMaximumAssetDispatchPlanCategories = 2U;
 inline constexpr std::size_t kPrecacheAssetDispatchDiagnosticTextLimit = 256U;
 
@@ -282,6 +286,7 @@ public:
 
 private:
     friend class ApprovedAssetSourceOpener;
+    friend class detail::PrecacheAssetDispatchStageTestAccess;
 
     ApprovedAssetSourceOpenOperation(
         AssetDispatchPlan plan,

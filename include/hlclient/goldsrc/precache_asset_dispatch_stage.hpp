@@ -16,6 +16,10 @@
 
 namespace hlclient::goldsrc {
 
+namespace detail {
+class PrecacheAssetDispatchStageTestAccess;
+} // namespace detail
+
 using PrecacheAssetDispatchStageClock = PrecacheManifestStageClock;
 using PrecacheAssetDispatchStageTimePoint = PrecacheManifestStageTimePoint;
 
@@ -275,6 +279,7 @@ public:
     [[nodiscard]] std::size_t importer_dispatch_count() const noexcept;
 
 private:
+    friend class detail::PrecacheAssetDispatchStageTestAccess;
     class Implementation;
     std::unique_ptr<Implementation> implementation_;
 };

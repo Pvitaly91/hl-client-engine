@@ -1,6 +1,6 @@
 #define HLCLIENT_LOCAL_RESOURCE_TEST_ACCESS
 
-#include <hlclient/local_assets/local_asset_source.hpp>
+#include "local_asset_source_test_access.hpp"
 
 #include "../src/local_resources/win32_local_resource_detail.hpp"
 #include "local_resource_test_fixture.hpp"
@@ -20,32 +20,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-namespace hlclient::local_assets::detail {
-
-class LocalAssetSourceOpenOperationTestAccess final {
-public:
-    [[nodiscard]] static local_resources::LocalReadOnlyFile* file(
-        LocalAssetSourceOpenOperation& operation) noexcept
-    {
-        return operation.file_ ? &*operation.file_ : nullptr;
-    }
-
-    static void simulate_final_change_metadata(
-        LocalAssetSourceOpenOperation& operation) noexcept
-    {
-        operation.initial_snapshot_.change_time ^= 1;
-    }
-
-    static void simulate_final_identity_replacement(
-        LocalAssetSourceOpenOperation& operation) noexcept
-    {
-        operation.initial_snapshot_.identity =
-            local_resources::LocalStableFileIdentity{};
-    }
-};
-
-} // namespace hlclient::local_assets::detail
 
 namespace {
 

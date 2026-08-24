@@ -30,6 +30,10 @@
 
 namespace hlclient::goldsrc {
 
+namespace detail {
+class GoldSrcHandshakeCoordinatorTestAccess;
+} // namespace detail
+
 enum class HandshakeStopPoint {
     challenge,
     connect_request,
@@ -333,6 +337,8 @@ public:
     [[nodiscard]] std::string_view error_context() const noexcept;
 
 private:
+    friend class detail::GoldSrcHandshakeCoordinatorTestAccess;
+
     void synchronize_from_challenge(ChallengeExchangeTimePoint now);
     void synchronize_from_response(ChallengeExchangeTimePoint now);
     void synchronize_from_netchan();

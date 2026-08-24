@@ -1,11 +1,17 @@
 #include "delta_test_fixture.hpp"
+#include "handshake_coordinator_test_access.hpp"
+#include "local_asset_source_test_access.hpp"
 #include "move_vars_test_fixture.hpp"
 #include "local_resource_test_fixture.hpp"
 #include "resource_client_response_test_fixture.hpp"
 #include "resource_list_test_fixture.hpp"
+#include "synthetic_goldsrc_bsp_fixture.hpp"
 #include "user_info_test_fixture.hpp"
 
+#include "../src/goldsrc/precache_asset_dispatch_stage_test_access.hpp"
+
 #include <hlclient/auth/authentication_provider.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
 #include <hlclient/goldsrc/challenge_protocol.hpp>
 #include <hlclient/goldsrc/connect_request.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
@@ -43,12 +49,15 @@
 #include <thread>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
 
 using namespace std::chrono_literals;
+namespace assets = hlclient::assets;
 namespace auth = hlclient::auth;
+namespace bsp = hlclient::goldsrc::bsp;
 namespace consistency = hlclient::resource_consistency;
 namespace delta_fixture = hlclient::test::delta_fixture;
 namespace goldsrc = hlclient::goldsrc;
@@ -57,6 +66,7 @@ namespace network = hlclient::network;
 namespace resource_fixture = resource_list_test_fixture;
 namespace response_fixture =
     hlclient::test::resource_client_response_fixture;
+namespace synthetic_bsp = hlclient::tests;
 namespace user_fixture = hlclient::test::user_info_fixture;
 
 inline constexpr std::string_view kAuthenticationMarker =
@@ -617,6 +627,24 @@ enum class PrecacheManifestTransportScenario {
     baseline,
     dropped_response,
     dropped_acknowledgement,
+};
+
+enum class PrecacheManifestCompletionMode {
+    manifest_only,
+    production_bsp_dispatch,
+    production_bsp_malformed_rejection,
+};
+
+enum class ProductionBspIntegrationScenario {
+    valid_quad,
+    valid_triangle,
+    valid_multi_face,
+    missing_texture_metadata,
+    malformed_header,
+    malformed_texinfo,
+    geometry_output_limit,
+    stale_selected_locator,
+    source_changed_during_read,
 };
 
 [[nodiscard]] std::vector<std::byte> manifest_first_semantic_payload()
@@ -2683,10 +2711,19 @@ struct PrecacheManifestIntegrationTraceCounts {
     std::size_t response_boundaries{0U};
     std::size_t manifest_publications{0U};
     std::size_t manifest_terminal_outcomes{0U};
+    std::size_t world_entries_selected{0U};
+    std::size_t asset_source_open_starts{0U};
+    std::size_t asset_source_progress_events{0U};
+    std::size_t asset_source_open_failures{0U};
+    std::size_t importer_probes_completed{0U};
+    std::size_t importers_selected{0U};
+    std::size_t assets_imported{0U};
+    std::size_t asset_import_failures{0U};
     std::size_t endpoint_mismatches{0U};
     std::optional<std::size_t> transmitted_at_response_boundary;
     std::optional<std::size_t> transmitted_at_manifest_publication;
     std::optional<std::size_t> transmitted_at_manifest_terminal;
+    std::optional<std::size_t> transmitted_at_asset_terminal;
     std::optional<std::size_t> authentication_releases_at_manifest_terminal;
 };
 
@@ -2724,14 +2761,292 @@ void write_manifest_integration_files(
     root.write(game, "generic/test.dat", "synthetic generic metadata");
 }
 
+[[nodiscard]] std::vector<std::byte> make_two_face_production_bsp()
+{
+    synthetic_bsp::SyntheticBspBuilder builder;
+    constexpr std::array vertices{
+        synthetic_bsp::SyntheticBspVector3{0.0F, 0.0F, 0.0F},
+        synthetic_bsp::SyntheticBspVector3{64.0F, 0.0F, 0.0F},
+        synthetic_bsp::SyntheticBspVector3{64.0F, 64.0F, 0.0F},
+        synthetic_bsp::SyntheticBspVector3{0.0F, 64.0F, 0.0F},
+    };
+    constexpr std::array edges{
+        synthetic_bsp::SyntheticBspEdge{0U, 0U},
+        synthetic_bsp::SyntheticBspEdge{0U, 1U},
+        synthetic_bsp::SyntheticBspEdge{1U, 2U},
+        synthetic_bsp::SyntheticBspEdge{2U, 0U},
+        synthetic_bsp::SyntheticBspEdge{0U, 2U},
+        synthetic_bsp::SyntheticBspEdge{2U, 3U},
+        synthetic_bsp::SyntheticBspEdge{3U, 0U},
+    };
+    constexpr std::array<std::int32_t, 6U> surfedges{1, 2, 3, 4, 5, 6};
+    std::array faces{
+        synthetic_bsp::SyntheticBspFace{},
+        synthetic_bsp::SyntheticBspFace{},
+    };
+    faces[0].surfedge_count = 3;
+    faces[1].first_surfedge = 3;
+    faces[1].surfedge_count = 3;
+    auto node = synthetic_bsp::SyntheticBspNode{};
+    node.face_count = 2U;
+    std::array leaves{
+        synthetic_bsp::SyntheticBspLeaf{},
+        synthetic_bsp::SyntheticBspLeaf{},
+    };
+    leaves[0].contents = -2;
+    leaves[0].marksurface_count = 0U;
+    leaves[1].marksurface_count = 2U;
+    constexpr std::array<std::uint16_t, 2U> marksurfaces{0U, 1U};
+    auto model = synthetic_bsp::SyntheticBspModel{};
+    model.face_count = 2;
+
+    builder.set_vertices(vertices)
+        .set_edges(edges)
+        .set_surfedges(surfedges)
+        .set_faces(faces)
+        .set_nodes(std::span{&node, 1U})
+        .set_leaves(leaves)
+        .set_marksurfaces(marksurfaces)
+        .set_models(std::span{&model, 1U});
+    return builder.build();
+}
+
+[[nodiscard]] std::vector<std::byte> production_bsp_fixture(
+    const ProductionBspIntegrationScenario scenario)
+{
+    switch (scenario) {
+    case ProductionBspIntegrationScenario::valid_triangle: {
+        synthetic_bsp::SyntheticBspBuilder builder;
+        constexpr auto vertices = synthetic_bsp::synthetic_triangle_vertices();
+        builder.set_convex_polygon(vertices);
+        return builder.build();
+    }
+    case ProductionBspIntegrationScenario::valid_multi_face:
+        return make_two_face_production_bsp();
+    case ProductionBspIntegrationScenario::missing_texture_metadata: {
+        synthetic_bsp::SyntheticBspBuilder builder;
+        const std::array<std::optional<synthetic_bsp::SyntheticBspMipTexture>, 1U>
+            textures{std::nullopt};
+        builder.set_texture_directory(textures);
+        return builder.build();
+    }
+    case ProductionBspIntegrationScenario::malformed_header: {
+        auto bytes = synthetic_bsp::literal_minimal_goldsrc_bsp_v30();
+        bytes.resize(synthetic_bsp::kSyntheticBspHeaderSize - 1U);
+        return bytes;
+    }
+    case ProductionBspIntegrationScenario::malformed_texinfo:
+        return std::move(synthetic_bsp::SyntheticBspCorruptor{
+                             synthetic_bsp::literal_minimal_goldsrc_bsp_v30()})
+            .write_u32(synthetic_bsp::SyntheticBspLumpId::texinfo,
+                       0U,
+                       0x7fc0'0000U)
+            .take();
+    case ProductionBspIntegrationScenario::valid_quad:
+    case ProductionBspIntegrationScenario::geometry_output_limit:
+    case ProductionBspIntegrationScenario::stale_selected_locator:
+    case ProductionBspIntegrationScenario::source_changed_during_read:
+        return synthetic_bsp::literal_minimal_goldsrc_bsp_v30();
+    }
+    return synthetic_bsp::literal_minimal_goldsrc_bsp_v30();
+}
+
+[[nodiscard]] bsp::GoldSrcBspImportLimits production_bsp_limits(
+    const ProductionBspIntegrationScenario scenario)
+{
+    bsp::GoldSrcBspImportLimits limits;
+    if (scenario ==
+        ProductionBspIntegrationScenario::geometry_output_limit) {
+        limits.maximum_output_vertices = 3U;
+    }
+    return limits;
+}
+
+[[nodiscard]] bool expects_production_source_failure(
+    const ProductionBspIntegrationScenario scenario) noexcept
+{
+    return scenario ==
+               ProductionBspIntegrationScenario::stale_selected_locator ||
+           scenario ==
+               ProductionBspIntegrationScenario::source_changed_during_read;
+}
+
+[[nodiscard]] bool expects_production_import_failure(
+    const ProductionBspIntegrationScenario scenario) noexcept
+{
+    return scenario == ProductionBspIntegrationScenario::malformed_header ||
+           scenario == ProductionBspIntegrationScenario::malformed_texinfo ||
+           scenario ==
+               ProductionBspIntegrationScenario::geometry_output_limit;
+}
+
+void check_literal_bsp_world_from_production_flow(
+    const assets::WorldAsset& world,
+    const ProductionBspIntegrationScenario scenario =
+        ProductionBspIntegrationScenario::valid_quad)
+{
+    CHECK(world.identity.source_name == "maps/test_map.bsp");
+    CHECK(world.coordinate_space ==
+          assets::WorldCoordinateSpace::source_native_goldsrc_z_up);
+    CHECK(world.texture_coordinate_space ==
+          assets::WorldTextureCoordinateSpace::texel_units);
+    CHECK(world.source_profile ==
+          assets::WorldGeometrySourceProfile::goldsrc_bsp_v30);
+
+    std::vector<synthetic_bsp::SyntheticBspVector3> expected_positions;
+    std::vector<std::uint32_t> expected_indices;
+    std::vector<std::uint32_t> expected_surface_index_counts;
+    if (scenario == ProductionBspIntegrationScenario::valid_triangle) {
+        constexpr auto triangle = synthetic_bsp::synthetic_triangle_vertices();
+        expected_positions.assign(triangle.begin(), triangle.end());
+        expected_indices = {0U, 1U, 2U};
+        expected_surface_index_counts = {3U};
+    } else if (scenario ==
+               ProductionBspIntegrationScenario::valid_multi_face) {
+        constexpr auto quad = synthetic_bsp::synthetic_quad_vertices();
+        expected_positions = {
+            quad[0U], quad[1U], quad[2U],
+            quad[0U], quad[2U], quad[3U],
+        };
+        expected_indices = {0U, 1U, 2U, 3U, 4U, 5U};
+        expected_surface_index_counts = {3U, 3U};
+    } else {
+        constexpr auto quad = synthetic_bsp::synthetic_quad_vertices();
+        expected_positions.assign(quad.begin(), quad.end());
+        expected_indices = {0U, 1U, 2U, 0U, 2U, 3U};
+        expected_surface_index_counts = {6U};
+    }
+
+    REQUIRE(world.vertices.size() == expected_positions.size());
+    REQUIRE(world.indices.size() == expected_indices.size());
+    REQUIRE(world.surfaces.size() == expected_surface_index_counts.size());
+    REQUIRE(world.materials.size() == 1U);
+
+    for (std::size_t index = 0U; index < expected_positions.size(); ++index) {
+        const auto& vertex = world.vertices[index];
+        CHECK(vertex.position.x == expected_positions[index].x);
+        CHECK(vertex.position.y == expected_positions[index].y);
+        CHECK(vertex.position.z == expected_positions[index].z);
+        CHECK(vertex.normal.x == 0.0F);
+        CHECK(vertex.normal.y == 0.0F);
+        CHECK(vertex.normal.z == 1.0F);
+        CHECK(vertex.texture_coordinate.x == vertex.position.x);
+        CHECK(vertex.texture_coordinate.y == vertex.position.y);
+    }
+    CHECK(std::ranges::equal(world.indices, expected_indices));
+
+    CHECK(world.bounds.minimum.x == 0.0F);
+    CHECK(world.bounds.minimum.y == 0.0F);
+    CHECK(world.bounds.minimum.z == 0.0F);
+    CHECK(world.bounds.maximum.x == 64.0F);
+    CHECK(world.bounds.maximum.y == 64.0F);
+    CHECK(world.bounds.maximum.z == 0.0F);
+    REQUIRE(world.source_model_bounds);
+    CHECK(world.source_model_bounds->minimum.x == -1.0F);
+    CHECK(world.source_model_bounds->minimum.y == -1.0F);
+    CHECK(world.source_model_bounds->minimum.z == -1.0F);
+    CHECK(world.source_model_bounds->maximum.x == 65.0F);
+    CHECK(world.source_model_bounds->maximum.y == 65.0F);
+    CHECK(world.source_model_bounds->maximum.z == 1.0F);
+
+    std::uint32_t first_index = 0U;
+    for (std::size_t index = 0U;
+         index < expected_surface_index_counts.size();
+         ++index) {
+        const auto& surface = world.surfaces[index];
+        CHECK(surface.first_index == first_index);
+        CHECK(surface.index_count == expected_surface_index_counts[index]);
+        CHECK(surface.material_index == 0U);
+        CHECK(surface.source_surface_ordinal ==
+              static_cast<std::uint32_t>(index));
+        CHECK_FALSE(surface.lightmap_offset);
+        CHECK(surface.light_styles ==
+              std::array<std::uint8_t, 4U>{0xffU, 0xffU, 0xffU, 0xffU});
+        CHECK_FALSE(surface.special_surface);
+        first_index += expected_surface_index_counts[index];
+    }
+
+    const auto& material = world.materials.front();
+    const bool missing_texture =
+        scenario ==
+        ProductionBspIntegrationScenario::missing_texture_metadata;
+    if (missing_texture) {
+        CHECK_FALSE(material.texture_name);
+        CHECK_FALSE(material.width);
+        CHECK_FALSE(material.height);
+        CHECK(material.texture_storage == assets::WorldTextureStorage::missing);
+    } else {
+        CHECK(material.texture_name == "TEST_QUAD");
+        CHECK(material.width == 64U);
+        CHECK(material.height == 64U);
+        CHECK(material.texture_storage ==
+              assets::WorldTextureStorage::external_reference);
+    }
+    CHECK(material.source_texture_flags == 0);
+    CHECK(material.source_texinfo_index == 0U);
+    CHECK(material.compatibility_profile ==
+          assets::WorldMaterialCompatibilityProfile::
+              source_texture_reference_v1);
+    CHECK(material.evidence_profile ==
+          assets::WorldMaterialEvidenceProfile::validated_source_metadata);
+
+    CHECK(world.statistics.source_version == 30);
+    CHECK(world.statistics.source_model_count == 1U);
+    CHECK(world.statistics.source_face_count ==
+          expected_surface_index_counts.size());
+    CHECK(world.statistics.world_model_source_face_count ==
+          expected_surface_index_counts.size());
+    CHECK(world.statistics.skipped_submodel_face_count == 0U);
+    CHECK(world.statistics.emitted_surface_count ==
+          expected_surface_index_counts.size());
+    CHECK(world.statistics.emitted_vertex_count == expected_positions.size());
+    CHECK(world.statistics.emitted_triangle_count ==
+          expected_indices.size() / 3U);
+    CHECK(world.statistics.material_count == 1U);
+    CHECK(world.statistics.missing_texture_reference_count ==
+          (missing_texture ? 1U : 0U));
+    CHECK(world.statistics.external_texture_reference_count ==
+          (missing_texture ? 0U : 1U));
+    CHECK(world.statistics.embedded_texture_reference_count == 0U);
+}
+
 void run_precache_manifest_integration(
     const std::size_t run,
     const PrecacheManifestIntegrationScenario scenario,
     const PrecacheManifestTransportScenario transport_scenario =
         PrecacheManifestTransportScenario::baseline,
-    const bool verify_stale_locator = false)
+    const bool verify_stale_locator = false,
+    const PrecacheManifestCompletionMode completion_mode =
+        PrecacheManifestCompletionMode::manifest_only,
+    const std::size_t source_read_chunk_bytes = 7U,
+    const ProductionBspIntegrationScenario production_bsp_scenario =
+        ProductionBspIntegrationScenario::valid_quad)
 {
     INFO("fake-HLDS precache-manifest run " << run + 1U);
+    const bool production_bsp_dispatch =
+        completion_mode != PrecacheManifestCompletionMode::manifest_only;
+    const bool legacy_malformed_face_rejection =
+        completion_mode ==
+        PrecacheManifestCompletionMode::production_bsp_malformed_rejection;
+    const bool expect_import_failure =
+        legacy_malformed_face_rejection ||
+        expects_production_import_failure(production_bsp_scenario);
+    const bool expect_source_failure =
+        expects_production_source_failure(production_bsp_scenario);
+    REQUIRE_FALSE((production_bsp_dispatch &&
+                   scenario != PrecacheManifestIntegrationScenario::complete &&
+                   scenario != PrecacheManifestIntegrationScenario::
+                                   world_ready_missing_sound));
+    REQUIRE_FALSE((legacy_malformed_face_rejection &&
+                   scenario != PrecacheManifestIntegrationScenario::complete));
+    REQUIRE_FALSE((production_bsp_dispatch && verify_stale_locator));
+    REQUIRE_FALSE((production_bsp_dispatch && source_read_chunk_bytes == 0U));
+    REQUIRE_FALSE((!production_bsp_dispatch &&
+                   production_bsp_scenario !=
+                       ProductionBspIntegrationScenario::valid_quad));
+    REQUIRE_FALSE((legacy_malformed_face_rejection &&
+                   production_bsp_scenario !=
+                       ProductionBspIntegrationScenario::valid_quad));
 
     // Alternate exact game-root selection and valve fallback while retaining
     // one validated environment for both consistency preparation and the
@@ -2743,6 +3058,29 @@ void run_precache_manifest_integration(
     const std::string_view selected_game = use_game_root ? game : "valve";
     const std::uint32_t expected_root_id = use_game_root ? 0U : 1U;
     write_manifest_integration_files(root, selected_game, scenario);
+    std::vector<std::byte> production_world_bytes;
+    if (production_bsp_dispatch) {
+        production_world_bytes = production_bsp_fixture(
+            production_bsp_scenario);
+        if (legacy_malformed_face_rejection) {
+            const auto face_descriptor =
+                hlclient::tests::synthetic_lump_descriptor_offset(
+                    hlclient::tests::SyntheticBspLumpId::faces);
+            const auto face_offset = static_cast<std::size_t>(
+                hlclient::tests::synthetic_read_i32le(
+                    production_world_bytes,
+                    face_descriptor));
+            hlclient::tests::synthetic_write_i16le(
+                std::span<std::byte>{production_world_bytes},
+                face_offset + 8U,
+                2);
+        }
+        root.write(
+            selected_game,
+            "maps/test_map.bsp",
+            production_world_bytes);
+    }
+    const auto before = snapshot_synthetic_root(root.path());
 
     auto roots = hlclient::local_resources::LocalResourceSearchRoots::create(
         root.path(),
@@ -2777,7 +3115,13 @@ void run_precache_manifest_integration(
     CHECK(prepared_provider.provider->selected_root_id().value() ==
           expected_root_id);
     CHECK_FALSE(prepared_provider.provider->consumed());
-    const auto before = snapshot_synthetic_root(root.path());
+    if (production_bsp_dispatch) {
+        CHECK(prepared_provider.provider->byte_count() == 3U);
+        CHECK(prepared_provider.provider->opaque_byte_count() == 16U);
+        CHECK_FALSE(can_open_synthetic_writer(
+            root.game_path(selected_game) / "tempdecal.wad"));
+    }
+    CHECK(snapshot_synthetic_root(root.path()) == before);
 
     network::NetworkRuntime runtime;
     INFO(runtime.error_message());
@@ -2801,12 +3145,29 @@ void run_precache_manifest_integration(
     auto response_stage_config = resource_client_response_config();
     goldsrc::PrecacheManifestStageConfig manifest_stage_config;
     manifest_stage_config.response = response_stage_config;
+    assets::AssetImporterRegistries registries;
+    if (production_bsp_dispatch) {
+        REQUIRE(bsp::register_builtin_asset_importers(
+            registries,
+            production_bsp_limits(production_bsp_scenario)));
+        CHECK(registries.worlds.size() == 1U);
+        CHECK(registries.models.size() == 0U);
+        CHECK(registries.sprites.size() == 0U);
+        CHECK(registries.images.size() == 0U);
+        CHECK(registries.audio.size() == 0U);
+    }
+    goldsrc::PrecacheAssetDispatchStageConfig asset_dispatch_config;
+    asset_dispatch_config.source_open.read_chunk_bytes =
+        source_read_chunk_bytes;
+    asset_dispatch_config.source_open.maximum_chunks_per_update = 1U;
     const auto expected_remote = *server_endpoint;
 
     goldsrc::GoldSrcHandshakeCoordinator handshake{
         transport,
         *server_endpoint,
-        goldsrc::HandshakeStopPoint::precache_manifest,
+        production_bsp_dispatch
+            ? goldsrc::HandshakeStopPoint::asset_dispatch
+            : goldsrc::HandshakeStopPoint::precache_manifest,
         std::move(prepared_request.request),
         challenge_config(),
         {},
@@ -2923,6 +3284,50 @@ void run_precache_manifest_integration(
                     event.transmitted_packet_count;
                 traces.authentication_releases_at_manifest_terminal =
                     authentication_releases;
+            }
+        },
+        production_bsp_dispatch ? &registries : nullptr,
+        asset_dispatch_config,
+        [&traces, expected_remote](
+            const goldsrc::PrecacheAssetDispatchTraceEvent& event) {
+            if (event.endpoint != expected_remote) {
+                ++traces.endpoint_mismatches;
+            }
+            using Classification =
+                goldsrc::PrecacheAssetDispatchTraceClassification;
+            switch (event.classification) {
+            case Classification::world_entry_selected:
+                ++traces.world_entries_selected;
+                break;
+            case Classification::asset_source_open_started:
+                ++traces.asset_source_open_starts;
+                break;
+            case Classification::asset_source_progress:
+                ++traces.asset_source_progress_events;
+                break;
+            case Classification::source_open_failed:
+                ++traces.asset_source_open_failures;
+                traces.transmitted_at_asset_terminal =
+                    event.transmitted_packet_count;
+                break;
+            case Classification::importer_probe_completed:
+                ++traces.importer_probes_completed;
+                break;
+            case Classification::importer_selected:
+                ++traces.importers_selected;
+                break;
+            case Classification::asset_imported:
+                ++traces.assets_imported;
+                traces.transmitted_at_asset_terminal =
+                    event.transmitted_packet_count;
+                break;
+            case Classification::import_failed:
+                ++traces.asset_import_failures;
+                traces.transmitted_at_asset_terminal =
+                    event.transmitted_packet_count;
+                break;
+            default:
+                break;
             }
         }};
 
@@ -3093,18 +3498,278 @@ void run_precache_manifest_integration(
         error);
     handshake.update(now + 1ms);
     CHECK_FALSE(handshake.terminal());
-    CHECK(handshake.state() ==
-          goldsrc::GoldSrcHandshakeState::waiting_for_precache_manifest);
+    if (production_bsp_dispatch) {
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::waiting_for_asset_dispatch);
+    } else {
+        CHECK(handshake.state() ==
+              goldsrc::GoldSrcHandshakeState::waiting_for_precache_manifest);
+    }
     require_no_datagram(*server);
 
-    // These two deterministic metadata-only updates build the inventory and
-    // manifest. Neither is allowed to drive the retained network session.
-    handshake.update(now + 2ms);
-    CHECK_FALSE(handshake.terminal());
-    require_no_datagram(*server);
-    handshake.update(now + 3ms);
-    REQUIRE(handshake.terminal());
-    require_no_datagram(*server);
+    const auto production_map_path =
+        root.game_path(selected_game) / "maps/test_map.bsp";
+    const auto stale_original_path =
+        root.game_path(selected_game) / "maps/test_map.stale-original.bsp";
+    bool production_mutation_applied = false;
+    auto terminal_time = now + 3ms;
+    if (production_bsp_dispatch) {
+        // All work after the covering ACK is bounded local metadata/source
+        // processing on the same retained coordinator and transport.
+        auto local_update_time = now + 2ms;
+        for (std::size_t update = 0U;
+             update < 256U && !handshake.terminal();
+             ++update) {
+            if (production_bsp_scenario ==
+                    ProductionBspIntegrationScenario::stale_selected_locator &&
+                !production_mutation_applied &&
+                traces.world_entries_selected == 1U &&
+                traces.asset_source_open_starts == 0U) {
+                std::filesystem::rename(
+                    production_map_path,
+                    stale_original_path);
+                root.write(
+                    selected_game,
+                    "maps/test_map.bsp",
+                    "stale replacement");
+                production_mutation_applied = true;
+            }
+
+            handshake.update(local_update_time);
+            require_no_datagram(*server);
+
+            if (production_bsp_scenario ==
+                    ProductionBspIntegrationScenario::
+                        source_changed_during_read &&
+                !production_mutation_applied &&
+                traces.asset_source_progress_events > 0U) {
+                auto* stage = hlclient::goldsrc::detail::
+                    GoldSrcHandshakeCoordinatorTestAccess::
+                        asset_dispatch_stage(handshake);
+                REQUIRE(stage != nullptr);
+                auto* operation = hlclient::goldsrc::detail::
+                    PrecacheAssetDispatchStageTestAccess::
+                        source_open_operation(*stage);
+                REQUIRE(operation != nullptr);
+                REQUIRE(operation->progress_bytes() > 0U);
+                hlclient::local_assets::detail::
+                    LocalAssetSourceOpenOperationTestAccess::
+                        simulate_final_change_metadata(*operation);
+                production_mutation_applied = true;
+            }
+
+            terminal_time = local_update_time;
+            local_update_time += 1ms;
+        }
+        REQUIRE(handshake.terminal());
+        if (expects_production_source_failure(production_bsp_scenario)) {
+            REQUIRE(production_mutation_applied);
+        }
+        if (production_bsp_scenario ==
+            ProductionBspIntegrationScenario::stale_selected_locator) {
+            REQUIRE(std::filesystem::remove(production_map_path));
+            std::filesystem::rename(
+                stale_original_path,
+                production_map_path);
+            CHECK_FALSE(std::filesystem::exists(stale_original_path));
+        }
+    } else {
+        // These two deterministic metadata-only updates build the inventory
+        // and manifest without driving the retained network session.
+        handshake.update(now + 2ms);
+        CHECK_FALSE(handshake.terminal());
+        require_no_datagram(*server);
+        handshake.update(terminal_time);
+        REQUIRE(handshake.terminal());
+        require_no_datagram(*server);
+    }
+
+    if (production_bsp_dispatch) {
+        const auto expected_terminal_state =
+            expect_source_failure
+                ? goldsrc::GoldSrcHandshakeState::asset_source_open_failed
+                : (expect_import_failure
+                       ? goldsrc::GoldSrcHandshakeState::asset_import_failed
+                       : goldsrc::GoldSrcHandshakeState::asset_imported);
+        const bool expect_import_success =
+            !expect_source_failure && !expect_import_failure;
+        const auto expected_progress_events =
+            production_bsp_scenario ==
+                    ProductionBspIntegrationScenario::stale_selected_locator
+                ? 0U
+                : (production_world_bytes.size() + source_read_chunk_bytes -
+                   1U) /
+                      source_read_chunk_bytes;
+        CHECK(handshake.state() == expected_terminal_state);
+
+        auto* asset_dispatch_stage = hlclient::goldsrc::detail::
+            GoldSrcHandshakeCoordinatorTestAccess::asset_dispatch_stage(
+                handshake);
+        REQUIRE(asset_dispatch_stage != nullptr);
+        CHECK(asset_dispatch_stage->manifest_publication_count() == 1U);
+        CHECK(asset_dispatch_stage->source_open_attempt_count() == 1U);
+        CHECK(asset_dispatch_stage->importer_dispatch_count() ==
+              (expect_source_failure ? 0U : 1U));
+
+        if (expect_source_failure) {
+            CHECK_FALSE(handshake.asset_dispatch_result());
+            REQUIRE(handshake.asset_dispatch_error());
+            const auto& asset_error = *handshake.asset_dispatch_error();
+            CHECK(asset_error.code ==
+                  goldsrc::PrecacheAssetDispatchStageErrorCode::
+                      source_open_failed);
+            if (production_bsp_scenario ==
+                ProductionBspIntegrationScenario::stale_selected_locator) {
+                CHECK(asset_error.source_open_code ==
+                      goldsrc::ApprovedAssetSourceOpenErrorCode::stale_locator);
+                CHECK(asset_error.local_source_open_code ==
+                      hlclient::local_assets::
+                          LocalAssetSourceOpenErrorCode::stale_locator);
+                CHECK(asset_error.locator_reopen_code ==
+                      hlclient::local_resources::
+                          LocalResourceLocatorReopenErrorCode::stale_locator);
+            } else {
+                CHECK(asset_error.source_open_code ==
+                      goldsrc::ApprovedAssetSourceOpenErrorCode::
+                          source_changed_during_read);
+                CHECK(asset_error.local_source_open_code ==
+                      hlclient::local_assets::
+                          LocalAssetSourceOpenErrorCode::
+                              source_changed_during_read);
+            }
+        } else if (expect_import_failure) {
+            CHECK_FALSE(handshake.asset_dispatch_result());
+            REQUIRE(handshake.asset_dispatch_error());
+            const auto& asset_error = *handshake.asset_dispatch_error();
+            CHECK(asset_error.code ==
+                  goldsrc::PrecacheAssetDispatchStageErrorCode::import_failed);
+            CHECK(asset_error.dispatch_state ==
+                  assets::AssetDispatchState::import_failed);
+            CHECK(asset_error.asset_code ==
+                  assets::AssetErrorCode::MalformedData);
+        } else {
+            CHECK_FALSE(handshake.asset_dispatch_error());
+            REQUIRE(handshake.asset_dispatch_result());
+            const auto& result = *handshake.asset_dispatch_result();
+            CHECK(result.environment().get() == environment.get());
+            CHECK(result.source_byte_count() == production_world_bytes.size());
+
+            const auto& manifest = result.manifest();
+            CHECK(manifest.entry_count() == 6U);
+            const bool incomplete =
+                scenario == PrecacheManifestIntegrationScenario::
+                                world_ready_missing_sound;
+            if (incomplete) {
+                CHECK(manifest.completeness() ==
+                      goldsrc::PrecacheManifestCompleteness::
+                          world_ready_but_incomplete);
+                CHECK_FALSE(manifest.complete_for_supported_local_profile());
+                CHECK(manifest.readiness_summary().resolved_mapped_file_count() ==
+                      4U);
+                CHECK(manifest.readiness_summary().missing_count() == 1U);
+            } else {
+                CHECK(manifest.completeness() ==
+                      goldsrc::PrecacheManifestCompleteness::
+                          complete_for_supported_local_profile);
+                CHECK(manifest.complete_for_supported_local_profile());
+                CHECK(manifest.readiness_summary().resolved_mapped_file_count() ==
+                      5U);
+                CHECK(manifest.readiness_summary().missing_count() == 0U);
+            }
+            CHECK(manifest.readiness_summary().metadata_only_count() == 1U);
+            CHECK(manifest.world_geometry_ready());
+            CHECK(manifest.world_selection().wire_ordinal() == 5U);
+            CHECK(manifest.world_selection().entry_offset() == 5U);
+            CHECK(manifest.world_selection().resource_index() == 137U);
+            CHECK(manifest.world_selection().status() ==
+                  goldsrc::WorldResourceReadiness::ready);
+            REQUIRE(manifest.world_selection().locator());
+            CHECK(manifest.world_selection().locator()->root_id().value() ==
+                  expected_root_id);
+
+            const auto& dispatch = result.dispatch_result();
+            CHECK(dispatch.state == assets::AssetDispatchState::imported);
+            CHECK(dispatch.selected_category ==
+                  assets::AssetImporterCategory::world);
+            CHECK(dispatch.selected_importer_id == "world:goldsrc-bsp-v30");
+            REQUIRE(dispatch.top_candidates.size() == 1U);
+            CHECK(dispatch.top_candidates.front().importer_id ==
+                  "world:goldsrc-bsp-v30");
+            REQUIRE(result.imported_asset());
+            const auto* world =
+                std::get_if<assets::WorldAsset>(&*result.imported_asset());
+            REQUIRE(world);
+            check_literal_bsp_world_from_production_flow(
+                *world,
+                production_bsp_scenario);
+        }
+
+        CHECK(traces.initial_requests_queued == 1U);
+        CHECK(traces.transition_requests_queued == 1U);
+        CHECK(traces.resource_lists_decoded == 1U);
+        CHECK(traces.resource_responses_queued == 1U);
+        CHECK(traces.response_boundaries == 1U);
+        CHECK(traces.manifest_publications == 1U);
+        CHECK(traces.manifest_terminal_outcomes == 1U);
+        CHECK(traces.world_entries_selected == 1U);
+        CHECK(traces.asset_source_open_starts == 1U);
+        CHECK(traces.asset_source_progress_events == expected_progress_events);
+        CHECK(traces.asset_source_open_failures ==
+              (expect_source_failure ? 1U : 0U));
+        CHECK(traces.importer_probes_completed ==
+              (expect_source_failure ? 0U : 1U));
+        CHECK(traces.importers_selected ==
+              (expect_source_failure ? 0U : 1U));
+        CHECK(traces.assets_imported == (expect_import_success ? 1U : 0U));
+        CHECK(traces.asset_import_failures ==
+              (expect_import_failure ? 1U : 0U));
+        CHECK(traces.endpoint_mismatches == 0U);
+        CHECK(response_datagrams ==
+              (transport_scenario == PrecacheManifestTransportScenario::baseline
+                   ? 1U
+                   : 2U));
+        REQUIRE(traces.transmitted_at_response_boundary);
+        REQUIRE(traces.transmitted_at_manifest_publication);
+        REQUIRE(traces.transmitted_at_manifest_terminal);
+        REQUIRE(traces.transmitted_at_asset_terminal);
+        REQUIRE(traces.authentication_releases_at_manifest_terminal);
+        CHECK(*traces.transmitted_at_manifest_publication ==
+              *traces.transmitted_at_response_boundary);
+        CHECK(*traces.transmitted_at_manifest_terminal ==
+              *traces.transmitted_at_response_boundary);
+        CHECK(*traces.transmitted_at_asset_terminal ==
+              *traces.transmitted_at_manifest_publication);
+        CHECK(*traces.authentication_releases_at_manifest_terminal == 0U);
+        CHECK(prepared_provider.provider->consumed());
+        CHECK(authentication_releases == 1U);
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+        CHECK(can_open_synthetic_writer(
+            root.game_path(selected_game) / "tempdecal.wad"));
+
+        handshake.update(terminal_time + 100ms);
+        handshake.cancel(terminal_time + 200ms);
+        CHECK(handshake.state() == expected_terminal_state);
+        CHECK(authentication_releases == 1U);
+        CHECK(traces.world_entries_selected == 1U);
+        CHECK(traces.asset_source_open_starts == 1U);
+        CHECK(traces.asset_source_progress_events == expected_progress_events);
+        CHECK(traces.asset_source_open_failures ==
+              (expect_source_failure ? 1U : 0U));
+        CHECK(traces.importer_probes_completed ==
+              (expect_source_failure ? 0U : 1U));
+        CHECK(traces.importers_selected ==
+              (expect_source_failure ? 0U : 1U));
+        CHECK(traces.assets_imported == (expect_import_success ? 1U : 0U));
+        CHECK(traces.asset_import_failures ==
+              (expect_import_failure ? 1U : 0U));
+        CHECK(asset_dispatch_stage->manifest_publication_count() == 1U);
+        CHECK(asset_dispatch_stage->source_open_attempt_count() == 1U);
+        CHECK(asset_dispatch_stage->importer_dispatch_count() ==
+              (expect_source_failure ? 0U : 1U));
+        require_no_datagram(*server);
+        CHECK(snapshot_synthetic_root(root.path()) == before);
+        return;
+    }
 
     if (scenario ==
         PrecacheManifestIntegrationScenario::duplicate_map_match) {
@@ -3672,6 +4337,137 @@ TEST_CASE("Production local provider rejects malicious server paths for 20 of 20
             run,
             ResourceResponseIntegrationScenario::malicious_resource_names,
             false);
+    }
+}
+
+TEST_CASE("Production local provider imports a valid literal BSP 20 of 20",
+          "[goldsrc][bsp][asset-dispatch][local-provider][udp][production][full-flow][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production literal BSP full-flow run " << run + 1U << "/20");
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::baseline,
+            false,
+            PrecacheManifestCompletionMode::production_bsp_dispatch);
+    }
+}
+
+TEST_CASE("Production local provider imports a world-ready incomplete BSP 20 of 20",
+          "[goldsrc][bsp][asset-dispatch][local-provider][udp][production][incomplete][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production incomplete-manifest BSP run " << run + 1U << "/20");
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::world_ready_missing_sound,
+            PrecacheManifestTransportScenario::baseline,
+            false,
+            PrecacheManifestCompletionMode::production_bsp_dispatch);
+    }
+}
+
+TEST_CASE("Production local provider rejects a malformed BSP 20 of 20",
+          "[goldsrc][bsp][asset-dispatch][local-provider][udp][production][malformed][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production malformed BSP full-flow run " << run + 1U << "/20");
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::baseline,
+            false,
+            PrecacheManifestCompletionMode::
+                production_bsp_malformed_rejection);
+    }
+}
+
+TEST_CASE("Production local provider imports a chunked BSP source 20 of 20",
+          "[goldsrc][bsp][asset-dispatch][local-provider][udp][production][chunked][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production three-byte-chunk BSP run " << run + 1U << "/20");
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::baseline,
+            false,
+            PrecacheManifestCompletionMode::production_bsp_dispatch,
+            3U);
+    }
+}
+
+TEST_CASE("Production BSP dispatch survives a dropped resource response 20 of 20",
+          "[goldsrc][bsp][asset-dispatch][local-provider][udp][production][drop-response][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production dropped-response BSP run " << run + 1U << "/20");
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::dropped_response,
+            false,
+            PrecacheManifestCompletionMode::production_bsp_dispatch);
+    }
+}
+
+TEST_CASE("Production BSP dispatch survives a dropped covering ACK 20 of 20",
+          "[goldsrc][bsp][asset-dispatch][local-provider][udp][production][drop-ack][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        INFO("production dropped-ACK BSP run " << run + 1U << "/20");
+        run_precache_manifest_integration(
+            run,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::dropped_acknowledgement,
+            false,
+            PrecacheManifestCompletionMode::production_bsp_dispatch);
+    }
+}
+
+TEST_CASE("Production BSP fake HLDS covers required one-shot import variants",
+          "[goldsrc][bsp][asset-dispatch][local-provider][udp][production][variants]")
+{
+    const auto run_variant = [](const ProductionBspIntegrationScenario scenario,
+                                const std::size_t chunk_bytes = 7U) {
+        run_precache_manifest_integration(
+            0U,
+            PrecacheManifestIntegrationScenario::complete,
+            PrecacheManifestTransportScenario::baseline,
+            false,
+            PrecacheManifestCompletionMode::production_bsp_dispatch,
+            chunk_bytes,
+            scenario);
+    };
+
+    SECTION("valid triangle BSP") {
+        run_variant(ProductionBspIntegrationScenario::valid_triangle);
+    }
+    SECTION("valid multi-face BSP") {
+        run_variant(ProductionBspIntegrationScenario::valid_multi_face);
+    }
+    SECTION("missing texture metadata") {
+        run_variant(
+            ProductionBspIntegrationScenario::missing_texture_metadata);
+    }
+    SECTION("malformed BSP header") {
+        run_variant(ProductionBspIntegrationScenario::malformed_header);
+    }
+    SECTION("malformed texinfo") {
+        run_variant(ProductionBspIntegrationScenario::malformed_texinfo);
+    }
+    SECTION("configured geometry output limit") {
+        run_variant(ProductionBspIntegrationScenario::geometry_output_limit);
+    }
+    SECTION("stale selected map locator before source open") {
+        run_variant(
+            ProductionBspIntegrationScenario::stale_selected_locator);
+    }
+    SECTION("selected map changes during incremental same-handle read") {
+        run_variant(
+            ProductionBspIntegrationScenario::source_changed_during_read,
+            8U);
     }
 }
 

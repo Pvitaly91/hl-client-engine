@@ -23,6 +23,15 @@ add_executable(hlclient_tests
     test_delta_description_stage.cpp
     test_delta_schema_registry.cpp
     test_game_paths.cpp
+    test_goldsrc_bsp_header.cpp
+    test_goldsrc_bsp_records.cpp
+    test_goldsrc_bsp_textures.cpp
+    test_goldsrc_bsp_face_loop.cpp
+    test_goldsrc_bsp_world_geometry.cpp
+    test_goldsrc_bsp_models.cpp
+    test_goldsrc_bsp_spatial_structure.cpp
+    test_goldsrc_bsp_importer.cpp
+    test_goldsrc_bsp_mutation_corpus.cpp
     test_handshake_connect_response.cpp
     test_handshake_netchan.cpp
     test_info_string.cpp
@@ -98,6 +107,7 @@ target_link_libraries(hlclient_tests
         hlclient_core
         hlclient_filesystem
         hlclient_goldsrc
+        hlclient_goldsrc_bsp
         hlclient_goldsrc_client
         hlclient_goldsrc_asset_dispatch
         hlclient_goldsrc_resource_readiness

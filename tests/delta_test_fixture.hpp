@@ -120,7 +120,8 @@ inline void append_string(
     bytes.push_back(std::byte{0U});
 }
 
-[[nodiscard]] inline std::vector<std::byte> server_info_body()
+[[nodiscard]] inline std::vector<std::byte> server_info_body(
+    const std::string_view map_name = "maps/test_alpha.bsp")
 {
     std::vector<std::byte> bytes;
     append_u32_le(bytes, 48U);
@@ -134,7 +135,7 @@ inline void append_string(
     bytes.push_back(std::byte{1U});
     append_string(bytes, "sample");
     append_string(bytes, "Local Test");
-    append_string(bytes, "maps/test_alpha.bsp");
+    append_string(bytes, map_name);
     append_string(bytes, "alpha beta");
     bytes.push_back(std::byte{0U});
     return bytes;
@@ -143,7 +144,8 @@ inline void append_string(
 [[nodiscard]] inline std::vector<std::byte> service_payload(
     const std::span<const std::vector<std::byte>> schemas,
     const std::uint8_t boundary_opcode = goldsrc::kStockPostDeltaBoundaryOpcode,
-    const std::span<const std::byte> boundary_body = {})
+    const std::span<const std::byte> boundary_body = {},
+    const std::string_view map_name = "maps/test_alpha.bsp")
 {
     std::vector<std::byte> bytes{
         std::byte{8U},
@@ -151,7 +153,7 @@ inline void append_string(
         std::byte{0U},
         std::byte{11U},
     };
-    const auto info = server_info_body();
+    const auto info = server_info_body(map_name);
     bytes.insert(bytes.end(), info.begin(), info.end());
     bytes.push_back(
         static_cast<std::byte>(goldsrc::kPreResourceSimpleControlOpcode));

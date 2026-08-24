@@ -6,16 +6,17 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M3.2.3's approved asset-source opening and
-format-importer dispatch on top of the M3.2.2 immutable metadata-only precache
-manifest and M3.2.1 sandboxed local-resource foundation. The
-`--stop-after asset-dispatch` route selects the exact ServerInfo world entry,
-reopens its locator in the exact validated root, reads it incrementally from one
-verified handle, and probes the world importer registry without sending a new
-network message. No production format importer is registered yet, so the typed
-no-importer boundary is the expected successful result.
+The repository has implemented M4.1's strict GoldSrc BSP v30 importer and
+owning CPU world geometry on top of M3.2.3's approved asset-source opening,
+M3.2.2's immutable metadata-only precache manifest, and M3.2.1's sandboxed
+local-resource foundation. `--stop-after asset-dispatch` selects the exact
+ServerInfo world entry, reopens its locator in the exact validated root, reads
+it incrementally from one verified handle, and dispatches the production BSP
+importer without sending a new network message. `--stop-after world-geometry`
+requires the imported non-empty `WorldAsset`, reports bounded CPU counts, and
+stops before texture, lightmap, renderer, or GPU work.
 
-Implemented M1–M3.2.3 bounded behavior includes the Protocol 48 challenge,
+Implemented M1–M4.1 bounded behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
@@ -435,17 +436,46 @@ M3.2.3 adds the explicit approved-source and importer boundary:
 This continues the same retained socket, driver, endpoint, authentication
 lifetime, manifest, and validated root environment. It opens only the selected
 world source through `reopen_verified()`, validates exact EOF and a final
-same-handle metadata snapshot, and runs deterministic importer probing. The
-current production registries are empty, so `importer_boundary_reached` exits
-successfully. Missing/stale sources and importer ambiguity or failure exit
-nonzero. No asset path is reopened, no dependent resource is loaded, and no
-renderer or GPU work occurs.
+same-handle metadata snapshot, and runs deterministic importer probing. A valid
+version-30 BSP is now imported into an owning CPU `WorldAsset`; explicit empty
+test registries retain the historical no-importer boundary. Missing/stale
+sources and ambiguous or malformed imports exit nonzero. Unsupported/no-match
+input remains a successful diagnostic boundary for `asset-dispatch`, while the
+stricter `world-geometry` stop requires an imported CPU world and exits nonzero.
+No asset path is reopened, no dependent resource is loaded, and no renderer or
+GPU work occurs.
+
+M4.1 adds a stricter CPU-geometry stop on that same route:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after world-geometry `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve --net-trace
+```
+
+The BSP parser accepts version 30 only, validates the exact 124-byte header and
+all 15 lumps with explicit little-endian reads, cross-checks every retained
+reference, reconstructs closed convex world-model face loops, and emits flat
+normals, deterministic fan indices, raw texel-unit S/T, material-reference
+metadata, surfaces, and finite bounds. Only model 0 geometry is emitted.
+Entities, PVS, collision runtime, brush-submodel instances, embedded/WAD
+texture pixels, palettes, lightmaps, and renderer resources remain absent.
 
 Normal runtime may read an explicitly supplied user-owned Steam installation
 with zero writes and no stock process launch. Active stock `hl.exe`/HLDS
 research remains restricted to an isolated marked copy. The local provider and
 deterministic fake-HLDS tests are not a claim of completed stock
 interoperability or manual installation validation.
+
+For a user-owned read-only map check with the optional offline checker, use
+`scripts/verify_local_bsp_import.ps1 -ToolPath <checker.exe> -Basedir <root>
+-Game valve -Map maps/<name>.bsp`. The wrapper runs the checker twice, compares
+deterministic summaries, and fails on target-content, size, write-time, or
+created/deleted-file drift while printing metadata only. No local stock-map run
+is claimed by this repository change.
 
 See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
 and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
@@ -454,7 +484,9 @@ and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.
 [local readiness](docs/LOCAL_RESOURCE_READINESS.md), the
 [metadata-only precache manifest](docs/PRECACHE_MANIFEST.md),
 [approved asset sources](docs/APPROVED_ASSET_SOURCE.md), and
-[asset importer dispatch](docs/ASSET_IMPORTER_DISPATCH.md).
+[asset importer dispatch](docs/ASSET_IMPORTER_DISPATCH.md), the
+[GoldSrc BSP v30 profile](docs/GOLDSRC_BSP_V30.md), and
+[CPU world geometry](docs/CPU_WORLD_GEOMETRY.md).
 
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
@@ -728,7 +760,7 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
   `hlclient_app_support`, `hlclient_client`;
 - `hlclient_asset_api`, `hlclient_local_asset_source`,
   `hlclient_asset_dispatch`, `hlclient_asset_manager`, `hlclient_scene_api`;
-- `hlclient_goldsrc_asset_dispatch`;
+- `hlclient_goldsrc_bsp`, `hlclient_goldsrc_asset_dispatch`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
 - `hlclient_local_resource_check` (network-free read-only diagnostic);
@@ -868,7 +900,10 @@ readiness/aggregate impact, exact world selection, path-safe locators, and the
 bounded metadata-only manifest. M3.2.3 adds one-source incremental verified
 opening, exact EOF/final-snapshot checks, pure importer probes, deterministic
 cross-category dispatch, and a same-session selected-world stop before any
-parser or renderer work.
+parser or renderer work. M4.1 adds the production `goldsrc-bsp-v30` importer,
+strict synthetic BSP grammar/mutation coverage, world-model-only face-loop
+reconstruction, raw texel UVs, metadata-only texture states, owning CPU world
+geometry, and same-session fake-HLDS import coverage without post-manifest TX.
 
 ## License
 

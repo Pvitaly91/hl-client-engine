@@ -10,10 +10,12 @@
 #include <hlclient/filesystem/game_paths.hpp>
 #include <hlclient/filesystem/rooted_file_system.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
 #include <hlclient/goldsrc/local_resource_inventory.hpp>
 #include <hlclient/goldsrc/local_resource_mapping.hpp>
 #include <hlclient/goldsrc/precache_manifest.hpp>
 #include <hlclient/goldsrc/precache_manifest_stage.hpp>
+#include <hlclient/local_assets/local_asset_source.hpp>
 #include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_resolver.hpp>
 #include <hlclient/local_resources/local_resource_search_roots.hpp>
@@ -29,6 +31,8 @@
 
 #include <charconv>
 #include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -59,6 +63,32 @@
 namespace {
 
 using hlclient::core::LogLevel;
+
+inline constexpr std::uint64_t kProductionGoldSrcBspMaximumSourceBytes =
+    hlclient::goldsrc::bsp::kGoldSrcBspDefaultMaximumSourceBytes;
+inline constexpr std::size_t kProductionGoldSrcBspAssetDispatchEvents = 1'024U;
+static_assert(
+    kProductionGoldSrcBspMaximumSourceBytes ==
+    hlclient::goldsrc::bsp::GoldSrcBspImportLimits{}.maximum_source_bytes);
+static_assert(
+    kProductionGoldSrcBspMaximumSourceBytes <=
+    hlclient::local_resources::kHardMaximumLocalResourceFileSize);
+static_assert(
+    kProductionGoldSrcBspMaximumSourceBytes /
+                hlclient::local_assets::kDefaultLocalAssetSourceReadChunkBytes +
+            8U <
+        kProductionGoldSrcBspAssetDispatchEvents);
+
+[[nodiscard]] hlclient::goldsrc::PrecacheAssetDispatchStageConfig
+production_bsp_asset_dispatch_config()
+{
+    hlclient::goldsrc::PrecacheAssetDispatchStageConfig config;
+    config.source_open.maximum_source_bytes =
+        kProductionGoldSrcBspMaximumSourceBytes;
+    config.maximum_stage_events =
+        kProductionGoldSrcBspAssetDispatchEvents;
+    return config;
+}
 
 class BootstrapSceneSource final : public hlclient::client::IClientSceneSource {
 public:
@@ -1992,7 +2022,8 @@ void log_precache_asset_dispatch_trace(
 }
 
 [[nodiscard]] int report_asset_dispatch(
-    const hlclient::goldsrc::ApprovedAssetDispatchState& result)
+    const hlclient::goldsrc::ApprovedAssetDispatchState& result,
+    const bool require_world_geometry)
 {
     const auto& plan = result.plan();
     const auto& dispatched = result.dispatch_result();
@@ -2032,11 +2063,87 @@ void log_precache_asset_dispatch_trace(
             LogLevel::info,
             "[asset] importer=" + dispatched.selected_importer_id);
     }
-    return dispatched.state == hlclient::assets::AssetDispatchState::imported ||
-                   dispatched.state == hlclient::assets::AssetDispatchState::
-                                           importer_not_registered
-               ? 0
-               : 1;
+    if (!require_world_geometry) {
+        return dispatched.state ==
+                           hlclient::assets::AssetDispatchState::imported ||
+                       dispatched.state == hlclient::assets::AssetDispatchState::
+                                               importer_not_registered
+                   ? 0
+                   : 1;
+    }
+
+    if (dispatched.state != hlclient::assets::AssetDispatchState::imported ||
+        !dispatched.asset) {
+        hlclient::core::log(
+            LogLevel::error,
+            "[world] CPU world geometry was not imported");
+        return 1;
+    }
+    const auto* world =
+        std::get_if<hlclient::assets::WorldAsset>(&*dispatched.asset);
+    if (world == nullptr || world->vertices.empty() || world->indices.empty() ||
+        world->surfaces.empty() || world->indices.size() % 3U != 0U) {
+        hlclient::core::log(
+            LogLevel::error,
+            "[world] imported asset has no valid non-empty CPU geometry");
+        return 1;
+    }
+
+    const auto finite_vector = [](const hlclient::assets::AssetVector3 value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) &&
+               std::isfinite(value.z);
+    };
+    const bool finite_bounds = finite_vector(world->bounds.minimum) &&
+                               finite_vector(world->bounds.maximum) &&
+                               world->bounds.minimum.x <= world->bounds.maximum.x &&
+                               world->bounds.minimum.y <= world->bounds.maximum.y &&
+                               world->bounds.minimum.z <= world->bounds.maximum.z;
+    if (!finite_bounds) {
+        hlclient::core::log(
+            LogLevel::error,
+            "[world] imported CPU geometry has invalid bounds");
+        return 1;
+    }
+
+    hlclient::core::log(LogLevel::info, "[world] GoldSrc BSP v30 imported");
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] vertices=" + std::to_string(world->vertices.size()));
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] triangles=" + std::to_string(world->indices.size() / 3U));
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] surfaces=" + std::to_string(world->surfaces.size()));
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] materials=" + std::to_string(world->materials.size()));
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] source-models=" +
+            std::to_string(world->statistics.source_model_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] skipped-submodel-faces=" +
+            std::to_string(world->statistics.skipped_submodel_face_count));
+    hlclient::core::log(LogLevel::info, "[world] textures:");
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] embedded=" +
+            std::to_string(
+                world->statistics.embedded_texture_reference_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] external=" +
+            std::to_string(
+                world->statistics.external_texture_reference_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] missing=" +
+            std::to_string(
+                world->statistics.missing_texture_reference_count));
+    hlclient::core::log(LogLevel::info, "[world] bounds: finite=true");
+    return 0;
 }
 
 [[nodiscard]] hlclient::network::UdpSocket open_challenge_socket(
@@ -2080,6 +2187,8 @@ public:
             local_resource_environment,
         const hlclient::assets::AssetImporterRegistries*
             asset_importer_registries,
+        hlclient::goldsrc::PrecacheAssetDispatchStageConfig
+            asset_dispatch_config,
         const bool net_trace)
         : local_resource_environment_{
               std::move(local_resource_environment)},
@@ -2149,7 +2258,7 @@ public:
                            &log_precache_manifest_trace}
                      : hlclient::goldsrc::PrecacheManifestTraceCallback{},
                  asset_importer_registries,
-                 {},
+                 std::move(asset_dispatch_config),
                  net_trace
                      ? hlclient::goldsrc::PrecacheAssetDispatchTraceCallback{
                            &log_precache_asset_dispatch_trace}
@@ -2181,12 +2290,13 @@ public:
         return handshake_.terminal();
     }
 
-    [[nodiscard]] int report_result() const
+    [[nodiscard]] int report_result(
+        const bool require_world_geometry = false) const
     {
         const int handshake_result = report_handshake_result(handshake_);
         if (handshake_.asset_dispatch_result()) {
             const int dispatch_result = report_asset_dispatch(
-                *handshake_.asset_dispatch_result());
+                *handshake_.asset_dispatch_result(), require_world_geometry);
             return handshake_result != 0 ? handshake_result : dispatch_result;
         }
         if (handshake_.precache_manifest_result()) {
@@ -2405,18 +2515,22 @@ int run_opengl_renderer(
     return 0;
 }
 
-int run_asset_dispatch_stop(HandshakeSession& session)
+int run_asset_dispatch_stop(
+    HandshakeSession& session,
+    const bool require_world_geometry)
 {
     hlclient::core::log(
         LogLevel::info,
-        "Asset-dispatch stop is running without renderer or GPU work");
+        require_world_geometry
+            ? "World-geometry stop is running without texture, lightmap, renderer, or GPU work"
+            : "Asset-dispatch stop is running without renderer or GPU work");
     while (!session.terminal()) {
         session.update(hlclient::goldsrc::ChallengeExchangeClock::now());
         if (!session.terminal()) {
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         }
     }
-    return session.report_result();
+    return session.report_result(require_world_geometry);
 }
 
 int run(const hlclient::core::CommandLineOptions& options)
@@ -2424,7 +2538,25 @@ int run(const hlclient::core::CommandLineOptions& options)
     print_version();
     std::cout << '\n' << std::flush;
 
+    const bool production_bsp_dispatch_requested =
+        options.stop_after ==
+            hlclient::core::ConnectionStopPoint::asset_dispatch ||
+        options.stop_after ==
+            hlclient::core::ConnectionStopPoint::world_geometry;
+
     hlclient::assets::AssetImporterRegistries asset_importers;
+    const auto importer_registration =
+        hlclient::goldsrc::bsp::register_builtin_asset_importers(
+            asset_importers);
+    if (!importer_registration) {
+        const auto context = importer_registration.error
+                                 ? importer_registration.error->context
+                                 : std::string{"unknown registration failure"};
+        hlclient::core::log(
+            LogLevel::error,
+            "Unable to register production asset importers: " + context);
+        return 1;
+    }
     std::unique_ptr<hlclient::filesystem::RootedFileSystem> asset_file_system;
     [[maybe_unused]] std::unique_ptr<hlclient::assets::AssetManager> asset_manager;
     if (options.base_directory && !options.resource_consistency_provider) {
@@ -2454,13 +2586,15 @@ int run(const hlclient::core::CommandLineOptions& options)
             asset_importers);
         hlclient::core::log(
             LogLevel::info,
-            "Asset pipeline initialized; no production format importers are registered in M0.1");
+            "Asset pipeline initialized with the GoldSrc BSP v30 world importer");
     } else if (options.stop_after ==
-               hlclient::core::ConnectionStopPoint::asset_dispatch) {
+                   hlclient::core::ConnectionStopPoint::asset_dispatch ||
+               options.stop_after ==
+                   hlclient::core::ConnectionStopPoint::world_geometry) {
         hlclient::core::log(
             LogLevel::info,
-            "Approved asset dispatch initialized; no production format "
-            "importers are registered before M4.1");
+            "Approved asset dispatch initialized with the production GoldSrc "
+            "BSP v30 world importer");
     } else if (options.resource_consistency_provider) {
         hlclient::core::log(
             LogLevel::info,
@@ -2507,9 +2641,15 @@ int run(const hlclient::core::CommandLineOptions& options)
                 return 1;
             }
 
+            auto resolver_limits =
+                hlclient::local_resources::LocalResourceResolverLimits{};
+            if (production_bsp_dispatch_requested) {
+                resolver_limits.maximum_file_size =
+                    kProductionGoldSrcBspMaximumSourceBytes;
+            }
             auto environment =
                 hlclient::local_resources::LocalResourceEnvironment::create(
-                    std::move(*roots.roots));
+                    std::move(*roots.roots), resolver_limits);
             if (!environment || !environment.environment) {
                 const auto code =
                     environment.error
@@ -2603,6 +2743,9 @@ int run(const hlclient::core::CommandLineOptions& options)
         case hlclient::core::ConnectionStopPoint::asset_dispatch:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::asset_dispatch;
             break;
+        case hlclient::core::ConnectionStopPoint::world_geometry:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::asset_dispatch;
+            break;
         }
         challenge_session = std::make_unique<HandshakeSession>(
             *address,
@@ -2612,13 +2755,21 @@ int run(const hlclient::core::CommandLineOptions& options)
             resource_consistency_provider.get(),
             local_resource_environment,
             &asset_importers,
+            production_bsp_dispatch_requested
+                ? production_bsp_asset_dispatch_config()
+                : hlclient::goldsrc::PrecacheAssetDispatchStageConfig{},
             options.net_trace);
     }
 
-    if (options.stop_after ==
-            hlclient::core::ConnectionStopPoint::asset_dispatch &&
+    if ((options.stop_after ==
+             hlclient::core::ConnectionStopPoint::asset_dispatch ||
+         options.stop_after ==
+             hlclient::core::ConnectionStopPoint::world_geometry) &&
         challenge_session) {
-        return run_asset_dispatch_stop(*challenge_session);
+        return run_asset_dispatch_stop(
+            *challenge_session,
+            options.stop_after ==
+                hlclient::core::ConnectionStopPoint::world_geometry);
     }
 
     const auto frame_limit = smoke_test_frame_limit();

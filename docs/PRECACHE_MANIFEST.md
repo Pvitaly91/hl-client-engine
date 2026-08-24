@@ -89,5 +89,10 @@ performs zero asset-source opens. M3.2.3's separate
 `--stop-after asset-dispatch` continuation may consume only the exact selected
 world locator through verified exact-root reopening. It may proceed when
 `world_geometry_ready()` is true even if unrelated resources make the full
-manifest incomplete. See [approved asset sources](APPROVED_ASSET_SOURCE.md)
-and [asset importer dispatch](ASSET_IMPORTER_DISPATCH.md).
+manifest incomplete. M4.1's `asset-dispatch` route then imports a valid BSP v30
+with the production world importer, while `world-geometry` additionally
+requires a non-empty owning CPU result. Neither route mutates this immutable
+manifest or sends a packet after its publication. See
+[approved asset sources](APPROVED_ASSET_SOURCE.md),
+[asset importer dispatch](ASSET_IMPORTER_DISPATCH.md), and
+[CPU world geometry](CPU_WORLD_GEOMETRY.md).

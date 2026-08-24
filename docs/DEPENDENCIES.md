@@ -24,7 +24,7 @@ The project also links the Windows SDK/OpenGL system import library through
 CMake's `OpenGL::GL` target and links Winsock2 where required. Those operating
 system components are not vendored or redistributed by this repository.
 
-M3.2.1 through M3.2.3 add no third-party dependency. `hlclient_hash_md5` is an independently
+M3.2.1 through M4.1 add no third-party dependency. `hlclient_hash_md5` is an independently
 authored C++20 incremental compatibility module and does not use OpenSSL,
 Windows CryptoAPI, or another crypto package. MD5 is present only to reproduce
 GoldSrc compatibility material; it is not approved for security, authenticity,
@@ -51,6 +51,7 @@ hlclient_goldsrc_resource_readiness
 hlclient_local_asset_source
     -> hlclient_asset_api
     -> hlclient_local_resources
+hlclient_goldsrc_bsp -> hlclient_asset_api -> hlclient_core
 hlclient_asset_dispatch -> hlclient_asset_api
 hlclient_goldsrc_asset_dispatch
     -> hlclient_goldsrc_resource_readiness
@@ -59,7 +60,10 @@ hlclient_goldsrc_asset_dispatch
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
 ```
 
-In particular, the sign-on target does not link the filesystem or concrete
+`hlclient_goldsrc_bsp` uses only project-owned C++20 code and the neutral asset
+API. The pinned Valve SDK's public BSP declarations were reviewed as reference
+evidence, but no SDK source is compiled into the importer and no SDK struct is
+used as a wire ABI. In particular, the sign-on target does not link the filesystem or concrete
 local-provider implementation, the resolver does not link the netchan driver,
 and the MD5 target does not depend on GoldSrc protocol types.
 
@@ -231,15 +235,17 @@ sprites, sounds, textures, `client.dll`, and other game files remain supplied by
 the user under the terms governing their copy. Automated tests must use small,
 original test fixtures or synthetic byte sequences.
 
-For normal M3.2.1–M3.2.3 runtime, the local consistency provider, readiness
+For normal M3.2.1–M4.1 runtime, the local consistency provider, readiness
 environment, and approved selected-world source opener may read an explicit
 user-owned installation supplied through `--basedir` and `--game`. That is an
 opt-in, read-only runtime input, not a build dependency: there is no Steam
 library/registry/environment auto-discovery, stock executable launch,
 configuration mutation, download, cache write, dependent-resource loading, or
 renderer use. M3.2.3 may read one selected world file and dispatch its owning
-bytes to explicitly registered importers; the production registry is empty and
-no real game-format parser is linked at this milestone. The consistency
+bytes to explicitly registered importers; M4.1 production registers the
+project-owned `goldsrc-bsp-v30` importer and retains only neutral CPU geometry
+and texture-reference metadata. It does not decode texture pixels, load WADs,
+or retain source bytes. The consistency
 provider's fixed target remains `tempdecal.wad`, selected by its compatibility
 profile rather than by server bytes or an arbitrary CLI path.
 

@@ -98,6 +98,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::precache_manifest;
             } else if (value == "asset-dispatch") {
                 options.stop_after = ConnectionStopPoint::asset_dispatch;
+            } else if (value == "world-geometry") {
+                options.stop_after = ConnectionStopPoint::world_geometry;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
                                " (expected challenge, connect-request, connect-response, "
@@ -105,7 +107,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                                "delta-schemas, movevars, user-info, or "
                                "resource-list-boundary, resource-list, or "
                                "resource-response-boundary, precache-manifest, or "
-                               "asset-dispatch)");
+                               "asset-dispatch, or world-geometry)");
             }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
@@ -156,7 +158,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "signon-boundary/pre-resource/delta-schemas/movevars/"
                        "user-info/resource-list-boundary/resource-list/"
                        "resource-response-boundary/precache-manifest/"
-                       "asset-dispatch stop point");
+                       "asset-dispatch/world-geometry stop point");
     }
     if (options.authentication_provider && !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
@@ -177,7 +179,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::resource_list ||
          options.stop_after == ConnectionStopPoint::resource_response_boundary ||
          options.stop_after == ConnectionStopPoint::precache_manifest ||
-         options.stop_after == ConnectionStopPoint::asset_dispatch) &&
+         options.stop_after == ConnectionStopPoint::asset_dispatch ||
+         options.stop_after == ConnectionStopPoint::world_geometry) &&
         !options.authentication_provider) {
         return failure(
             "Netchan bootstrap and sign-on require the explicit "
@@ -202,6 +205,13 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             "The asset-dispatch stop point requires "
             "--resource-consistency-provider local");
     }
+    if (options.stop_after == ConnectionStopPoint::world_geometry &&
+        options.resource_consistency_provider !=
+            ResourceConsistencyProviderKind::local) {
+        return failure(
+            "The world-geometry stop point requires "
+            "--resource-consistency-provider local");
+    }
 
     return CommandLineParseResult{std::move(options), {}};
 }
@@ -214,7 +224,8 @@ bool requires_local_resource_consistency_preparation(
            (options.stop_after ==
                 ConnectionStopPoint::resource_response_boundary ||
             options.stop_after == ConnectionStopPoint::precache_manifest ||
-            options.stop_after == ConnectionStopPoint::asset_dispatch);
+            options.stop_after == ConnectionStopPoint::asset_dispatch ||
+            options.stop_after == ConnectionStopPoint::world_geometry);
 }
 
 std::string_view command_line_help() noexcept
@@ -233,7 +244,7 @@ Options:
                        delta-schemas, movevars, user-info, or
                        resource-list-boundary, resource-list, or
                        resource-response-boundary, precache-manifest, or
-                       asset-dispatch
+                       asset-dispatch, or world-geometry
                        (default: challenge)
   --auth-provider <name>
                       Authentication provider for connect stages: file
@@ -242,7 +253,7 @@ Options:
   --resource-consistency-provider <name>
                       Explicit read-only response provider: local; requires
                       --basedir and is prepared only for resource-response-boundary,
-                      precache-manifest, or asset-dispatch
+                      precache-manifest, asset-dispatch, or world-geometry
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
@@ -279,8 +290,11 @@ map entry, and publishes a bounded immutable metadata-only manifest. It does not
 download, cache, open asset contents, parse assets, or integrate with a renderer.
 Asset-dispatch continues on the same retained session, securely opens the
 selected world source through its verified locator, runs importer dispatch,
-and stops before renderer work. No matching importer is an expected boundary
-until the BSP importer milestone.
+and stops before renderer work. A valid BSP v30 source is imported by the
+production GoldSrc world importer.
+World-geometry follows that same retained route, requires a non-empty owning
+CPU WorldAsset, reports bounded geometry counts, and stops before texture,
+lightmap, renderer, or GPU work.
 No mode implements authentication generation.
 )";
 }

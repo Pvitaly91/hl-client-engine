@@ -401,6 +401,44 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
               std::string::npos);
     }
 
+    SECTION("world geometry requires and schedules the local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"world-geometry"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::world_geometry);
+        CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
+    SECTION("world geometry rejects a missing local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"world-geometry"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+
+        const auto result = parse_command_line(arguments);
+        CHECK_FALSE(result);
+        CHECK(result.error.find("requires --resource-consistency-provider local") !=
+              std::string::npos);
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -848,8 +886,9 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("resource-response-boundary") != std::string_view::npos);
     CHECK(help.find("precache-manifest") != std::string_view::npos);
     CHECK(help.find("asset-dispatch") != std::string_view::npos);
+    CHECK(help.find("world-geometry") != std::string_view::npos);
     CHECK(help.find("securely opens the") != std::string_view::npos);
-    CHECK(help.find("expected boundary") != std::string_view::npos);
+    CHECK(help.find("valid BSP v30") != std::string_view::npos);
     CHECK(help.find("before renderer work") != std::string_view::npos);
     CHECK(help.find("metadata-only manifest") != std::string_view::npos);
     CHECK(help.find("does not") != std::string_view::npos);

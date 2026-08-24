@@ -131,6 +131,20 @@ target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
 set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
 
 hlclient_add_library(
+    hlclient_goldsrc_bsp
+    include/hlclient/goldsrc/bsp/goldsrc_bsp_format.hpp
+    include/hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp
+    include/hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp
+    src/goldsrc/bsp/goldsrc_bsp_parser.cpp
+    src/goldsrc/bsp/goldsrc_bsp_world_importer.cpp
+)
+add_library(hlclient::goldsrc_bsp ALIAS hlclient_goldsrc_bsp)
+target_link_libraries(hlclient_goldsrc_bsp PUBLIC hlclient::asset_api)
+set_property(
+    TARGET hlclient_goldsrc_bsp
+    PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
+
+hlclient_add_library(
     hlclient_asset_dispatch
     include/hlclient/assets/asset_importer_dispatcher.hpp
     src/assets/asset_importer_dispatcher.cpp
@@ -496,6 +510,7 @@ target_link_libraries(
         hlclient::filesystem
         hlclient::asset_api
         hlclient::asset_manager
+        hlclient::goldsrc_bsp
         hlclient::network
         hlclient::goldsrc
         hlclient::goldsrc_client

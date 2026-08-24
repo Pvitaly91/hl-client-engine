@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -203,6 +204,31 @@ inline constexpr std::array<std::byte, 8U> kTestModelTwoMagic{
     std::byte{0x54}, std::byte{0x45}, std::byte{0x53}, std::byte{0x54},
     std::byte{0x4D}, std::byte{0x44}, std::byte{0x4C}, std::byte{0x32},
 };
+
+static_assert(std::is_same_v<
+              decltype(hlclient::assets::WorldAsset{}.vertices),
+              std::vector<hlclient::assets::WorldVertex>>);
+static_assert(std::is_same_v<
+              decltype(hlclient::assets::ModelAsset{}.vertices),
+              std::vector<hlclient::assets::ModelVertex>>);
+
+TEST_CASE("Neutral world asset API preserves existing surface fields",
+          "[assets][world-api]")
+{
+    hlclient::assets::WorldAsset world;
+    world.identity.source_name = "synthetic-world";
+    world.vertices.push_back(hlclient::assets::WorldVertex{});
+    world.indices = {0U, 0U, 0U};
+    world.surfaces.push_back(hlclient::assets::WorldSurface{0U, 3U, 0U});
+
+    CHECK(world.identity.source_name == "synthetic-world");
+    REQUIRE(world.surfaces.size() == 1U);
+    CHECK(world.surfaces.front().first_index == 0U);
+    CHECK(world.surfaces.front().index_count == 3U);
+    CHECK(world.surfaces.front().material_index == 0U);
+    CHECK_FALSE(world.surfaces.front().source_surface_ordinal);
+    CHECK_FALSE(world.surfaces.front().lightmap_offset);
+}
 
 [[nodiscard]] std::vector<std::byte> synthetic_header(
     const std::array<std::byte, 8U>& magic,
