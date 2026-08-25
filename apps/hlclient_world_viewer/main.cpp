@@ -14,13 +14,19 @@
 #include <hlclient/world_preview/world_preview_scene_source.hpp>
 #include <hlclient/world_render/world_render_package_builder.hpp>
 
+#include <glad/gl.h>
+
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -29,6 +35,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -41,8 +48,11 @@ struct Options {
         hlclient::world_visibility::WorldVisibilityMode::all};
     hlclient::world_preview::WorldPreviewBrushSubmodelsMode brush_submodels{
         hlclient::world_preview::WorldPreviewBrushSubmodelsMode::off};
+    hlclient::client::PreviewWorldCullMode cull_mode{
+        hlclient::client::PreviewWorldCullMode::none};
     bool visibility_mode_present{false};
     bool brush_submodels_present{false};
+    bool cull_mode_present{false};
 };
 
 [[nodiscard]] std::optional<std::string> narrow_printable_ascii(
@@ -73,7 +83,7 @@ struct Options {
         if (argument != L"--basedir" && argument != L"--game" &&
             argument != L"--map" && argument != L"--camera" &&
             argument != L"--visibility" &&
-            argument != L"--brush-submodels") {
+            argument != L"--brush-submodels" && argument != L"--cull") {
             return std::nullopt;
         }
         if (index + 1 >= argument_count) {
@@ -143,7 +153,7 @@ struct Options {
             } else {
                 return std::nullopt;
             }
-        } else {
+        } else if (argument == L"--brush-submodels") {
             if (options.brush_submodels_present) {
                 return std::nullopt;
             }
@@ -154,6 +164,20 @@ struct Options {
             } else if (*narrow == "static") {
                 options.brush_submodels = hlclient::world_preview::
                     WorldPreviewBrushSubmodelsMode::static_instances;
+            } else {
+                return std::nullopt;
+            }
+        } else {
+            if (options.cull_mode_present) {
+                return std::nullopt;
+            }
+            options.cull_mode_present = true;
+            if (*narrow == "none") {
+                options.cull_mode =
+                    hlclient::client::PreviewWorldCullMode::none;
+            } else if (*narrow == "back") {
+                options.cull_mode =
+                    hlclient::client::PreviewWorldCullMode::back;
             } else {
                 return std::nullopt;
             }
@@ -173,7 +197,7 @@ void print_usage()
            "--game <directory> --map <maps/name.bsp> "
            "--camera <static|orbit|spawn> "
            "[--visibility <all|frustum|pvs|pvs-frustum>] "
-           "[--brush-submodels <off|static>]\n";
+           "[--brush-submodels <off|static>] [--cull <none|back>]\n";
 }
 
 [[nodiscard]] std::optional<std::uint64_t> smoke_test_frame_limit()
@@ -328,7 +352,36 @@ build_world_render_package(
                               ? hlclient::goldsrc::lightmaps::to_string(
                                     imported_lightmaps.error->code)
                               : std::string_view{"lightmap_import_failed"};
-        std::cerr << "lightmap-import=" << code << '\n';
+        std::cerr << "lightmap-import=" << code;
+        if (imported_lightmaps.error &&
+            imported_lightmaps.error->surface_index) {
+            std::cerr << ";surface="
+                      << *imported_lightmaps.error->surface_index;
+        }
+        if (imported_lightmaps.error && imported_lightmaps.error->extent_code) {
+            std::cerr << ";extent="
+                      << hlclient::goldsrc::lightmaps::to_string(
+                             *imported_lightmaps.error->extent_code);
+        }
+        if (imported_lightmaps.error &&
+            imported_lightmaps.error->surface_index &&
+            imported_lightmaps.error->extent_code ==
+                hlclient::goldsrc::lightmaps::GoldSrcLightmapExtentErrorCode::
+                    sample_limit_exceeded &&
+            *imported_lightmaps.error->surface_index < world.surfaces.size()) {
+            const auto measured =
+                hlclient::goldsrc::lightmaps::calculate_goldsrc_lightmap_extents(
+                    world,
+                    world.surfaces[*imported_lightmaps.error->surface_index],
+                    hlclient::goldsrc::lightmaps::
+                        kGoldSrcLightmapHardMaximumSamplesPerSurface);
+            if (measured && measured.extents) {
+                std::cerr << ";sample-width=" << measured.extents->sample_width
+                          << ";sample-height="
+                          << measured.extents->sample_height;
+            }
+        }
+        std::cerr << '\n';
         return {};
     }
     if (!imported_lightmaps.lightmap_set->complete_for_world_surfaces()) {
@@ -437,6 +490,63 @@ struct PreparedWorldScene {
     };
 }
 
+[[nodiscard]] std::optional<std::uint64_t> count_non_clear_pixels(
+    const hlclient::renderer::RenderExtent extent,
+    const hlclient::renderer::ClearColor clear_color)
+{
+    if (extent.width <= 0 || extent.height <= 0) {
+        return std::nullopt;
+    }
+    const auto width = static_cast<std::size_t>(extent.width);
+    const auto height = static_cast<std::size_t>(extent.height);
+    if (height > std::numeric_limits<std::size_t>::max() / width) {
+        return std::nullopt;
+    }
+    const auto pixel_count = width * height;
+    if (pixel_count > std::numeric_limits<std::size_t>::max() / 4U) {
+        return std::nullopt;
+    }
+    std::vector<std::uint8_t> pixels(pixel_count * 4U);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(
+        0,
+        0,
+        extent.width,
+        extent.height,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        pixels.data());
+    if (glGetError() != GL_NO_ERROR) {
+        return std::nullopt;
+    }
+
+    const auto channel = [](const float value) {
+        return static_cast<int>(std::lround(
+            static_cast<double>(std::clamp(value, 0.0F, 1.0F)) * 255.0));
+    };
+    const std::array expected{
+        channel(clear_color.red),
+        channel(clear_color.green),
+        channel(clear_color.blue),
+        channel(clear_color.alpha),
+    };
+    std::uint64_t non_clear = 0U;
+    for (std::size_t pixel = 0U; pixel < pixel_count; ++pixel) {
+        bool differs = false;
+        for (std::size_t component = 0U; component < 4U; ++component) {
+            if (std::abs(static_cast<int>(pixels[pixel * 4U + component]) -
+                    expected[component]) > 2) {
+                differs = true;
+                break;
+            }
+        }
+        if (differs) {
+            ++non_clear;
+        }
+    }
+    return non_clear;
+}
+
 [[nodiscard]] int render_world(
     PreparedWorldScene prepared,
     const Options& options,
@@ -444,7 +554,7 @@ struct PreparedWorldScene {
 {
     hlclient::world_preview::WorldPreviewSceneOptions scene_options;
     scene_options.camera_mode = *options.camera_mode;
-    scene_options.cull_mode = hlclient::client::PreviewWorldCullMode::none;
+    scene_options.cull_mode = options.cull_mode;
     scene_options.visibility_mode = options.visibility_mode;
     scene_options.brush_submodels = options.brush_submodels;
     scene_options.spawn_camera = prepared.spawn_camera;
@@ -473,6 +583,7 @@ struct PreparedWorldScene {
     auto previous_time = std::chrono::steady_clock::now();
     auto current_extent = window.pixel_extent();
     std::uint64_t rendered_frames = 0U;
+    std::optional<std::uint64_t> non_clear_pixel_count;
     bool running = true;
     while (running) {
         hlclient::platform::WindowEvent event;
@@ -505,12 +616,21 @@ struct PreparedWorldScene {
             return 1;
         }
         previous_time = current_time;
-        renderer.render(
-            hlclient::client::build_render_scene(scene_source.world_state()),
-            hlclient::renderer::RenderExtent{
-                current_extent.width,
-                current_extent.height,
-            });
+        const auto render_scene =
+            hlclient::client::build_render_scene(scene_source.world_state());
+        const auto render_extent = hlclient::renderer::RenderExtent{
+            current_extent.width,
+            current_extent.height,
+        };
+        renderer.render(render_scene, render_extent);
+        if (frame_limit) {
+            non_clear_pixel_count =
+                count_non_clear_pixels(render_extent, render_scene.clear_color);
+            if (!non_clear_pixel_count) {
+                std::cerr << "framebuffer-proof=failed\n";
+                return 1;
+            }
+        }
         window.swap_buffers();
         ++rendered_frames;
         if (frame_limit && rendered_frames >= *frame_limit) {
@@ -548,6 +668,12 @@ struct PreparedWorldScene {
     std::cout << "spatial-leaves=" << spatial_statistics.leaf_count << '\n';
     std::cout << "visibility-mode="
               << hlclient::world_visibility::to_string(options.visibility_mode)
+              << '\n';
+    std::cout << "cull-mode="
+              << (options.cull_mode ==
+                          hlclient::client::PreviewWorldCullMode::back
+                      ? "back"
+                      : "none")
               << '\n';
     if (final_visibility) {
         const auto& visibility_statistics = final_visibility->statistics();
@@ -622,6 +748,10 @@ struct PreparedWorldScene {
                       : 0U)
               << '\n';
     std::cout << "triangles=" << renderer_statistics.triangle_count << '\n';
+    if (non_clear_pixel_count) {
+        std::cout << "non-clear-pixels=" << *non_clear_pixel_count << '\n';
+    }
+    std::cout << "gl-error=none\n";
     std::cout << "vsync-enabled=" << (window.vsync_enabled() ? 1 : 0) << '\n';
     std::cout << "network-operations=0\n";
     std::cout << "writes-performed=0\n";
@@ -635,6 +765,8 @@ struct PreparedWorldScene {
             renderer_statistics.scene_upload_count != 1U ||
             renderer_statistics.rendered_frame_count != rendered_frames ||
             !renderer_statistics.scene_present ||
+            (frame_limit &&
+                (!non_clear_pixel_count || *non_clear_pixel_count == 0U)) ||
             (options.visibility_mode ==
                     hlclient::world_visibility::WorldVisibilityMode::all &&
                 (renderer_statistics.draw_call_count == 0U ||

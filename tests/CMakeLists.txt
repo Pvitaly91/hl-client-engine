@@ -27,6 +27,7 @@ add_executable(hlclient_tests
     test_goldsrc_bsp_records.cpp
     test_goldsrc_bsp_textures.cpp
     test_goldsrc_bsp_face_loop.cpp
+    test_goldsrc_bsp_face_orientation.cpp
     test_goldsrc_bsp_world_geometry.cpp
     test_goldsrc_bsp_models.cpp
     test_goldsrc_brush_submodels.cpp

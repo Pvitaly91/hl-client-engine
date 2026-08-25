@@ -102,6 +102,31 @@ TEST_CASE("Recognized truncated or malformed v30 data remains an importer candid
         CHECK(imported.error().context.size() <=
             bsp::kGoldSrcBspMaximumDiagnosticContextBytes);
     }
+
+    SECTION("face geometry diagnostics retain bounded production metadata")
+    {
+        auto bytes = fixture::literal_minimal_goldsrc_bsp_v30();
+        for (std::size_t index = 0U; index < 4U; ++index) {
+            fixture::SyntheticBspCorruptor corruptor{std::move(bytes)};
+            bytes = corruptor
+                        .write_i32(
+                            fixture::SyntheticBspLumpId::surfedges,
+                            index * 4U,
+                            static_cast<std::int32_t>(index + 1U))
+                        .take();
+        }
+        const auto source = make_source("maps/malformed.bsp", std::move(bytes));
+        const auto imported = importer.import(source);
+        REQUIRE_FALSE(imported);
+        const auto& context = imported.error().context;
+        CHECK(context.find("model=0") != std::string::npos);
+        CHECK(context.find("face=0") != std::string::npos);
+        CHECK(context.find("side=0") != std::string::npos);
+        CHECK(context.find("edges=4") != std::string::npos);
+        CHECK(context.find("classification=invalid_face_winding") !=
+            std::string::npos);
+        CHECK(context.size() <= bsp::kGoldSrcBspMaximumDiagnosticContextBytes);
+    }
 }
 
 TEST_CASE("Importer identity and probe are stable and side-effect free",

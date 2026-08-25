@@ -5,8 +5,9 @@ into a neutral, owning `WorldAsset`. It does not traverse the BSP tree to choose
 draw surfaces and does not emit geometry belonging only to brush submodels.
 All model ranges are still validated; omitted face counts are retained in
 statistics. Door, platform, and rotating-brush entity association belongs to a
-later milestone. M4.4 preserves this M4.1 output byte-for-byte while applying
-the same parameterized reconstruction path separately to `models[1..N]`.
+later milestone. M4.4 applies the same parameterized reconstruction path
+separately to `models[1..N]`. M4.4.1 makes that path a named shared builder and
+aligns both world and brush fixtures with Valve's qbsp face convention.
 
 ## Face reconstruction
 
@@ -16,18 +17,60 @@ surfedge uses `edge.v[0] -> edge.v[1]`; a negative surfedge uses
 sentinel policy, and `INT32_MIN` is rejected before negation. Each edge must end
 where the next begins and the final edge must close on the first.
 
-The resulting polygon must have at least three distinct vertices, contain no
-consecutive duplicate corner, lie on the selected plane within `0.02` source
-units, have no intersecting non-adjacent edges, have non-zero area above the
-`1e-6` geometry epsilon, and be consistently convex. Collinear boundary split
-points are accepted as non-negative local turns; every emitted fan triangle
-must still be non-degenerate and have a strictly positive dot product against
-the face normal. The face normal is the normalized source plane normal, negated
-only when `face.side == 1`. Broken, non-planar, degenerate, concave,
-self-intersecting, self-inconsistent, or oppositely wound faces fail; the
-importer never repairs, sorts, or silently reverses them. Pairwise intersection
-work has a named aggregate default limit of 16,777,216 comparisons so hostile
-inputs cannot multiply the bounded face-corner limit into unbounded CPU work.
+The face normal is the normalized source plane normal for side 0 and its
+negation for side 1. Pinned Valve compiler evidence establishes that the raw
+qbsp loop is clockwise relative to that side-adjusted normal: its standard
+area-vector dot is strictly negative. The explicit
+`valve_qbsp_clockwise_wire_to_counter_clockwise_render` profile is therefore a
+single wire-format conversion, not a permissive retry. After bounded cleanup,
+`[q0, q1, ..., q(n-1)]` becomes `[q0, q(n-1), ..., q1]`; the first retained
+source corner remains the fan anchor.
+
+Orientation uses a centroid-rebased double-precision area vector:
+
+```text
+c = sum(p[i]) / N
+A = sum(cross(p[i] - c, p[(i + 1) % N] - c))
+polygon_extent = max(axis-aligned polygon spans)
+polygon_area_tolerance = clamp(
+    64 * DBL_EPSILON * max(1, polygon_extent * polygon_extent),
+    1e-12, 1e-4)
+triangle_winding_tolerance = clamp(
+    64 * DBL_EPSILON * max(1, triangle_extent * triangle_extent),
+    1e-12, 1e-4)
+```
+
+Raw `dot(A, face_normal)` must be below `-polygon_area_tolerance`; canonical
+whole-loop output must be above `polygon_area_tolerance`. Each local turn and
+fan triangle is checked independently against the tolerance derived from that
+triangle's own extent. Planarity remains a separate fixed `0.02` source-unit
+limit.
+
+Valve qbsp can insert valid T-junction points inside straight boundary edges.
+The shared builder may remove only such a strictly interior middle corner. Its
+source-float distance tolerance is:
+
+```text
+clamp(32 * FLT_EPSILON * max(1, maximum_absolute_coordinate),
+      32 * FLT_EPSILON, 0.01)
+```
+
+The point-to-line distance must be within that tolerance, the normalized
+incoming/outgoing direction dot must be at least `0.99`, and the projected
+segment parameter must remain inside both endpoint margins
+`distance_tolerance / segment_length`. Passes are bounded by the original
+corner count, at least three corners must remain, and cleaned raw orientation
+must remain negative. Retained positions and texture coordinates are not
+altered.
+
+The resulting polygon must have at least three distinct vertices, lie on its
+plane, have no intersecting non-adjacent edges, and be consistently convex.
+Invalid sides/references, edge zero, `INT32_MIN`, duplicate vertices, broken or
+open loops, non-finite/nonplanar input, concavity, self-intersection,
+zero/ambiguous area, the opposite raw convention, and failed cleanup remain
+typed transactional errors. Pairwise intersection work has a named aggregate
+default limit of 16,777,216 comparisons so hostile inputs cannot multiply the
+bounded face-corner limit into unbounded CPU work.
 
 Supported polygons use a deterministic fan:
 
@@ -35,9 +78,11 @@ Supported polygons use a deterministic fan:
 (v0, v1, v2), (v0, v2, v3), ...
 ```
 
-One `WorldVertex` is emitted per source face corner. Vertices are intentionally
-not deduplicated across faces so flat normals, texture mappings, and future
-lightmap seams retain face ownership. Faces and corners remain in source order.
+One `WorldVertex` is emitted per retained canonical face corner. Vertices are
+intentionally not deduplicated across faces so flat normals, texture mappings,
+and future lightmap seams retain face ownership. Faces remain in source order;
+corners retain the evidenced first source anchor followed by the deterministic
+reversed tail.
 
 ## Neutral asset data
 
@@ -103,13 +148,21 @@ virtual name; native map paths are not accepted by the checker interface. The
 wrapper captures checker output instead of echoing it, runs the checker twice,
 requires byte-for-byte deterministic summaries, and reports metadata only.
 
-The wrapper snapshots the selected map's SHA-256, size, and write time plus the
-file inventory under the selected game/`valve` search roots before execution
-and after each run. Any persistent content, metadata, created-file, or
-deleted-file drift fails closed. No user-owned BSP, entity text, texture data,
-native path, or raw checker output is committed or printed. A user-owned stock
-map run is intentionally pending until an explicit local root and optional
-checker executable are supplied.
+M4.4.1 adds `hlclient_bsp_compat_check` and
+`scripts/verify_stock_bsp_geometry_compatibility.ps1`. The tool can validate a
+safe virtual map through geometry, textures, render package, or spatial scene;
+the wrapper selects the full spatial-scene path, runs each selected map twice,
+and requires identical normalized summaries.
+
+The M4.4.1 wrapper snapshots each selected map's content, size, and write time,
+the relevant WAD set, and the approved game-root inventory before execution
+and after both runs. Any content, metadata, created-file, or deleted-file drift
+fails closed. No user-owned BSP, entity text, texture data, native path, or raw
+checker output is committed or printed. It records only bounded aggregate
+diagnostics. Exact evidence, formulas, and the separately verified acceptance
+summary belong in
+[GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md),
+never in tracked game data.
 
 The separate M4.2 checker and resolution policy are documented in
 [world texture resolution](WORLD_TEXTURE_RESOLUTION.md). They reuse this
@@ -125,10 +178,11 @@ Z-up coordinates and triangle winding. See
 ## M4.4 geometry reuse and spatial membership
 
 M4.4 publishes each brush submodel as a separate owning local-space geometry
-asset. It uses the same validated planes, vertices, edges, surfedges, face
-ranges, texinfo, winding checks, and deterministic fan triangulation as model
-zero. No alternate face decoder or renderer-side BSP parsing is introduced,
-and the historical model-0 `WorldAsset` remains unchanged.
+asset. M4.4.1 routes model zero and every brush model through the same
+`GoldSrcFaceGeometryBuilder`, including the Valve wire-orientation profile,
+centroid-rebased area test, scale-aware collinear gate, canonical order, raw
+S/T evaluation, bounds, and deterministic fan triangulation. No alternate
+face decoder or renderer-side BSP parsing is introduced.
 
 The renderer-neutral spatial package maps leaf marksurfaces only to exact
 model-0 source-surface ordinals. Faces owned exclusively by brush submodels do

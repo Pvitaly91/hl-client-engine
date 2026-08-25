@@ -6,9 +6,10 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.4's bounded renderer-neutral spatial,
-visibility, and static brush-submodel path on top of M4.3's first static-world
-rendering path, M4.1 CPU BSP geometry, and M4.2 embedded/WAD3 RGBA textures. The
+The repository has implemented M4.4.1's explicit Valve BSP-v30 geometry
+compatibility profile on top of M4.4's bounded renderer-neutral spatial,
+visibility, and static brush-submodel path, M4.3's first static-world rendering
+path, M4.1 CPU BSP geometry, and M4.2 embedded/WAD3 RGBA textures. The
 CPU continuation decodes exact GoldSrc RGB lightmap samples, retains all four
 source style slots, packs deterministic padded multi-page atlases, and builds
 an immutable renderer-neutral `WorldRenderPackage` with normalized base UVs,
@@ -23,7 +24,7 @@ remain CPU-only;
 opens the local preview. The standalone `hlclient_world_viewer` performs the
 same composition offline and read-only for an explicit user-owned map.
 
-Implemented M1–M4.4 bounded behavior includes the Protocol 48 challenge,
+Implemented M1–M4.4.1 bounded behavior includes the Protocol 48 challenge,
 captured one-shot `connect` request, strict immediate connectionless
 `ACCEPT`/`REJECT`,
 an explicit authentication-provider boundary, same-socket netchan bootstrap,
@@ -513,8 +514,9 @@ For a user-owned read-only map check with the optional offline checker, use
 `scripts/verify_local_bsp_import.ps1 -ToolPath <checker.exe> -Basedir <root>
 -Game valve -Map maps/<name>.bsp`. The wrapper runs the checker twice, compares
 deterministic summaries, and fails on target-content, size, write-time, or
-created/deleted-file drift while printing metadata only. No local stock-map run
-is claimed by this repository change.
+created/deleted-file drift while printing metadata only. At the historical
+M4.1 boundary this was not a stock-run claim; the later M4.4.1 compatibility
+acceptance is documented below.
 
 The optional M4.2 network-free checker can verify a complete local texture set:
 
@@ -528,8 +530,8 @@ The optional M4.2 network-free checker can verify a complete local texture set:
 Its wrapper snapshots the selected map, root-level WAD files, and both approved
 search-root inventories, runs the checker twice, requires identical summaries,
 and rejects content/metadata or created/deleted-file drift. It prints a summary
-digest and bounded counts, not paths or asset bytes. No user-owned local run is
-claimed.
+digest and bounded counts, not paths or asset bytes. This historical M4.2
+section predates the M4.4.1 user-owned read-only acceptance documented below.
 
 M4.3 adds the CPU render-package stop without changing any earlier stop:
 
@@ -576,9 +578,10 @@ For a completely offline, read-only user-owned map preview:
 
 ```powershell
 .\build\bin\Debug\hlclient_world_viewer.exe `
-  --basedir "D:\Steam\steamapps\common\Half-Life" `
-  --game valve --map maps/crossfire.bsp `
-  --camera spawn --visibility pvs-frustum --brush-submodels static
+  --basedir "<Half-Life-root>" `
+  --game valve --map maps/<name>.bsp `
+  --camera spawn --visibility pvs-frustum --brush-submodels static `
+  --cull back
 ```
 
 The viewer accepts a safe virtual map name, not a native map path; it starts no
@@ -599,7 +602,44 @@ For the same M4.4 scene composition without SDL, OpenGL, or GPU resources:
 
 Visibility accepts `all`, `frustum`, `pvs`, or `pvs-frustum`; brush submodels
 accept `off` or `static`; cameras accept `static`, `orbit`, or `spawn`.
-Historical defaults remain `all`, `off`, and `static`.
+Viewer culling accepts `none` or `back`; historical viewer defaults remain
+`all`, `off`, `static`, and `none`.
+
+M4.4.1 names the default BSP-v30 face rule
+`valve_qbsp_clockwise_wire_to_counter_clockwise_render`. Signed surfedges first
+reconstruct the Valve QBSP clockwise wire relative to the side-adjusted face
+normal. The shared world/brush geometry builder then publishes deterministic
+counter-clockwise renderer geometry; it does not accept both orientations or
+invert winding in OpenGL.
+
+The network-free CPU checker can validate one safe virtual map through any
+bounded pipeline boundary, including the complete spatial scene:
+
+```powershell
+.\build\bin\Debug\hlclient_bsp_compat_check.exe `
+  --basedir "<Half-Life-root>" --game valve `
+  --map maps/<name>.bsp --validate-through spatial-scene
+```
+
+For multiple user-selected maps, the read-only wrapper snapshots the BSPs,
+relevant WADs, and file inventories, runs every CPU check twice, and requires
+identical metadata plus `external-file-drift=none`:
+
+```powershell
+.\scripts\verify_stock_bsp_geometry_compatibility.ps1 `
+  -ToolPath .\build\bin\Debug\hlclient_bsp_compat_check.exe `
+  -Basedir "<Half-Life-root>" -Game valve `
+  -Maps @("maps/<name>.bsp")
+```
+
+Run the CPU verifier before the optional OpenGL proof. On an OpenGL 3.3
+Core-capable desktop, invoke `verify_local_world_render.ps1` with `-Frames 2`,
+`-Visibility pvs-frustum`, `-BrushSubmodels static`, `-Camera spawn`, and
+`-CullModes @('none','back')`; the wrapper now selects that dual set by default.
+It requires one world/scene upload per run, two rendered frames, non-clear
+pixels, nonzero draw/triangle counts, `gl-error=none`, and no file drift. A
+host without the required context may skip only this graphical proof; the CPU
+compatibility verifier remains required.
 
 See [GoldSrc post-resource client response](docs/GOLDSRC_RESOURCE_CLIENT_RESPONSE.md)
 and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.md),
@@ -621,6 +661,7 @@ and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.
 [world visibility](docs/WORLD_VISIBILITY.md),
 [GoldSrc brush submodels](docs/GOLDSRC_BRUSH_SUBMODELS.md),
 [brush-submodel rendering](docs/BRUSH_SUBMODEL_RENDERING.md), the
+[stock BSP geometry compatibility profile](docs/GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md),
 [OpenGL world renderer](docs/OPENGL_WORLD_RENDERER.md), and the
 [offline world viewer](docs/WORLD_VIEWER.md).
 

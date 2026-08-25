@@ -30,12 +30,13 @@ Build the `hlclient_world_viewer` target and run, for example:
 
 ```powershell
 .\build\bin\Debug\hlclient_world_viewer.exe `
-  --basedir "D:\Steam\steamapps\common\Half-Life" `
+  --basedir "<Half-Life-root>" `
   --game valve `
-  --map maps/crossfire.bsp `
+  --map maps/<name>.bsp `
   --camera spawn `
   --visibility pvs-frustum `
-  --brush-submodels static
+  --brush-submodels static `
+  --cull back
 ```
 
 `--basedir`, `--game`, and `--map` select the explicit user-owned environment;
@@ -46,11 +47,12 @@ falls back to the bounds-derived camera if neither inert initial descriptor is
 available. It does not create a player or apply gameplay spawn behavior.
 
 `--visibility` accepts `all`, `frustum`, `pvs`, or `pvs-frustum`.
-`--brush-submodels` accepts `off` or `static`. Historical behavior is preserved
-by the defaults `--visibility all --brush-submodels off`; M4.4 verification
-must opt into `pvs-frustum` and `static` explicitly. The PVS fallback policy is
-explicitly frustum-only for the diagnostic preview when its camera has no
-usable PVS row. There are no keyboard/mouse gameplay controls. A positive
+`--brush-submodels` accepts `off` or `static`, and `--cull` accepts `none` or
+`back`. Historical behavior is preserved by the defaults `--visibility all
+--brush-submodels off --cull none`; M4.4.1 verification opts into
+`pvs-frustum`, `static`, and both cull modes explicitly. The PVS fallback policy
+is frustum-only for the diagnostic preview when its camera has no usable PVS
+row. There are no keyboard/mouse gameplay controls. A positive
 `HLCLIENT_SMOKE_TEST_FRAMES` value bounds the frame loop for smoke/automation
 runs; normal manual use runs until quit.
 
@@ -68,6 +70,15 @@ depth testing, and a bounds-derived Z-up camera. Preview culling defaults to
 none because a bounds camera is not guaranteed to be inside the closed world;
 this deliberate double-sided diagnostic view does not change source winding.
 
+M4.4.1's default BSP-v30 profile is
+`valve_qbsp_clockwise_wire_to_counter_clockwise_render`. The CPU geometry
+boundary reconstructs the signed-surfedge wire in Valve QBSP's clockwise
+orientation relative to the side-adjusted normal, validates it strictly, and
+reverses it deterministically into counter-clockwise renderer geometry. World
+faces and brush-submodel faces share that builder. `--cull back` consumes this
+canonical output directly; it is a proof mode, not a renderer-side winding
+repair. See [GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md).
+
 M4.4 opt-in modes add CPU PVS/frustum selection and supported static initial
 opaque brush instances. Brush geometry reuses the world texture/lightmap
 policies and is uploaded once independently of instance count. Camera or PVS
@@ -79,31 +90,58 @@ or translucent rendermodes, dynamic light-style animation, dynamic lights, a
 skybox, animated water, gameplay movement, entity updates, or live server
 state.
 
-## Read-only verification wrapper
+## CPU compatibility gate
+
+Run the CPU-only compatibility checker before opening an SDL/OpenGL window:
+
+```powershell
+.\build\bin\Debug\hlclient_bsp_compat_check.exe `
+  --basedir "<Half-Life-root>" --game valve `
+  --map maps/<name>.bsp --validate-through spatial-scene
+
+.\scripts\verify_stock_bsp_geometry_compatibility.ps1 `
+  -ToolPath .\build\bin\Debug\hlclient_bsp_compat_check.exe `
+  -Basedir "<Half-Life-root>" -Game valve `
+  -Maps @("maps/<name>.bsp")
+```
+
+The checker is network-free, SDL/OpenGL-free, and write-free. The wrapper runs
+each safe virtual map twice, requires identical deterministic metadata through
+`spatial-scene`, and rejects BSP, WAD, or file-inventory drift. Neither command
+prints native paths, asset bytes, texture names, entity text, or raw geometry.
+
+## Read-only OpenGL verification wrapper
 
 For a bounded drift-detecting check, use:
 
 ```powershell
 .\scripts\verify_local_world_render.ps1 `
   -ViewerPath .\build\bin\Debug\hlclient_world_viewer.exe `
-  -Basedir "D:\Steam\steamapps\common\Half-Life" `
+  -Basedir "<Half-Life-root>" `
   -Game valve `
-  -Map maps/boot_camp.bsp `
+  -Map maps/<name>.bsp `
   -Frames 2 `
   -Visibility pvs-frustum `
   -BrushSubmodels static `
-  -Camera spawn
+  -Camera spawn `
+  -CullModes @('none', 'back')
 ```
 
 The wrapper snapshots relevant BSP/WAD size, hash, write time, and file
-inventory before and after a bounded run. It requires exit code zero, at least
-one draw call and a nonzero triangle count, validates the reported camera leaf,
-PVS fallback, visible/total surfaces, and brush counts, rejects
-created/deleted/modified files, and prints metadata only. The three new
-parameters default to the historical `all`/`off`/`static` route.
-`maps/boot_camp.bsp`, `maps/crossfire.bsp`,
-and `maps/stalkyard.bsp` are suggested user-owned checks; no game asset or
-screenshot belongs in the repository.
+inventory before and after all requested runs. Each cull mode executes in its
+own process for exactly two frames in the M4.4.1 proof. It requires exit code
+zero, world and scene upload counts of one, non-clear pixels, nonzero draw-call
+and triangle counts, exact reported cull mode, and `gl-error=none`. It also
+validates the camera leaf, PVS fallback, visible/total surfaces, brush counts,
+and unchanged external snapshots, then prints metadata only. `-CullModes`
+defaults to the M4.4.1 acceptance set `none,back`. A single mode remains
+available for a bounded focused diagnostic. The historical scene choices still
+default to `all`, `off`, and `static`.
+
+This OpenGL wrapper is optional and must run only on a host whose actual
+context supports OpenGL 3.3 Core or newer. An unavailable or older context is a
+graphical capability skip, not permission to skip the preceding CPU verifier.
+No game asset, extracted data, or screenshot belongs in the repository.
 
 ## Network-built preview
 

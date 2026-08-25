@@ -406,7 +406,8 @@ void configure_two_material_geometry(fixture::SyntheticBspBuilder& builder)
         fixture::SyntheticBspEdge{2U, 3U},
         fixture::SyntheticBspEdge{3U, 0U},
     };
-    constexpr std::array<std::int32_t, 6U> surfedges{1, 2, 3, 4, 5, 6};
+    constexpr std::array<std::int32_t, 6U> surfedges{
+        -3, -2, -1, -6, -5, -4};
     std::array faces{
         fixture::SyntheticBspFace{},
         fixture::SyntheticBspFace{},

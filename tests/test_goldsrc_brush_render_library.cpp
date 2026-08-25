@@ -120,12 +120,15 @@ void write_embedded_palettes(
 {
     fixture::SyntheticBspBuilder builder;
     constexpr auto vertices = fixture::synthetic_quad_vertices();
+    // Valve qbsp stores the raw face wire clockwise relative to the
+    // side-adjusted normal. The parser canonicalizes this 0-3-2-1 loop back
+    // to renderer-facing 0-1-2-3 order before brush publication.
     constexpr std::array edges{
         fixture::SyntheticBspEdge{0U, 0U},
-        fixture::SyntheticBspEdge{0U, 1U},
-        fixture::SyntheticBspEdge{1U, 2U},
-        fixture::SyntheticBspEdge{2U, 3U},
-        fixture::SyntheticBspEdge{3U, 0U},
+        fixture::SyntheticBspEdge{0U, 3U},
+        fixture::SyntheticBspEdge{3U, 2U},
+        fixture::SyntheticBspEdge{2U, 1U},
+        fixture::SyntheticBspEdge{1U, 0U},
     };
     constexpr std::array<std::int32_t, 4U> surfedges{1, 2, 3, 4};
 

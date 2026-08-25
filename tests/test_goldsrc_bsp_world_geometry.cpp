@@ -40,7 +40,8 @@ using Catch::Approx;
         fixture::SyntheticBspEdge{2U, 3U},
         fixture::SyntheticBspEdge{3U, 0U},
     };
-    constexpr std::array<std::int32_t, 6U> surfedges{1, 2, 3, 4, 5, 6};
+    constexpr std::array<std::int32_t, 6U> surfedges{
+        -3, -2, -1, -6, -5, -4};
     std::array faces{fixture::SyntheticBspFace{}, fixture::SyntheticBspFace{}};
     faces[0].surfedge_count = 3;
     faces[1].first_surfedge = 3;
@@ -78,7 +79,7 @@ using Catch::Approx;
         fixture::SyntheticBspEdge{3U, 0U},
     };
     constexpr std::array<std::int32_t, 8U> surfedges{
-        1, 2, 3, 4, 1, 2, 3, 4};
+        -4, -3, -2, -1, -4, -3, -2, -1};
     std::array faces{fixture::SyntheticBspFace{}, fixture::SyntheticBspFace{}};
     faces[0].surfedge_count = 4;
     faces[1].first_surfedge = 4;

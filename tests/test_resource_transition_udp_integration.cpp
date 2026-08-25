@@ -2839,7 +2839,8 @@ void configure_two_face_production_geometry(
         synthetic_bsp::SyntheticBspEdge{2U, 3U},
         synthetic_bsp::SyntheticBspEdge{3U, 0U},
     };
-    constexpr std::array<std::int32_t, 6U> surfedges{1, 2, 3, 4, 5, 6};
+    constexpr std::array<std::int32_t, 6U> surfedges{
+        -3, -2, -1, -6, -5, -4};
     std::array faces{
         synthetic_bsp::SyntheticBspFace{},
         synthetic_bsp::SyntheticBspFace{},
@@ -2916,7 +2917,8 @@ void configure_world_spatial_scene_geometry(
         synthetic_bsp::SyntheticBspEdge{2U, 3U},
         synthetic_bsp::SyntheticBspEdge{3U, 0U},
     };
-    constexpr std::array<std::int32_t, 6U> surfedges{1, 2, 3, 4, 5, 6};
+    constexpr std::array<std::int32_t, 6U> surfedges{
+        -3, -2, -1, -6, -5, -4};
     std::array faces{
         synthetic_bsp::SyntheticBspFace{},
         synthetic_bsp::SyntheticBspFace{},

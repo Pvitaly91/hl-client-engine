@@ -2325,6 +2325,14 @@ void log_world_render_package_trace(
 
     if (dispatched.state != hlclient::assets::AssetDispatchState::imported ||
         !dispatched.asset) {
+        if (dispatched.error &&
+            dispatched.error->context.find("; classification=") !=
+                std::string::npos) {
+            hlclient::core::log(
+                LogLevel::error,
+                "[world] face geometry error: " +
+                    dispatched.error->context);
+        }
         hlclient::core::log(
             LogLevel::error,
             "[world] CPU world geometry was not imported");
@@ -2356,7 +2364,19 @@ void log_world_render_package_trace(
         return 1;
     }
 
-    hlclient::core::log(LogLevel::info, "[world] GoldSrc BSP v30 imported");
+    hlclient::core::log(LogLevel::info, "[world] BSP geometry imported");
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] canonicalized-face-orientations=" +
+            std::to_string(
+                world->statistics.canonicalized_face_orientation_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "[world] winding-profile=" +
+            std::string{hlclient::goldsrc::bsp::to_string(
+                hlclient::goldsrc::bsp::
+                    GoldSrcFaceOrientationCompatibilityProfile::
+                        valve_qbsp_clockwise_wire_to_counter_clockwise_render)});
     hlclient::core::log(
         LogLevel::info,
         "[world] vertices=" + std::to_string(world->vertices.size()));

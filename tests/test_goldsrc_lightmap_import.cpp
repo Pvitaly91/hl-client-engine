@@ -319,6 +319,48 @@ TEST_CASE("GoldSrc lightmap import handles unlit and malformed metadata explicit
     }
 }
 
+TEST_CASE("Stock-sized wide lightmap faces use a bounded compatibility limit",
+    "[goldsrc-lightmap][import][stock-compatibility]")
+{
+    constexpr std::size_t stock_derived_sample_width = 177U;
+    constexpr std::size_t stock_derived_sample_height = 204U;
+    constexpr std::size_t stock_derived_sample_count =
+        stock_derived_sample_width * stock_derived_sample_height;
+    fixture::SurfaceDescription description;
+    description.maximum_s =
+        static_cast<float>((stock_derived_sample_width - 1U) * 16U);
+    description.maximum_t =
+        static_cast<float>((stock_derived_sample_height - 1U) * 16U);
+    const auto world = fixture::make_world(description);
+    const auto bsp = fixture::make_bsp_with_lighting(
+        fixture::sequential_rgb_samples(stock_derived_sample_count));
+
+    const auto imported =
+        lightmaps::GoldSrcWorldLightmapImporter::import(world, bsp);
+    INFO((imported.error ? imported.error->context : std::string{}));
+    REQUIRE(imported);
+    REQUIRE(imported.lightmap_set->binding_count() == 1U);
+    const auto& binding = imported.lightmap_set->bindings()[0U];
+    CHECK(binding.sample_width == stock_derived_sample_width);
+    CHECK(binding.sample_height == stock_derived_sample_height);
+    CHECK(imported.lightmap_set->statistics().total_source_sample_count ==
+        stock_derived_sample_count);
+
+    auto limits = lightmaps::GoldSrcWorldLightmapImportLimits{};
+    limits.maximum_samples_per_surface = stock_derived_sample_count;
+    REQUIRE(lightmaps::GoldSrcWorldLightmapImporter::import(
+        world, bsp, limits));
+    limits.maximum_samples_per_surface = stock_derived_sample_count - 1U;
+    const auto rejected =
+        lightmaps::GoldSrcWorldLightmapImporter::import(world, bsp, limits);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error);
+    CHECK(rejected.error->code == lightmaps::
+        GoldSrcWorldLightmapImportErrorCode::invalid_lightmap_extent);
+    CHECK(rejected.error->extent_code ==
+        lightmaps::GoldSrcLightmapExtentErrorCode::sample_limit_exceeded);
+}
+
 TEST_CASE("GoldSrc lightmap bytes are copied without gamma or exposure",
     "[goldsrc-lightmap][color]")
 {

@@ -27,7 +27,11 @@ param(
     [string]$BrushSubmodels = 'off',
 
     [ValidateSet('static', 'orbit', 'spawn')]
-    [string]$Camera = 'static'
+    [string]$Camera = 'static',
+
+    [ValidateCount(1, 2)]
+    [ValidateSet('none', 'back')]
+    [string[]]$CullModes = @('none', 'back')
 )
 
 Set-StrictMode -Version Latest
@@ -293,7 +297,8 @@ function Invoke-Viewer {
         [Parameter(Mandatory = $true)][int]$FrameCount,
         [Parameter(Mandatory = $true)][string]$VisibilityMode,
         [Parameter(Mandatory = $true)][string]$BrushMode,
-        [Parameter(Mandatory = $true)][string]$CameraMode
+        [Parameter(Mandatory = $true)][string]$CameraMode,
+        [Parameter(Mandatory = $true)][string]$CullMode
     )
 
     $savedFrameLimit = [Environment]::GetEnvironmentVariable(
@@ -306,7 +311,8 @@ function Invoke-Viewer {
             'Process')
         $output = @(& $Executable --basedir $Root --game $GameDirectory `
             --map $VirtualMap --camera $CameraMode `
-            --visibility $VisibilityMode --brush-submodels $BrushMode 2>&1 |
+            --visibility $VisibilityMode --brush-submodels $BrushMode `
+            --cull $CullMode 2>&1 |
             ForEach-Object { [string]$_ })
         if ($LASTEXITCODE -ne 0) {
             Throw-VerificationFailure
@@ -357,88 +363,131 @@ try {
         Throw-VerificationFailure
     }
 
+    [string[]]$cullModesToVerify = @($CullModes | ForEach-Object {
+        $_.ToLowerInvariant()
+    } | Select-Object -Unique)
+    if ($cullModesToVerify.Count -ne $CullModes.Count) {
+        Throw-VerificationFailure
+    }
+    [string]$expectedReportedVisibility = switch ($Visibility) {
+        'frustum' { 'frustum_only' }
+        'pvs' { 'pvs_only' }
+        'pvs-frustum' { 'pvs_and_frustum' }
+        default { 'all' }
+    }
+
     $inventoryBefore = Get-InventorySnapshot -Roots $roots
     $mapBefore = Get-FileSnapshot -Path $mapTarget
     $wadsBefore = Get-WadSnapshot -Roots $roots
 
-    [string[]]$output = @(Invoke-Viewer -Executable $viewer.FullName `
-        -Root $base -GameDirectory $Game -VirtualMap $Map `
-        -FrameCount $Frames -VisibilityMode $Visibility `
-        -BrushMode $BrushSubmodels -CameraMode $Camera)
+    $renderResults = [System.Collections.Generic.List[object]]::new()
+    foreach ($cullMode in $cullModesToVerify) {
+        [string[]]$output = @(Invoke-Viewer -Executable $viewer.FullName `
+            -Root $base -GameDirectory $Game -VirtualMap $Map `
+            -FrameCount $Frames -VisibilityMode $Visibility `
+            -BrushMode $BrushSubmodels -CameraMode $Camera `
+            -CullMode $cullMode)
 
-    $uploadCount = Get-ExactCounter -Output $output `
-        -Name 'world-upload-count'
-    $sceneUploadCount = Get-ExactCounter -Output $output `
-        -Name 'scene-upload-count'
-    $brushUploadCount = Get-ExactCounter -Output $output `
-        -Name 'brush-upload-count'
-    $visibilityUpdates = Get-ExactCounter -Output $output `
-        -Name 'visibility-updates'
-    $renderedFrames = Get-ExactCounter -Output $output `
-        -Name 'rendered-frames'
-    $drawCalls = Get-ExactCounter -Output $output -Name 'draw-calls'
-    $brushDrawCalls = Get-ExactCounter -Output $output `
-        -Name 'brush-draw-calls'
-    $renderedCommands = Get-ExactCounter -Output $output `
-        -Name 'rendered-commands'
-    $triangles = Get-ExactCounter -Output $output -Name 'triangles'
-    $geometrySurfaces = Get-ExactCounter -Output $output `
-        -Name 'geometry-surfaces'
-    $spatialNodes = Get-ExactCounter -Output $output -Name 'spatial-nodes'
-    $spatialLeaves = Get-ExactCounter -Output $output -Name 'spatial-leaves'
-    $brushModels = Get-ExactCounter -Output $output -Name 'brush-models'
-    $brushInstances = Get-ExactCounter -Output $output `
-        -Name 'brush-instances'
-    $brushSupported = Get-ExactCounter -Output $output `
-        -Name 'brush-supported'
-    $brushUnsupported = Get-ExactCounter -Output $output `
-        -Name 'brush-unsupported'
-    $visibleWorld = Get-ExactRatio -Output $output `
-        -Name 'visible-world-surfaces'
-    $visibleBrushes = Get-ExactRatio -Output $output `
-        -Name 'visible-brush-instances'
-    $reportedVisibility = Get-ExactText -Output $output `
-        -Name 'visibility-mode'
-    $appliedVisibility = Get-ExactText -Output $output `
-        -Name 'visibility-applied'
-    $cameraLeaf = Get-ExactText -Output $output -Name 'camera-leaf'
-    $pvsFallback = Get-ExactText -Output $output -Name 'pvs-fallback'
-    $pvsRowAvailable = Get-ExactCounter -Output $output `
-        -Name 'pvs-row-available'
-    $spawnCameraApplied = Get-ExactCounter -Output $output `
-        -Name 'spawn-camera-applied'
-    $networkOperations = Get-ExactCounter -Output $output `
-        -Name 'network-operations'
-    $writesPerformed = Get-ExactCounter -Output $output `
-        -Name 'writes-performed'
-    if ($uploadCount -ne 1U -or $sceneUploadCount -ne 1U -or
-        $visibilityUpdates -eq 0U -or
-        $renderedFrames -ne [uint64]$Frames -or
-        $drawCalls -eq 0U -or $renderedCommands -eq 0U -or
-        $triangles -eq 0U -or $geometrySurfaces -eq 0U -or
-        $spatialNodes -eq 0U -or $spatialLeaves -lt 2U -or
-        $visibleWorld.Visible -eq 0U -or
-        $visibleWorld.Total -ne $geometrySurfaces -or
-        $visibleBrushes.Total -ne $brushInstances -or
-        $visibleBrushes.Visible -gt $visibleBrushes.Total -or
-        $brushSupported + $brushUnsupported -ne $brushInstances -or
-        $reportedVisibility -cne $Visibility -or
-        [string]::IsNullOrWhiteSpace($appliedVisibility) -or
-        ($cameraLeaf -cne 'unavailable' -and
-            $cameraLeaf -notmatch '^[0-9]+$') -or
-        ($pvsRowAvailable -gt 1U) -or
-        (($Visibility -eq 'pvs' -or $Visibility -eq 'pvs-frustum') -and
-            $pvsRowAvailable -eq 0U -and $pvsFallback -ceq 'none') -or
-        ($BrushSubmodels -eq 'off' -and
-            ($brushModels -ne 0U -or $brushInstances -ne 0U -or
-                $brushUploadCount -ne 0U -or $brushDrawCalls -ne 0U)) -or
-        ($BrushSubmodels -eq 'static' -and $brushModels -gt 0U -and
-            $brushUploadCount -ne 1U) -or
-        ($BrushSubmodels -eq 'static' -and $brushSupported -gt 0U -and
-            ($visibleBrushes.Visible -eq 0U -or $brushDrawCalls -eq 0U)) -or
-        ($Camera -eq 'spawn' -and $spawnCameraApplied -ne 1U) -or
-        $networkOperations -ne 0U -or $writesPerformed -ne 0U) {
-        Throw-VerificationFailure
+        $uploadCount = Get-ExactCounter -Output $output `
+            -Name 'world-upload-count'
+        $sceneUploadCount = Get-ExactCounter -Output $output `
+            -Name 'scene-upload-count'
+        $brushUploadCount = Get-ExactCounter -Output $output `
+            -Name 'brush-upload-count'
+        $visibilityUpdates = Get-ExactCounter -Output $output `
+            -Name 'visibility-updates'
+        $renderedFrames = Get-ExactCounter -Output $output `
+            -Name 'rendered-frames'
+        $drawCalls = Get-ExactCounter -Output $output -Name 'draw-calls'
+        $brushDrawCalls = Get-ExactCounter -Output $output `
+            -Name 'brush-draw-calls'
+        $renderedCommands = Get-ExactCounter -Output $output `
+            -Name 'rendered-commands'
+        $triangles = Get-ExactCounter -Output $output -Name 'triangles'
+        $nonClearPixels = Get-ExactCounter -Output $output `
+            -Name 'non-clear-pixels'
+        $geometrySurfaces = Get-ExactCounter -Output $output `
+            -Name 'geometry-surfaces'
+        $spatialNodes = Get-ExactCounter -Output $output -Name 'spatial-nodes'
+        $spatialLeaves = Get-ExactCounter -Output $output -Name 'spatial-leaves'
+        $brushModels = Get-ExactCounter -Output $output -Name 'brush-models'
+        $brushInstances = Get-ExactCounter -Output $output `
+            -Name 'brush-instances'
+        $brushSupported = Get-ExactCounter -Output $output `
+            -Name 'brush-supported'
+        $brushUnsupported = Get-ExactCounter -Output $output `
+            -Name 'brush-unsupported'
+        $visibleWorld = Get-ExactRatio -Output $output `
+            -Name 'visible-world-surfaces'
+        $visibleBrushes = Get-ExactRatio -Output $output `
+            -Name 'visible-brush-instances'
+        $reportedVisibility = Get-ExactText -Output $output `
+            -Name 'visibility-mode'
+        $reportedCullMode = Get-ExactText -Output $output -Name 'cull-mode'
+        $appliedVisibility = Get-ExactText -Output $output `
+            -Name 'visibility-applied'
+        $cameraLeaf = Get-ExactText -Output $output -Name 'camera-leaf'
+        $pvsFallback = Get-ExactText -Output $output -Name 'pvs-fallback'
+        $pvsRowAvailable = Get-ExactCounter -Output $output `
+            -Name 'pvs-row-available'
+        $spawnCameraApplied = Get-ExactCounter -Output $output `
+            -Name 'spawn-camera-applied'
+        $glError = Get-ExactText -Output $output -Name 'gl-error'
+        $networkOperations = Get-ExactCounter -Output $output `
+            -Name 'network-operations'
+        $writesPerformed = Get-ExactCounter -Output $output `
+            -Name 'writes-performed'
+        if ($uploadCount -ne 1 -or $sceneUploadCount -ne 1 -or
+            $visibilityUpdates -eq 0 -or
+            $renderedFrames -ne [uint64]$Frames -or
+            $drawCalls -eq 0 -or $renderedCommands -eq 0 -or
+            $triangles -eq 0 -or $nonClearPixels -eq 0 -or
+            $geometrySurfaces -eq 0 -or $spatialNodes -eq 0 -or
+            $spatialLeaves -lt 2 -or $visibleWorld.Visible -eq 0 -or
+            $visibleWorld.Total -ne $geometrySurfaces -or
+            $visibleBrushes.Total -ne $brushInstances -or
+            $visibleBrushes.Visible -gt $visibleBrushes.Total -or
+            ($brushSupported + $brushUnsupported) -ne $brushInstances -or
+            $reportedVisibility -cne $expectedReportedVisibility -or
+            $reportedCullMode -cne $cullMode -or $glError -cne 'none' -or
+            [string]::IsNullOrWhiteSpace($appliedVisibility) -or
+            ($cameraLeaf -cne 'unavailable' -and
+                $cameraLeaf -notmatch '^[0-9]+$') -or
+            ($pvsRowAvailable -gt 1) -or
+            (($Visibility -eq 'pvs' -or $Visibility -eq 'pvs-frustum') -and
+                $pvsRowAvailable -eq 0 -and $pvsFallback -ceq 'none') -or
+            ($BrushSubmodels -eq 'off' -and
+                ($brushModels -ne 0 -or $brushInstances -ne 0 -or
+                    $brushUploadCount -ne 0 -or $brushDrawCalls -ne 0)) -or
+            ($BrushSubmodels -eq 'static' -and $brushModels -gt 0 -and
+                $brushUploadCount -ne 1) -or
+            ($BrushSubmodels -eq 'static' -and $brushSupported -gt 0 -and
+                ($visibleBrushes.Visible -eq 0 -or
+                    $brushDrawCalls -eq 0)) -or
+            ($Camera -eq 'spawn' -and $spawnCameraApplied -ne 1) -or
+            $networkOperations -ne 0 -or $writesPerformed -ne 0) {
+            Throw-VerificationFailure
+        }
+
+        $renderResults.Add([pscustomobject]@{
+            CullMode = $cullMode
+            WorldUploadCount = $uploadCount
+            SceneUploadCount = $sceneUploadCount
+            RenderedFrames = $renderedFrames
+            DrawCalls = $drawCalls
+            BrushDrawCalls = $brushDrawCalls
+            Triangles = $triangles
+            NonClearPixels = $nonClearPixels
+            CameraLeaf = $cameraLeaf
+            PvsRowAvailable = $pvsRowAvailable
+            PvsFallback = $pvsFallback
+            VisibleWorld = $visibleWorld
+            BrushModels = $brushModels
+            BrushInstances = $brushInstances
+            BrushSupported = $brushSupported
+            BrushUnsupported = $brushUnsupported
+            GlError = $glError
+        })
     }
 
     $inventoryAfter = Get-InventorySnapshot -Roots $roots
@@ -453,20 +502,47 @@ try {
         Throw-VerificationFailure
     }
 
+    $legacyResult = $renderResults[0]
     Write-Output 'manual-world-render-verification=passed'
-    Write-Output ('rendered-frames=' + $renderedFrames)
-    Write-Output ('draw-calls=' + $drawCalls)
-    Write-Output ('brush-draw-calls=' + $brushDrawCalls)
-    Write-Output ('triangles=' + $triangles)
-    Write-Output ('camera-leaf=' + $cameraLeaf)
-    Write-Output ('pvs-row-available=' + $pvsRowAvailable)
-    Write-Output ('pvs-fallback=' + $pvsFallback)
-    Write-Output ('visible-world-surfaces=' + $visibleWorld.Visible + '/' +
-        $visibleWorld.Total)
-    Write-Output ('brush-models=' + $brushModels)
-    Write-Output ('brush-instances=' + $brushInstances)
-    Write-Output ('brush-supported=' + $brushSupported)
-    Write-Output ('brush-unsupported=' + $brushUnsupported)
+    Write-Output ('cull-modes-verified=' +
+        (($renderResults | ForEach-Object { $_.CullMode }) -join ','))
+    Write-Output ('cull-mode-runs=' + $renderResults.Count)
+    foreach ($renderResult in $renderResults) {
+        $prefix = 'cull-' + $renderResult.CullMode
+        Write-Output ($prefix + '-world-upload-count=' +
+            $renderResult.WorldUploadCount)
+        Write-Output ($prefix + '-scene-upload-count=' +
+            $renderResult.SceneUploadCount)
+        Write-Output ($prefix + '-rendered-frames=' +
+            $renderResult.RenderedFrames)
+        Write-Output ($prefix + '-draw-calls=' + $renderResult.DrawCalls)
+        Write-Output ($prefix + '-brush-draw-calls=' +
+            $renderResult.BrushDrawCalls)
+        Write-Output ($prefix + '-triangles=' + $renderResult.Triangles)
+        Write-Output ($prefix + '-non-clear-pixels=' +
+            $renderResult.NonClearPixels)
+        Write-Output ($prefix + '-gl-error=' + $renderResult.GlError)
+    }
+    # Retain the original single-run summary keys for existing callers. They
+    # describe the first requested cull mode; the prefixed rows prove every
+    # requested bounded run independently.
+    Write-Output ('cull-mode=' + $legacyResult.CullMode)
+    Write-Output ('rendered-frames=' + $legacyResult.RenderedFrames)
+    Write-Output ('draw-calls=' + $legacyResult.DrawCalls)
+    Write-Output ('brush-draw-calls=' + $legacyResult.BrushDrawCalls)
+    Write-Output ('triangles=' + $legacyResult.Triangles)
+    Write-Output ('non-clear-pixels=' + $legacyResult.NonClearPixels)
+    Write-Output ('gl-error=' + $legacyResult.GlError)
+    Write-Output ('camera-leaf=' + $legacyResult.CameraLeaf)
+    Write-Output ('pvs-row-available=' + $legacyResult.PvsRowAvailable)
+    Write-Output ('pvs-fallback=' + $legacyResult.PvsFallback)
+    Write-Output ('visible-world-surfaces=' +
+        $legacyResult.VisibleWorld.Visible + '/' +
+        $legacyResult.VisibleWorld.Total)
+    Write-Output ('brush-models=' + $legacyResult.BrushModels)
+    Write-Output ('brush-instances=' + $legacyResult.BrushInstances)
+    Write-Output ('brush-supported=' + $legacyResult.BrushSupported)
+    Write-Output ('brush-unsupported=' + $legacyResult.BrushUnsupported)
     Write-Output ('wad-files-snapshotted=' + $wadsBefore.Count)
     Write-Output 'network-operations=0'
     Write-Output 'writes-performed=0'

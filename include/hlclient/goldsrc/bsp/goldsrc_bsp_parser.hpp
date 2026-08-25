@@ -2,6 +2,7 @@
 
 #include <hlclient/assets/asset_types.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_format.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_face_geometry_builder.hpp>
 #include <hlclient/goldsrc/spatial/goldsrc_spatial_package_builder.hpp>
 
 #include <array>
@@ -98,10 +99,10 @@ struct GoldSrcBspError {
     std::size_t byte_offset{0U};
     std::optional<std::size_t> element_index;
     std::string context;
-    // Present only when canonical geometry materialization failed for a
-    // brush submodel (models[1..N]). Structural BSP and world-model failures
-    // remain untagged so callers can preserve their package boundary.
+    // Present for every face-geometry materialization failure, including
+    // model zero. Non-geometry structural failures remain untagged.
     std::optional<std::uint32_t> source_model_index;
+    std::optional<GoldSrcFaceGeometryDiagnostic> face_geometry_diagnostic;
 };
 
 // Owning handoff of the one canonical BSP validation/decode pass.  Spatial
@@ -132,6 +133,31 @@ struct GoldSrcBspBrushSubmodelAsset {
     assets::WorldAsset geometry;
 };
 
+// Sanitized aggregate-only geometry evidence. It intentionally retains no
+// face-local arrays, source names, entity values, or filesystem information.
+struct GoldSrcBspGeometryStatistics {
+    std::uint64_t source_model_count{0U};
+    std::uint64_t world_face_count{0U};
+    std::uint64_t brush_face_count{0U};
+    std::uint64_t side_zero_face_count{0U};
+    std::uint64_t side_one_face_count{0U};
+    std::uint64_t positive_surfedge_count{0U};
+    std::uint64_t negative_surfedge_count{0U};
+    std::uint64_t faces_with_negative_surfedges{0U};
+    std::uint64_t faces_with_mixed_surfedge_signs{0U};
+    std::uint64_t negative_wire_area_dot_count{0U};
+    std::uint64_t positive_wire_area_dot_count{0U};
+    std::uint64_t ambiguous_wire_area_dot_count{0U};
+    std::uint64_t already_canonical_face_count{0U};
+    std::uint64_t canonicalized_face_count{0U};
+    std::uint64_t collinear_canonicalized_face_count{0U};
+    std::uint64_t removed_collinear_corner_count{0U};
+    std::uint64_t rejected_ambiguous_face_count{0U};
+    std::uint64_t brush_canonicalized_face_count{0U};
+    double minimum_accepted_winding_margin{0.0};
+    double maximum_planarity_deviation{0.0};
+};
+
 struct GoldSrcBspParsedDocument {
     assets::WorldAsset world_asset;
     GoldSrcBspSpatialSource spatial_source;
@@ -140,6 +166,7 @@ struct GoldSrcBspParsedDocument {
     // Fixed-record lumps report record counts. Variable byte lumps report byte
     // counts, while the texture lump reports its directory entry count.
     std::array<std::size_t, kGoldSrcBspLumpCount> lump_element_counts{};
+    GoldSrcBspGeometryStatistics geometry_statistics{};
 };
 
 struct GoldSrcBspParseResult {

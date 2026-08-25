@@ -134,6 +134,12 @@ struct WorldGeometryStatistics {
     std::uint64_t missing_texture_reference_count{0U};
     std::uint64_t external_texture_reference_count{0U};
     std::uint64_t embedded_texture_reference_count{0U};
+    std::uint64_t already_canonical_face_orientation_count{0U};
+    std::uint64_t canonicalized_face_orientation_count{0U};
+    std::uint64_t rejected_ambiguous_face_orientation_count{0U};
+    std::uint64_t removed_collinear_corner_count{0U};
+    double minimum_accepted_winding_margin{0.0};
+    std::uint64_t brush_canonicalized_face_orientation_count{0U};
 };
 
 struct WorldAsset {

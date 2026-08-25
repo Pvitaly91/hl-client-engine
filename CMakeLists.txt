@@ -179,11 +179,13 @@ set_property(
 hlclient_add_library(
     hlclient_goldsrc_bsp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_format.hpp
+    include/hlclient/goldsrc/bsp/goldsrc_face_geometry_builder.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_texture_source_parser.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp
     include/hlclient/goldsrc/bsp/goldsrc_entity_document.hpp
     include/hlclient/goldsrc/bsp/goldsrc_worldspawn_wad_references.hpp
+    src/goldsrc/bsp/goldsrc_face_geometry_builder.cpp
     src/goldsrc/bsp/goldsrc_bsp_parser.cpp
     src/goldsrc/bsp/goldsrc_bsp_texture_source_parser.cpp
     src/goldsrc/bsp/goldsrc_bsp_world_importer.cpp
@@ -841,6 +843,25 @@ set_property(
     TARGET hlclient_world_texture_check PROPERTY FOLDER "Tools/Resources")
 
 add_executable(
+    hlclient_bsp_compat_check
+    apps/hlclient_bsp_compat_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_bsp_compat_check)
+target_link_libraries(
+    hlclient_bsp_compat_check
+    PRIVATE
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_brush_models
+        hlclient::goldsrc_world_texture_import
+        hlclient::goldsrc_lightmaps
+        hlclient::world_render_package
+        hlclient::local_asset_source
+        hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_bsp_compat_check PROPERTY FOLDER "Tools/Assets")
+
+add_executable(
     hlclient_world_viewer
     apps/hlclient_world_viewer/main.cpp
 )
@@ -858,6 +879,7 @@ target_link_libraries(
         hlclient::local_resources
         hlclient::platform
         hlclient::renderer_opengl
+        hlclient::glad
 )
 set_property(TARGET hlclient_world_viewer PROPERTY FOLDER "Tools/World")
 set_target_properties(

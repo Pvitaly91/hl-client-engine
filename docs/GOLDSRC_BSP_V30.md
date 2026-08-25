@@ -7,11 +7,13 @@ M4.4 extension keeps that one wire parser and publishes owning canonical
 plane/node/leaf/marksurface/visibility records, entity-lump bytes, and one
 neutral geometry asset for each render submodel in `models[1..N]`. Spatial,
 entity, and renderer-neutral scene builders consume those validated records;
-they do not implement a second BSP layout decoder. The
-implementation uses the pinned public Half-Life SDK only to
-cross-check published constants and field meanings. Project code decodes every
-field from bounded bytes; it does not include, cast to, or copy SDK wire
-structures.
+they do not implement a second BSP layout decoder. M4.4.1 formalizes the shared
+world/submodel face materializer as `GoldSrcFaceGeometryBuilder` and converts
+the evidenced Valve qbsp wire convention into one canonical renderer-facing
+winding. The implementation uses the pinned public Half-Life SDK only to
+cross-check published constants, field meanings, and compiler conventions.
+Project code decodes every field from bounded bytes; it does not include, cast
+to, or copy SDK wire structures.
 
 ## Wire grammar
 
@@ -120,6 +122,79 @@ bounded byte offset, optional element index, and bounded context. Errors never
 contain source bytes, entity text, texture names, or native paths. No partial
 `WorldAsset` is published.
 
+## M4.4.1 face orientation profile
+
+The pinned Valve sources establish four related facts. A positive surfedge
+traverses `edge.v[0] -> edge.v[1]`, while a negative surfedge traverses
+`edge.v[1] -> edge.v[0]`; consecutive directed edges must form one closed
+loop. Qbsp stores `face.planenum & ~1` plus `face.side = face.planenum & 1`, so
+side 0 uses plane normal/distance `(N, d)` and side 1 uses `(-N, -d)`. Valve's
+winding helpers use `cross(p2 - p0, p1 - p0)`, making an emitted qbsp wire
+clockwise under the renderer's standard cross-product convention. Changing to
+the opposite plane side is accompanied by an explicit compiler winding
+reversal. Exact public source paths and line references are recorded in
+[GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md).
+
+The only supported profile is
+`valve_qbsp_clockwise_wire_to_counter_clockwise_render`. It requires the raw
+wire area to point strictly opposite the side-adjusted face normal. After the
+bounded collinear rule below, it preserves the first retained source corner
+and reverses the tail:
+
+```text
+[q0, q1, ..., q(n-1)] -> [q0, q(n-1), ..., q1]
+```
+
+This is a format conversion, not an `accept_reversed_faces` fallback. A raw
+counter-clockwise loop, an ambiguous near-zero loop, or a canonical output
+triangle that does not point strictly with the emitted normal fails typed.
+
+Polygon orientation uses a centroid-rebased double-precision area vector, not
+the first three corners:
+
+```text
+c = sum(p[i]) / N
+A = sum(cross(p[i] - c, p[(i + 1) % N] - c))
+signed_area = dot(A, side_adjusted_normal)
+
+polygon_extent = max(axis-aligned polygon spans)
+polygon_area_tolerance = clamp(
+    64 * DBL_EPSILON * max(1, polygon_extent * polygon_extent),
+    1e-12, 1e-4)
+
+triangle_extent = max(axis-aligned spans of the current triangle)
+triangle_winding_tolerance = clamp(
+    64 * DBL_EPSILON * max(1, triangle_extent * triangle_extent),
+    1e-12, 1e-4)
+```
+
+The raw/cleaned/canonical whole-loop checks use the polygon tolerance; local
+turn and emitted fan-triangle checks use the independently evaluated triangle
+tolerance. Planarity remains a separate fixed `0.02` source-unit check. Qbsp's normal
+T-junction pass can insert valid intermediate points on a straight face edge.
+For source-float precision the bounded cleanup uses:
+
+```text
+distance_tolerance = clamp(
+    32 * FLT_EPSILON * max(1, maximum_absolute_coordinate),
+    32 * FLT_EPSILON,
+    0.01)
+```
+
+A middle point is removable only when its line distance is within that
+tolerance, its two normalized edge directions have dot at least `0.99`, and
+its projection lies strictly inside the surrounding segment by a
+`distance_tolerance / segment_length` endpoint margin. Passes are bounded by
+the original corner count, retain at least three corners, preserve the wire's
+orientation, and never merge arbitrary duplicate or cross-face vertices.
+
+Invalid side/plane/edge references, edge zero, `INT32_MIN`, broken adjacency,
+open or repeated-vertex loops, non-finite or nonplanar geometry, concavity,
+self-intersection, zero/ambiguous area, unsupported raw orientation, and a
+failed or over-limit collinear conversion remain strict transactional errors.
+The same builder and profile are used for model 0 and every materialized brush
+model; no renderer, texture, lightmap, or visibility layer repairs geometry.
+
 ## Importer and composition
 
 `GoldSrcBspWorldImporter` implements the neutral `IWorldImporter` contract. Its
@@ -161,3 +236,12 @@ Brush models reuse the exact face reconstruction code used for model zero;
 their local geometry remains separate from entity instances and transforms.
 The parser does not infer doors, platforms, movement, triggers, or gameplay
 state. See [GoldSrc brush submodels](GOLDSRC_BRUSH_SUBMODELS.md).
+
+The offline `hlclient_bsp_compat_check` accepts only a safe virtual
+`maps/*.bsp` name under an explicit user-owned environment.
+`scripts/verify_stock_bsp_geometry_compatibility.ps1` runs every selected map
+twice through the CPU spatial-scene boundary, requires identical summaries,
+snapshots selected-map and relevant-WAD metadata plus the approved-root
+inventory, and fails on any drift. Tracked evidence contains aggregate metadata
+only; maps, WADs, raw face arrays, native paths, texture names, and entity text
+are never published or committed.

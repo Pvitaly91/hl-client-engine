@@ -77,9 +77,9 @@ TEST_CASE("Negative and mixed surfedge signs obey the oriented-edge rule",
     {
         constexpr std::array edges{
             fixture::SyntheticBspEdge{0U, 0U},
-            fixture::SyntheticBspEdge{1U, 0U},
-            fixture::SyntheticBspEdge{2U, 1U},
-            fixture::SyntheticBspEdge{0U, 2U},
+            fixture::SyntheticBspEdge{2U, 0U},
+            fixture::SyntheticBspEdge{1U, 2U},
+            fixture::SyntheticBspEdge{0U, 1U},
         };
         constexpr std::array<std::int32_t, 3U> surfedges{-1, -2, -3};
         const auto result = parse_loop(vertices, edges, surfedges);
@@ -95,9 +95,9 @@ TEST_CASE("Negative and mixed surfedge signs obey the oriented-edge rule",
     {
         constexpr std::array edges{
             fixture::SyntheticBspEdge{0U, 0U},
-            fixture::SyntheticBspEdge{0U, 1U},
-            fixture::SyntheticBspEdge{2U, 1U},
-            fixture::SyntheticBspEdge{2U, 0U},
+            fixture::SyntheticBspEdge{0U, 2U},
+            fixture::SyntheticBspEdge{1U, 2U},
+            fixture::SyntheticBspEdge{1U, 0U},
         };
         constexpr std::array<std::int32_t, 3U> surfedges{1, -2, 3};
         const auto result = parse_loop(vertices, edges, surfedges);

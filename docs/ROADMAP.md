@@ -749,9 +749,11 @@ fallback. Exact per-source-surface ranges feed a stable renderer-neutral draw
 list. Immutable scene-resource identity and per-frame visibility revisions are
 separate, so camera/PVS changes do not re-upload geometry or textures.
 
-BSP models 1..N reuse the M4.1 face builder. A bounded inert quoted entity
-document interprets only brush-reference and initial transform/render metadata.
-The supported qcsg profile uses entity-origin-relative geometry and Valve
+BSP models 1..N use the same face path as model zero. M4.4.1 below supersedes
+the earlier synthetic-only orientation assumption with the evidence-backed
+shared builder. A bounded inert quoted entity document interprets only
+brush-reference and initial transform/render metadata. The supported qcsg
+profile uses entity-origin-relative geometry and Valve
 `(YAW * PITCH) * ROLL` initial transforms; nonzero source-model origins and
 nonzero rendermodes remain typed unsupported outcomes. The existing texture,
 WAD3, lightmap, atlas, and material code builds one aggregate immutable brush
@@ -765,12 +767,51 @@ full-world path. No doors, platforms, rotation updates, think/use/touch,
 snapshots, interpolation, gameplay input, translucent rendering, or other
 runtime entity behavior is introduced.
 
-### M4.5 — Runtime entities and models
+### M4.4.1 — Stock BSP geometry compatibility
 
-**Status: planned.**
+**Status: completed.**
 
-Apply validated runtime entity/model state only after the M4.4 visibility and
-brush-submodel boundary is complete. M4.4 does not begin this runtime work.
+Pinned public Valve compiler evidence establishes the exact face convention:
+positive surfedges traverse `edge.v[0] -> edge.v[1]`, negative surfedges
+traverse `edge.v[1] -> edge.v[0]`, side 1 negates the selected plane, and the
+closed qbsp wire is clockwise relative to that side-adjusted normal. The named
+`valve_qbsp_clockwise_wire_to_counter_clockwise_render` profile rejects every
+other raw sign and converts valid wires to one canonical counter-clockwise
+renderer order while preserving the first retained source corner.
+
+One shared `GoldSrcFaceGeometryBuilder` now owns reconstruction for model zero
+and models 1..N. It computes a centroid-rebased double area vector, uses the
+bounded area margin
+`clamp(64 * DBL_EPSILON * max(1, extent^2), 1e-12, 1e-4)`, and retains the
+separate `0.02` source-unit planarity limit. Valve qbsp's valid intermediate
+T-junction corners use a bounded strictly-interior cleanup: distance tolerance
+is `clamp(32 * FLT_EPSILON * max(1, max_abs_coordinate),
+32 * FLT_EPSILON, 0.01)`, direction dot is at least `0.99`, and the projection
+must clear both scaled endpoint margins. Cleanup cannot exceed the original
+corner count or leave fewer than three corners.
+
+Broken/open loops, invalid references or sides, duplicate vertices,
+nonplanarity, zero/ambiguous area, unsupported raw orientation, concavity,
+self-intersection, and invalid canonical triangles remain typed transactional
+failures. No renderer-side cull inversion, shader-normal flip, absolute winding
+test, map special case, or permissive runtime toggle was added.
+
+The network-free stock checker and viewer wrappers reuse the production
+resolver/parser/texture/lightmap/spatial/brush/package paths for explicit safe
+virtual names under a user-owned root. They perform no writes, compare
+before/after file metadata and inventories, and publish only bounded aggregate
+results. Required read-only stock-map and capable-host preview acceptance is
+tracked without committing maps, WADs, raw geometry, native paths, texture
+names, or entity text. See
+[GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md).
+
+### M4.5 — Runtime server entities, studio/sprite rendering and interpolation
+
+**Status: next.**
+
+Apply validated runtime entity/model state only after the M4.4 visibility,
+brush-submodel, and M4.4.1 stock-geometry boundaries are complete. Neither
+completed milestone begins this runtime work.
 
 ## M5 — Entity snapshots
 

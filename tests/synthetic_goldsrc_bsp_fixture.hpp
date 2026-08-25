@@ -36,10 +36,10 @@ inline constexpr std::size_t kSyntheticBspLumpCount = 15U;
 inline constexpr std::size_t kSyntheticBspHeaderSize = 124U;
 
 // Independent, literal GoldSrc BSP v30 fixture. It contains a single 64x64
-// counter-clockwise quad on the Z=0 plane, one external texture reference,
+// Valve-clockwise wire quad on the Z=0 plane, one external texture reference,
 // one world model, and the minimal node/leaf/marksurface structure used by the
-// supported profile. This byte string is deliberately not produced by the
-// test-only builder below.
+// supported profile. Canonical import output is counter-clockwise. This byte
+// string is deliberately not produced by the test-only builder below.
 inline constexpr char kLiteralMinimalGoldSrcBspV30[] =
     "\x1e\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x7c\x00\x00\x00"
     "\x14\x00\x00\x00\x90\x00\x00\x00\x30\x00\x00\x00\xc0\x00\x00\x00"
@@ -66,8 +66,8 @@ inline constexpr char kLiteralMinimalGoldSrcBspV30[] =
     "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x41\x00"
     "\x41\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     "\x00\x00\x00\x00\x01\x00\x01\x00\x02\x00\x02\x00\x03\x00\x03\x00"
-    "\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\x04\x00"
-    "\x00\x00\x00\x00\x80\xbf\x00\x00\x80\xbf\x00\x00\x80\xbf\x00\x00"
+    "\x00\x00\xfc\xff\xff\xff\xfd\xff\xff\xff\xfe\xff\xff\xff\xff\xff"
+    "\xff\xff\x00\x00\x80\xbf\x00\x00\x80\xbf\x00\x00\x80\xbf\x00\x00"
     "\x82\x42\x00\x00\x82\x42\x00\x00\x80\x3f\x00\x00\x00\x00\x00\x00"
     "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff"
     "\xff\xff\xff\xff\xff\xff\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00"
@@ -554,12 +554,22 @@ public:
     {
         set_vertices(vertices);
 
+        // Callers provide renderer-canonical CCW positions. Valve qbsp wire
+        // loops use the opposite direction; retain corner zero so the parser's
+        // canonical conversion keeps historical output ordering byte-stable.
+        std::vector<std::uint16_t> wire_order;
+        wire_order.reserve(vertices.size());
+        wire_order.push_back(0U);
+        for (std::size_t index = vertices.size(); index > 1U; --index) {
+            wire_order.push_back(static_cast<std::uint16_t>(index - 1U));
+        }
+
         std::vector<SyntheticBspEdge> edges;
         edges.reserve(vertices.size() + 1U);
         edges.push_back({0U, 0U});
         for (std::size_t index = 0U; index < vertices.size(); ++index) {
-            edges.push_back({static_cast<std::uint16_t>(index),
-                static_cast<std::uint16_t>((index + 1U) % vertices.size())});
+            edges.push_back({wire_order[index],
+                wire_order[(index + 1U) % wire_order.size()]});
         }
         set_edges(edges);
 

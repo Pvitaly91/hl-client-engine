@@ -18,6 +18,11 @@ inline constexpr double kGoldSrcLightmapCoordinateTolerance = 1.0e-5;
 inline constexpr std::size_t kGoldSrcLightmapHardMaximumSurfaceCount = 65'535U;
 inline constexpr std::size_t kGoldSrcLightmapHardMaximumSamplesPerSurface =
     1'048'576U;
+// Stock Valve BSP evidence includes a 177 x 204 (36,108 sample) face.
+// Keep the default bounded at one 256 x 256 sample rectangle while retaining
+// the independent hard ceiling for explicitly configured tools.
+inline constexpr std::size_t kGoldSrcLightmapDefaultMaximumSamplesPerSurface =
+    65'536U;
 inline constexpr std::uint32_t kGoldSrcLightmapHardMaximumAtlasDimension = 4'096U;
 inline constexpr std::size_t kGoldSrcLightmapHardMaximumAtlasPages = 64U;
 inline constexpr std::size_t kGoldSrcLightmapHardMaximumTotalAtlasRgbaBytes =
@@ -25,7 +30,8 @@ inline constexpr std::size_t kGoldSrcLightmapHardMaximumTotalAtlasRgbaBytes =
 
 struct GoldSrcWorldLightmapImportLimits {
     std::size_t maximum_surface_count{65'535U};
-    std::size_t maximum_samples_per_surface{16'384U};
+    std::size_t maximum_samples_per_surface{
+        kGoldSrcLightmapDefaultMaximumSamplesPerSurface};
     std::size_t maximum_total_source_samples{16'777'216U};
     std::uint32_t atlas_width{1'024U};
     std::uint32_t maximum_atlas_dimension{2'048U};
@@ -82,7 +88,8 @@ struct GoldSrcLightmapExtentResult {
 [[nodiscard]] GoldSrcLightmapExtentResult calculate_goldsrc_lightmap_extents(
     const assets::WorldAsset& world,
     const assets::WorldSurface& surface,
-    std::size_t maximum_samples_per_surface = 16'384U) noexcept;
+    std::size_t maximum_samples_per_surface =
+        kGoldSrcLightmapDefaultMaximumSamplesPerSurface) noexcept;
 
 enum class GoldSrcWorldLightmapImportErrorCode {
     invalid_configuration,

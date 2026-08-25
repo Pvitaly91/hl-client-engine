@@ -135,10 +135,18 @@ file handle, SDL object, or OpenGL resource.
 Renderable statuses are `resolved` and `unlit_no_lightmap`. The remaining
 typed statuses identify invalid metadata, out-of-range source data, atlas
 limits, or an unsupported style profile. Fatal input produces no final set.
-Defaults bound 65,535 surfaces, 16,384 samples per surface, 16 atlas pages, a
+Defaults bound 65,535 surfaces, 65,536 samples per surface, 16 atlas pages, a
 2048 maximum atlas dimension, and 256 MiB of atlas RGBA data. The importer also
 bounds aggregate source samples and performs checked arithmetic before every
 allocation and byte-range operation.
+
+The per-surface default is the bounded stock-compatibility profile for one
+256 x 256 sample rectangle. Read-only evidence included a 177 x 204 face,
+which requires 36,108 source samples and therefore exceeds the historical
+16,384-sample default. The 65,536 limit admits that independently reproduced
+structural case without changing the separate 1,048,576 hard ceiling, atlas
+dimension/page limits, aggregate-source-sample bound, or exact checked range
+validation.
 
 M4.3 does not implement gamma/overbright correction, dynamic light styles,
 dynamic lights, PVS, brush entities, animated textures, water, sky, fog, or

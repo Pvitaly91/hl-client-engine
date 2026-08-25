@@ -9,8 +9,37 @@ snapshots, or any other gameplay behavior.
 
 Model zero and brush submodels use one parameterized face reconstruction path:
 the same validated planes, vertices, edges, surfedges, faces, texinfo,
-materials, winding checks, and fan triangulation. Every model face range must
-be exact and every supported submodel must build transactionally.
+materials, winding checks, and fan triangulation. M4.4.1 names that path
+`GoldSrcFaceGeometryBuilder`; there is no brush-only orientation branch. Every
+model face range must be exact and every supported submodel must build
+transactionally.
+
+The pinned Valve qbsp convention is explicit. A positive surfedge traverses
+`edge.v[0] -> edge.v[1]`, a negative one traverses
+`edge.v[1] -> edge.v[0]`, and `face.side == 1` negates the selected plane
+normal. The closed raw wire is clockwise relative to that side-adjusted normal.
+The shared `valve_qbsp_clockwise_wire_to_counter_clockwise_render` profile
+requires that negative area-normal relation, preserves the first retained
+source corner, and reverses the remaining corners to publish canonical
+counter-clockwise triangles. Surfedge sign and model index never select a
+different rule.
+
+The builder computes a centroid-rebased double area vector and uses
+`clamp(64 * DBL_EPSILON * max(1, extent^2), 1e-12, 1e-4)` for its area margin.
+Planarity remains fixed at `0.02` source units. Compiler-inserted T-junction
+corners may be removed only by the bounded strictly-interior collinear gate:
+distance uses
+`clamp(32 * FLT_EPSILON * max(1, max_abs_coordinate),
+32 * FLT_EPSILON, 0.01)`, adjacent normalized directions must have dot at least
+`0.99`, and the projected point must be inside both tolerance-scaled endpoint
+margins. No duplicate, off-segment, nonplanar, concave, self-intersecting,
+ambiguous, or oppositely encoded face is repaired.
+
+Thus brush normals, raw S/T values, bounds, lightmap extents, and triangle
+indices all derive from the same canonical candidate as model zero. OpenGL
+receives the canonical result and does not invert front-face state, culling, or
+shader normals. See
+[GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md).
 
 The supported `BrushSubmodelCoordinateProfile` follows the pinned Valve qcsg
 origin-brush path: qcsg records the entity origin and subtracts it from brush

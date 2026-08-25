@@ -116,8 +116,13 @@ PVS/frustum resolution publishes only indices, commands, bounded statistics,
 and a visibility revision; it does not alter scene resource identity or return
 to parser/network/filesystem layers. The inert entity document is parsed at
 most once for requested brush/spawn metadata and is not retained by the scene.
-No post-manifest semantic packet or runtime entity behavior is added. The
-sign-on target still sees only the path-free provider API.
+M4.4.1 corrects the earlier synthetic-only geometry assumption inside the BSP
+CPU boundary: one `GoldSrcFaceGeometryBuilder` now validates the evidenced
+Valve qbsp clockwise wire, performs bounded collinear T-junction cleanup, and
+publishes canonical counter-clockwise faces for both world and brush models.
+No texture, lightmap, scene, visibility, or renderer component has an alternate
+winding path. No post-manifest semantic packet or runtime entity behavior is
+added. The sign-on target still sees only the path-free provider API.
 Custom/player-resource
 grammar, server-info second-client slot evidence, snapshots, movement
 application, and commands remain future increments behind the same boundaries.
@@ -145,7 +150,7 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_local_asset_source` | incremental exact-root locator reopen, bounded same-handle read, exact EOF and final-snapshot validation, owning `AssetSource` publication | GoldSrc types, importer selection, path fallback, renderer, network |
 | `hlclient_asset_dispatch` | pointer-free pure importer probes, deterministic typed/cross-category selection, and owning imported-asset result | filesystem, GoldSrc protocol, network, renderer, OpenGL |
 | `hlclient_goldsrc_indexed_texture` | shared strict miptex grammar, four indexed mip/palette ranges, incremental RGBA8 conversion, masked-index-255 alpha, and neutral texture assets | BSP/WAD container parsing, filesystem, network, SDL, OpenGL, renderer/GPU work |
-| `hlclient_goldsrc_bsp` | strict BSP v30 byte grammar, structural validation, shared world/submodel face reconstruction, exact texture ordinals, owning spatial-source records/entity bytes, used physical texture-source ranges, canonical inert entity parsing, and owning CPU assets | filesystem/local-resource APIs, WAD opening/catalogs, network/sign-on, `AssetManager`, SDL, OpenGL, renderer/GPU work |
+| `hlclient_goldsrc_bsp` | strict BSP v30 byte grammar, structural validation, shared world/submodel `GoldSrcFaceGeometryBuilder`, evidenced qbsp-clockwise to renderer-counter-clockwise conversion, bounded collinear compatibility and diagnostics, exact texture ordinals, owning spatial-source records/entity bytes, used physical texture-source ranges, canonical inert entity parsing, and owning CPU assets | filesystem/local-resource APIs, WAD opening/catalogs, network/sign-on, `AssetManager`, SDL, OpenGL, renderer/GPU work |
 | `hlclient_goldsrc_wad3` | strict bounded WAD3 header/directory catalog, uncompressed type-`0x43` lookup, normalized duplicate rejection, and shared miptex adapter | filesystem/local-resource resolution, compiler-path interpretation, network, SDL, OpenGL, renderer/GPU work |
 | `hlclient_goldsrc_asset_dispatch` | evidence-derived resource role/plan, approved source facade, selected-world manifest continuation, and same-session terminal dispatch state | format parsing, download/cache, renderer/GPU work, extra network messages |
 | `hlclient_goldsrc_world_texture_import` | network-free retained-BSP texture resolution, sandboxed declared-WAD source opening, incremental decode, exact material bindings, and immutable complete/incomplete texture sets | sign-on/stage state, sockets, downloads/cache, entity instantiation, lightmaps, texture effects/animation, `AssetManager`, SDL, OpenGL, renderer/GPU work |
@@ -171,6 +176,7 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_renderer_opengl` | OpenGL 3.3 Core world/brush scene cache/upload, built-in shaders, camera/model matrices, depth/masked visible-command drawing, historical full-world fallback, and RAII GPU ownership using GLAD | packet/format/PVS parsing, filesystem lookup, client connection state, entity/gameplay logic |
 | `hlclient_renderer_null` | headless renderer lifecycle and frame statistics | SDL, OpenGL, GLAD, Winsock, SDK types |
 | `hlclient_local_resource_check` | network-free, read-only diagnostic composition for an explicit user-owned root | stock process launch, path/digest output, file mutation, protocol transport |
+| `hlclient_bsp_compat_check` | network-free, read-only production BSP geometry/texture/render-package/spatial-scene validation with bounded aggregate compatibility diagnostics | network, SDL/OpenGL, writes, native-path or raw-asset output, gameplay |
 | `hlclient_world_texture_check` | network-free, read-only BSP/WAD texture composition for one explicit safe virtual map | stock process launch, writes, downloads/cache, renderer/GPU work, native-path or asset-byte output |
 | `hlclient_world_viewer` | network-free, read-only BSP/WAD/lightmap/spatial/scene composition and configurable local diagnostic OpenGL preview for one safe virtual map | stock/network process launch, writes, downloads/cache, native map-path input, runtime gameplay |
 | `hlclient` | composition root and frame loop | reusable subsystem implementation |
@@ -180,7 +186,7 @@ Public dependencies should point inward toward stable project-owned contracts.
 Private implementation dependencies may point outward to SDL, GLAD, OpenGL,
 Winsock, or SDK headers without exposing them to unrelated consumers.
 
-The M4.4 target direction remains deliberately acyclic:
+The M4.4/M4.4.1 target direction remains deliberately acyclic:
 
 ```text
 hlclient_hash_md5 -> hlclient_core
@@ -316,6 +322,13 @@ and supported static brush resources. Stable scene resource identity/revision
 lets one renderer reuse the same world/brush uploads and replace them
 transactionally when resources change. Visibility has a separate revision and
 changes commands only; there is no global cache or per-frame upload.
+
+The renderer boundary receives only M4.4.1 canonical counter-clockwise
+triangles whose standard cross product has a strictly positive margin against
+the flat face normal. The BSP layer computes that margin from a
+centroid-rebased double area vector with an extent-scaled bounded tolerance;
+the renderer does not invert `glFrontFace`, globally disable back-face culling,
+flip normals in a shader, or retry a face with another order.
 
 Resource handles crossing this boundary must be project-owned opaque values,
 not raw OpenGL names. Asset decoding produces CPU-side formats before a
@@ -676,6 +689,15 @@ prebuilt libraries, use its bundled SDL2, or copy SDK implementation files into
 project modules. Any future use beyond reference headers requires an explicit
 architecture and license review.
 
+M4.4.1 uses the pinned public compiler sources only to establish the signed
+surfedge endpoint rule, the `face.side` plane-normal rule, Valve's reversed
+cross-product winding convention, mirrored-face reversal, and T-junction point
+emission. The project-owned builder and its centroid-rebased arithmetic remain
+independently authored. Exact references, the fixed `0.02` planarity limit,
+the bounded area formula, and the float-scale strictly-interior collinear gate
+are documented in
+[GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md).
+
 ## Composition and lifetime
 
 `hlclient` is the composition root. A normal standalone frame follows this
@@ -732,7 +754,12 @@ The standalone viewer is a separate composition root: it begins with one safe
 virtual map under an explicit user-owned local environment, validates all CPU
 assets and builds the scene before initializing SDL/OpenGL, performs no
 network operation or write, updates only CPU camera/visibility state per frame,
-and destroys renderer resources before the context.
+and destroys renderer resources before the context. The M4.4.1 checker/wrapper
+uses the same safe virtual-name and verified-open boundary without initializing
+a renderer; before/after selected-file metadata and approved-root inventories
+make external drift a terminal failure. Only bounded aggregate diagnostics may
+be retained—never native paths, raw face arrays, map/WAD bytes, texture names,
+or entity text.
 
 Partially initialized states must unwind safely through RAII. Logging and error
 messages should identify the failed boundary without exposing secrets or

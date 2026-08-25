@@ -39,6 +39,29 @@ a sampler policy. Lightmap UVs follow the extent and texel-center atlas formula
 documented in [GoldSrc world lightmaps](GOLDSRC_LIGHTMAPS.md), also with no CPU
 flip. All derived coordinates must be finite.
 
+M4.4.1 guarantees that every incoming world or brush face was produced by the
+same `GoldSrcFaceGeometryBuilder`. The builder validates Valve's clockwise qbsp
+wire against the side-adjusted plane normal using a centroid-rebased
+double-precision area vector, applies only the bounded strictly-interior
+T-junction collinear rule, and publishes counter-clockwise triangles. The
+render package never guesses winding from the first three corners and never
+repairs geometry. Its input invariant is:
+
+```text
+dot(cross(v1 - v0, v2 - v0), flat_face_normal) >
+    triangle_winding_tolerance
+```
+
+The builder derives polygon-area and triangle-winding tolerances separately
+with `clamp(64 * DBL_EPSILON * max(1, extent^2), 1e-12, 1e-4)`, using the
+whole polygon extent for the former and each triangle's extent for the latter.
+Its separate planarity limit is `0.02` source units. Collinear distance is bounded by
+`clamp(32 * FLT_EPSILON * max(1, max_abs_coordinate),
+32 * FLT_EPSILON, 0.01)`, additionally requiring same-direction dot `>= 0.99`
+and a strictly interior projected segment parameter. Full derivation and
+strict malformed cases are documented in
+[GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md).
+
 ## Materials and batches
 
 One neutral `WorldRenderMaterial` identifies:
@@ -130,8 +153,9 @@ commands.
 The preview defaults to `RenderCullMode::none`. Because bounds do not identify
 a valid in-world player spawn, the diagnostic camera may view the outside of a
 closed world shell. Double-sided rendering keeps that shell visible without
-changing M4.1 winding. Back-face culling remains an implemented selectable
-renderer mode.
+a renderer-side winding workaround. M4.4.1 canonical geometry also supports
+the implemented `RenderCullMode::back` path with the normal front-face
+convention.
 
 ## Stage and lifetime boundary
 
@@ -160,4 +184,7 @@ available. M4.4 still excludes runtime entity behavior, dynamic brush motion,
 translucent rendermodes, dynamic lights/styles, animated/water/sky effects,
 gameplay input, server snapshots, and M3.3 downloads/cache. See
 [world visibility](WORLD_VISIBILITY.md) and
-[brush-submodel rendering](BRUSH_SUBMODEL_RENDERING.md).
+[brush-submodel rendering](BRUSH_SUBMODEL_RENDERING.md). M4.4.1 stock
+acceptance uses the same package path through a network-free, read-only checker
+or viewer wrapper; those tools accept safe virtual names, report bounded
+metadata, detect external-file drift, and never commit user-owned assets.

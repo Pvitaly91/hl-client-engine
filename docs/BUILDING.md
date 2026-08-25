@@ -159,6 +159,7 @@ Runtime output is organized per configuration:
 
 ```text
 build\bin\Debug\hlclient.exe
+build\bin\Debug\hlclient_bsp_compat_check.exe
 build\bin\Debug\hlclient_world_viewer.exe
 build\bin\Debug\SDL3.dll
 build\lib\Debug\...
@@ -231,18 +232,46 @@ static scene, but no SDL window, OpenGL context, or GPU resource. The defaults
 remain `--visibility all --brush-submodels off --camera static`, preserving the
 M4.3 route.
 
+M4.4.1 also provides a network-free, SDL-free CPU acceptance target. Its
+default BSP-v30 geometry profile is
+`valve_qbsp_clockwise_wire_to_counter_clockwise_render`: Valve QBSP clockwise
+wire loops are strictly validated against the side-adjusted normal and then
+canonicalized to counter-clockwise renderer output by the shared world/brush
+builder.
+
+```powershell
+cmake --build --preset vs2022-win32-debug `
+  --target hlclient_bsp_compat_check
+
+.\build\bin\Debug\hlclient_bsp_compat_check.exe `
+  --basedir "<Half-Life-root>" --game valve `
+  --map maps/<name>.bsp --validate-through spatial-scene
+
+.\scripts\verify_stock_bsp_geometry_compatibility.ps1 `
+  -ToolPath .\build\bin\Debug\hlclient_bsp_compat_check.exe `
+  -Basedir "<Half-Life-root>" -Game valve `
+  -Maps @("maps/<name>.bsp")
+```
+
+The checker writes no files, initializes no network or graphics subsystem,
+and emits deterministic bounded metadata without native paths, entity text,
+texture names, or raw coordinates. The wrapper runs each map twice and fails
+on a changed summary or BSP/WAD/inventory drift. Complete this CPU check before
+an optional graphical proof.
+
 For an entirely offline read-only preview, build and run the viewer target:
 
 ```powershell
 cmake --build --preset vs2022-win32-debug --target hlclient_world_viewer
 
 .\build\bin\Debug\hlclient_world_viewer.exe `
-  --basedir "D:\Steam\steamapps\common\Half-Life" `
+  --basedir "<Half-Life-root>" `
   --game valve `
-  --map maps/boot_camp.bsp `
+  --map maps/<name>.bsp `
   --camera spawn `
   --visibility pvs-frustum `
-  --brush-submodels static
+  --brush-submodels static `
+  --cull back
 ```
 
 The viewer accepts a safe virtual map name rather than a native map path. It
@@ -251,8 +280,28 @@ initialization; it starts no network or stock process and writes no game data.
 Use `--camera static` for a deterministic bounds view, `--camera orbit` for a
 slow bounds-derived diagnostic orbit, or `--camera spawn` for inert initial
 spawn metadata with bounds fallback. Visibility accepts `all`, `frustum`,
-`pvs`, or `pvs-frustum`; brush submodels accept `off` or `static`. See
-[offline world viewer](WORLD_VIEWER.md).
+`pvs`, or `pvs-frustum`; brush submodels accept `off` or `static`; culling
+accepts `none` or `back` and defaults to `none`. See [offline world
+viewer](WORLD_VIEWER.md).
+
+On a desktop whose actual context is OpenGL 3.3 Core or newer, the bounded
+read-only wrapper validates both renderer cull modes by default:
+
+```powershell
+.\scripts\verify_local_world_render.ps1 `
+  -ViewerPath .\build\bin\Debug\hlclient_world_viewer.exe `
+  -Basedir "<Half-Life-root>" -Game valve -Map maps/<name>.bsp `
+  -Frames 2 -Visibility pvs-frustum -BrushSubmodels static `
+  -Camera spawn -CullModes @('none', 'back')
+```
+
+Each cull mode is a separate two-frame process and must report one world/scene
+upload, non-clear pixels, nonzero draws and triangles, and `gl-error=none`.
+The wrapper also requires unchanged BSP/WAD/inventory snapshots. Pass a single
+`none` or `back` value to `-CullModes` for a bounded diagnostic rerun. A host
+without the required graphics capability can omit this optional OpenGL check,
+but not the preceding CPU compatibility verifier. Omitting `-CullModes`
+selects the dual `none,back` acceptance run.
 
 To perform the M1 connectionless challenge exchange without opening a window:
 

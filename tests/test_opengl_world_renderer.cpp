@@ -518,7 +518,7 @@ void populate_masked_embedded_texture(std::vector<std::byte>& bsp_bytes)
         goldsrc_fixture::SyntheticBspEdge{2U, 1U},
     };
     constexpr std::array<std::int32_t, 8U> surfedges{
-        1, 2, 3, 4, 5, 6, 7, 8};
+        -4, -3, -2, -1, -8, -7, -6, -5};
 
     std::array faces{
         goldsrc_fixture::SyntheticBspFace{},

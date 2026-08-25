@@ -296,6 +296,19 @@ assets::WorldAssetResult GoldSrcBspWorldImporter::import(
                 : assets::AssetErrorCode::MalformedData;
         std::string context{"goldsrc-bsp-v30: code="};
         context.append(to_string(parser_error.code));
+        if (parser_error.face_geometry_diagnostic) {
+            const auto& diagnostic = *parser_error.face_geometry_diagnostic;
+            context.append("; model=");
+            context.append(std::to_string(diagnostic.source_model_index));
+            context.append("; face=");
+            context.append(std::to_string(diagnostic.source_face_ordinal));
+            context.append("; side=");
+            context.append(std::to_string(diagnostic.face_side));
+            context.append("; edges=");
+            context.append(std::to_string(diagnostic.surfedge_count));
+            context.append("; classification=");
+            context.append(to_string(diagnostic.failure_classification));
+        }
         if (parser_error.lump_id) {
             context.append("; lump=");
             context.append(to_string(*parser_error.lump_id));

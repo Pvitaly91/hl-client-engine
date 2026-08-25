@@ -96,9 +96,20 @@ vertical flip.
 
 Every frame sets the viewport, clear color, and depth clear; enables depth
 testing with `GL_LEQUAL` and depth writes; disables blending; and selects no
-culling or back-face culling from `RenderScene`. The diagnostic preview uses
+culling or back-face culling from `RenderScene`. The viewer exposes those
+states as `--cull none` and `--cull back`. The diagnostic preview defaults to
 no culling so an outside-bounds camera can see the closed shell. Geometry
 winding is never reversed to accommodate that camera.
+
+Under M4.4.1, BSP v30 uses the explicit
+`valve_qbsp_clockwise_wire_to_counter_clockwise_render` compatibility profile.
+The shared CPU world/brush builder validates Valve QBSP's clockwise raw wire
+against the side-adjusted normal, preserves a deterministic anchor, and emits
+counter-clockwise renderer triangles whose winding agrees with the emitted
+normal. Back-face culling consumes those canonical indices without any global
+normal, shader, index, or cull-state inversion. The detailed evidence and
+tolerance policy are in
+[GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md).
 
 For each deterministic package batch, the renderer binds its base texture and
 lightmap page/fallback, sets the masked and lightmap uniforms, and calls
@@ -111,6 +122,31 @@ checked per-surface ranges in stable opaque-world, masked-world, opaque-brush,
 masked-brush order. The historical M4.3 full-batch path remains the fallback
 when no draw list is supplied. Unsupported or nonzero brush rendermodes never
 enter the draw list; blending remains disabled.
+
+## Bounded cull-mode proof
+
+First run `hlclient_bsp_compat_check` or its read-only stock verifier through
+`spatial-scene`; that CPU gate requires neither SDL nor OpenGL. On a host whose
+actual current context is OpenGL 3.3 Core or newer, validate both cull states
+with two bounded frames each:
+
+```powershell
+.\scripts\verify_local_world_render.ps1 `
+  -ViewerPath .\build\bin\Debug\hlclient_world_viewer.exe `
+  -Basedir "<Half-Life-root>" -Game valve -Map maps/<name>.bsp `
+  -Frames 2 -Visibility pvs-frustum -BrushSubmodels static `
+  -Camera spawn -CullModes @('none', 'back')
+```
+
+The wrapper launches a separate bounded viewer process per mode and validates
+the exact `cull-mode` report. Each process must render two frames, retain one
+world/scene upload, produce non-clear pixels and nonzero draw/triangle counts,
+and report `gl-error=none`. BSP, relevant WAD, and search-root inventories must
+remain unchanged across both processes. `-CullModes` defaults to the M4.4.1
+acceptance set `none,back`. One value may be supplied for a focused rerun while
+retaining the same bounded and drift checks. Hosts without the required
+graphics capability may skip this optional proof, but the CPU compatibility
+verifier remains mandatory.
 
 ## Failure and diagnostics
 

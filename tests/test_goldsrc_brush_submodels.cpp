@@ -1,6 +1,7 @@
 #include <hlclient/assets/asset_source.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/lightmaps/goldsrc_world_lightmap_import.hpp>
 
 #include "synthetic_goldsrc_bsp_fixture.hpp"
 
@@ -21,6 +22,7 @@ namespace {
 namespace assets = hlclient::assets;
 namespace bsp = hlclient::goldsrc::bsp;
 namespace fixture = hlclient::tests;
+namespace lightmaps = hlclient::goldsrc::lightmaps;
 
 [[nodiscard]] bool exact_float(const float left, const float right) noexcept
 {
@@ -137,16 +139,18 @@ void set_entity_lump(
         fixture::SyntheticBspEdge{1U, 2U},
         fixture::SyntheticBspEdge{2U, 3U},
         fixture::SyntheticBspEdge{3U, 0U},
-        // The brush face deliberately stores every edge backwards. Its four
-        // negative surfedges must reconstruct the same counter-clockwise loop.
-        fixture::SyntheticBspEdge{5U, 4U},
-        fixture::SyntheticBspEdge{6U, 5U},
-        fixture::SyntheticBspEdge{7U, 6U},
-        fixture::SyntheticBspEdge{4U, 7U},
+        fixture::SyntheticBspEdge{4U, 5U},
+        fixture::SyntheticBspEdge{5U, 6U},
+        fixture::SyntheticBspEdge{6U, 7U},
+        fixture::SyntheticBspEdge{7U, 4U},
     };
-    std::array<std::int32_t, 8U> surfedges{1, 2, 3, 4, -5, -6, -7, -8};
+    // Valve QBSP writes face loops clockwise relative to the side-adjusted
+    // normal. Negative surfedges preserve the first wire corner while both
+    // quads canonicalize back to the renderer's counter-clockwise order.
+    std::array<std::int32_t, 8U> surfedges{
+        -4, -3, -2, -1, -8, -7, -6, -5};
     if (malformed_brush_face) {
-        surfedges[5U] = -7;
+        surfedges[5U] = -6;
     }
 
     std::vector faces{fixture::SyntheticBspFace{}};
@@ -276,6 +280,122 @@ TEST_CASE("Canonical BSP face reconstruction publishes ordered brush submodels",
     REQUIRE_FALSE(expected_entities.empty());
     CHECK(parsed.document->entity_lump_bytes == expected_entities);
     CHECK(parsed.document->brush_submodels[0U].geometry.vertices.size() == 4U);
+}
+
+TEST_CASE("World and brush models share identical canonical face geometry",
+    "[goldsrc-bsp][brush-submodels][shared-builder][face-orientation]")
+{
+    fixture::SyntheticBspBuilder builder;
+    constexpr auto vertices = fixture::synthetic_quad_vertices();
+    builder.set_convex_polygon(vertices);
+
+    std::array faces{
+        fixture::SyntheticBspFace{},
+        fixture::SyntheticBspFace{},
+    };
+    for (auto& face : faces) {
+        face.light_styles = {0U, 0xFFU, 0xFFU, 0xFFU};
+        face.light_offset = 0;
+    }
+    std::array models{
+        fixture::SyntheticBspModel{},
+        fixture::SyntheticBspModel{},
+    };
+    models[1U].first_face = 1;
+    models[1U].visibility_leaf_count = 0;
+    builder.set_faces(faces).set_models(models);
+    builder.lump(fixture::SyntheticBspLumpId::lighting).resize(75U);
+
+    const auto parsed = bsp::GoldSrcBspParser::parse(builder.build());
+    REQUIRE(parsed);
+    REQUIRE(parsed.document);
+    REQUIRE(parsed.document->brush_submodels.size() == 1U);
+    const auto& world = parsed.document->world_asset;
+    const auto& brush = parsed.document->brush_submodels[0U].geometry;
+
+    REQUIRE(world.vertices.size() == 4U);
+    REQUIRE(brush.vertices.size() == world.vertices.size());
+    CHECK(world.indices ==
+        std::vector<std::uint32_t>{0U, 1U, 2U, 0U, 2U, 3U});
+    CHECK(brush.indices == world.indices);
+    CHECK(exact_bounds(brush.bounds, world.bounds));
+    for (std::size_t index = 0U; index < world.vertices.size(); ++index) {
+        const auto& world_vertex = world.vertices[index];
+        const auto& brush_vertex = brush.vertices[index];
+        CHECK(exact_vector(brush_vertex.position, world_vertex.position));
+        CHECK(exact_vector(brush_vertex.normal, world_vertex.normal));
+        CHECK(exact_float(
+            brush_vertex.texture_coordinate.x,
+            world_vertex.texture_coordinate.x));
+        CHECK(exact_float(
+            brush_vertex.texture_coordinate.y,
+            world_vertex.texture_coordinate.y));
+        CHECK(exact_float(
+            world_vertex.texture_coordinate.x, world_vertex.position.x));
+        CHECK(exact_float(
+            world_vertex.texture_coordinate.y, world_vertex.position.y));
+    }
+
+    REQUIRE(world.surfaces.size() == 1U);
+    REQUIRE(brush.surfaces.size() == 1U);
+    const auto& world_surface = world.surfaces[0U];
+    const auto& brush_surface = brush.surfaces[0U];
+    CHECK(world_surface.source_surface_ordinal == 0U);
+    CHECK(brush_surface.source_surface_ordinal == 1U);
+    CHECK(brush_surface.first_index == world_surface.first_index);
+    CHECK(brush_surface.index_count == world_surface.index_count);
+    CHECK(brush_surface.material_index == world_surface.material_index);
+    CHECK(exact_bounds(brush_surface.bounds, world_surface.bounds));
+    CHECK(brush_surface.lightmap_offset == world_surface.lightmap_offset);
+    CHECK(brush_surface.light_styles == world_surface.light_styles);
+    CHECK(brush_surface.special_surface == world_surface.special_surface);
+    CHECK(brush_surface.first_vertex == world_surface.first_vertex);
+    CHECK(brush_surface.vertex_count == world_surface.vertex_count);
+
+    const auto winding_dot = [](const assets::WorldAsset& geometry,
+                                 const std::size_t first_index) {
+        const auto& first = geometry.vertices[geometry.indices[first_index]];
+        const auto& second = geometry.vertices[geometry.indices[first_index + 1U]];
+        const auto& third = geometry.vertices[geometry.indices[first_index + 2U]];
+        const auto abx = static_cast<double>(second.position.x) - first.position.x;
+        const auto aby = static_cast<double>(second.position.y) - first.position.y;
+        const auto abz = static_cast<double>(second.position.z) - first.position.z;
+        const auto acx = static_cast<double>(third.position.x) - first.position.x;
+        const auto acy = static_cast<double>(third.position.y) - first.position.y;
+        const auto acz = static_cast<double>(third.position.z) - first.position.z;
+        const auto cross_x = aby * acz - abz * acy;
+        const auto cross_y = abz * acx - abx * acz;
+        const auto cross_z = abx * acy - aby * acx;
+        return cross_x * first.normal.x + cross_y * first.normal.y +
+            cross_z * first.normal.z;
+    };
+    for (std::size_t first_index = 0U;
+         first_index < world.indices.size();
+         first_index += 3U) {
+        CHECK(winding_dot(world, first_index) > 0.0);
+        CHECK(winding_dot(brush, first_index) == winding_dot(world, first_index));
+    }
+
+    const auto world_extents = lightmaps::calculate_goldsrc_lightmap_extents(
+        world, world_surface);
+    const auto brush_extents = lightmaps::calculate_goldsrc_lightmap_extents(
+        brush, brush_surface);
+    REQUIRE(world_extents);
+    REQUIRE(brush_extents);
+    CHECK(brush_extents.extents->texture_min_s ==
+        world_extents.extents->texture_min_s);
+    CHECK(brush_extents.extents->texture_min_t ==
+        world_extents.extents->texture_min_t);
+    CHECK(brush_extents.extents->extent_s == world_extents.extents->extent_s);
+    CHECK(brush_extents.extents->extent_t == world_extents.extents->extent_t);
+    CHECK(brush_extents.extents->sample_width ==
+        world_extents.extents->sample_width);
+    CHECK(brush_extents.extents->sample_height ==
+        world_extents.extents->sample_height);
+    CHECK(world_extents.extents->extent_s == 64U);
+    CHECK(world_extents.extents->extent_t == 64U);
+    CHECK(world_extents.extents->sample_width == 5U);
+    CHECK(world_extents.extents->sample_height == 5U);
 }
 
 TEST_CASE("Brush extraction preserves the M4.1 world geometry payload",

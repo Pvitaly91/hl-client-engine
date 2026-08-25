@@ -105,9 +105,7 @@ struct Plane {
     std::int32_t type{0};
 };
 
-struct Edge {
-    std::array<std::uint16_t, 2U> vertices{};
-};
+using Edge = GoldSrcFaceGeometrySourceEdge;
 
 struct Texinfo {
     std::array<float, 4U> s{};
@@ -167,10 +165,11 @@ struct TextureMetadata {
     std::optional<std::uint32_t> height;
 };
 
-struct DoubleVector3 {
-    double x{0.0};
-    double y{0.0};
-    double z{0.0};
+struct ModelGeometryOutputLimits {
+    std::size_t maximum_vertices{0U};
+    std::size_t maximum_indices{0U};
+    std::size_t maximum_surfaces{0U};
+    std::size_t maximum_materials{0U};
 };
 
 [[nodiscard]] bool checked_add(
@@ -226,112 +225,6 @@ struct DoubleVector3 {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 }
 
-[[nodiscard]] DoubleVector3 subtract(
-    const assets::AssetVector3& left,
-    const assets::AssetVector3& right) noexcept
-{
-    return DoubleVector3{
-        static_cast<double>(left.x) - static_cast<double>(right.x),
-        static_cast<double>(left.y) - static_cast<double>(right.y),
-        static_cast<double>(left.z) - static_cast<double>(right.z),
-    };
-}
-
-[[nodiscard]] DoubleVector3 cross(
-    const DoubleVector3& left,
-    const DoubleVector3& right) noexcept
-{
-    return DoubleVector3{
-        left.y * right.z - left.z * right.y,
-        left.z * right.x - left.x * right.z,
-        left.x * right.y - left.y * right.x,
-    };
-}
-
-[[nodiscard]] double dot(
-    const DoubleVector3& left,
-    const assets::AssetVector3& right) noexcept
-{
-    return left.x * static_cast<double>(right.x) +
-           left.y * static_cast<double>(right.y) +
-           left.z * static_cast<double>(right.z);
-}
-
-[[nodiscard]] double plane_distance(
-    const assets::AssetVector3& point,
-    const assets::AssetVector3& normal) noexcept
-{
-    return static_cast<double>(point.x) * static_cast<double>(normal.x) +
-           static_cast<double>(point.y) * static_cast<double>(normal.y) +
-           static_cast<double>(point.z) * static_cast<double>(normal.z);
-}
-
-[[nodiscard]] double signed_face_area(
-    const assets::AssetVector3& first,
-    const assets::AssetVector3& second,
-    const assets::AssetVector3& third,
-    const assets::AssetVector3& normal) noexcept
-{
-    return dot(cross(subtract(second, first), subtract(third, first)), normal);
-}
-
-[[nodiscard]] bool point_within_segment_bounds(
-    const assets::AssetVector3& point,
-    const assets::AssetVector3& first,
-    const assets::AssetVector3& second) noexcept
-{
-    const auto within_axis = [](const float value, const float left, const float right) {
-        const auto minimum = static_cast<double>(std::min(left, right)) -
-            kGoldSrcBspGeometryEpsilon;
-        const auto maximum = static_cast<double>(std::max(left, right)) +
-            kGoldSrcBspGeometryEpsilon;
-        return static_cast<double>(value) >= minimum &&
-               static_cast<double>(value) <= maximum;
-    };
-    return within_axis(point.x, first.x, second.x) &&
-           within_axis(point.y, first.y, second.y) &&
-           within_axis(point.z, first.z, second.z);
-}
-
-[[nodiscard]] bool coplanar_segments_intersect(
-    const assets::AssetVector3& first_start,
-    const assets::AssetVector3& first_end,
-    const assets::AssetVector3& second_start,
-    const assets::AssetVector3& second_end,
-    const assets::AssetVector3& normal) noexcept
-{
-    const auto first_start_side =
-        signed_face_area(first_start, first_end, second_start, normal);
-    const auto first_end_side =
-        signed_face_area(first_start, first_end, second_end, normal);
-    const auto second_start_side =
-        signed_face_area(second_start, second_end, first_start, normal);
-    const auto second_end_side =
-        signed_face_area(second_start, second_end, first_end, normal);
-    const auto opposite_sides = [](const double left, const double right) {
-        return (left > kGoldSrcBspGeometryEpsilon &&
-                   right < -kGoldSrcBspGeometryEpsilon) ||
-               (left < -kGoldSrcBspGeometryEpsilon &&
-                   right > kGoldSrcBspGeometryEpsilon);
-    };
-    if (opposite_sides(first_start_side, first_end_side) &&
-        opposite_sides(second_start_side, second_end_side)) {
-        return true;
-    }
-
-    const auto lies_on_segment = [](const double signed_area,
-                                     const assets::AssetVector3& point,
-                                     const assets::AssetVector3& start,
-                                     const assets::AssetVector3& end) {
-        return std::abs(signed_area) <= kGoldSrcBspGeometryEpsilon &&
-               point_within_segment_bounds(point, start, end);
-    };
-    return lies_on_segment(first_start_side, second_start, first_start, first_end) ||
-           lies_on_segment(first_end_side, second_end, first_start, first_end) ||
-           lies_on_segment(second_start_side, first_start, second_start, second_end) ||
-           lies_on_segment(second_end_side, first_end, second_start, second_end);
-}
-
 [[nodiscard]] bool supported_contents(const std::int32_t value) noexcept
 {
     return value >= kGoldSrcBspMinimumContentsValue &&
@@ -346,6 +239,46 @@ struct DoubleVector3 {
 [[nodiscard]] GoldSrcBspParseResult failure_result(GoldSrcBspError error)
 {
     return GoldSrcBspParseResult{std::nullopt, std::move(error)};
+}
+
+[[nodiscard]] GoldSrcBspErrorCode parser_error_code(
+    const GoldSrcFaceGeometryErrorCode code) noexcept
+{
+    switch (code) {
+    case GoldSrcFaceGeometryErrorCode::none:
+    case GoldSrcFaceGeometryErrorCode::invalid_configuration:
+        return GoldSrcBspErrorCode::invalid_configuration;
+    case GoldSrcFaceGeometryErrorCode::invalid_plane:
+    case GoldSrcFaceGeometryErrorCode::invalid_face_side:
+        return GoldSrcBspErrorCode::invalid_face_reference;
+    case GoldSrcFaceGeometryErrorCode::invalid_surfedge_range:
+        return GoldSrcBspErrorCode::invalid_face_reference;
+    case GoldSrcFaceGeometryErrorCode::invalid_surfedge_reference:
+        return GoldSrcBspErrorCode::invalid_surfedge_reference;
+    case GoldSrcFaceGeometryErrorCode::invalid_edge_reference:
+        return GoldSrcBspErrorCode::invalid_edge_reference;
+    case GoldSrcFaceGeometryErrorCode::invalid_vertex_reference:
+        return GoldSrcBspErrorCode::invalid_vertex_reference;
+    case GoldSrcFaceGeometryErrorCode::broken_face_edge_loop:
+    case GoldSrcFaceGeometryErrorCode::duplicate_face_vertex:
+        return GoldSrcBspErrorCode::broken_face_edge_loop;
+    case GoldSrcFaceGeometryErrorCode::nonplanar_face:
+        return GoldSrcBspErrorCode::nonplanar_face;
+    case GoldSrcFaceGeometryErrorCode::self_intersecting_face:
+    case GoldSrcFaceGeometryErrorCode::invalid_face_winding:
+    case GoldSrcFaceGeometryErrorCode::concave_face:
+        return GoldSrcBspErrorCode::invalid_face_winding;
+    case GoldSrcFaceGeometryErrorCode::degenerate_face:
+    case GoldSrcFaceGeometryErrorCode::collinear_canonicalization_failed:
+        return GoldSrcBspErrorCode::degenerate_face;
+    case GoldSrcFaceGeometryErrorCode::invalid_texture_coordinate:
+        return GoldSrcBspErrorCode::invalid_float;
+    case GoldSrcFaceGeometryErrorCode::geometry_limit_exceeded:
+        return GoldSrcBspErrorCode::geometry_limit_exceeded;
+    case GoldSrcFaceGeometryErrorCode::unable_to_retain_candidate:
+        return GoldSrcBspErrorCode::unable_to_retain_world;
+    }
+    return GoldSrcBspErrorCode::unable_to_retain_world;
 }
 
 } // namespace
@@ -588,6 +521,26 @@ private:
                 byte_offset,
                 element_index,
                 bounded_context(context),
+            };
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool fail_face_geometry(
+        const GoldSrcFaceGeometryError& geometry_error,
+        const std::size_t face_record_offset)
+    {
+        if (!error_) {
+            std::string context{"Face geometry validation failed: "};
+            context.append(to_string(geometry_error.code));
+            error_ = GoldSrcBspError{
+                parser_error_code(geometry_error.code),
+                GoldSrcBspLumpId::faces,
+                face_record_offset,
+                geometry_error.diagnostic.source_face_ordinal,
+                bounded_context(context),
+                geometry_error.diagnostic.source_model_index,
+                geometry_error.diagnostic,
             };
         }
         return false;
@@ -1452,8 +1405,8 @@ private:
     {
         for (std::size_t index = 0U; index < edges_.size(); ++index) {
             const auto& edge = edges_[index];
-            if (static_cast<std::size_t>(edge.vertices[0U]) >= vertices_.size() ||
-                static_cast<std::size_t>(edge.vertices[1U]) >= vertices_.size()) {
+            if (static_cast<std::size_t>(edge.vertex_indices[0U]) >= vertices_.size() ||
+                static_cast<std::size_t>(edge.vertex_indices[1U]) >= vertices_.size()) {
                 return fail(
                     GoldSrcBspErrorCode::invalid_vertex_reference,
                     GoldSrcBspLumpId::edges,
@@ -1839,14 +1792,15 @@ private:
 
     [[nodiscard]] std::optional<assets::WorldAsset> build_model_geometry(
         const std::size_t model_index,
-        std::size_t& polygon_edge_pair_tests)
+        std::size_t& polygon_edge_pair_tests,
+        const ModelGeometryOutputLimits& output_limits)
     {
-        const auto& world_model = models_[model_index];
-        const auto world_first_face = static_cast<std::size_t>(
-            static_cast<std::uint32_t>(world_model.first_face));
-        const auto world_face_count = static_cast<std::size_t>(
-            static_cast<std::uint32_t>(world_model.face_count));
-        if (world_face_count == 0U) {
+        const auto& source_model = models_[model_index];
+        const auto first_face = static_cast<std::size_t>(
+            static_cast<std::uint32_t>(source_model.first_face));
+        const auto face_count = static_cast<std::size_t>(
+            static_cast<std::uint32_t>(source_model.face_count));
+        if (face_count == 0U) {
             static_cast<void>(fail(
                 GoldSrcBspErrorCode::degenerate_face,
                 GoldSrcBspLumpId::models,
@@ -1858,7 +1812,7 @@ private:
                 "BSP render model contains no source faces"));
             return std::nullopt;
         }
-        if (world_face_count > limits_.maximum_output_surfaces) {
+        if (face_count > output_limits.maximum_surfaces) {
             static_cast<void>(fail(
                 GoldSrcBspErrorCode::geometry_limit_exceeded,
                 GoldSrcBspLumpId::models,
@@ -1871,258 +1825,234 @@ private:
             return std::nullopt;
         }
 
-        std::size_t output_vertex_count = 0U;
-        std::size_t output_triangle_count = 0U;
-        std::size_t output_index_count = 0U;
+        std::vector<GoldSrcFaceGeometryCandidate> candidates;
+        candidates.reserve(face_count);
         std::vector<std::uint8_t> used_texinfo(texinfo_.size(), 0U);
+        std::size_t output_vertex_count = 0U;
+        std::size_t output_index_count = 0U;
+        std::size_t output_triangle_count = 0U;
         std::size_t material_count = 0U;
-        for (std::size_t local_face = 0U; local_face < world_face_count; ++local_face) {
-            const auto source_face = world_first_face + local_face;
-            const auto& face = faces_[source_face];
-            const auto corner_count = static_cast<std::size_t>(face.surfedge_count);
-            const auto triangle_count = corner_count - 2U;
-            std::size_t face_index_count = 0U;
-            if (!checked_add(output_vertex_count, corner_count, output_vertex_count) ||
-                !checked_add(output_triangle_count, triangle_count, output_triangle_count) ||
-                !checked_multiply(triangle_count, 3U, face_index_count) ||
-                !checked_add(output_index_count, face_index_count, output_index_count)) {
+        std::uint64_t removed_collinear_corner_count = 0U;
+        auto minimum_winding_margin = std::numeric_limits<double>::infinity();
+
+        for (std::size_t local_face = 0U; local_face < face_count; ++local_face) {
+            const auto source_face_index = first_face + local_face;
+            const auto& face = faces_[source_face_index];
+            const auto& plane =
+                planes_[static_cast<std::size_t>(face.plane_index)];
+            const auto& source_texinfo =
+                texinfo_[static_cast<std::size_t>(face.texinfo_index)];
+            const auto remaining_pair_tests =
+                polygon_edge_pair_tests <=
+                        limits_.maximum_polygon_edge_pair_tests
+                    ? limits_.maximum_polygon_edge_pair_tests -
+                          polygon_edge_pair_tests
+                    : 0U;
+            auto built = GoldSrcFaceGeometryBuilder::build(
+                GoldSrcFaceGeometryBuildInput{
+                    static_cast<std::uint32_t>(model_index),
+                    static_cast<std::uint32_t>(source_face_index),
+                    GoldSrcFaceGeometrySourcePlane{
+                        plane.normal,
+                        plane.distance,
+                    },
+                    GoldSrcFaceGeometrySourceFace{
+                        static_cast<std::uint32_t>(face.plane_index),
+                        face.side,
+                        face.first_surfedge,
+                        face.surfedge_count,
+                    },
+                    edges_,
+                    surfedges_,
+                    vertices_,
+                    GoldSrcFaceGeometrySourceTexinfo{
+                        source_texinfo.s,
+                        source_texinfo.t,
+                    },
+                    GoldSrcFaceGeometryLimits{
+                        limits_.maximum_face_edges,
+                        remaining_pair_tests,
+                    },
+                    GoldSrcFaceOrientationCompatibilityProfile::
+                        valve_qbsp_clockwise_wire_to_counter_clockwise_render,
+                });
+            if (built.polygon_edge_pair_test_count > remaining_pair_tests) {
                 static_cast<void>(fail(
                     GoldSrcBspErrorCode::geometry_limit_exceeded,
                     GoldSrcBspLumpId::faces,
                     absolute_record_offset(
                         GoldSrcBspLumpId::faces,
-                        source_face,
+                        source_face_index,
                         kGoldSrcBspFaceWireSize),
-                    source_face,
-                    "Checked world geometry output arithmetic overflowed"));
+                    source_face_index,
+                    "Face geometry exceeded its aggregate validation-work budget"));
                 return std::nullopt;
             }
-            const auto texinfo_index = static_cast<std::size_t>(face.texinfo_index);
-            if (used_texinfo[texinfo_index] == 0U) {
-                used_texinfo[texinfo_index] = 1U;
+            polygon_edge_pair_tests += built.polygon_edge_pair_test_count;
+            if (!built || !built.candidate) {
+                if (built.error) {
+                    static_cast<void>(fail_face_geometry(
+                        *built.error,
+                        absolute_record_offset(
+                            GoldSrcBspLumpId::faces,
+                            source_face_index,
+                            kGoldSrcBspFaceWireSize)));
+                } else {
+                    static_cast<void>(fail(
+                        GoldSrcBspErrorCode::unable_to_retain_world,
+                        GoldSrcBspLumpId::faces,
+                        absolute_record_offset(
+                            GoldSrcBspLumpId::faces,
+                            source_face_index,
+                            kGoldSrcBspFaceWireSize),
+                        source_face_index,
+                        "Face geometry builder returned no candidate or error"));
+                }
+                return std::nullopt;
+            }
+
+            auto candidate = std::move(*built.candidate);
+            std::size_t next_triangle_count = 0U;
+            if (!checked_add(
+                    output_vertex_count,
+                    candidate.corners.size(),
+                    output_vertex_count) ||
+                !checked_add(
+                    output_index_count,
+                    candidate.local_triangle_indices.size(),
+                    output_index_count) ||
+                !checked_add(
+                    output_triangle_count,
+                    candidate.local_triangle_indices.size() / 3U,
+                    next_triangle_count)) {
+                static_cast<void>(fail(
+                    GoldSrcBspErrorCode::geometry_limit_exceeded,
+                    GoldSrcBspLumpId::faces,
+                    absolute_record_offset(
+                        GoldSrcBspLumpId::faces,
+                        source_face_index,
+                        kGoldSrcBspFaceWireSize),
+                    source_face_index,
+                    "Checked face geometry output arithmetic overflowed"));
+                return std::nullopt;
+            }
+            output_triangle_count = next_triangle_count;
+            const auto source_texinfo_index =
+                static_cast<std::size_t>(face.texinfo_index);
+            if (used_texinfo[source_texinfo_index] == 0U) {
+                used_texinfo[source_texinfo_index] = 1U;
                 ++material_count;
             }
-        }
-        if (output_vertex_count > limits_.maximum_output_vertices ||
-            output_vertex_count >
-                static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
-            output_index_count > limits_.maximum_output_indices ||
-            output_index_count >
-                static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
-            material_count > limits_.maximum_output_materials ||
-            material_count >
-                static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
-            static_cast<void>(fail(
-                GoldSrcBspErrorCode::geometry_limit_exceeded,
-                GoldSrcBspLumpId::models,
-                absolute_record_offset(
-                    GoldSrcBspLumpId::models,
-                    model_index,
-                    kGoldSrcBspModelWireSize) + 56U,
-                model_index,
-                "BSP model geometry or material output exceeds configured limits"));
-            return std::nullopt;
+
+            if (output_vertex_count > output_limits.maximum_vertices ||
+                output_vertex_count > static_cast<std::size_t>(
+                    std::numeric_limits<std::uint32_t>::max()) ||
+                output_index_count > output_limits.maximum_indices ||
+                output_index_count > static_cast<std::size_t>(
+                    std::numeric_limits<std::uint32_t>::max()) ||
+                material_count > output_limits.maximum_materials ||
+                material_count > static_cast<std::size_t>(
+                    std::numeric_limits<std::uint32_t>::max())) {
+                static_cast<void>(fail(
+                    GoldSrcBspErrorCode::geometry_limit_exceeded,
+                    GoldSrcBspLumpId::faces,
+                    absolute_record_offset(
+                        GoldSrcBspLumpId::faces,
+                        source_face_index,
+                        kGoldSrcBspFaceWireSize),
+                    source_face_index,
+                    "BSP model geometry or material output exceeds configured limits"));
+                return std::nullopt;
+            }
+
+            const auto& diagnostic = candidate.diagnostic;
+            const auto positive_surfedges =
+                static_cast<std::uint64_t>(diagnostic.positive_surfedge_count);
+            const auto negative_surfedges =
+                static_cast<std::uint64_t>(diagnostic.negative_surfedge_count);
+            geometry_statistics_.positive_surfedge_count += positive_surfedges;
+            geometry_statistics_.negative_surfedge_count += negative_surfedges;
+            if (negative_surfedges != 0U) {
+                ++geometry_statistics_.faces_with_negative_surfedges;
+            }
+            if (negative_surfedges != 0U && positive_surfedges != 0U) {
+                ++geometry_statistics_.faces_with_mixed_surfedge_signs;
+            }
+            if (face.side == 0) {
+                ++geometry_statistics_.side_zero_face_count;
+            } else {
+                ++geometry_statistics_.side_one_face_count;
+            }
+            if (diagnostic.signed_area_normal_dot <
+                -diagnostic.polygon_area_tolerance) {
+                ++geometry_statistics_.negative_wire_area_dot_count;
+            } else if (diagnostic.signed_area_normal_dot >
+                       diagnostic.polygon_area_tolerance) {
+                ++geometry_statistics_.positive_wire_area_dot_count;
+            } else {
+                ++geometry_statistics_.ambiguous_wire_area_dot_count;
+            }
+            ++geometry_statistics_.canonicalized_face_count;
+            if (diagnostic.removed_collinear_corner_count != 0U) {
+                ++geometry_statistics_.collinear_canonicalized_face_count;
+            }
+            geometry_statistics_.removed_collinear_corner_count +=
+                diagnostic.removed_collinear_corner_count;
+            if (model_index != 0U) {
+                ++geometry_statistics_.brush_canonicalized_face_count;
+            }
+            geometry_statistics_.maximum_planarity_deviation = std::max(
+                geometry_statistics_.maximum_planarity_deviation,
+                diagnostic.maximum_planarity_deviation);
+            minimum_winding_margin = std::min(
+                minimum_winding_margin,
+                diagnostic.minimum_triangle_winding_dot);
+            geometry_statistics_.minimum_accepted_winding_margin =
+                geometry_statistics_.minimum_accepted_winding_margin == 0.0
+                    ? diagnostic.minimum_triangle_winding_dot
+                    : std::min(
+                          geometry_statistics_.minimum_accepted_winding_margin,
+                          diagnostic.minimum_triangle_winding_dot);
+            removed_collinear_corner_count +=
+                diagnostic.removed_collinear_corner_count;
+            candidates.push_back(std::move(candidate));
         }
 
         assets::WorldAsset world;
-        world.coordinate_space = assets::WorldCoordinateSpace::source_native_goldsrc_z_up;
-        world.texture_coordinate_space = assets::WorldTextureCoordinateSpace::texel_units;
+        world.coordinate_space =
+            assets::WorldCoordinateSpace::source_native_goldsrc_z_up;
+        world.texture_coordinate_space =
+            assets::WorldTextureCoordinateSpace::texel_units;
         world.source_profile = assets::WorldGeometrySourceProfile::goldsrc_bsp_v30;
         world.source_model_bounds = assets::WorldBounds{
-            world_model.minimums,
-            world_model.maximums,
+            source_model.minimums,
+            source_model.maximums,
         };
         world.vertices.reserve(output_vertex_count);
         world.indices.reserve(output_index_count);
-        world.surfaces.reserve(world_face_count);
+        world.surfaces.reserve(face_count);
         world.materials.reserve(material_count);
 
-        constexpr auto unassigned_material = std::numeric_limits<std::size_t>::max();
-        std::vector<std::size_t> material_by_texinfo(texinfo_.size(), unassigned_material);
-        std::vector<std::uint32_t> polygon;
-        std::vector<std::uint32_t> sorted_polygon;
-        polygon.reserve(limits_.maximum_face_edges);
-        sorted_polygon.reserve(limits_.maximum_face_edges);
+        constexpr auto unassigned_material =
+            std::numeric_limits<std::size_t>::max();
+        std::vector<std::size_t> material_by_texinfo(
+            texinfo_.size(),
+            unassigned_material);
         bool has_world_bounds = false;
         assets::WorldBounds world_bounds{};
 
-        for (std::size_t local_face = 0U; local_face < world_face_count; ++local_face) {
-            const auto source_face_index = world_first_face + local_face;
+        for (std::size_t local_face = 0U; local_face < face_count; ++local_face) {
+            const auto source_face_index = first_face + local_face;
             const auto& face = faces_[source_face_index];
-            const auto face_record_offset = absolute_record_offset(
-                GoldSrcBspLumpId::faces,
-                source_face_index,
-                kGoldSrcBspFaceWireSize);
-            const auto corner_count = static_cast<std::size_t>(face.surfedge_count);
-            const auto first_surfedge = static_cast<std::size_t>(
-                static_cast<std::uint32_t>(face.first_surfedge));
-
-            polygon.clear();
-            std::optional<std::uint32_t> first_start;
-            std::optional<std::uint32_t> previous_end;
-            for (std::size_t corner = 0U; corner < corner_count; ++corner) {
-                const auto oriented_edge = surfedges_[first_surfedge + corner];
-                const auto edge_index = oriented_edge < 0
-                                            ? static_cast<std::size_t>(
-                                                  -static_cast<std::int64_t>(oriented_edge))
-                                            : static_cast<std::size_t>(oriented_edge);
-                const auto& edge = edges_[edge_index];
-                const auto start = static_cast<std::uint32_t>(
-                    oriented_edge < 0 ? edge.vertices[1U] : edge.vertices[0U]);
-                const auto end = static_cast<std::uint32_t>(
-                    oriented_edge < 0 ? edge.vertices[0U] : edge.vertices[1U]);
-                if (start == end || (previous_end && *previous_end != start)) {
-                    static_cast<void>(fail(
-                        GoldSrcBspErrorCode::broken_face_edge_loop,
-                        GoldSrcBspLumpId::surfedges,
-                        absolute_record_offset(
-                            GoldSrcBspLumpId::surfedges,
-                            first_surfedge + corner,
-                            kGoldSrcBspSurfedgeWireSize),
-                        source_face_index,
-                        "Oriented face edges are degenerate or not exactly adjacent"));
-                    return std::nullopt;
-                }
-                if (!first_start) {
-                    first_start = start;
-                }
-                polygon.push_back(start);
-                previous_end = end;
-            }
-            if (!first_start || !previous_end || *previous_end != *first_start) {
-                static_cast<void>(fail(
-                    GoldSrcBspErrorCode::broken_face_edge_loop,
-                    GoldSrcBspLumpId::faces,
-                    face_record_offset + 4U,
-                    source_face_index,
-                    "Final oriented face edge does not close onto the first edge"));
-                return std::nullopt;
-            }
-
-            sorted_polygon.assign(polygon.begin(), polygon.end());
-            std::ranges::sort(sorted_polygon);
-            const auto unique_end = std::ranges::unique(sorted_polygon).begin();
-            if (static_cast<std::size_t>(unique_end - sorted_polygon.begin()) < 3U ||
-                unique_end != sorted_polygon.end()) {
-                static_cast<void>(fail(
-                    GoldSrcBspErrorCode::broken_face_edge_loop,
-                    GoldSrcBspLumpId::faces,
-                    face_record_offset,
-                    source_face_index,
-                    "Face edge loop repeats a vertex or has fewer than three unique vertices"));
-                return std::nullopt;
-            }
-
-            const auto& source_plane = planes_[static_cast<std::size_t>(face.plane_index)];
-            auto face_normal = source_plane.normal;
-            if (face.side == 1) {
-                face_normal.x = -face_normal.x;
-                face_normal.y = -face_normal.y;
-                face_normal.z = -face_normal.z;
-            }
-            for (const auto vertex_index : polygon) {
-                const auto& position = vertices_[static_cast<std::size_t>(vertex_index)];
-                const auto distance = plane_distance(position, source_plane.normal);
-                if (std::abs(distance - source_plane.distance) >
-                    static_cast<double>(kGoldSrcBspPlanarityTolerance)) {
-                    static_cast<void>(fail(
-                        GoldSrcBspErrorCode::nonplanar_face,
-                        GoldSrcBspLumpId::faces,
-                        face_record_offset,
-                        source_face_index,
-                        "A world face vertex does not lie on its selected plane"));
-                    return std::nullopt;
-                }
-            }
-
-            for (std::size_t first_edge = 0U; first_edge < corner_count; ++first_edge) {
-                const auto first_next = (first_edge + 1U) % corner_count;
-                for (std::size_t second_edge = first_edge + 1U;
-                     second_edge < corner_count;
-                     ++second_edge) {
-                    const auto second_next = (second_edge + 1U) % corner_count;
-                    if (first_next == second_edge || second_next == first_edge) {
-                        continue;
-                    }
-                    if (polygon_edge_pair_tests >=
-                        limits_.maximum_polygon_edge_pair_tests) {
-                        static_cast<void>(fail(
-                            GoldSrcBspErrorCode::geometry_limit_exceeded,
-                            GoldSrcBspLumpId::faces,
-                            face_record_offset,
-                            source_face_index,
-                            "Aggregate polygon intersection validation exceeds the configured work limit"));
-                        return std::nullopt;
-                    }
-                    ++polygon_edge_pair_tests;
-                    if (coplanar_segments_intersect(
-                            vertices_[polygon[first_edge]],
-                            vertices_[polygon[first_next]],
-                            vertices_[polygon[second_edge]],
-                            vertices_[polygon[second_next]],
-                            face_normal)) {
-                        static_cast<void>(fail(
-                            GoldSrcBspErrorCode::invalid_face_winding,
-                            GoldSrcBspLumpId::faces,
-                            face_record_offset,
-                            source_face_index,
-                            "World face has intersecting non-adjacent boundary edges"));
-                        return std::nullopt;
-                    }
-                }
-            }
-
-            for (std::size_t corner = 0U; corner < corner_count; ++corner) {
-                const auto& first = vertices_[polygon[corner]];
-                const auto& second = vertices_[polygon[(corner + 1U) % corner_count]];
-                const auto& third = vertices_[polygon[(corner + 2U) % corner_count]];
-                const auto turn = dot(cross(subtract(second, first), subtract(third, second)),
-                                      face_normal);
-                // Collinear boundary vertices are retained: stock BSP face
-                // loops may carry deterministic edge-split points. The fan
-                // check below still requires every emitted triangle to have
-                // positive area, while a negative local turn is concave.
-                if (turn < -kGoldSrcBspGeometryEpsilon) {
-                    static_cast<void>(fail(
-                        GoldSrcBspErrorCode::invalid_face_winding,
-                        GoldSrcBspLumpId::faces,
-                        face_record_offset,
-                        source_face_index,
-                        "World face is concave, self-inconsistent, or oppositely wound"));
-                    return std::nullopt;
-                }
-            }
-            for (std::size_t triangle = 0U; triangle < corner_count - 2U; ++triangle) {
-                const auto& first = vertices_[polygon[0U]];
-                const auto& second = vertices_[polygon[triangle + 1U]];
-                const auto& third = vertices_[polygon[triangle + 2U]];
-                const auto winding = dot(cross(subtract(second, first), subtract(third, first)),
-                                         face_normal);
-                if (std::abs(winding) <= kGoldSrcBspGeometryEpsilon) {
-                    static_cast<void>(fail(
-                        GoldSrcBspErrorCode::degenerate_face,
-                        GoldSrcBspLumpId::faces,
-                        face_record_offset,
-                        source_face_index,
-                        "Triangle fan would emit a zero-area triangle"));
-                    return std::nullopt;
-                }
-                if (winding < 0.0) {
-                    static_cast<void>(fail(
-                        GoldSrcBspErrorCode::invalid_face_winding,
-                        GoldSrcBspLumpId::faces,
-                        face_record_offset,
-                        source_face_index,
-                        "Triangle fan winding disagrees with the face normal"));
-                    return std::nullopt;
-                }
-            }
-
-            const auto source_texinfo_index = static_cast<std::size_t>(face.texinfo_index);
+            const auto& candidate = candidates[local_face];
+            const auto source_texinfo_index =
+                static_cast<std::size_t>(face.texinfo_index);
             const auto& source_texinfo = texinfo_[source_texinfo_index];
+
             auto material_index = material_by_texinfo[source_texinfo_index];
             if (material_index == unassigned_material) {
-                const auto texture_index = static_cast<std::size_t>(source_texinfo.miptex_index);
+                const auto texture_index =
+                    static_cast<std::size_t>(source_texinfo.miptex_index);
                 const auto& texture = textures_[texture_index];
                 material_index = world.materials.size();
                 material_by_texinfo[source_texinfo_index] = material_index;
@@ -2134,102 +2064,66 @@ private:
                     source_texinfo.flags,
                     static_cast<std::uint32_t>(source_texinfo_index),
                     static_cast<std::uint32_t>(texture_index),
-                    assets::WorldMaterialCompatibilityProfile::source_texture_reference_v1,
-                    assets::WorldMaterialEvidenceProfile::validated_source_metadata,
+                    assets::WorldMaterialCompatibilityProfile::
+                        source_texture_reference_v1,
+                    assets::WorldMaterialEvidenceProfile::
+                        validated_source_metadata,
                 });
             }
 
             const auto first_output_vertex = world.vertices.size();
             const auto first_output_index = world.indices.size();
-            assets::WorldBounds face_bounds{};
-            bool has_face_bounds = false;
-            for (const auto vertex_index : polygon) {
-                const auto& position = vertices_[static_cast<std::size_t>(vertex_index)];
-                const auto s = static_cast<double>(position.x) *
-                                   static_cast<double>(source_texinfo.s[0U]) +
-                               static_cast<double>(position.y) *
-                                   static_cast<double>(source_texinfo.s[1U]) +
-                               static_cast<double>(position.z) *
-                                   static_cast<double>(source_texinfo.s[2U]) +
-                               static_cast<double>(source_texinfo.s[3U]);
-                const auto t = static_cast<double>(position.x) *
-                                   static_cast<double>(source_texinfo.t[0U]) +
-                               static_cast<double>(position.y) *
-                                   static_cast<double>(source_texinfo.t[1U]) +
-                               static_cast<double>(position.z) *
-                                   static_cast<double>(source_texinfo.t[2U]) +
-                               static_cast<double>(source_texinfo.t[3U]);
-                const auto maximum_float = static_cast<double>(std::numeric_limits<float>::max());
-                if (!std::isfinite(s) || !std::isfinite(t) || std::abs(s) > maximum_float ||
-                    std::abs(t) > maximum_float) {
-                    static_cast<void>(fail(
-                        GoldSrcBspErrorCode::invalid_float,
-                        GoldSrcBspLumpId::texinfo,
-                        absolute_record_offset(
-                            GoldSrcBspLumpId::texinfo,
-                            source_texinfo_index,
-                            kGoldSrcBspTexinfoWireSize),
-                        source_texinfo_index,
-                        "Raw texel-space texture coordinate is not finite"));
-                    return std::nullopt;
-                }
+            for (const auto& corner : candidate.corners) {
                 world.vertices.push_back(assets::WorldVertex{
-                    position,
-                    face_normal,
-                    assets::AssetVector2{static_cast<float>(s), static_cast<float>(t)},
+                    corner.position,
+                    candidate.emitted_face_normal,
+                    corner.texture_coordinate,
                 });
-
-                if (!has_face_bounds) {
-                    face_bounds = assets::WorldBounds{position, position};
-                    has_face_bounds = true;
-                } else {
-                    face_bounds.minimum.x = std::min(face_bounds.minimum.x, position.x);
-                    face_bounds.minimum.y = std::min(face_bounds.minimum.y, position.y);
-                    face_bounds.minimum.z = std::min(face_bounds.minimum.z, position.z);
-                    face_bounds.maximum.x = std::max(face_bounds.maximum.x, position.x);
-                    face_bounds.maximum.y = std::max(face_bounds.maximum.y, position.y);
-                    face_bounds.maximum.z = std::max(face_bounds.maximum.z, position.z);
-                }
                 if (!has_world_bounds) {
-                    world_bounds = assets::WorldBounds{position, position};
+                    world_bounds =
+                        assets::WorldBounds{corner.position, corner.position};
                     has_world_bounds = true;
                 } else {
-                    world_bounds.minimum.x = std::min(world_bounds.minimum.x, position.x);
-                    world_bounds.minimum.y = std::min(world_bounds.minimum.y, position.y);
-                    world_bounds.minimum.z = std::min(world_bounds.minimum.z, position.z);
-                    world_bounds.maximum.x = std::max(world_bounds.maximum.x, position.x);
-                    world_bounds.maximum.y = std::max(world_bounds.maximum.y, position.y);
-                    world_bounds.maximum.z = std::max(world_bounds.maximum.z, position.z);
+                    world_bounds.minimum.x =
+                        std::min(world_bounds.minimum.x, corner.position.x);
+                    world_bounds.minimum.y =
+                        std::min(world_bounds.minimum.y, corner.position.y);
+                    world_bounds.minimum.z =
+                        std::min(world_bounds.minimum.z, corner.position.z);
+                    world_bounds.maximum.x =
+                        std::max(world_bounds.maximum.x, corner.position.x);
+                    world_bounds.maximum.y =
+                        std::max(world_bounds.maximum.y, corner.position.y);
+                    world_bounds.maximum.z =
+                        std::max(world_bounds.maximum.z, corner.position.z);
                 }
             }
-
-            for (std::size_t triangle = 0U; triangle < corner_count - 2U; ++triangle) {
-                world.indices.push_back(static_cast<std::uint32_t>(first_output_vertex));
+            for (const auto local_index : candidate.local_triangle_indices) {
                 world.indices.push_back(static_cast<std::uint32_t>(
-                    first_output_vertex + triangle + 1U));
-                world.indices.push_back(static_cast<std::uint32_t>(
-                    first_output_vertex + triangle + 2U));
+                    first_output_vertex + local_index));
             }
             world.surfaces.push_back(assets::WorldSurface{
                 static_cast<std::uint32_t>(first_output_index),
-                static_cast<std::uint32_t>(world.indices.size() - first_output_index),
+                static_cast<std::uint32_t>(
+                    candidate.local_triangle_indices.size()),
                 static_cast<std::uint32_t>(material_index),
-                face_bounds,
+                candidate.bounds,
                 static_cast<std::uint32_t>(source_face_index),
                 face.light_offset >= 0
-                    ? std::optional{static_cast<std::uint32_t>(face.light_offset)}
+                    ? std::optional{
+                          static_cast<std::uint32_t>(face.light_offset)}
                     : std::nullopt,
                 face.light_styles,
                 (static_cast<std::uint32_t>(source_texinfo.flags) &
                  kGoldSrcBspTexSpecialFlag) != 0U,
                 static_cast<std::uint32_t>(first_output_vertex),
-                static_cast<std::uint32_t>(corner_count),
+                static_cast<std::uint32_t>(candidate.corners.size()),
             });
         }
 
         if (!has_world_bounds || world.vertices.size() != output_vertex_count ||
             world.indices.size() != output_index_count ||
-            world.surfaces.size() != world_face_count ||
+            world.surfaces.size() != face_count ||
             world.materials.size() != material_count) {
             static_cast<void>(fail(
                 GoldSrcBspErrorCode::unable_to_retain_world,
@@ -2247,8 +2141,8 @@ private:
             kGoldSrcBspVersion,
             static_cast<std::uint64_t>(models_.size()),
             static_cast<std::uint64_t>(faces_.size()),
-            model_index == 0U ? static_cast<std::uint64_t>(world_face_count) : 0U,
-            static_cast<std::uint64_t>(faces_.size() - world_face_count),
+            model_index == 0U ? static_cast<std::uint64_t>(face_count) : 0U,
+            static_cast<std::uint64_t>(faces_.size() - face_count),
             static_cast<std::uint64_t>(world.surfaces.size()),
             static_cast<std::uint64_t>(world.vertices.size()),
             static_cast<std::uint64_t>(output_triangle_count),
@@ -2256,6 +2150,14 @@ private:
             0U,
             0U,
             0U,
+            0U,
+            static_cast<std::uint64_t>(face_count),
+            0U,
+            removed_collinear_corner_count,
+            std::isfinite(minimum_winding_margin)
+                ? minimum_winding_margin
+                : 0.0,
+            model_index == 0U ? 0U : static_cast<std::uint64_t>(face_count),
         };
         for (const auto& material : world.materials) {
             switch (material.texture_storage) {
@@ -2270,15 +2172,32 @@ private:
                 break;
             }
         }
-
         return world;
     }
-
     [[nodiscard]] std::optional<GoldSrcBspParsedDocument> build_world()
     {
         const auto& world_model = models_.front();
+        geometry_statistics_ = GoldSrcBspGeometryStatistics{};
+        geometry_statistics_.source_model_count =
+            static_cast<std::uint64_t>(models_.size());
+        geometry_statistics_.world_face_count =
+            static_cast<std::uint64_t>(world_model.face_count);
+        for (std::size_t model_index = 1U;
+             model_index < models_.size();
+             ++model_index) {
+            geometry_statistics_.brush_face_count += static_cast<std::uint64_t>(
+                models_[model_index].face_count);
+        }
         std::size_t polygon_edge_pair_tests = 0U;
-        auto world = build_model_geometry(0U, polygon_edge_pair_tests);
+        auto world = build_model_geometry(
+            0U,
+            polygon_edge_pair_tests,
+            ModelGeometryOutputLimits{
+                limits_.maximum_output_vertices,
+                limits_.maximum_output_indices,
+                limits_.maximum_output_surfaces,
+                limits_.maximum_output_materials,
+            });
         if (!world) {
             return std::nullopt;
         }
@@ -2295,8 +2214,23 @@ private:
             for (std::size_t model_index = 1U;
                  model_index < models_.size();
                  ++model_index) {
-                auto geometry =
-                    build_model_geometry(model_index, polygon_edge_pair_tests);
+                const auto remaining_vertices =
+                    limits_.maximum_output_vertices - retained_vertex_count;
+                const auto remaining_indices =
+                    limits_.maximum_output_indices - retained_index_count;
+                const auto remaining_surfaces =
+                    limits_.maximum_output_surfaces - retained_surface_count;
+                const auto remaining_materials =
+                    limits_.maximum_output_materials - retained_material_count;
+                auto geometry = build_model_geometry(
+                    model_index,
+                    polygon_edge_pair_tests,
+                    ModelGeometryOutputLimits{
+                        remaining_vertices,
+                        remaining_indices,
+                        remaining_surfaces,
+                        remaining_materials,
+                    });
                 if (!geometry) {
                     if (error_) {
                         error_->source_model_index =
@@ -2457,6 +2391,7 @@ private:
             std::move(brush_submodels),
             std::move(entity_lump_bytes),
             lump_element_counts_,
+            geometry_statistics_,
         };
     }
 
@@ -2477,6 +2412,7 @@ private:
     std::vector<std::uint16_t> marksurfaces_;
     std::vector<Clipnode> clipnodes_;
     std::vector<Model> models_;
+    GoldSrcBspGeometryStatistics geometry_statistics_{};
     std::optional<GoldSrcBspError> error_;
 };
 
