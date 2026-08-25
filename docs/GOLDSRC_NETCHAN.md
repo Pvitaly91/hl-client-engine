@@ -1,5 +1,13 @@
 # GoldSrc Protocol 48 netchan profile
 
+> M4.5.1 ownership note: an evidence-gated post-resource consumer can receive
+> the same already-started `NetchanDriver`, UDP transport/endpoints and attached
+> authentication lifetime through a private one-consumer seam. No second
+> socket, driver or connect is created. Until stock continuation-request bytes
+> are captured, production queues nothing and finalizes at the exact unsupported
+> boundary. Synthetic fixed requests still delegate sequencing, retries and
+> covering ACKs to the driver.
+
 ## Scope and evidence status
 
 This document records the M2.3.2 persistent reliable channel and the M2.3.3

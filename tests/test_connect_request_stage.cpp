@@ -1,5 +1,7 @@
 #include <hlclient/goldsrc/connect_request_stage.hpp>
 
+#include "handshake_coordinator_test_access.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -31,7 +33,9 @@ using hlclient::goldsrc::ConnectRequestTraceEvent;
 using hlclient::goldsrc::GoldSrcHandshakeCoordinator;
 using hlclient::goldsrc::GoldSrcHandshakeState;
 using hlclient::goldsrc::HandshakeStopPoint;
+using hlclient::goldsrc::PostResourceEntitySnapshotStageState;
 using hlclient::goldsrc::PrepareConnectRequestResult;
+using hlclient::goldsrc::detail::GoldSrcHandshakeCoordinatorTestAccess;
 using hlclient::auth::AuthenticationSession;
 using hlclient::auth::IAuthenticationSessionLifetime;
 using hlclient::network::Datagram;
@@ -292,6 +296,101 @@ TEST_CASE("Precache-manifest coordinator mode requires one retained local enviro
         CHECK(transport.sent.empty());
     }
     CHECK(authentication_releases == 1U);
+}
+
+TEST_CASE("Post-resource coordinator stops own the dedicated entity-snapshot stage",
+          "[goldsrc][connect-stage][post-resource][configuration]")
+{
+    const auto exercise_stop = [](const HandshakeStopPoint stop_point) {
+        FakeDatagramTransport transport;
+        const auto endpoint = NetworkAddress::loopback(27'013);
+        const auto epoch = ChallengeExchangeTimePoint{};
+        auto prepared = prepared_request();
+        REQUIRE(prepared);
+
+        // Only the four original required constructor arguments are supplied.
+        // Keeping this form compiling protects the append-only defaulted
+        // coordinator constructor contract used by historical stop points.
+        GoldSrcHandshakeCoordinator coordinator{
+            transport,
+            endpoint,
+            stop_point,
+            std::move(prepared.value)};
+
+        CHECK(coordinator.stop_point() == stop_point);
+        CHECK(coordinator.state() == GoldSrcHandshakeState::idle);
+        CHECK_FALSE(coordinator.terminal());
+        CHECK_FALSE(coordinator.post_resource_result());
+        CHECK_FALSE(coordinator.post_resource_error());
+
+        auto* const stage =
+            GoldSrcHandshakeCoordinatorTestAccess::post_resource_stage(
+                coordinator);
+        REQUIRE(stage != nullptr);
+        CHECK(GoldSrcHandshakeCoordinatorTestAccess::resource_response_stage(
+                  coordinator) == nullptr);
+        CHECK(stage->remote_endpoint() == endpoint);
+        CHECK(stage->state() == PostResourceEntitySnapshotStageState::idle);
+        CHECK_FALSE(stage->error());
+
+        // Starting the owned stage proves that the defaults propagated by the
+        // coordinator form a valid post-resource configuration. Synchronizing
+        // through the friend seam verifies the public nonterminal state and
+        // result/error accessors without duplicating a fake-HLDS transcript.
+        REQUIRE(stage->start(epoch, transport.local));
+        GoldSrcHandshakeCoordinatorTestAccess::
+            synchronize_from_post_resource_stage(coordinator);
+        CHECK(
+            coordinator.state() ==
+            GoldSrcHandshakeState::waiting_for_post_resource_entity_snapshot);
+        CHECK_FALSE(coordinator.terminal());
+        CHECK_FALSE(coordinator.post_resource_result());
+        CHECK_FALSE(coordinator.post_resource_error());
+
+        stage->cancel(epoch + 1ms);
+        GoldSrcHandshakeCoordinatorTestAccess::
+            synchronize_from_post_resource_stage(coordinator);
+        CHECK(coordinator.state() == GoldSrcHandshakeState::cancelled);
+        CHECK(coordinator.terminal());
+        CHECK_FALSE(coordinator.post_resource_result());
+        CHECK_FALSE(coordinator.post_resource_error());
+        CHECK(coordinator.error_context().empty());
+    };
+
+    SECTION("server-baselines stop")
+    {
+        exercise_stop(HandshakeStopPoint::server_baselines);
+    }
+    SECTION("entity-snapshot stop")
+    {
+        exercise_stop(HandshakeStopPoint::entity_snapshot);
+    }
+}
+
+TEST_CASE("Historical resource-response stop keeps its original dedicated stage",
+          "[goldsrc][connect-stage][resource-response][regression]")
+{
+    FakeDatagramTransport transport;
+    const auto endpoint = NetworkAddress::loopback(27'012);
+    auto prepared = prepared_request();
+    REQUIRE(prepared);
+
+    GoldSrcHandshakeCoordinator coordinator{
+        transport,
+        endpoint,
+        HandshakeStopPoint::resource_response_boundary,
+        std::move(prepared.value)};
+
+    CHECK(coordinator.stop_point() ==
+          HandshakeStopPoint::resource_response_boundary);
+    CHECK(coordinator.state() == GoldSrcHandshakeState::idle);
+    CHECK_FALSE(coordinator.terminal());
+    CHECK(GoldSrcHandshakeCoordinatorTestAccess::resource_response_stage(
+              coordinator) != nullptr);
+    CHECK(GoldSrcHandshakeCoordinatorTestAccess::post_resource_stage(
+              coordinator) == nullptr);
+    CHECK_FALSE(coordinator.post_resource_result());
+    CHECK_FALSE(coordinator.post_resource_error());
 }
 
 TEST_CASE("Connect stage 2: builder preserves the exact 32-bit challenge bit pattern",

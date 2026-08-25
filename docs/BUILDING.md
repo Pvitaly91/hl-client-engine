@@ -436,6 +436,43 @@ metadata-only and redact authentication. Diagnostics include direction, endpoint
 classification, attempt, elapsed time, and datagram size without printing raw
 untrusted control bytes.
 
+### Post-resource entity evidence boundary
+
+The M4.5.1 diagnostic spellings are CPU-only and accept the null renderer:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27015 --stop-after server-baselines `
+  --auth-provider file --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\isolated\Half-Life" --game valve --net-trace
+```
+
+Replace `server-baselines` with `entity-snapshot` for the later reserved stop.
+The current stock profile intentionally reaches only the proven opcode-5
+continuation boundary, sends no unconfirmed request, reports
+evidence-pending, and returns code 2. This is expected until accepted
+restoration-attested captures close the stock grammar gate.
+
+Research-root preflight can be run without launching stock processes:
+
+```powershell
+.\scripts\verify_stock_entity_snapshots.ps1 `
+  -ValidateResearchRoot `
+  -ResearchHalfLifeRoot "D:\isolated\Half-Life" `
+  -ClientPath "D:\isolated\Half-Life\hl.exe" `
+  -HldsPath "D:\isolated\Half-Life\hlds.exe"
+```
+
+Raw research output is ignored. The verifier never creates the tracked stock
+evidence JSON for a zero-run or incomplete corpus. Capture restoration rejects
+reparse points before and during rollback and preserves its bounded temporary
+backup for manual recovery if exact before/after drift verification cannot
+complete. The current sanitized candidate checks are structural only; because
+the absent capture harness does not publish a per-run typed observation trace,
+tracked validation and projection remain fail-closed instead of accepting
+retry/drop/duplicate/replay claims from labels and counts.
+
 ### Manual original-HLDS verification
 
 With a user-run original HLDS already listening on loopback, run exactly:

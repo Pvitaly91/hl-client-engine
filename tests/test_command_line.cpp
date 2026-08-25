@@ -347,6 +347,50 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             *result.options));
     }
 
+    SECTION("entity diagnostic stop points require and schedule the local provider")
+    {
+        for (const auto stop : {std::string_view{"server-baselines"},
+                                std::string_view{"entity-snapshot"}}) {
+            CAPTURE(stop);
+            const std::array arguments{
+                std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+                std::string_view{"--stop-after"}, stop,
+                std::string_view{"--auth-provider"}, std::string_view{"file"},
+                std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+                std::string_view{"--resource-consistency-provider"},
+                std::string_view{"local"},
+                std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+                std::string_view{"--renderer"}, std::string_view{"null"},
+            };
+            const auto result = parse_command_line(arguments);
+            REQUIRE(result);
+            CHECK(result.options->stop_after ==
+                  (stop == "server-baselines"
+                       ? hlclient::core::ConnectionStopPoint::server_baselines
+                       : hlclient::core::ConnectionStopPoint::entity_snapshot));
+            CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+                *result.options));
+        }
+    }
+
+    SECTION("entity diagnostic stop points reject a missing local provider")
+    {
+        for (const auto stop : {std::string_view{"server-baselines"},
+                                std::string_view{"entity-snapshot"}}) {
+            const std::array arguments{
+                std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+                std::string_view{"--stop-after"}, stop,
+                std::string_view{"--auth-provider"}, std::string_view{"file"},
+                std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            };
+            const auto result = parse_command_line(arguments);
+            CAPTURE(stop);
+            CHECK_FALSE(result);
+            CHECK(result.error.find("require --resource-consistency-provider local") !=
+                  std::string::npos);
+        }
+    }
+
     SECTION("precache manifest rejects a missing local provider")
     {
         const std::array arguments{
@@ -744,6 +788,17 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             std::string_view{"--execute-stufftext"},
             std::string_view{"--mount-server-map"},
             std::string_view{"--download-resource"},
+            std::string_view{"--raw-client-command"},
+            std::string_view{"--raw-server-message"},
+            std::string_view{"--inject-entity"},
+            std::string_view{"--entity-snapshot-file"},
+            std::string_view{"--replay-snapshot"},
+            std::string_view{"--force-entity-schema"},
+            std::string_view{"--ignore-delta-base"},
+            std::string_view{"--skip-baselines"},
+            std::string_view{"--spawn-entity"},
+            std::string_view{"--set-entity-origin"},
+            std::string_view{"--send-usercmd"},
             std::string_view{"--skip-auth"},
             std::string_view{"--raw-delta"},
             std::string_view{"--inject-delta"},
@@ -1095,6 +1150,8 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("resource-list-boundary") != std::string_view::npos);
     CHECK(help.find("resource-list") != std::string_view::npos);
     CHECK(help.find("resource-response-boundary") != std::string_view::npos);
+    CHECK(help.find("server-baselines") != std::string_view::npos);
+    CHECK(help.find("entity-snapshot") != std::string_view::npos);
     CHECK(help.find("precache-manifest") != std::string_view::npos);
     CHECK(help.find("asset-dispatch") != std::string_view::npos);
     CHECK(help.find("world-geometry") != std::string_view::npos);

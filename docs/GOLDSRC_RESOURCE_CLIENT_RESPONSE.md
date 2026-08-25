@@ -1,5 +1,14 @@
 # GoldSrc post-resource client response
 
+> M4.5.1 continuation note: the stage now has a second private, one-consumer
+> seam that may retain the same driver plus the bounded owning decoded source
+> payload for `PostResourceEntitySnapshotStage`. Raw payload bytes remain
+> private and are cleared during exactly-once cleanup. The historical
+> precache/local-preview seam and every public response-boundary behavior are
+> unchanged. Because no accepted entity capture exists, the production
+> continuation still stops before the first post-response body and sends no
+> client request. See [post-resource sign-on](GOLDSRC_POST_RESOURCE_SIGNON.md).
+
 M3.1.3 continues from the exact M3.1.2 end-of-payload boundary. It separates
 one reliable semantic unit from a contemporaneous suffix, builds the semantic
 unit from typed provider material, queues it once through the persistent

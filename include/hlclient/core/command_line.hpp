@@ -25,6 +25,8 @@ enum class ConnectionStopPoint {
     resource_list_boundary,
     resource_list,
     resource_response_boundary,
+    server_baselines,
+    entity_snapshot,
     precache_manifest,
     asset_dispatch,
     world_geometry,

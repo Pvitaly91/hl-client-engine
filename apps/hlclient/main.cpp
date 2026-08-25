@@ -1269,6 +1269,86 @@ void log_precache_manifest_trace(
     }
 }
 
+void log_post_resource_entity_snapshot_trace(
+    const hlclient::goldsrc::PostResourceEntitySnapshotTraceEvent& event)
+{
+    using Type =
+        hlclient::goldsrc::PostResourceEntitySnapshotStageEventType;
+    const auto& metadata = event.metadata;
+    switch (metadata.type) {
+    case Type::post_resource_message_received:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[signon] post-resource message opcode=" +
+                (metadata.opcode
+                     ? std::to_string(
+                           static_cast<unsigned int>(*metadata.opcode))
+                     : std::string{"unavailable"}) +
+                " offset=" + std::to_string(metadata.byte_offset) + ":" +
+                std::to_string(metadata.bit_offset));
+        return;
+    case Type::client_signon_request_ready:
+    case Type::client_signon_request_queued:
+    case Type::client_signon_request_acknowledged:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[signon] typed request metadata bytes=" +
+                std::to_string(metadata.semantic_byte_count));
+        return;
+    case Type::server_signon_progress:
+        hlclient::core::log(
+            LogLevel::debug, "[signon] progression metadata received");
+        return;
+    case Type::baseline_decoded:
+    case Type::baseline_registry_ready:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[entity] baselines=" +
+                std::to_string(metadata.baseline_count));
+        return;
+    case Type::full_entity_snapshot_ready:
+    case Type::delta_entity_snapshot_ready:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[entity] snapshot entities=" +
+                std::to_string(metadata.entity_count) +
+                " changed=" + std::to_string(metadata.changed_count) +
+                " added=" + std::to_string(metadata.added_count) +
+                " removed=" + std::to_string(metadata.removed_count) +
+                " history=" + std::to_string(metadata.history_count));
+        return;
+    case Type::entity_removed:
+        hlclient::core::log(
+            LogLevel::debug, "[entity] removal metadata received");
+        return;
+    case Type::snapshot_history_updated:
+        hlclient::core::log(
+            LogLevel::debug,
+            "[entity] history=" +
+                std::to_string(metadata.history_count));
+        return;
+    case Type::unsupported_message:
+        hlclient::core::log(
+            LogLevel::error,
+            "[signon] stock post-resource body remains evidence-pending");
+        return;
+    case Type::missing_delta_base:
+        hlclient::core::log(
+            LogLevel::error, "[entity] exact delta base is unavailable");
+        return;
+    case Type::timeout:
+    case Type::cancelled:
+    case Type::backpressure:
+    case Type::secondary_stream_pending:
+    case Type::network_error:
+    case Type::protocol_error:
+        hlclient::core::log(
+            LogLevel::error,
+            "[signon] post-resource entity stage ended without publication");
+        return;
+    }
+}
+
 void log_precache_asset_dispatch_trace(
     const hlclient::goldsrc::PrecacheAssetDispatchTraceEvent& event)
 {
@@ -1992,6 +2072,49 @@ void log_world_render_package_trace(
             LogLevel::error,
             "Secondary post-resource response stream remains pending");
         return 1;
+    case State::server_baselines_ready:
+        hlclient::core::log(
+            LogLevel::info,
+            "[entity] bounded baseline registry publication reached");
+        return 0;
+    case State::entity_snapshot_ready:
+        hlclient::core::log(
+            LogLevel::info,
+            "[entity] bounded full/delta snapshot publication reached");
+        return 0;
+    case State::post_resource_unsupported_message:
+        if (!handshake.post_resource_result()) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Post-resource evidence boundary has no owning result");
+            return 1;
+        }
+        hlclient::core::log(
+            LogLevel::error,
+            "[signon] stock post-resource request and entity wire grammar "
+            "remain evidence-pending; the first unconfirmed body is "
+            "unconsumed and no continuation request was queued");
+        return 2;
+    case State::post_resource_missing_delta_base:
+        hlclient::core::log(
+            LogLevel::error,
+            "[entity] exact referenced delta base is unavailable");
+        return 1;
+    case State::post_resource_timed_out:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource entity-snapshot stage timed out");
+        return 1;
+    case State::post_resource_backpressure:
+        hlclient::core::log(
+            LogLevel::error,
+            "Post-resource entity-snapshot event bound was reached");
+        return 1;
+    case State::post_resource_secondary_stream_pending:
+        hlclient::core::log(
+            LogLevel::error,
+            "Secondary post-resource entity stream remains pending");
+        return 1;
     case State::precache_manifest_ready:
         if (!handshake.precache_manifest_result()) {
             hlclient::core::log(
@@ -2166,6 +2289,7 @@ void log_world_render_package_trace(
     case State::waiting_for_resource_transition:
     case State::waiting_for_resource_list:
     case State::waiting_for_resource_response:
+    case State::waiting_for_post_resource_entity_snapshot:
     case State::waiting_for_precache_manifest:
     case State::waiting_for_asset_dispatch:
     case State::waiting_for_world_textures:
@@ -2720,7 +2844,14 @@ public:
                  net_trace
                      ? hlclient::goldsrc::WorldRenderPackageTraceCallback{
                            &log_world_render_package_trace}
-                     : hlclient::goldsrc::WorldRenderPackageTraceCallback{}}
+                     : hlclient::goldsrc::WorldRenderPackageTraceCallback{},
+                 {},
+                 net_trace
+                     ? hlclient::goldsrc::
+                           PostResourceEntitySnapshotTraceCallback{
+                               &log_post_resource_entity_snapshot_trace}
+                     : hlclient::goldsrc::
+                           PostResourceEntitySnapshotTraceCallback{}}
     {
         hlclient::core::log(LogLevel::info, "GoldSrc challenge exchange started");
         hlclient::core::log(LogLevel::info, "Server: " + remote_endpoint.to_string());
@@ -3072,6 +3203,28 @@ int run_asset_dispatch_stop(
         require_world_render_package);
 }
 
+int run_evidence_pending_post_resource_stop(HandshakeSession& session)
+{
+    hlclient::core::log(
+        LogLevel::info,
+        "[signon] post-resource phase started; stock entity grammar evidence is pending");
+    while (!session.terminal()) {
+        session.update(hlclient::goldsrc::ChallengeExchangeClock::now());
+        if (!session.terminal()) {
+            std::this_thread::yield();
+        }
+    }
+    const auto boundary_result = session.report_result();
+    if (boundary_result != 0) {
+        return boundary_result;
+    }
+    hlclient::core::log(
+        LogLevel::error,
+        "[signon] stock post-resource request and entity wire grammar remain "
+        "evidence-pending; stopped at the exact unconsumed boundary");
+    return 2;
+}
+
 int run(const hlclient::core::CommandLineOptions& options)
 {
     print_version();
@@ -3291,6 +3444,14 @@ int run(const hlclient::core::CommandLineOptions& options)
             stop_point =
                 hlclient::goldsrc::HandshakeStopPoint::resource_response_boundary;
             break;
+        case hlclient::core::ConnectionStopPoint::server_baselines:
+            stop_point =
+                hlclient::goldsrc::HandshakeStopPoint::server_baselines;
+            break;
+        case hlclient::core::ConnectionStopPoint::entity_snapshot:
+            stop_point =
+                hlclient::goldsrc::HandshakeStopPoint::entity_snapshot;
+            break;
         case hlclient::core::ConnectionStopPoint::precache_manifest:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::precache_manifest;
             break;
@@ -3331,6 +3492,14 @@ int run(const hlclient::core::CommandLineOptions& options)
                 ? production_world_render_package_config(options)
                 : hlclient::goldsrc::WorldRenderPackageStageConfig{},
             options.net_trace);
+    }
+
+    if ((options.stop_after ==
+             hlclient::core::ConnectionStopPoint::server_baselines ||
+         options.stop_after ==
+             hlclient::core::ConnectionStopPoint::entity_snapshot) &&
+        challenge_session) {
+        return run_evidence_pending_post_resource_stop(*challenge_session);
     }
 
     if ((options.stop_after ==

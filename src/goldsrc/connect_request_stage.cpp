@@ -387,6 +387,48 @@ private:
     return GoldSrcHandshakeState::protocol_error;
 }
 
+[[nodiscard]] GoldSrcHandshakeState map_post_resource_entity_snapshot_state(
+    const PostResourceEntitySnapshotStageState state) noexcept
+{
+    switch (state) {
+    case PostResourceEntitySnapshotStageState::idle:
+    case PostResourceEntitySnapshotStageState::waiting_for_resource_response:
+    case PostResourceEntitySnapshotStageState::decoding_post_resource_messages:
+    case PostResourceEntitySnapshotStageState::client_request_ready:
+    case PostResourceEntitySnapshotStageState::
+        waiting_for_client_request_transmit:
+    case PostResourceEntitySnapshotStageState::waiting_for_client_request_ack:
+    case PostResourceEntitySnapshotStageState::waiting_for_server_signon:
+    case PostResourceEntitySnapshotStageState::decoding_baselines:
+    case PostResourceEntitySnapshotStageState::waiting_for_full_snapshot:
+    case PostResourceEntitySnapshotStageState::waiting_for_delta_snapshot:
+        return GoldSrcHandshakeState::
+            waiting_for_post_resource_entity_snapshot;
+    case PostResourceEntitySnapshotStageState::baseline_registry_ready:
+        return GoldSrcHandshakeState::server_baselines_ready;
+    case PostResourceEntitySnapshotStageState::full_snapshot_ready:
+    case PostResourceEntitySnapshotStageState::entity_snapshot_ready:
+        return GoldSrcHandshakeState::entity_snapshot_ready;
+    case PostResourceEntitySnapshotStageState::unsupported_message:
+        return GoldSrcHandshakeState::post_resource_unsupported_message;
+    case PostResourceEntitySnapshotStageState::missing_delta_base:
+        return GoldSrcHandshakeState::post_resource_missing_delta_base;
+    case PostResourceEntitySnapshotStageState::timed_out:
+        return GoldSrcHandshakeState::post_resource_timed_out;
+    case PostResourceEntitySnapshotStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case PostResourceEntitySnapshotStageState::backpressure:
+        return GoldSrcHandshakeState::post_resource_backpressure;
+    case PostResourceEntitySnapshotStageState::secondary_stream_pending:
+        return GoldSrcHandshakeState::post_resource_secondary_stream_pending;
+    case PostResourceEntitySnapshotStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case PostResourceEntitySnapshotStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
 [[nodiscard]] GoldSrcHandshakeState map_precache_manifest_state(
     const PrecacheManifestStageState state) noexcept
 {
@@ -781,7 +823,9 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     WorldTextureImportStageConfig world_texture_config,
     WorldTextureImportTraceCallback world_texture_trace_callback,
     WorldRenderPackageStageConfig world_render_package_config,
-    WorldRenderPackageTraceCallback world_render_package_trace_callback)
+    WorldRenderPackageTraceCallback world_render_package_trace_callback,
+    PostResourceEntitySnapshotStageConfig post_resource_config,
+    PostResourceEntitySnapshotTraceCallback post_resource_trace_callback)
     : stop_point_{stop_point},
       challenge_exchange_{
           transport,
@@ -811,6 +855,8 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::resource_list_boundary ||
                 stop_point_ == HandshakeStopPoint::resource_list ||
                 stop_point_ == HandshakeStopPoint::resource_response_boundary ||
+                stop_point_ == HandshakeStopPoint::server_baselines ||
+                stop_point_ == HandshakeStopPoint::entity_snapshot ||
                 stop_point_ == HandshakeStopPoint::precache_manifest ||
                 stop_point_ == HandshakeStopPoint::asset_dispatch ||
                 stop_point_ == HandshakeStopPoint::world_textures ||
@@ -913,6 +959,22 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                     std::move(resource_transition_trace_callback),
                     std::move(resource_list_trace_callback),
                     std::move(resource_response_trace_callback));
+            }
+            if (stop_point_ == HandshakeStopPoint::server_baselines ||
+                stop_point_ == HandshakeStopPoint::entity_snapshot) {
+                post_resource_config.resource_response =
+                    std::move(resource_response_config);
+                post_resource_config.stop_condition =
+                    stop_point_ == HandshakeStopPoint::server_baselines
+                    ? EntitySnapshotStageStopCondition::server_baselines
+                    : EntitySnapshotStageStopCondition::first_applied_delta;
+                post_resource_entity_snapshot_stage_ =
+                    std::make_unique<PostResourceEntitySnapshotStage>(
+                        transport,
+                        remote_endpoint,
+                        std::move(post_resource_config),
+                        resource_consistency_provider,
+                        std::move(post_resource_trace_callback));
             }
             if (stop_point_ == HandshakeStopPoint::precache_manifest) {
                 if (!local_resource_environment) {
@@ -1065,6 +1127,14 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
     if (terminal()) {
         return;
     }
+    if (post_resource_entity_snapshot_stage_ &&
+        state_ == GoldSrcHandshakeState::
+                      waiting_for_post_resource_entity_snapshot) {
+        post_resource_entity_snapshot_stage_->update(now);
+        synchronize_from_post_resource_entity_snapshot();
+        release_authentication_session_if_terminal();
+        return;
+    }
     if (world_render_package_stage_ &&
         state_ == GoldSrcHandshakeState::waiting_for_world_render_package) {
         world_render_package_stage_->update(now);
@@ -1169,6 +1239,14 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (post_resource_entity_snapshot_stage_ &&
+        state_ == GoldSrcHandshakeState::
+                      waiting_for_post_resource_entity_snapshot) {
+        post_resource_entity_snapshot_stage_->cancel(now);
+        synchronize_from_post_resource_entity_snapshot();
+        release_authentication_session_if_terminal();
         return;
     }
     if (world_render_package_stage_ &&
@@ -1334,6 +1412,13 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::resource_response_timed_out:
     case GoldSrcHandshakeState::resource_response_backpressure:
     case GoldSrcHandshakeState::resource_response_secondary_stream_pending:
+    case GoldSrcHandshakeState::server_baselines_ready:
+    case GoldSrcHandshakeState::entity_snapshot_ready:
+    case GoldSrcHandshakeState::post_resource_unsupported_message:
+    case GoldSrcHandshakeState::post_resource_missing_delta_base:
+    case GoldSrcHandshakeState::post_resource_timed_out:
+    case GoldSrcHandshakeState::post_resource_backpressure:
+    case GoldSrcHandshakeState::post_resource_secondary_stream_pending:
     case GoldSrcHandshakeState::precache_manifest_ready:
     case GoldSrcHandshakeState::local_resources_incomplete:
     case GoldSrcHandshakeState::unsafe_local_resources:
@@ -1385,6 +1470,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_resource_transition:
     case GoldSrcHandshakeState::waiting_for_resource_list:
     case GoldSrcHandshakeState::waiting_for_resource_response:
+    case GoldSrcHandshakeState::waiting_for_post_resource_entity_snapshot:
     case GoldSrcHandshakeState::waiting_for_precache_manifest:
     case GoldSrcHandshakeState::waiting_for_asset_dispatch:
     case GoldSrcHandshakeState::waiting_for_world_textures:
@@ -1510,6 +1596,22 @@ GoldSrcHandshakeCoordinator::resource_client_response_error() const noexcept
     return resource_client_response_stage_
                ? resource_client_response_stage_->error()
                : empty;
+}
+const std::optional<PostResourceSignonState>&
+GoldSrcHandshakeCoordinator::post_resource_result() const noexcept
+{
+    static const std::optional<PostResourceSignonState> empty;
+    return post_resource_entity_snapshot_stage_
+        ? post_resource_entity_snapshot_stage_->result()
+        : empty;
+}
+const std::optional<PostResourceEntitySnapshotStageError>&
+GoldSrcHandshakeCoordinator::post_resource_error() const noexcept
+{
+    static const std::optional<PostResourceEntitySnapshotStageError> empty;
+    return post_resource_entity_snapshot_stage_
+        ? post_resource_entity_snapshot_stage_->error()
+        : empty;
 }
 const std::optional<PrecacheManifestSignonState>&
 GoldSrcHandshakeCoordinator::precache_manifest_result() const noexcept
@@ -1649,6 +1751,10 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
         resource_client_response_stage_->error()) {
         return resource_client_response_stage_->error()->context;
     }
+    if (post_resource_entity_snapshot_stage_ &&
+        post_resource_entity_snapshot_stage_->error()) {
+        return post_resource_entity_snapshot_stage_->error()->context;
+    }
     if (precache_manifest_stage_ && precache_manifest_stage_->error()) {
         return precache_manifest_stage_->error()->context;
     }
@@ -1696,6 +1802,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::resource_list_boundary &&
          stop_point_ != HandshakeStopPoint::resource_list &&
          stop_point_ != HandshakeStopPoint::resource_response_boundary &&
+         stop_point_ != HandshakeStopPoint::server_baselines &&
+         stop_point_ != HandshakeStopPoint::entity_snapshot &&
          stop_point_ != HandshakeStopPoint::precache_manifest &&
          stop_point_ != HandshakeStopPoint::asset_dispatch &&
          stop_point_ != HandshakeStopPoint::world_textures &&
@@ -1736,6 +1844,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
           stop_point_ != HandshakeStopPoint::resource_list_boundary &&
           stop_point_ != HandshakeStopPoint::resource_list &&
           stop_point_ != HandshakeStopPoint::resource_response_boundary &&
+          stop_point_ != HandshakeStopPoint::server_baselines &&
+          stop_point_ != HandshakeStopPoint::entity_snapshot &&
            stop_point_ != HandshakeStopPoint::precache_manifest &&
            stop_point_ != HandshakeStopPoint::asset_dispatch &&
            stop_point_ != HandshakeStopPoint::world_textures &&
@@ -1758,6 +1868,9 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
           !resource_list_stage_) ||
          (stop_point_ == HandshakeStopPoint::resource_response_boundary &&
           !resource_client_response_stage_) ||
+         ((stop_point_ == HandshakeStopPoint::server_baselines ||
+           stop_point_ == HandshakeStopPoint::entity_snapshot) &&
+          !post_resource_entity_snapshot_stage_) ||
          (stop_point_ == HandshakeStopPoint::precache_manifest &&
           !precache_manifest_stage_) ||
          (stop_point_ == HandshakeStopPoint::asset_dispatch &&
@@ -1871,6 +1984,21 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         synchronize_from_resource_client_response();
         if (!resource_response_started &&
             state_ == GoldSrcHandshakeState::waiting_for_resource_response) {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::server_baselines ||
+        stop_point_ == HandshakeStopPoint::entity_snapshot) {
+        const bool post_resource_started =
+            post_resource_entity_snapshot_stage_->start(
+                now,
+                *challenge_exchange_.local_endpoint(),
+                std::move(driver_lifetime));
+        synchronize_from_post_resource_entity_snapshot();
+        if (!post_resource_started &&
+            state_ == GoldSrcHandshakeState::
+                          waiting_for_post_resource_entity_snapshot) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -2195,6 +2323,37 @@ void GoldSrcHandshakeCoordinator::synchronize_from_resource_client_response()
     if (stage_error &&
         stage_error->code ==
             ResourceClientResponseStageErrorCode::invalid_configuration) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::
+synchronize_from_post_resource_entity_snapshot()
+{
+    if (!post_resource_entity_snapshot_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Post-resource entity-snapshot mode has no persistent stage";
+        return;
+    }
+
+    // The coordinator publishes aggregate state and owns no external event
+    // polling API. Drain metadata events so a long-running evidence-backed
+    // profile cannot exhaust the bounded nested queue.
+    while (post_resource_entity_snapshot_stage_->poll_event()) {
+    }
+
+    state_ = map_post_resource_entity_snapshot_state(
+        post_resource_entity_snapshot_stage_->state());
+    const auto& stage_error =
+        post_resource_entity_snapshot_stage_->error();
+    if (stage_error &&
+        (stage_error->code ==
+             PostResourceEntitySnapshotStageErrorCode::invalid_configuration ||
+         stage_error->response_code ==
+             ResourceClientResponseStageErrorCode::invalid_configuration ||
+         stage_error->driver_code ==
+             NetchanDriverErrorCode::invalid_configuration)) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

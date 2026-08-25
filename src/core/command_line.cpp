@@ -106,6 +106,10 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::resource_list;
             } else if (value == "resource-response-boundary") {
                 options.stop_after = ConnectionStopPoint::resource_response_boundary;
+            } else if (value == "server-baselines") {
+                options.stop_after = ConnectionStopPoint::server_baselines;
+            } else if (value == "entity-snapshot") {
+                options.stop_after = ConnectionStopPoint::entity_snapshot;
             } else if (value == "precache-manifest") {
                 options.stop_after = ConnectionStopPoint::precache_manifest;
             } else if (value == "asset-dispatch") {
@@ -124,7 +128,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                                "netchan-bootstrap, signon-boundary, pre-resource, "
                                "delta-schemas, movevars, user-info, or "
                                "resource-list-boundary, resource-list, or "
-                               "resource-response-boundary, precache-manifest, or "
+                               "resource-response-boundary, server-baselines, "
+                               "entity-snapshot, precache-manifest, or "
                                "asset-dispatch, world-geometry, world-textures, or "
                                "world-render-package, or world-spatial-scene)");
             }
@@ -241,7 +246,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "a connect-request, connect-response, netchan-bootstrap, or "
                        "signon-boundary/pre-resource/delta-schemas/movevars/"
                        "user-info/resource-list-boundary/resource-list/"
-                       "resource-response-boundary/precache-manifest/"
+                       "resource-response-boundary/server-baselines/"
+                       "entity-snapshot/precache-manifest/"
                        "asset-dispatch/world-geometry/world-textures/"
                        "world-render-package/world-spatial-scene stop point or "
                        "--view-world");
@@ -264,6 +270,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::resource_list_boundary ||
          options.stop_after == ConnectionStopPoint::resource_list ||
          options.stop_after == ConnectionStopPoint::resource_response_boundary ||
+         options.stop_after == ConnectionStopPoint::server_baselines ||
+         options.stop_after == ConnectionStopPoint::entity_snapshot ||
          options.stop_after == ConnectionStopPoint::precache_manifest ||
          options.stop_after == ConnectionStopPoint::asset_dispatch ||
          options.stop_after == ConnectionStopPoint::world_geometry ||
@@ -285,6 +293,14 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             ResourceConsistencyProviderKind::local) {
         return failure(
             "The precache-manifest stop point requires "
+            "--resource-consistency-provider local");
+    }
+    if ((options.stop_after == ConnectionStopPoint::server_baselines ||
+         options.stop_after == ConnectionStopPoint::entity_snapshot) &&
+        options.resource_consistency_provider !=
+            ResourceConsistencyProviderKind::local) {
+        return failure(
+            "The server-baselines and entity-snapshot stop points require "
             "--resource-consistency-provider local");
     }
     if (options.stop_after == ConnectionStopPoint::asset_dispatch &&
@@ -336,6 +352,8 @@ bool requires_local_resource_consistency_preparation(
                ResourceConsistencyProviderKind::local &&
            (options.stop_after ==
                 ConnectionStopPoint::resource_response_boundary ||
+            options.stop_after == ConnectionStopPoint::server_baselines ||
+            options.stop_after == ConnectionStopPoint::entity_snapshot ||
             options.stop_after == ConnectionStopPoint::precache_manifest ||
             options.stop_after == ConnectionStopPoint::asset_dispatch ||
             options.stop_after == ConnectionStopPoint::world_geometry ||
@@ -359,7 +377,8 @@ Options:
                        netchan-bootstrap, signon-boundary, pre-resource,
                        delta-schemas, movevars, user-info, or
                        resource-list-boundary, resource-list, or
-                       resource-response-boundary, precache-manifest, or
+                       resource-response-boundary, server-baselines,
+                       entity-snapshot, precache-manifest, or
                        asset-dispatch, world-geometry, world-textures, or
                        world-render-package, or world-spatial-scene
                        (default: challenge)
@@ -370,7 +389,8 @@ Options:
   --resource-consistency-provider <name>
                       Explicit read-only response provider: local; requires
                       --basedir and is prepared only for resource-response-boundary,
-                      precache-manifest, asset-dispatch, world-geometry, or
+                      server-baselines, entity-snapshot, precache-manifest,
+                      asset-dispatch, world-geometry, or
                       world-textures, world-render-package, or
                       world-spatial-scene
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)

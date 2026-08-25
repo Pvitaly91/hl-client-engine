@@ -414,6 +414,30 @@ different target. Root validation and one-handle streaming preparation complete
 before network initialization, so provider preparation failures send zero
 packets. Earlier stop points perform no provider filesystem work.
 
+M4.5.1 also reserves CPU-only diagnostics for the post-resource entity
+boundary:
+
+```powershell
+.\build\bin\Debug\hlclient.exe --renderer null `
+  --connect 127.0.0.1:27128 --stop-after server-baselines `
+  --auth-provider file `
+  --auth-material-file C:\private\hl-auth-material.bin `
+  --resource-consistency-provider local `
+  --basedir "D:\isolated\Half-Life" --game valve --net-trace
+```
+
+`entity-snapshot` has the same prerequisites. Accepted stock entity captures
+are currently zero, so both spellings deliberately stop at the exact unconsumed
+post-response boundary, send no invented continuation request, report
+evidence-pending, and return non-success. The reusable generic delta,
+baseline, snapshot and bounded-history mechanics are exercised only by the
+sealed independently authored synthetic profile. No entity state reaches asset
+loading, `ClientWorldState`, interpolation or rendering. See
+[post-resource sign-on](docs/GOLDSRC_POST_RESOURCE_SIGNON.md),
+[runtime delta values](docs/GOLDSRC_RUNTIME_DELTA_VALUES.md),
+[entity baselines](docs/GOLDSRC_ENTITY_BASELINES.md), and
+[entity snapshots](docs/GOLDSRC_ENTITY_SNAPSHOTS.md).
+
 M3.2.2 continues that exact session into the metadata-only manifest stop:
 
 ```powershell

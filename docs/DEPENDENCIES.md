@@ -275,6 +275,14 @@ DLLs, tools, legacy Visual Studio projects, prebuilt libraries, or bundled SDL2.
 Those files exist inside the upstream submodule but are outside the
 `hl-client-engine` dependency graph.
 
+M4.5.1 adds no third-party dependency. `hlclient_goldsrc_delta_values`,
+`hlclient_goldsrc_entity_snapshots`, and
+`hlclient_goldsrc_post_resource_signon` are project-owned C++20 static targets.
+They reuse the existing delta schema and netchan APIs and do not link SDL,
+OpenGL, filesystem, `AssetManager`, game DLLs, Steam libraries, HLSDK object
+code, or a secondary engine. The pinned Valve SDK declarations remain a
+semantic cross-check only and are not a runtime wire proof.
+
 The SDK snapshot is needed as the official API/ABI and compatibility reference
 for selected declarations under `common`, `engine`, `pm_shared`, `cl_dll`, and
 `public`. It is not the source of this client's runtime architecture.

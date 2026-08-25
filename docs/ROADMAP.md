@@ -805,80 +805,48 @@ tracked without committing maps, WADs, raw geometry, native paths, texture
 names, or entity text. See
 [GoldSrc BSP geometry compatibility](GOLDSRC_BSP_GEOMETRY_COMPATIBILITY.md).
 
-### M4.5 — Runtime server entities, studio/sprite rendering and interpolation
+### M4.5.1 — Post-resource sign-on, baselines and entity snapshots
+
+**Status: bounded evidence-pending profile.**
+
+The project now has an owning generic runtime-delta object model, bounded
+baseline/snapshot/history mechanics, a strict post-response unsupported-message
+boundary, private same-driver/source-payload continuation seam, synthetic-only
+neutral fixtures, and isolated stock verification tooling. Accepted stock
+entity captures are still zero, so runtime masks, continuation requests,
+baseline/full/delta wire grammar, sign-on completion, clientdata and weapondata
+remain fail-closed. The production route sends no invented request and makes no
+project-to-stock entity-snapshot claim. No entity state reaches assets,
+`ClientWorldState`, interpolation or a renderer. See
+[post-resource sign-on](GOLDSRC_POST_RESOURCE_SIGNON.md),
+[runtime delta values](GOLDSRC_RUNTIME_DELTA_VALUES.md),
+[entity baselines](GOLDSRC_ENTITY_BASELINES.md), and
+[entity snapshots](GOLDSRC_ENTITY_SNAPSHOTS.md).
+
+### M4.5.2 — GoldSrc Studio MDL and SPR importers
 
 **Status: next.**
 
-Apply validated runtime entity/model state only after the M4.4 visibility,
-brush-submodel, and M4.4.1 stock-geometry boundaries are complete. Neither
-completed milestone begins this runtime work.
+This milestone will add bounded local format importers only; it was not started
+by M4.5.1.
 
-## M5 — Entity snapshots
+### M4.5.3 — Runtime entity composition, interpolation and OpenGL rendering
 
-**Goal:** decode live server entity state and present it as stable interpolatable
-world data.
+**Status: planned.**
 
-Planned work:
+Apply validated runtime entity/model state only after the evidence gates and
+M4.5.2 importers are complete.
 
-- delta descriptions/baselines and packet-entity messages;
-- snapshot history keyed by server time and sequence;
-- lifecycle for create, update, dormant, and remove operations;
-- player and non-player entity separation where the protocol requires it;
-- loss/reordering recovery and bounded entity indices/counts;
-- translation from protocol fields to neutral entity components.
+### M4.6 — Gameplay camera, input, usercmd and prediction
 
-Exit criteria: recorded snapshot fixtures reproduce the expected neutral world
-state without any packet type reaching the renderer.
+**Status: planned.**
 
-## M6 — MDL, players, and animated models
+## Superseded milestone numbering
 
-**Goal:** render server entities with GoldSrc studio models and basic animation.
-
-Planned work:
-
-- safe MDL and related texture/sequence parsing;
-- bones, sequences, controllers, blending, bodygroups, and skins needed by
-  Half-Life multiplayer;
-- player model selection and entity attachment basics;
-- render-scene instances and renderer-side GPU resource caching;
-- invalid model/animation fallback behavior.
-
-Exit criteria: representative player and world studio models animate from
-snapshot state with parser and pose tests independent of OpenGL.
-
-## M7 — Input, user commands, and movement
-
-**Goal:** turn SDL input into GoldSrc-compatible client commands and local
-movement state.
-
-Planned work:
-
-- device-independent input actions, bindings, focus, and mouse capture;
-- fixed protocol representation for `usercmd` construction and transmission;
-- command numbering, view angles, buttons, impulse, and movement values;
-- client-side movement using reviewed compatibility rules;
-- repeatable command-generation tests and input sampling policy;
-- clear boundary between platform events, command intent, and wire encoding.
-
-Exit criteria: the client can join, spawn, and send valid commands while local
-movement state remains deterministic under the test clock.
-
-## M8 — Interpolation and prediction
-
-**Goal:** provide smooth presentation under real network timing while remaining
-correctable by authoritative server state.
-
-Planned work:
-
-- snapshot interpolation buffer and render-time selection;
-- local-player prediction, command history, acknowledgement, and replay;
-- authoritative correction with bounded smoothing/error metrics;
-- entity-specific interpolation/teleport rules;
-- loss, latency, jitter, and frame-rate simulation tests;
-- instrumentation to distinguish network, simulation, and render time.
-
-Exit criteria: movement stays responsive and converges to authoritative state in
-repeatable simulated adverse-network scenarios.
+The former M5–M8 entity/model/input/interpolation buckets were split into the
+active M4.5.1, M4.5.2, M4.5.3 and M4.6 sequence above. They are not additional
+or competing next milestones. The only next milestone after this bounded
+M4.5.1 result is M4.5.2.
 
 ## M9 — `client.dll` API and HUD
 

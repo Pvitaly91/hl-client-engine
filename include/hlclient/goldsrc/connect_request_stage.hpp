@@ -9,6 +9,7 @@
 #include <hlclient/goldsrc/movement_environment_stage.hpp>
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 #include <hlclient/goldsrc/pre_resource_signon_stage.hpp>
+#include <hlclient/goldsrc/post_resource_entity_snapshot_stage.hpp>
 #include <hlclient/goldsrc/precache_asset_dispatch_stage.hpp>
 #include <hlclient/goldsrc/precache_manifest_stage.hpp>
 #include <hlclient/goldsrc/resource_list_stage.hpp>
@@ -49,6 +50,8 @@ enum class HandshakeStopPoint {
     resource_list_boundary,
     resource_list,
     resource_response_boundary,
+    server_baselines,
+    entity_snapshot,
     precache_manifest,
     asset_dispatch,
     world_textures,
@@ -208,6 +211,14 @@ enum class GoldSrcHandshakeState {
     resource_response_timed_out,
     resource_response_backpressure,
     resource_response_secondary_stream_pending,
+    waiting_for_post_resource_entity_snapshot,
+    server_baselines_ready,
+    entity_snapshot_ready,
+    post_resource_unsupported_message,
+    post_resource_missing_delta_base,
+    post_resource_timed_out,
+    post_resource_backpressure,
+    post_resource_secondary_stream_pending,
     waiting_for_precache_manifest,
     precache_manifest_ready,
     local_resources_incomplete,
@@ -297,7 +308,9 @@ public:
         WorldTextureImportStageConfig world_texture_config = {},
         WorldTextureImportTraceCallback world_texture_trace_callback = {},
         WorldRenderPackageStageConfig world_render_package_config = {},
-        WorldRenderPackageTraceCallback world_render_package_trace_callback = {});
+        WorldRenderPackageTraceCallback world_render_package_trace_callback = {},
+        PostResourceEntitySnapshotStageConfig post_resource_config = {},
+        PostResourceEntitySnapshotTraceCallback post_resource_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -347,6 +360,10 @@ public:
     resource_client_response_result() const noexcept;
     [[nodiscard]] const std::optional<ResourceClientResponseStageError>&
     resource_client_response_error() const noexcept;
+    [[nodiscard]] const std::optional<PostResourceSignonState>&
+    post_resource_result() const noexcept;
+    [[nodiscard]] const std::optional<PostResourceEntitySnapshotStageError>&
+    post_resource_error() const noexcept;
     [[nodiscard]] const std::optional<PrecacheManifestSignonState>&
     precache_manifest_result() const noexcept;
     [[nodiscard]] const std::optional<PrecacheManifestStageError>&
@@ -397,6 +414,7 @@ private:
     void synchronize_from_resource_transition();
     void synchronize_from_resource_list();
     void synchronize_from_resource_client_response();
+    void synchronize_from_post_resource_entity_snapshot();
     void synchronize_from_precache_manifest(ChallengeExchangeTimePoint now);
     void synchronize_from_asset_dispatch();
     void synchronize_from_world_textures();
@@ -416,6 +434,8 @@ private:
     std::optional<ResourceTransitionStage> resource_transition_stage_;
     std::optional<ResourceListStage> resource_list_stage_;
     std::optional<ResourceClientResponseStage> resource_client_response_stage_;
+    std::unique_ptr<PostResourceEntitySnapshotStage>
+        post_resource_entity_snapshot_stage_;
     std::unique_ptr<PrecacheManifestStage> precache_manifest_stage_;
     std::unique_ptr<PrecacheAssetDispatchStage> asset_dispatch_stage_;
     std::unique_ptr<WorldTextureImportStage> world_texture_stage_;

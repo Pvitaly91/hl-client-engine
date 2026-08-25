@@ -422,6 +422,60 @@ target_link_libraries(
 set_property(TARGET hlclient_goldsrc_signon PROPERTY FOLDER "Engine/Network/GoldSrc")
 
 hlclient_add_library(
+    hlclient_goldsrc_delta_values
+    include/hlclient/goldsrc/delta_value_decoder.hpp
+    src/goldsrc/delta_value_decoder.cpp
+)
+add_library(
+    hlclient::goldsrc_delta_values ALIAS hlclient_goldsrc_delta_values)
+target_link_libraries(
+    hlclient_goldsrc_delta_values
+    PUBLIC hlclient::goldsrc_signon
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_delta_values
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Delta")
+
+hlclient_add_library(
+    hlclient_goldsrc_entity_snapshots
+    include/hlclient/goldsrc/entity_snapshot.hpp
+    src/goldsrc/entity_snapshot.cpp
+)
+add_library(
+    hlclient::goldsrc_entity_snapshots ALIAS
+    hlclient_goldsrc_entity_snapshots)
+target_link_libraries(
+    hlclient_goldsrc_entity_snapshots
+    PUBLIC
+        hlclient::goldsrc_delta_values
+        hlclient::goldsrc_signon
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_entity_snapshots
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Entities")
+
+hlclient_add_library(
+    hlclient_goldsrc_post_resource_signon
+    include/hlclient/goldsrc/post_resource_entity_snapshot_stage.hpp
+    include/hlclient/goldsrc/post_resource_signon.hpp
+    src/goldsrc/post_resource_entity_snapshot_stage.cpp
+    src/goldsrc/post_resource_signon.cpp
+)
+add_library(
+    hlclient::goldsrc_post_resource_signon ALIAS
+    hlclient_goldsrc_post_resource_signon)
+target_link_libraries(
+    hlclient_goldsrc_post_resource_signon
+    PUBLIC
+        hlclient::goldsrc_entity_snapshots
+        hlclient::goldsrc_signon
+        hlclient::goldsrc_netchan
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_post_resource_signon
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Signon")
+
+hlclient_add_library(
     hlclient_goldsrc_local_resources
     include/hlclient/goldsrc/local_resource_mapping.hpp
     include/hlclient/goldsrc/local_resource_inventory.hpp
@@ -592,6 +646,7 @@ target_link_libraries(
         hlclient::auth
         hlclient::goldsrc
         hlclient::goldsrc_netchan
+        hlclient::goldsrc_post_resource_signon
         hlclient::goldsrc_resource_readiness
         hlclient::goldsrc_asset_dispatch
         hlclient::goldsrc_world_textures

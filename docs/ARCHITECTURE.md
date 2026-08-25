@@ -145,6 +145,9 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_resource_consistency_api` | path-free bounded provider requirements, move-only asynchronous operation/session/material ownership, cancellation, and private opaque-material handoff | filesystem/path policy, local lookup, checksum calculation, sockets, GoldSrc list types, assets, renderer |
 | `hlclient_resource_consistency_local` | pre-network preparation of the fixed `tempdecal.wad` compatibility target and one-shot nonblocking provider operation | server-derived paths, response codec/layout, network creation, writes, downloads, cache, assets |
 | `hlclient_goldsrc_signon` | exact fixed initial/transition requests, strict `BZ2\0` decoding, owning immutable sign-on/list/response states, historical neutral opcode-43 and zero-TX resource-list stop, exact standard list and neutral 41-byte opcode-5 codecs, carrier/tail separation, provider-required response stage, same-driver semantic-once lifecycle, and next-payload opcode boundary | arbitrary commands, custom/player-resource bodies, production consistency material, resource resolution, runtime application, command execution, filesystem, renderer, SDL, assets, world state |
+| `hlclient_goldsrc_delta_values` | immutable schema-aligned generic values, bounded transactional synthetic-neutral runtime-mask/scalar mechanics, and fail-before-read stock evidence boundary | schema reparsing, native/HLSDK struct writes, stock mask claims, wall clock, filesystem, assets, renderer |
+| `hlclient_goldsrc_entity_snapshots` | immutable generic baseline/full/delta/history state, explicit add/remove and exact-base mechanics, strict ordering, bounded retention, and sealed synthetic-neutral builders | stock entity wire/opcode claims, clientdata prediction, model binding, filesystem, renderer |
+| `hlclient_goldsrc_post_resource_signon` | exact unconsumed post-response cursor, bounded metadata transcript, typed request evidence gate, private same-driver/source-payload continuation, and a sealed four-control-fixture synthetic stage that publishes typed baseline/full/delta state for fake-HLDS tests | arbitrary commands/raw injection, stock request invention, stock entity-body decoding without evidence, opcode scanning, stufftext execution, assets, entity rendering |
 | `hlclient_goldsrc_local_resources` | evidence-gated resource-type/name classification and ordered metadata-only `LocalResourceInventoryState` adapter | sign-on transport, readiness/precache decisions, downloads/cache, file contents, asset loading |
 | `hlclient_goldsrc_resource_readiness` | strict list/inventory correlation, per-entry readiness and aggregate impact, exact map selection, immutable ordered manifest, and bounded type-local sparse slots | downloads/cache, file-content parsing, assets, renderer, OpenGL |
 | `hlclient_local_asset_source` | incremental exact-root locator reopen, bounded same-handle read, exact EOF and final-snapshot validation, owning `AssetSource` publication | GoldSrc types, importer selection, path fallback, renderer, network |
@@ -712,9 +715,9 @@ order:
    borrows the registries but never feeds its path through `AssetManager`;
 5. when a later stop point is explicit, acquire bounded authentication material
    through the configured provider and retain its optional session lifetime;
-6. only for response/manifest/asset-dispatch/world-geometry/world-textures/
-   world-render-package/world-spatial-scene/view-world routes with explicit
-   local selection,
+6. only for response/server-baselines/entity-snapshot/manifest/asset-dispatch/
+   world-geometry/world-textures/world-render-package/world-spatial-scene/
+   view-world routes with explicit local selection,
    validate `--basedir`/`--game`, prepare fixed-target consistency material
    through one sandboxed handle, close the file, and retain the one-shot
    provider plus its validated environment;
@@ -730,6 +733,10 @@ order:
    state and any explicitly selected static initial brush scene; print the
    requested bounded result, release the optional lifetime
    exactly once, and return before selecting or initializing any renderer;
+   the separate `server-baselines` and `entity-snapshot` diagnostics likewise
+   advance the retained network coordinator headlessly and return before any
+   renderer, asset importer, BSP, or WAD work (the stock evidence-pending
+   profile stops at the exact unconsumed body and queues no request);
 9. for `--view-world`, build the same scene headlessly, resolve the requested
    initial visibility/draw list, finalize retained driver/authentication state
    exactly once, and only then initialize SDL, an

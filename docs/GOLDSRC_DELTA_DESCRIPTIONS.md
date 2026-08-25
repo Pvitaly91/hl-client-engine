@@ -1,5 +1,13 @@
 # GoldSrc delta-description schemas
 
+> Runtime-value boundary: opcode-14 evidence proves schema metadata only. It
+> does not prove the runtime changed mask, integer representation, multiplier
+> formula, angle/time-window/string encoding, baseline defaults, or entity
+> framing. M4.5.1 reuses `DeltaSchemaRegistryState` through a separate
+> fail-before-read stock decoder and a sealed synthetic-neutral test profile;
+> it never reuses the description presence-mask grammar by assumption. See
+> [runtime delta values](GOLDSRC_RUNTIME_DELTA_VALUES.md).
+
 M2.4.3 extends the exact retained M2.4.2 service payload from its opcode-14
 cursor through the complete delta-description sequence. The implementation is
 an owning metadata registry only. It does not apply deltas to runtime memory,

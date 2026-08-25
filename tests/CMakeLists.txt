@@ -22,6 +22,14 @@ add_executable(hlclient_tests
     test_delta_description_stream.cpp
     test_delta_description_stage.cpp
     test_delta_schema_registry.cpp
+    test_goldsrc_delta_value_decoder.cpp
+    test_entity_baseline_registry.cpp
+    test_entity_full_snapshot.cpp
+    test_entity_delta_snapshot.cpp
+    test_entity_snapshot_history.cpp
+    test_post_resource_signon_stream.cpp
+    test_entity_snapshot_signon_stage.cpp
+    test_entity_snapshot_fake_hlds_integration.cpp
     test_game_paths.cpp
     test_goldsrc_bsp_header.cpp
     test_goldsrc_bsp_records.cpp
@@ -151,6 +159,9 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_resource_readiness
         hlclient_goldsrc_local_resources
         hlclient_goldsrc_netchan
+        hlclient_goldsrc_delta_values
+        hlclient_goldsrc_entity_snapshots
+        hlclient_goldsrc_post_resource_signon
         hlclient_goldsrc_signon
         hlclient_goldsrc_world_textures
         hlclient_goldsrc_world_render
