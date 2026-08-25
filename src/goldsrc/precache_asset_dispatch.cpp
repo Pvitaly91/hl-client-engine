@@ -382,66 +382,6 @@ ApprovedAssetSourceCreateResult ApprovedAssetSource::create(
     return result;
 }
 
-const assets::AssetSource& ApprovedAssetSource::source() const noexcept
-{
-    return source_.source();
-}
-
-std::size_t ApprovedAssetSource::wire_ordinal() const noexcept
-{
-    return wire_ordinal_;
-}
-
-ResourceType ApprovedAssetSource::resource_type() const noexcept
-{
-    return resource_type_;
-}
-
-std::uint16_t ApprovedAssetSource::resource_index() const noexcept
-{
-    return resource_index_;
-}
-
-local_resources::LocalResourceRootId ApprovedAssetSource::root_id()
-    const noexcept
-{
-    return source_.root_id();
-}
-
-local_resources::LocalVirtualResourceId
-ApprovedAssetSource::virtual_resource_id() const noexcept
-{
-    return source_.virtual_resource_id();
-}
-
-local_resources::LocalStableFileIdentity
-ApprovedAssetSource::expected_identity() const noexcept
-{
-    return source_.expected_identity();
-}
-
-std::uint64_t ApprovedAssetSource::byte_count() const noexcept
-{
-    return source_.byte_count();
-}
-
-assets::AssetDispatchRole ApprovedAssetSource::role() const noexcept
-{
-    return role_;
-}
-
-PrecacheManifestCompatibilityProfile
-ApprovedAssetSource::compatibility_profile() const noexcept
-{
-    return compatibility_profile_;
-}
-
-PrecacheManifestEvidenceProfile ApprovedAssetSource::evidence_profile()
-    const noexcept
-{
-    return evidence_profile_;
-}
-
 ApprovedAssetImporterDispatcher::ApprovedAssetImporterDispatcher(
     const assets::AssetImporterRegistries& registries) noexcept
     : dispatcher_{registries}

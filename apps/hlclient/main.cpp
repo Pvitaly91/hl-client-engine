@@ -11,6 +11,7 @@
 #include <hlclient/filesystem/rooted_file_system.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
 #include <hlclient/goldsrc/local_resource_inventory.hpp>
 #include <hlclient/goldsrc/local_resource_mapping.hpp>
 #include <hlclient/goldsrc/precache_manifest.hpp>
@@ -3249,7 +3250,7 @@ int run(const hlclient::core::CommandLineOptions& options)
 
     hlclient::assets::AssetImporterRegistries asset_importers;
     const auto importer_registration =
-        hlclient::goldsrc::bsp::register_builtin_asset_importers(
+        hlclient::goldsrc::register_builtin_asset_importers(
             asset_importers);
     if (!importer_registration) {
         const auto context = importer_registration.error

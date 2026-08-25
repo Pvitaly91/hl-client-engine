@@ -137,6 +137,33 @@ TEST_CASE("Verified locator reopen never searches a fallback root",
     CHECK(ordinary.file->root_id().value() == 1U);
 }
 
+TEST_CASE("Exact-root discovery never combines a selected root with fallback",
+          "[local-resource][locator][roots]")
+{
+    ScopedLocalResourceTestRoot temporary;
+    temporary.create_game("mymod");
+    temporary.write("mymod", "models/main.mdl", "main");
+    temporary.write("valve", "models/mainT.mdl", "fallback-companion");
+    auto environment = make_environment(temporary, "mymod");
+    auto main = make_locator(*environment, "models/main.mdl");
+    REQUIRE(main.root_id().value() == 0U);
+
+    auto companion =
+        local::LocalVirtualResourceName::create("models/mainT.mdl");
+    REQUIRE(companion);
+    REQUIRE(companion.name);
+    auto exact = environment->resolve_exact_root(
+        *companion.name, main.root_id());
+    CHECK_FALSE(exact);
+    CHECK(exact.code == local::LocalResourceResolutionCode::not_found);
+    CHECK_FALSE(exact.file);
+
+    auto ordinary = environment->resolver().resolve(*companion.name);
+    REQUIRE(ordinary);
+    REQUIRE(ordinary.file);
+    CHECK(ordinary.file->root_id().value() == 1U);
+}
+
 TEST_CASE("Verified locator reopen rejects stale file metadata",
           "[local-resource][locator][stale]")
 {

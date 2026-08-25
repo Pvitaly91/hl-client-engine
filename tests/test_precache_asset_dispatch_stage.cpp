@@ -14,6 +14,7 @@
 #include <hlclient/auth/authentication_provider.hpp>
 #include <hlclient/goldsrc/challenge_protocol.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
 #include <hlclient/goldsrc/precache_asset_dispatch_stage.hpp>
@@ -973,7 +974,7 @@ TEST_CASE("Production GoldSrc BSP importer publishes owning CPU world geometry",
   const auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
   write_complete_resources(root, world_bytes);
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   CHECK(registries.worlds.size() == 1U);
 
   auto config = test_config();
@@ -1021,7 +1022,7 @@ TEST_CASE("Production GoldSrc BSP registry leaves version 29 at the no-match bou
   hlclient::tests::synthetic_write_i32le(world_bytes, 0U, 29);
   write_complete_resources(root, world_bytes);
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   DispatchStageHarness harness{shared_environment(root), registries};
 
   const auto boundary = harness.reach_manifest(kCompleteEntries);
@@ -1330,7 +1331,7 @@ TEST_CASE("Precache asset dispatch rejects source metadata drift after read prog
   const auto world_bytes = hlclient::tests::literal_minimal_goldsrc_bsp_v30();
   write_complete_resources(root, world_bytes);
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   auto config = test_config();
   config.source_open.read_chunk_bytes = 8U;
   config.source_open.maximum_chunks_per_update = 1U;
@@ -1571,7 +1572,7 @@ TEST_CASE("Production BSP dispatch is stable across 20 chunked fake-HLDS runs",
   write_complete_resources(root, world_bytes);
   const auto environment = shared_environment(root);
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
 
   for (std::size_t run = 0U; run < 20U; ++run) {
     INFO("production BSP world-import run=" << run);
@@ -1612,7 +1613,7 @@ TEST_CASE("Production BSP malformed rejection is stable across 20 fake-HLDS runs
   write_complete_resources(root, world_bytes);
   const auto environment = shared_environment(root);
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
 
   for (std::size_t run = 0U; run < 20U; ++run) {
     INFO("malformed BSP rejection run=" << run);
@@ -1697,7 +1698,7 @@ TEST_CASE("Production BSP imports from world-ready incomplete manifests across 2
   root.write("valve", "maps/test_alpha.bsp", world_bytes);
   const auto environment = shared_environment(root);
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
 
   for (std::size_t run = 0U; run < 20U; ++run) {
     INFO("production world-ready incomplete run=" << run);
@@ -1767,7 +1768,7 @@ TEST_CASE("Dropped response and ACK continuations remain one semantic dispatch "
   write_complete_resources(root, world_bytes);
   const auto environment = shared_environment(root);
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
 
   const auto run_loss_mode = [&](const ResponseLossMode mode,
                                  const std::size_t expected_transmits) {
@@ -1910,7 +1911,7 @@ TEST_CASE("Full coordinator maps asset outcomes from challenge through the "
         std::make_unique<synthetic::SyntheticWorldImporter>("coordinator-world",
                                                             importer_counts)));
   }
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   CHECK(registries.worlds.size() == (production_bsp ? 1U : 2U));
 
   FakeTransport transport;

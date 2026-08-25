@@ -204,13 +204,12 @@ lump evidence raise confidence, and `.bsp` is only a hint. A `.bsp` extension
 alone never matches. A malformed version-30 candidate is selected so import can
 return `MalformedData`; other versions do not match.
 
-The core `GoldSrcBspWorldImporter` portion of
-`hlclient_goldsrc_bsp` / `hlclient::goldsrc_bsp` depends only on
-`hlclient_asset_api` (and therefore core). The target's M4.2 texture-source and
-worldspawn parsers additionally reuse the filesystem-free shared miptex parser,
-but still have no filesystem, local-resource, network, sign-on, SDL, OpenGL,
-renderer, or asset-manager dependency. Production composition calls
-`register_builtin_asset_importers` once on a caller-owned registry; there is no
+`hlclient_goldsrc_bsp` / `hlclient::goldsrc_bsp` depends inward on the neutral
+asset API, the filesystem-free shared miptex parser, and the GoldSrc spatial
+adapter. It has no Studio, sprite, filesystem, local-resource, network, sign-on,
+SDL, OpenGL, renderer, or asset-manager dependency. The separate
+`hlclient_goldsrc_builtin_importers` composition target calls
+`register_builtin_asset_importers` on a caller-owned registry; there is no
 global registry or cache.
 
 Automated coverage uses only original synthetic bytes, including an independent

@@ -593,3 +593,32 @@ If graphical CTest cases skip, inspect the reported actual context rather than
 assuming that a successfully requested 3.3 context was supplied. A legacy
 driver is an accepted capability skip for those tests; it is not accepted by
 the production OpenGL renderer.
+
+## GoldSrc visual-asset checker
+
+The Win32 build also produces the CPU-only
+`build\bin\<Configuration>\hlclient_goldsrc_asset_check.exe`. It accepts an
+explicit Half-Life base, one game directory, a safe virtual asset name, and an
+optional category constraint:
+
+```powershell
+.\build\bin\Debug\hlclient_goldsrc_asset_check.exe `
+  --basedir "D:\Games\Half-Life" --game valve `
+  --asset models/barney.mdl --kind model
+```
+
+Use `/` rather than `\` in the virtual asset argument. The tool resolves only
+the configured game and `valve` roots, follows Studio companions only in the
+main model's exact root, prints aggregate metadata, and performs no rendering,
+networking, or writes. User-owned repeated read-only checks are available via
+`scripts\verify_local_goldsrc_visual_assets.ps1`; missing optional names are
+reported as pending and are never created. Before reading selected assets, the
+verifier rejects reparse points in both roots, binds every selected-file digest
+to its root-relative identity, and rejects a substituted checker PE containing
+known Windows network dependencies, network API evidence, or process-launch API
+evidence. Each checker run has a 30-second wall deadline and a 64 KiB combined
+standard-output/error capture limit. While it runs, the verifier observes the
+full process tree (including the trusted Windows console host) for TCP/UDP
+endpoints and fails if the checker launches another process. These checks report
+the evidence actually tested instead of making an unconditional network claim.
+Game files are not required by the automated build or CTest suite.

@@ -9,6 +9,7 @@
 
 #include <hlclient/assets/asset_importer_registry.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
 #include <hlclient/goldsrc/world_render/world_render_package_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
@@ -709,7 +710,7 @@ TEST_CASE("World render package stage publishes one complete CPU package",
   fixture::ScopedLocalResourceTestRoot root;
   write_stage_prerequisites(root, embedded_lightmapped_bsp());
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   WorldRenderPackageStageHarness harness{root, registries};
   harness.begin_protocol();
   harness.finish();
@@ -759,7 +760,7 @@ TEST_CASE("World render package stage publishes one M4.4 CPU spatial scene",
   fixture::ScopedLocalResourceTestRoot root;
   write_stage_prerequisites(root, embedded_lightmapped_bsp());
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   auto config = test_config();
   config.build_world_spatial_scene = true;
   WorldRenderPackageStageHarness harness{root, registries, config};
@@ -808,7 +809,7 @@ TEST_CASE("World render package stage composes brushes spawn and CPU visibility"
   write_stage_prerequisites(root,
                             embedded_lightmapped_bsp_with_brush_scene());
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   auto config = test_config();
   config.build_world_spatial_scene = true;
   config.world_scene.brushes =
@@ -952,7 +953,7 @@ TEST_CASE("World render package stage translates submodel parse limits to the br
     config.bsp.maximum_output_vertices = 7U;
   }
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   WorldRenderPackageStageHarness harness{root, registries, config};
   harness.begin_protocol();
   harness.finish();
@@ -987,7 +988,7 @@ TEST_CASE("World render package stage keeps model zero parse failures at the BSP
   write_stage_prerequisites(root,
                             embedded_lightmapped_bsp_with_brush_scene());
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   auto config = test_config();
   config.build_world_spatial_scene = true;
   config.world_scene.brushes =
@@ -1043,7 +1044,7 @@ TEST_CASE("World render package stage retains typed M4.4 scene failures",
   }
 
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   WorldRenderPackageStageHarness harness{root, registries, config};
   harness.begin_protocol();
   harness.finish();
@@ -1098,7 +1099,7 @@ TEST_CASE("World render package stage preserves typed prerequisite failures",
   }
 
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   WorldRenderPackageStageHarness harness{root, registries, config};
   harness.begin_protocol();
   harness.finish();
@@ -1138,7 +1139,7 @@ TEST_CASE(
   fixture::ScopedLocalResourceTestRoot root;
   write_stage_prerequisites(root, embedded_lightmapped_bsp());
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   auto config = test_config();
   config.maximum_stage_events = 4U;
   SECTION("historical M4.3 package boundary") {}
@@ -1205,7 +1206,7 @@ TEST_CASE("World render package stage cancellation and timeout are idempotent",
   }
 
   assets::AssetImporterRegistries registries;
-  REQUIRE(bsp::register_builtin_asset_importers(registries));
+  REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
   WorldRenderPackageStageHarness harness{root, registries, config};
   harness.begin_protocol();
   if (scenario == Scenario::cancellation) {

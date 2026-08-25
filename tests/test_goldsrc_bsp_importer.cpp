@@ -1,6 +1,7 @@
 #include <hlclient/assets/asset_importer_registry.hpp>
 #include <hlclient/assets/asset_source.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
 
 #include "synthetic_goldsrc_bsp_fixture.hpp"
 
@@ -175,16 +176,17 @@ TEST_CASE("Import returns an owning WorldAsset with only approved virtual identi
     CHECK(retained.materials.size() == 1U);
 }
 
-TEST_CASE("Production registration installs exactly one real world importer",
+TEST_CASE("Production registration installs the three real GoldSrc importers",
     "[goldsrc-bsp][importer][registration]")
 {
     assets::AssetImporterRegistries registries;
-    const auto registered = bsp::register_builtin_asset_importers(registries);
+    const auto registered =
+        hlclient::goldsrc::register_builtin_asset_importers(registries);
     INFO((registered.error ? registered.error->context : std::string{}));
     REQUIRE(registered);
     CHECK(registries.worlds.size() == 1U);
-    CHECK(registries.models.size() == 0U);
-    CHECK(registries.sprites.size() == 0U);
+    CHECK(registries.models.size() == 1U);
+    CHECK(registries.sprites.size() == 1U);
     CHECK(registries.images.size() == 0U);
     CHECK(registries.audio.size() == 0U);
 

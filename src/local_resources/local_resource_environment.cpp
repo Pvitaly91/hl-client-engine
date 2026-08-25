@@ -159,6 +159,20 @@ LocalResourceEnvironment::root_metadata(
     return *found;
 }
 
+LocalResourceResolutionResult LocalResourceEnvironment::resolve_exact_root(
+    const LocalVirtualResourceName& virtual_name,
+    const LocalResourceRootId root_id) const
+{
+    if (!resolver_ || !root_id.valid() || !root_metadata(root_id)) {
+        return LocalResourceResolutionResult{
+            LocalResourceResolutionCode::io_error,
+            std::nullopt,
+            "Selected local resource root does not belong to this environment",
+        };
+    }
+    return resolver_->resolve_exact_root(virtual_name, root_id);
+}
+
 LocalResourceLocatorCreateResult LocalResourceEnvironment::make_locator(
     const LocalResourceRootId root_id,
     LocalVirtualResourceName virtual_name,

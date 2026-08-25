@@ -152,10 +152,16 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_goldsrc_resource_readiness` | strict list/inventory correlation, per-entry readiness and aggregate impact, exact map selection, immutable ordered manifest, and bounded type-local sparse slots | downloads/cache, file-content parsing, assets, renderer, OpenGL |
 | `hlclient_local_asset_source` | incremental exact-root locator reopen, bounded same-handle read, exact EOF and final-snapshot validation, owning `AssetSource` publication | GoldSrc types, importer selection, path fallback, renderer, network |
 | `hlclient_asset_dispatch` | pointer-free pure importer probes, deterministic typed/cross-category selection, and owning imported-asset result | filesystem, GoldSrc protocol, network, renderer, OpenGL |
+| `hlclient_goldsrc_approved_asset_source_api` | network-free owning read-only capability shared by manifest approval and offline visual composition | source approval policy, network/sign-on stages, importer selection, renderer |
+| `hlclient_model_asset_api` | format-neutral owning skeletal model metadata layered additively over the legacy model asset | GoldSrc wire names, playback state, entity binding, renderer/GPU state |
 | `hlclient_goldsrc_indexed_texture` | shared strict miptex grammar, four indexed mip/palette ranges, incremental RGBA8 conversion, masked-index-255 alpha, and neutral texture assets | BSP/WAD container parsing, filesystem, network, SDL, OpenGL, renderer/GPU work |
+| `hlclient_goldsrc_studio_model` | strict CPU-only IDST/IDSQ v10 parsing, skeletal geometry/textures/animations, and deterministic importer probing | filesystem/environment access, entity binding, playback, renderer/GPU work, network |
+| `hlclient_goldsrc_sprite` | strict CPU-only IDSP v2 palette/frame/group parsing and owning indexed/RGBA sprite import | filesystem/environment access, billboarding/blending, renderer/GPU work, network |
 | `hlclient_goldsrc_bsp` | strict BSP v30 byte grammar, structural validation, shared world/submodel `GoldSrcFaceGeometryBuilder`, evidenced qbsp-clockwise to renderer-counter-clockwise conversion, bounded collinear compatibility and diagnostics, exact texture ordinals, owning spatial-source records/entity bytes, used physical texture-source ranges, canonical inert entity parsing, and owning CPU assets | filesystem/local-resource APIs, WAD opening/catalogs, network/sign-on, `AssetManager`, SDL, OpenGL, renderer/GPU work |
+| `hlclient_goldsrc_builtin_importers` | the single caller-owned production composition that registers BSP, Studio, and sprite importers exactly once | parser implementation, global registries/state, filesystem, network/sign-on, renderer/GPU work |
 | `hlclient_goldsrc_wad3` | strict bounded WAD3 header/directory catalog, uncompressed type-`0x43` lookup, normalized duplicate rejection, and shared miptex adapter | filesystem/local-resource resolution, compiler-path interpretation, network, SDL, OpenGL, renderer/GPU work |
 | `hlclient_goldsrc_asset_dispatch` | evidence-derived resource role/plan, approved source facade, selected-world manifest continuation, and same-session terminal dispatch state | format parsing, download/cache, renderer/GPU work, extra network messages |
+| `hlclient_goldsrc_visual_asset_bundle` | canonical model-or-sprite dispatch plus transactional exact-root Studio companion composition for approved or verified local sources | network/sign-on stages, native-path input, renderer/GPU work, entity/gameplay state |
 | `hlclient_goldsrc_world_texture_import` | network-free retained-BSP texture resolution, sandboxed declared-WAD source opening, incremental decode, exact material bindings, and immutable complete/incomplete texture sets | sign-on/stage state, sockets, downloads/cache, entity instantiation, lightmaps, texture effects/animation, `AssetManager`, SDL, OpenGL, renderer/GPU work |
 | `hlclient_goldsrc_world_textures` | same-session terminal stage that composes asset dispatch with the CPU-only world-texture import target | texture codec duplication, SDL, OpenGL, renderer/GPU work, extra network messages after the manifest boundary |
 | `hlclient_goldsrc_lightmaps` | exact face-local GoldSrc lightmap extents, RGB/style-slot decode, deterministic padded multi-page atlases, and immutable per-surface bindings | filesystem, network, SDL, OpenGL, gamma/overbright, dynamic lighting |
@@ -181,6 +187,7 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_local_resource_check` | network-free, read-only diagnostic composition for an explicit user-owned root | stock process launch, path/digest output, file mutation, protocol transport |
 | `hlclient_bsp_compat_check` | network-free, read-only production BSP geometry/texture/render-package/spatial-scene validation with bounded aggregate compatibility diagnostics | network, SDL/OpenGL, writes, native-path or raw-asset output, gameplay |
 | `hlclient_world_texture_check` | network-free, read-only BSP/WAD texture composition for one explicit safe virtual map | stock process launch, writes, downloads/cache, renderer/GPU work, native-path or asset-byte output |
+| `hlclient_goldsrc_asset_check` | network-free, read-only canonical Studio/SPR composition for one safe virtual asset with bounded aggregate diagnostics | network/stage libraries, writes, native-path or raw-asset output, rendering/entity behavior |
 | `hlclient_world_viewer` | network-free, read-only BSP/WAD/lightmap/spatial/scene composition and configurable local diagnostic OpenGL preview for one safe virtual map | stock/network process launch, writes, downloads/cache, native map-path input, runtime gameplay |
 | `hlclient` | composition root and frame loop | reusable subsystem implementation |
 | `hlclient_tests` | deterministic unit/integration tests with local resources | public Internet or installed-game requirements |
@@ -208,19 +215,47 @@ hlclient_goldsrc_resource_readiness
 hlclient_local_asset_source
     -> hlclient_asset_api
     -> hlclient_local_resources
+hlclient_goldsrc_approved_asset_source_api
+    -> hlclient_asset_api
+    -> hlclient_asset_dispatch
+    -> hlclient_local_asset_source
+    -> hlclient_local_resources
+hlclient_model_asset_api -> hlclient_asset_api -> hlclient_core
+hlclient_goldsrc_studio_model
+    -> hlclient_model_asset_api
+    -> hlclient_asset_api
+    -> hlclient_core
+hlclient_goldsrc_sprite -> hlclient_asset_api -> hlclient_core
 hlclient_goldsrc_indexed_texture -> hlclient_asset_api -> hlclient_core
 hlclient_goldsrc_bsp
     -> hlclient_asset_api
     -> hlclient_goldsrc_indexed_texture
     -> hlclient_goldsrc_spatial
+hlclient_goldsrc_builtin_importers
+    -> hlclient_goldsrc_bsp
+    -> hlclient_goldsrc_studio_model
+    -> hlclient_goldsrc_sprite
 hlclient_goldsrc_wad3
     -> hlclient_asset_api
     -> hlclient_goldsrc_indexed_texture
 hlclient_asset_dispatch -> hlclient_asset_api
 hlclient_goldsrc_asset_dispatch
+    -> hlclient_goldsrc_approved_asset_source_api
     -> hlclient_goldsrc_resource_readiness
     -> hlclient_local_asset_source
     -> hlclient_asset_dispatch
+hlclient_goldsrc_visual_asset_bundle
+    -> hlclient_goldsrc_studio_model
+    -> hlclient_goldsrc_sprite
+    -> hlclient_goldsrc_approved_asset_source_api
+    -> hlclient_local_asset_source
+    -> hlclient_local_resources
+    -> hlclient_asset_dispatch
+hlclient_goldsrc_asset_check
+    -> hlclient_goldsrc_builtin_importers
+    -> hlclient_goldsrc_visual_asset_bundle
+    -> hlclient_local_asset_source
+    -> hlclient_local_resources
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
 hlclient_goldsrc_world_texture_import
     -> hlclient_goldsrc_bsp
@@ -270,23 +305,32 @@ hlclient_renderer_opengl
     -> hlclient_glad + OpenGL::GL
 ```
 
+The BSP parser target remains independent of Studio and sprite. The separate
+`hlclient_goldsrc_builtin_importers` composition target owns the one canonical
+production registration helper, so world-only BSP consumers do not inherit
+the visual importer libraries.
+
 The offline `hlclient_world_texture_check` and `hlclient_world_viewer`
 composition roots link `hlclient_goldsrc_world_texture_import`, never the
-same-session `hlclient_goldsrc_world_textures` stage. This makes their
-generated link closure exclude `hlclient_network`, Winsock, netchan, sign-on,
-resource-transition, and asset-dispatch stage libraries. The lightmap target
+same-session `hlclient_goldsrc_world_textures` stage. The offline
+`hlclient_goldsrc_asset_check` similarly links the canonical builtin registrar,
+network-free visual bundle, and approved-source API seam, never
+`hlclient_goldsrc_asset_dispatch`. Their
+generated link closures therefore exclude `hlclient_network`, Winsock,
+netchan, sign-on, resource-transition, readiness, and asset-dispatch stage
+libraries. The lightmap target
 likewise links only `hlclient_asset_api`; its private implementation reads the
 clean-room inline BSP v30 header constants and does not acquire the BSP parser
 library or any network-bearing target.
 
 The corresponding Visual Studio folders include `Engine/Core/Hash`,
 `Engine/Resources/Local`, `Engine/Resource Consistency`,
-`Engine/Assets/Source`, `Engine/Assets/Dispatch`,
+`Engine/Assets/Source`, `Engine/Assets/Dispatch`, `Engine/Assets/Models`,
 `Engine/Assets/Formats/GoldSrc`, `Engine/Assets/World Textures`,
 `Engine/Assets/World Render`, `Engine/Renderer/World`,
 `Engine/Renderer/Visibility`, and
-`Engine/Resources/GoldSrc`; the offline graphical diagnostic belongs under
-`Tools/World`.
+`Engine/Resources/GoldSrc`; offline asset diagnostics belong under
+`Tools/Assets`, and the graphical diagnostic belongs under `Tools/World`.
 In particular, `hlclient_goldsrc_signon` does not acquire a filesystem or
 concrete local-provider dependency.
 
@@ -771,6 +815,31 @@ or entity text.
 Partially initialized states must unwind safely through RAII. Logging and error
 messages should identify the failed boundary without exposing secrets or
 turning malformed remote data into a process crash.
+
+## CPU visual-asset import boundary
+
+M4.5.2 adds separate targets for neutral model types, the network-free approved
+source API seam, Studio v10, SPR v2, and GoldSrc visual dependency composition.
+Parsers depend inward on the neutral asset API only; they cannot see a renderer,
+`LocalResourceEnvironment`, network driver, or native filesystem. The outer
+visual operation owns the
+approved-or-verified source/environment boundary, uses the canonical
+cross-category dispatcher, invokes only the selected registered importer, and
+follows only a typed Studio dependency result.
+
+```text
+approved model resource
+    -> verified owning source
+    -> global model-or-sprite probe
+    -> self-contained IDST / exact-root Studio bundle / IDSP
+    -> owning ModelAsset or SpriteAsset
+```
+
+Models retain source-native bone-local geometry and compressed animation;
+sprites retain indexed frames, palette, groups, intervals, and format metadata.
+No output is a render instance. Entity-number/model-index association,
+fractional interpolation, body/skin/sequence application, billboarding, blend
+state, and OpenGL upload remain deliberately outside this boundary for M4.5.3.
 
 ## Module and plugin policy
 

@@ -1,0 +1,127 @@
+{
+  "schema_version": "hlclient.goldsrc-studio-sprite-compatibility.v1",
+  "project_commit": "d69696caedd9ae0bf9fbf841a83750bc7e7a9911",
+  "assets": [
+    {
+      "ordinal": 1,
+      "category": "model",
+      "source_identifier": "IDST",
+      "source_version": 10,
+      "source_count": 5,
+      "dependency_profile": "split-texture-plus-external-sequence-groups",
+      "structural_counts": {
+        "bones": 24,
+        "bodyparts": 2,
+        "submodels": 4,
+        "meshes": 32,
+        "vertices": 1345,
+        "triangles": 865,
+        "textures": 26,
+        "skin_families": 1,
+        "sequences": 71,
+        "sequence_groups": 4,
+        "animation_runs": 6638
+      },
+      "deterministic_summary_sha256": "b0587bf92a6aa2d2e0d6b22de5ae6f16f4af6fa08b00af211e9cef86522f0418"
+    },
+    {
+      "ordinal": 2,
+      "category": "model",
+      "source_identifier": "IDST",
+      "source_version": 10,
+      "source_count": 9,
+      "dependency_profile": "split-texture-plus-external-sequence-groups",
+      "structural_counts": {
+        "bones": 22,
+        "bodyparts": 3,
+        "submodels": 7,
+        "meshes": 38,
+        "vertices": 1975,
+        "triangles": 1351,
+        "textures": 31,
+        "skin_families": 2,
+        "sequences": 128,
+        "sequence_groups": 8,
+        "animation_runs": 12093
+      },
+      "deterministic_summary_sha256": "7138b481e1bc2b1bcbde04f827b7792a565a8e5f79f68ae5c2695d3494503899"
+    },
+    {
+      "ordinal": 3,
+      "category": "model",
+      "source_identifier": "IDST",
+      "source_version": 10,
+      "source_count": 5,
+      "dependency_profile": "split-texture-plus-external-sequence-groups",
+      "structural_counts": {
+        "bones": 30,
+        "bodyparts": 3,
+        "submodels": 8,
+        "meshes": 32,
+        "vertices": 1948,
+        "triangles": 1212,
+        "textures": 34,
+        "skin_families": 2,
+        "sequences": 82,
+        "sequence_groups": 4,
+        "animation_runs": 6201
+      },
+      "deterministic_summary_sha256": "986845016a3cc01dbe6f023c7e1533e2b982f38f6d1f75e95d16f51086d94242"
+    },
+    {
+      "ordinal": 4,
+      "category": "sprite",
+      "source_identifier": "IDSP",
+      "source_version": 2,
+      "source_count": 1,
+      "dependency_profile": "single-source",
+      "structural_counts": {
+        "top_level_entries": 15,
+        "flattened_frames": 15,
+        "groups": 0,
+        "indexed_bytes": 61440
+      },
+      "deterministic_summary_sha256": "7c556a0cf765346d1faa91654eba9d01070549e1035780385dc24aa38c841a86"
+    },
+    {
+      "ordinal": 5,
+      "category": "sprite",
+      "source_identifier": "IDSP",
+      "source_version": 2,
+      "source_count": 1,
+      "dependency_profile": "single-source",
+      "structural_counts": {
+        "top_level_entries": 1,
+        "flattened_frames": 1,
+        "groups": 0,
+        "indexed_bytes": 2048
+      },
+      "deterministic_summary_sha256": "ca76c255989fe6bde9a9b8766d1ec749074a88d2db6c06c98e2c5a42d443163a"
+    },
+    {
+      "ordinal": 6,
+      "category": "sprite",
+      "source_identifier": "IDSP",
+      "source_version": 2,
+      "source_count": 1,
+      "dependency_profile": "single-source",
+      "structural_counts": {
+        "top_level_entries": 1,
+        "flattened_frames": 1,
+        "groups": 0,
+        "indexed_bytes": 4096
+      },
+      "deterministic_summary_sha256": "ab01800c31f2f4c18e5b91708e16b7e33865838b4971d717e546215f4834f8b1"
+    }
+  ],
+  "verification": {
+    "checker_runs": 12,
+    "deterministic_summary": true,
+    "created_files": 0,
+    "deleted_files": 0,
+    "checker_launched_descendant_processes_observed": false,
+    "checker_network_api_evidence": "none",
+    "checker_process_tree_network_endpoints_observed": false,
+    "external_file_drift": "none"
+  }
+}

@@ -13,6 +13,7 @@
 
 #include <hlclient/auth/authentication_provider.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
 #include <hlclient/goldsrc/challenge_protocol.hpp>
 #include <hlclient/goldsrc/connect_request.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
@@ -4279,12 +4280,12 @@ void run_precache_manifest_integration(
     manifest_stage_config.response = response_stage_config;
     assets::AssetImporterRegistries registries;
     if (production_bsp_dispatch) {
-        REQUIRE(bsp::register_builtin_asset_importers(
+        REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(
             registries,
             production_bsp_limits(production_bsp_scenario)));
         CHECK(registries.worlds.size() == 1U);
-        CHECK(registries.models.size() == 0U);
-        CHECK(registries.sprites.size() == 0U);
+        CHECK(registries.models.size() == 1U);
+        CHECK(registries.sprites.size() == 1U);
         CHECK(registries.images.size() == 0U);
         CHECK(registries.audio.size() == 0U);
     }

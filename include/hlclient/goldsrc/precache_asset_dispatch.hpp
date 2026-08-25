@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/assets/asset_importer_dispatcher.hpp>
+#include <hlclient/goldsrc/approved_asset_source.hpp>
 #include <hlclient/goldsrc/precache_manifest.hpp>
 #include <hlclient/local_assets/local_asset_source.hpp>
 
@@ -21,7 +22,6 @@ class PrecacheAssetDispatchStageTestAccess;
 inline constexpr std::size_t kMaximumAssetDispatchPlanCategories = 2U;
 inline constexpr std::size_t kPrecacheAssetDispatchDiagnosticTextLimit = 256U;
 
-class ApprovedAssetSource;
 class ApprovedAssetSourceOpenOperation;
 class ApprovedAssetSourceOpener;
 
@@ -133,63 +133,6 @@ struct ApprovedAssetSourceError {
 };
 
 struct ApprovedAssetSourceCreateResult;
-
-// GoldSrc evidence facade over a source that was opened and read exclusively
-// through the local locator capability. Native paths and handles remain in the
-// lower local-resource implementation and are never retained here.
-class ApprovedAssetSource final {
-public:
-    ApprovedAssetSource(ApprovedAssetSource&&) noexcept = default;
-    ApprovedAssetSource& operator=(ApprovedAssetSource&&) noexcept = delete;
-    ApprovedAssetSource(const ApprovedAssetSource&) = delete;
-    ApprovedAssetSource& operator=(const ApprovedAssetSource&) = delete;
-    ~ApprovedAssetSource() = default;
-
-    [[nodiscard]] const assets::AssetSource& source() const noexcept;
-    [[nodiscard]] std::size_t wire_ordinal() const noexcept;
-    [[nodiscard]] ResourceType resource_type() const noexcept;
-    [[nodiscard]] std::uint16_t resource_index() const noexcept;
-    [[nodiscard]] local_resources::LocalResourceRootId root_id() const noexcept;
-    [[nodiscard]] local_resources::LocalVirtualResourceId virtual_resource_id()
-        const noexcept;
-    [[nodiscard]] local_resources::LocalStableFileIdentity expected_identity()
-        const noexcept;
-    [[nodiscard]] std::uint64_t byte_count() const noexcept;
-    [[nodiscard]] assets::AssetDispatchRole role() const noexcept;
-    [[nodiscard]] PrecacheManifestCompatibilityProfile compatibility_profile()
-        const noexcept;
-    [[nodiscard]] PrecacheManifestEvidenceProfile evidence_profile()
-        const noexcept;
-
-private:
-    friend class ApprovedAssetImporterDispatcher;
-    friend class ApprovedAssetSourceOpenOperation;
-
-    [[nodiscard]] static ApprovedAssetSourceCreateResult create(
-        const AssetDispatchPlan& plan,
-        local_assets::LocalAssetSource source) noexcept;
-
-    ApprovedAssetSource(
-        local_assets::LocalAssetSource source,
-        std::size_t wire_ordinal,
-        ResourceType resource_type,
-        std::uint16_t resource_index,
-        assets::AssetDispatchRole role,
-        PrecacheManifestCompatibilityProfile compatibility_profile,
-        PrecacheManifestEvidenceProfile evidence_profile) noexcept;
-
-    local_assets::LocalAssetSource source_;
-    std::size_t wire_ordinal_{0U};
-    ResourceType resource_type_{ResourceType::sound};
-    std::uint16_t resource_index_{0U};
-    assets::AssetDispatchRole role_{assets::AssetDispatchRole::unsupported};
-    PrecacheManifestCompatibilityProfile compatibility_profile_{
-        PrecacheManifestCompatibilityProfile::
-            stock_protocol_48_standard_metadata_only};
-    PrecacheManifestEvidenceProfile evidence_profile_{
-        PrecacheManifestEvidenceProfile::
-            exact_correlated_local_resource_metadata};
-};
 
 // Capability-checking facade used by GoldSrc production composition. The
 // generic assets-layer dispatcher remains filesystem/protocol-neutral, while

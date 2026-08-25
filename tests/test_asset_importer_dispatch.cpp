@@ -195,6 +195,42 @@ TEST_CASE(
   CHECK(sprite.imports == 0);
 }
 
+TEST_CASE(
+    "Probe-only dispatch selection reuses global ranking and imports once",
+    "[assets][dispatch][selection]") {
+  ImporterCounts model;
+  ImporterCounts sprite;
+  assets::AssetImporterRegistries registries;
+  register_importer(registries.models, "model", 100U, -100, model);
+  register_importer(registries.sprites, "sprite", 80U, 100, sprite);
+  const assets::AssetImporterDispatcher dispatcher{registries};
+  const auto source = make_source("models/shared.bin");
+
+  auto selection = dispatcher.select(
+      source, assets::AssetDispatchRole::model_or_sprite);
+
+  REQUIRE(selection.selected());
+  CHECK(selection.state == assets::AssetDispatchSelectionState::selected);
+  CHECK(selection.selected_category == assets::AssetImporterCategory::model);
+  CHECK(selection.selected_importer_id == "model:model");
+  REQUIRE(selection.top_candidates.size() == 1U);
+  CHECK(model.probes == 1);
+  CHECK(sprite.probes == 1);
+  CHECK(model.imports == 0);
+  CHECK(sprite.imports == 0);
+
+  const auto result =
+      dispatcher.import_selected(source, std::move(selection));
+
+  REQUIRE(result.imported());
+  CHECK(result.selected_category == assets::AssetImporterCategory::model);
+  CHECK(result.selected_importer_id == "model:model");
+  CHECK(model.probes == 1);
+  CHECK(sprite.probes == 1);
+  CHECK(model.imports == 1);
+  CHECK(sprite.imports == 0);
+}
+
 TEST_CASE("Model-or-sprite dispatch uses priority for equal confidence",
           "[assets][dispatch]") {
   ImporterCounts model;

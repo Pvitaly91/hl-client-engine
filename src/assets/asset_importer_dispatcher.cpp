@@ -70,12 +70,12 @@ candidate_ids(const std::vector<AssetDispatchProbeCandidate> &candidates) {
   return result;
 }
 
-[[nodiscard]] AssetDispatchResult
-no_importer_result(const AssetSource &source,
-                   std::vector<AssetDispatchProbeCandidate> candidates = {}) {
-  return AssetDispatchResult{
-      AssetDispatchState::importer_not_registered,
-      std::nullopt,
+[[nodiscard]] AssetDispatchSelection
+no_importer_selection(
+    const AssetSource &source,
+    std::vector<AssetDispatchProbeCandidate> candidates = {}) {
+  return AssetDispatchSelection{
+      AssetDispatchSelectionState::importer_not_registered,
       AssetImporterCategory::none,
       {},
       std::move(candidates),
@@ -89,13 +89,13 @@ no_importer_result(const AssetSource &source,
   };
 }
 
-[[nodiscard]] AssetDispatchResult
-ambiguous_result(const AssetSource &source,
-                 std::vector<AssetDispatchProbeCandidate> candidates) {
+[[nodiscard]] AssetDispatchSelection
+ambiguous_selection(
+    const AssetSource &source,
+    std::vector<AssetDispatchProbeCandidate> candidates) {
   auto ids = candidate_ids(candidates);
-  return AssetDispatchResult{
-      AssetDispatchState::ambiguous_importer,
-      std::nullopt,
+  return AssetDispatchSelection{
+      AssetDispatchSelectionState::ambiguous_importer,
       AssetImporterCategory::none,
       {},
       std::move(candidates),
@@ -108,6 +108,38 @@ ambiguous_result(const AssetSource &source,
           std::move(ids),
       },
   };
+}
+
+[[nodiscard]] constexpr AssetDispatchState dispatch_state_for_selection(
+    const AssetDispatchSelectionState state) noexcept {
+  switch (state) {
+  case AssetDispatchSelectionState::selected:
+    return AssetDispatchState::source_invalid;
+  case AssetDispatchSelectionState::importer_not_registered:
+    return AssetDispatchState::importer_not_registered;
+  case AssetDispatchSelectionState::ambiguous_importer:
+    return AssetDispatchState::ambiguous_importer;
+  case AssetDispatchSelectionState::unsupported_asset_role:
+    return AssetDispatchState::unsupported_asset_role;
+  case AssetDispatchSelectionState::metadata_only_resource:
+    return AssetDispatchState::metadata_only_resource;
+  case AssetDispatchSelectionState::source_invalid:
+    return AssetDispatchState::source_invalid;
+  }
+  return AssetDispatchState::source_invalid;
+}
+
+[[nodiscard]] std::optional<std::string_view> raw_importer_id(
+    const AssetDispatchSelection &selection) noexcept {
+  const auto category = to_string(selection.selected_category);
+  if (category == "none" ||
+      selection.selected_importer_id.size() <= category.size() ||
+      !selection.selected_importer_id.starts_with(category) ||
+      selection.selected_importer_id[category.size()] != ':') {
+    return std::nullopt;
+  }
+  return std::string_view{selection.selected_importer_id}.substr(
+      category.size() + 1U);
 }
 
 template <class Asset>
@@ -180,13 +212,12 @@ AssetImporterDispatcher::AssetImporterDispatcher(
     const AssetImporterRegistries &registries) noexcept
     : registries_{registries} {}
 
-AssetDispatchResult
-AssetImporterDispatcher::dispatch(const AssetSource &source,
-                                  const AssetDispatchRole role) const {
+AssetDispatchSelection
+AssetImporterDispatcher::select(const AssetSource &source,
+                                const AssetDispatchRole role) const {
   if (role == AssetDispatchRole::metadata_only) {
-    return AssetDispatchResult{
-        AssetDispatchState::metadata_only_resource,
-        std::nullopt,
+    return AssetDispatchSelection{
+        AssetDispatchSelectionState::metadata_only_resource,
         AssetImporterCategory::none,
         {},
         {},
@@ -194,9 +225,8 @@ AssetImporterDispatcher::dispatch(const AssetSource &source,
     };
   }
   if (role == AssetDispatchRole::unsupported) {
-    return AssetDispatchResult{
-        AssetDispatchState::unsupported_asset_role,
-        std::nullopt,
+    return AssetDispatchSelection{
+        AssetDispatchSelectionState::unsupported_asset_role,
         AssetImporterCategory::none,
         {},
         {},
@@ -210,9 +240,8 @@ AssetImporterDispatcher::dispatch(const AssetSource &source,
     };
   }
   if (!source_metadata_valid(source)) {
-    return AssetDispatchResult{
-        AssetDispatchState::source_invalid,
-        std::nullopt,
+    return AssetDispatchSelection{
+        AssetDispatchSelectionState::source_invalid,
         AssetImporterCategory::none,
         {},
         {},
@@ -232,16 +261,20 @@ AssetImporterDispatcher::dispatch(const AssetSource &source,
     append_candidates(ranked, probe, AssetImporterCategory::world);
     auto candidates = public_candidates(ranked);
     if (probe.state == AssetImporterProbeState::no_match) {
-      return no_importer_result(source, std::move(candidates));
+      return no_importer_selection(source, std::move(candidates));
     }
     if (probe.state == AssetImporterProbeState::ambiguous) {
-      return ambiguous_result(source, std::move(candidates));
+      return ambiguous_selection(source, std::move(candidates));
     }
     const auto &selected = probe.top_candidates.front();
-    return imported_result(
-        registries_.worlds.import_selected(source, selected.importer_id),
-        AssetImporterCategory::world, selected.importer_id,
-        std::move(candidates));
+    return AssetDispatchSelection{
+        AssetDispatchSelectionState::selected,
+        AssetImporterCategory::world,
+        qualified_importer_id(
+            AssetImporterCategory::world, selected.importer_id),
+        std::move(candidates),
+        std::nullopt,
+    };
   }
 
   if (role == AssetDispatchRole::audio) {
@@ -250,22 +283,25 @@ AssetImporterDispatcher::dispatch(const AssetSource &source,
     append_candidates(ranked, probe, AssetImporterCategory::audio);
     auto candidates = public_candidates(ranked);
     if (probe.state == AssetImporterProbeState::no_match) {
-      return no_importer_result(source, std::move(candidates));
+      return no_importer_selection(source, std::move(candidates));
     }
     if (probe.state == AssetImporterProbeState::ambiguous) {
-      return ambiguous_result(source, std::move(candidates));
+      return ambiguous_selection(source, std::move(candidates));
     }
     const auto &selected = probe.top_candidates.front();
-    return imported_result(
-        registries_.audio.import_selected(source, selected.importer_id),
-        AssetImporterCategory::audio, selected.importer_id,
-        std::move(candidates));
+    return AssetDispatchSelection{
+        AssetDispatchSelectionState::selected,
+        AssetImporterCategory::audio,
+        qualified_importer_id(
+            AssetImporterCategory::audio, selected.importer_id),
+        std::move(candidates),
+        std::nullopt,
+    };
   }
 
   if (role != AssetDispatchRole::model_or_sprite) {
-    return AssetDispatchResult{
-        AssetDispatchState::source_invalid,
-        std::nullopt,
+    return AssetDispatchSelection{
+        AssetDispatchSelectionState::source_invalid,
         AssetImporterCategory::none,
         {},
         {},
@@ -287,21 +323,134 @@ AssetImporterDispatcher::dispatch(const AssetSource &source,
   auto best = global_best_candidates(ranked);
   auto candidates = public_candidates(best);
   if (best.empty()) {
-    return no_importer_result(source, std::move(candidates));
+    return no_importer_selection(source, std::move(candidates));
   }
   if (best.size() > 1U) {
-    return ambiguous_result(source, std::move(candidates));
+    return ambiguous_selection(source, std::move(candidates));
   }
 
   const auto &selected = best.front();
-  if (selected.category == AssetImporterCategory::model) {
-    return imported_result(
-        registries_.models.import_selected(source, selected.raw_importer_id),
-        selected.category, selected.raw_importer_id, std::move(candidates));
+  return AssetDispatchSelection{
+      AssetDispatchSelectionState::selected,
+      selected.category,
+      qualified_importer_id(selected.category, selected.raw_importer_id),
+      std::move(candidates),
+      std::nullopt,
+  };
+}
+
+AssetDispatchResult AssetImporterDispatcher::import_selected(
+    const AssetSource &source,
+    AssetDispatchSelection selection) const {
+  if (!selection.selected()) {
+    return AssetDispatchResult{
+        dispatch_state_for_selection(selection.state),
+        std::nullopt,
+        selection.selected_category,
+        std::move(selection.selected_importer_id),
+        std::move(selection.top_candidates),
+        std::move(selection.error),
+    };
   }
+
+  const auto raw_id = raw_importer_id(selection);
+  if (!raw_id) {
+    return AssetDispatchResult{
+        AssetDispatchState::source_invalid,
+        std::nullopt,
+        AssetImporterCategory::none,
+        {},
+        std::move(selection.top_candidates),
+        AssetError{
+            AssetErrorCode::ImportFailed,
+            source.virtual_path(),
+            {},
+            "Asset dispatch selection token is invalid",
+            {},
+        },
+    };
+  }
+
+  switch (selection.selected_category) {
+  case AssetImporterCategory::model:
+    return imported_result(
+        registries_.models.import_selected(source, *raw_id),
+        selection.selected_category, *raw_id,
+        std::move(selection.top_candidates));
+  case AssetImporterCategory::world:
+    return imported_result(
+        registries_.worlds.import_selected(source, *raw_id),
+        selection.selected_category, *raw_id,
+        std::move(selection.top_candidates));
+  case AssetImporterCategory::sprite:
+    return imported_result(
+        registries_.sprites.import_selected(source, *raw_id),
+        selection.selected_category, *raw_id,
+        std::move(selection.top_candidates));
+  case AssetImporterCategory::audio:
+    return imported_result(
+        registries_.audio.import_selected(source, *raw_id),
+        selection.selected_category, *raw_id,
+        std::move(selection.top_candidates));
+  case AssetImporterCategory::none:
+  case AssetImporterCategory::image:
+    break;
+  }
+
+  return AssetDispatchResult{
+      AssetDispatchState::source_invalid,
+      std::nullopt,
+      AssetImporterCategory::none,
+      {},
+      std::move(selection.top_candidates),
+      AssetError{
+          AssetErrorCode::ImportFailed,
+          source.virtual_path(),
+          {},
+          "Selected asset importer category is invalid",
+          {},
+      },
+  };
+}
+
+AssetDispatchResult AssetImporterDispatcher::import_selected_model_with(
+    const AssetSource &source,
+    AssetDispatchSelection selection,
+    const SelectedModelImporterFunction &import_function) const {
+  if (!selection.selected()) {
+    return import_selected(source, std::move(selection));
+  }
+
+  const auto raw_id = raw_importer_id(selection);
+  if (selection.selected_category != AssetImporterCategory::model ||
+      !raw_id || !import_function) {
+    return AssetDispatchResult{
+        AssetDispatchState::source_invalid,
+        std::nullopt,
+        AssetImporterCategory::none,
+        {},
+        std::move(selection.top_candidates),
+        AssetError{
+            AssetErrorCode::ImportFailed,
+            source.virtual_path(),
+            {},
+            "Selected model-import callback or selection token is invalid",
+            {},
+        },
+    };
+  }
+
   return imported_result(
-      registries_.sprites.import_selected(source, selected.raw_importer_id),
-      selected.category, selected.raw_importer_id, std::move(candidates));
+      registries_.models.import_selected_with(
+          source, *raw_id, import_function),
+      selection.selected_category, *raw_id,
+      std::move(selection.top_candidates));
+}
+
+AssetDispatchResult
+AssetImporterDispatcher::dispatch(const AssetSource &source,
+                                  const AssetDispatchRole role) const {
+  return import_selected(source, select(source, role));
 }
 
 } // namespace hlclient::assets

@@ -96,3 +96,11 @@ manifest or sends a packet after its publication. See
 [approved asset sources](APPROVED_ASSET_SOURCE.md),
 [asset importer dispatch](ASSET_IMPORTER_DISPATCH.md), and
 [CPU world geometry](CPU_WORLD_GEOMETRY.md).
+
+M4.5.2 does not change resource-list wire types or eagerly import a manifest.
+An ordinary model entry remains `model_or_sprite`; its approved source is
+opened only when explicitly selected by the reusable visual import operation.
+IDST/IDSP signature evidence chooses the importer category. Studio companions
+are local derived dependencies, not new manifest entries or invented sprite
+resource types, and are restricted to the main source's exact root. No new
+network message, download/cache transition, or live entity stop point is added.

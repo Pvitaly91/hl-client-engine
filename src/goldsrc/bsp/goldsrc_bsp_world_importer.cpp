@@ -340,34 +340,4 @@ assets::WorldAssetResult GoldSrcBspWorldImporter::import(
     return assets::WorldAssetResult::success(std::move(world));
 }
 
-assets::AssetImporterRegistrationResult register_builtin_asset_importers(
-    assets::AssetImporterRegistries& registries,
-    GoldSrcBspImportLimits limits)
-{
-    try {
-        return registries.worlds.register_importer(
-            std::make_unique<GoldSrcBspWorldImporter>(std::move(limits)),
-            kGoldSrcBspWorldImporterPriority);
-    } catch (const std::exception& exception) {
-        return assets::AssetImporterRegistrationResult{
-            false,
-            assets::AssetImporterRegistrationError{
-                assets::AssetImporterRegistrationErrorCode::NullImporter,
-                std::string{kGoldSrcBspWorldImporterId},
-                std::string{"Unable to construct the built-in BSP importer: "} +
-                    exception.what(),
-            },
-        };
-    } catch (...) {
-        return assets::AssetImporterRegistrationResult{
-            false,
-            assets::AssetImporterRegistrationError{
-                assets::AssetImporterRegistrationErrorCode::NullImporter,
-                std::string{kGoldSrcBspWorldImporterId},
-                "Unable to construct the built-in BSP importer",
-            },
-        };
-    }
-}
-
 } // namespace hlclient::goldsrc::bsp

@@ -277,6 +277,56 @@ private:
         return invoke_selected(source, *selected);
     }
 
+    template<class Invoker>
+    [[nodiscard]] AssetResult<Asset> import_selected_with(
+        const AssetSource& source,
+        const std::string_view importer_id,
+        Invoker&& invoker) const
+    {
+        const auto selected = std::ranges::find_if(
+            entries_,
+            [importer_id](const Entry& entry) { return entry.id == importer_id; });
+        if (selected == entries_.end()) {
+            return AssetResult<Asset>::failure(AssetError{
+                AssetErrorCode::UnsupportedFormat,
+                source.virtual_path(),
+                {},
+                "The selected asset importer is no longer registered",
+                {},
+            });
+        }
+
+        try {
+            auto result = std::forward<Invoker>(invoker)(
+                static_cast<const IAssetImporter<Asset>&>(*selected->importer),
+                source);
+            if (result) {
+                return result;
+            }
+
+            auto error = std::move(result).error();
+            error.virtual_path = source.virtual_path();
+            error.importer_id = selected->id;
+            return AssetResult<Asset>::failure(std::move(error));
+        } catch (const std::exception& exception) {
+            return AssetResult<Asset>::failure(AssetError{
+                AssetErrorCode::ImportFailed,
+                source.virtual_path(),
+                selected->id,
+                std::string{"Importer failed with an exception: "} + exception.what(),
+                {},
+            });
+        } catch (...) {
+            return AssetResult<Asset>::failure(AssetError{
+                AssetErrorCode::ImportFailed,
+                source.virtual_path(),
+                selected->id,
+                "Importer failed with an unknown exception",
+                {},
+            });
+        }
+    }
+
     [[nodiscard]] static AssetResult<Asset> invoke_selected(
         const AssetSource& source,
         const Entry& selected)

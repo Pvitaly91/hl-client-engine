@@ -42,6 +42,7 @@ enum class AssetErrorCode {
     SourceReadFailed,
     UnsupportedFormat,
     AmbiguousFormat,
+    ExternalDependencyRequired,
     MalformedData,
     ImportFailed,
 };

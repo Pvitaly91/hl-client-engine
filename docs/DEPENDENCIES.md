@@ -52,19 +52,47 @@ hlclient_goldsrc_resource_readiness
 hlclient_local_asset_source
     -> hlclient_asset_api
     -> hlclient_local_resources
+hlclient_goldsrc_approved_asset_source_api
+    -> hlclient_asset_api
+    -> hlclient_asset_dispatch
+    -> hlclient_local_asset_source
+    -> hlclient_local_resources
+hlclient_model_asset_api -> hlclient_asset_api -> hlclient_core
+hlclient_goldsrc_studio_model
+    -> hlclient_model_asset_api
+    -> hlclient_asset_api
+    -> hlclient_core
+hlclient_goldsrc_sprite -> hlclient_asset_api -> hlclient_core
 hlclient_goldsrc_indexed_texture -> hlclient_asset_api -> hlclient_core
 hlclient_goldsrc_bsp
     -> hlclient_asset_api
     -> hlclient_goldsrc_indexed_texture
     -> hlclient_goldsrc_spatial
+hlclient_goldsrc_builtin_importers
+    -> hlclient_goldsrc_bsp
+    -> hlclient_goldsrc_studio_model
+    -> hlclient_goldsrc_sprite
 hlclient_goldsrc_wad3
     -> hlclient_asset_api
     -> hlclient_goldsrc_indexed_texture
 hlclient_asset_dispatch -> hlclient_asset_api
 hlclient_goldsrc_asset_dispatch
+    -> hlclient_goldsrc_approved_asset_source_api
     -> hlclient_goldsrc_resource_readiness
     -> hlclient_local_asset_source
     -> hlclient_asset_dispatch
+hlclient_goldsrc_visual_asset_bundle
+    -> hlclient_goldsrc_studio_model
+    -> hlclient_goldsrc_sprite
+    -> hlclient_goldsrc_approved_asset_source_api
+    -> hlclient_local_asset_source
+    -> hlclient_local_resources
+    -> hlclient_asset_dispatch
+hlclient_goldsrc_asset_check
+    -> hlclient_goldsrc_builtin_importers
+    -> hlclient_goldsrc_visual_asset_bundle
+    -> hlclient_local_asset_source
+    -> hlclient_local_resources
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
 hlclient_goldsrc_world_texture_import
     -> hlclient_goldsrc_bsp
@@ -136,6 +164,20 @@ same-session stage target, so their generated executable closure contains no
 stage, or Winsock dependency. `hlclient_goldsrc_lightmaps` links only
 `hlclient_asset_api`; its implementation consumes inline BSP v30 wire
 constants without linking the BSP parser library.
+
+The BSP parser target does not link Studio or sprite; the separate
+`hlclient_goldsrc_builtin_importers` composition target owns the one canonical
+caller-owned production registrar for all three categories. Consequently,
+world-only BSP consumers do not inherit the visual importer libraries.
+
+The offline `hlclient_goldsrc_asset_check` links that registrar and
+`hlclient_goldsrc_visual_asset_bundle` through the interface-only
+`hlclient_goldsrc_approved_asset_source_api` seam. It does not link
+`hlclient_goldsrc_asset_dispatch`, readiness, sign-on, netchan,
+`hlclient_network`, or Winsock. The same visual operation accepts either the
+manifest-approved capability or a verified exact-root `LocalAssetSource`; both
+routes use the canonical cross-category dispatcher and invoke only its selected
+registered importer.
 
 The bootstrap intentionally does not add Boost, Asio, Qt, ImGui, GLM, OpenAL,
 FMOD, Vulkan, DirectX renderer code, protobuf, or a JSON framework. UDP remains
@@ -349,6 +391,23 @@ raw BSP/PVS/entity bytes, locator, file handle, compiler path, or native path.
 Changing camera visibility does not reopen an asset and does not re-upload the
 scene resources. No additional game file category or write/cache policy is
 introduced.
+
+M4.5.2 adds no third-party library and does not build or link an SDK tool. The
+project-owned Studio and sprite parsers use the pinned public Half-Life SDK
+only as reviewed format/compiler evidence for record sizes, strip/fan winding,
+texture layout, and animation RLE semantics. Production code does not include
+or ABI-cast SDK `mstudio*`/`dsprite*` structs. Automated MDL/SPR sources are
+small project-created literal fixtures; installed game models and sprites
+remain optional, read-only, user-owned verification inputs and are never
+committed or fetched.
+
+The M4.5.2 target set is `hlclient_model_asset_api`,
+`hlclient_goldsrc_studio_model`, `hlclient_goldsrc_sprite`,
+`hlclient_goldsrc_builtin_importers`,
+`hlclient_goldsrc_approved_asset_source_api`,
+`hlclient_goldsrc_visual_asset_bundle`, and the offline
+`hlclient_goldsrc_asset_check`. All are project-owned C++20/API composition;
+none adds a redistributed runtime or an SDK linkage.
 
 This runtime policy is distinct from active stock-client/HLDS research. Research
 verifiers continue to require their isolated marked copy and reject primary or

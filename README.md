@@ -962,10 +962,15 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
   `hlclient_goldsrc_local_resources`, `hlclient_resource_consistency_api`,
   `hlclient_resource_consistency_local`, `hlclient_auth`,
   `hlclient_app_support`, `hlclient_client`;
-- `hlclient_asset_api`, `hlclient_local_asset_source`,
-  `hlclient_asset_dispatch`, `hlclient_asset_manager`, `hlclient_scene_api`;
+- `hlclient_asset_api`, `hlclient_model_asset_api`,
+  `hlclient_local_asset_source`, `hlclient_asset_dispatch`,
+  `hlclient_asset_manager`, `hlclient_scene_api`;
 - `hlclient_goldsrc_indexed_texture`, `hlclient_goldsrc_bsp`,
-  `hlclient_goldsrc_wad3`, `hlclient_goldsrc_asset_dispatch`,
+  `hlclient_goldsrc_wad3`, `hlclient_goldsrc_studio_model`,
+  `hlclient_goldsrc_sprite`, `hlclient_goldsrc_builtin_importers`,
+  `hlclient_goldsrc_approved_asset_source_api`,
+  `hlclient_goldsrc_visual_asset_bundle`,
+  `hlclient_goldsrc_asset_dispatch`,
   `hlclient_goldsrc_world_texture_import`,
   `hlclient_goldsrc_world_textures`, `hlclient_goldsrc_lightmaps`,
   `hlclient_goldsrc_world_render`, `hlclient_goldsrc_spatial`,
@@ -975,9 +980,9 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
   `hlclient_world_scene_renderer`, `hlclient_world_preview`;
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
-- `hlclient_local_resource_check` and `hlclient_world_texture_check`
-  (network-free read-only diagnostics), plus `hlclient_world_viewer`
-  (network-free read-only OpenGL preview);
+- `hlclient_local_resource_check`, `hlclient_world_texture_check`, and
+  `hlclient_goldsrc_asset_check` (network-free read-only diagnostics), plus
+  `hlclient_world_viewer` (network-free read-only OpenGL preview);
 - `hlclient_tests`;
 - SDL3, bzip2, Catch2, GLAD2, and the Half-Life SDK reference target under
   `ThirdParty`.
@@ -1151,6 +1156,15 @@ ranges, inert entity/transform/brush-instance tests, scene/visibility revision
 separation, and static-brush rendering checks. OpenGL frame tests run when the
 actual current context reports 3.3 or newer and skip only for unavailable or
 legacy contexts; a requested version alone is not the capability gate.
+M4.5.2 adds bounded CPU-only Studio `IDST`/`IDSQ` v10 and sprite `IDSP` v2
+importers, neutral owning skeletal/indexed-sprite metadata, exact-root model
+companions, production model-or-sprite registration, and a network-free
+read-only checker. It intentionally adds no model/sprite drawing, entity
+binding, interpolation, gameplay, or download/cache behavior. See
+[Studio MDL v10](docs/GOLDSRC_STUDIO_MDL_V10.md),
+[Studio animation](docs/GOLDSRC_STUDIO_ANIMATION.md),
+[Studio dependencies](docs/GOLDSRC_STUDIO_DEPENDENCIES.md), and
+[SPR v2](docs/GOLDSRC_SPR_V2.md).
 
 ## License
 

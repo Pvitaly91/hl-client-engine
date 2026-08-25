@@ -825,10 +825,19 @@ project-to-stock entity-snapshot claim. No entity state reaches assets,
 
 ### M4.5.2 — GoldSrc Studio MDL and SPR importers
 
-**Status: next.**
+**Status: completed.**
 
-This milestone will add bounded local format importers only; it was not started
-by M4.5.1.
+The project now has bounded CPU-only `IDST` v10/`IDSQ` v10 and `IDSP` v2
+parsers, additive neutral skeletal/sprite source data, production model and
+sprite importer registration, exact-root Studio companion bundles, and a
+network-free read-only checker. Synthetic tests cover records, strip/fan
+geometry, textures/skins, compressed animation, dependencies, sprite groups,
+dispatch, mutation, and repeated import. No renderer, entity binding,
+interpolation, gameplay, or download/cache work was added. See
+[Studio MDL v10](GOLDSRC_STUDIO_MDL_V10.md),
+[Studio animation](GOLDSRC_STUDIO_ANIMATION.md),
+[Studio dependencies](GOLDSRC_STUDIO_DEPENDENCIES.md), and
+[SPR v2](GOLDSRC_SPR_V2.md).
 
 ### M4.5.3 — Runtime entity composition, interpolation and OpenGL rendering
 
@@ -845,8 +854,8 @@ M4.5.2 importers are complete.
 
 The former M5–M8 entity/model/input/interpolation buckets were split into the
 active M4.5.1, M4.5.2, M4.5.3 and M4.6 sequence above. They are not additional
-or competing next milestones. The only next milestone after this bounded
-M4.5.1 result is M4.5.2.
+or competing next milestones. The only next milestone after the completed
+M4.5.2 importer boundary is M4.5.3.
 
 ## M9 — `client.dll` API and HUD
 

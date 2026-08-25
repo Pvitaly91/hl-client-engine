@@ -105,6 +105,14 @@ public:
     [[nodiscard]] std::optional<LocalResourceSearchRootMetadata> root_metadata(
         LocalResourceRootId root_id) const noexcept;
 
+    // Resolves one safe virtual name only within a root that belongs to this
+    // environment. A miss never falls through to another configured root.
+    // This is the discovery step for derived companion resources; callers
+    // should close the returned handle and retain a locator before reading.
+    [[nodiscard]] LocalResourceResolutionResult resolve_exact_root(
+        const LocalVirtualResourceName& virtual_name,
+        LocalResourceRootId root_id) const;
+
     // Creates metadata only. No filesystem lookup or file-content read occurs.
     [[nodiscard]] LocalResourceLocatorCreateResult make_locator(
         LocalResourceRootId root_id,

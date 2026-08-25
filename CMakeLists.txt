@@ -123,6 +123,7 @@ hlclient_add_library(
     include/hlclient/assets/asset_importer.hpp
     include/hlclient/assets/asset_importer_registry.hpp
     include/hlclient/assets/asset_source.hpp
+    include/hlclient/assets/sprite_asset_types.hpp
     include/hlclient/assets/asset_types.hpp
     include/hlclient/assets/world_lightmap_types.hpp
     include/hlclient/assets/world_texture_types.hpp
@@ -133,6 +134,18 @@ hlclient_add_library(
 add_library(hlclient::asset_api ALIAS hlclient_asset_api)
 target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
 set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
+
+add_library(hlclient_model_asset_api INTERFACE)
+add_library(hlclient::model_asset_api ALIAS hlclient_model_asset_api)
+target_sources(
+    hlclient_model_asset_api
+    INTERFACE include/hlclient/assets/model_asset_types.hpp)
+target_include_directories(
+    hlclient_model_asset_api INTERFACE "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(
+    hlclient_model_asset_api INTERFACE hlclient::asset_api hlclient::core)
+set_property(
+    TARGET hlclient_model_asset_api PROPERTY FOLDER "Engine/Assets/Models")
 
 hlclient_add_library(
     hlclient_world_spatial
@@ -146,6 +159,42 @@ target_link_libraries(hlclient_world_spatial PUBLIC hlclient::asset_api)
 set_property(
     TARGET hlclient_world_spatial
     PROPERTY FOLDER "Engine/Renderer/World/Visibility")
+
+hlclient_add_library(
+    hlclient_goldsrc_studio_model
+    include/hlclient/goldsrc/studio/goldsrc_studio_animation.hpp
+    include/hlclient/goldsrc/studio/goldsrc_studio_format.hpp
+    include/hlclient/goldsrc/studio/goldsrc_studio_geometry.hpp
+    include/hlclient/goldsrc/studio/goldsrc_studio_model_importer.hpp
+    include/hlclient/goldsrc/studio/goldsrc_studio_parser.hpp
+    src/goldsrc/studio/goldsrc_studio_animation.cpp
+    src/goldsrc/studio/goldsrc_studio_format.cpp
+    src/goldsrc/studio/goldsrc_studio_geometry.cpp
+    src/goldsrc/studio/goldsrc_studio_model_importer.cpp
+    src/goldsrc/studio/goldsrc_studio_parser.cpp
+)
+add_library(
+    hlclient::goldsrc_studio_model ALIAS hlclient_goldsrc_studio_model)
+target_link_libraries(
+    hlclient_goldsrc_studio_model
+    PUBLIC hlclient::model_asset_api hlclient::asset_api hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_studio_model
+    PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_sprite
+    include/hlclient/goldsrc/sprite/goldsrc_sprite_importer.hpp
+    include/hlclient/goldsrc/sprite/goldsrc_sprite_parser.hpp
+    src/goldsrc/sprite/goldsrc_sprite_importer.cpp
+    src/goldsrc/sprite/goldsrc_sprite_parser.cpp
+)
+add_library(hlclient::goldsrc_sprite ALIAS hlclient_goldsrc_sprite)
+target_link_libraries(
+    hlclient_goldsrc_sprite PUBLIC hlclient::asset_api hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_sprite
+    PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
 
 hlclient_add_library(
     hlclient_goldsrc_spatial
@@ -204,6 +253,24 @@ set_property(
     PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
 
 hlclient_add_library(
+    hlclient_goldsrc_builtin_importers
+    include/hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp
+    src/goldsrc/goldsrc_builtin_asset_importers.cpp
+)
+add_library(
+    hlclient::goldsrc_builtin_importers ALIAS
+    hlclient_goldsrc_builtin_importers)
+target_link_libraries(
+    hlclient_goldsrc_builtin_importers
+    PUBLIC hlclient::goldsrc_bsp
+    PRIVATE
+        hlclient::goldsrc_studio_model
+        hlclient::goldsrc_sprite)
+set_property(
+    TARGET hlclient_goldsrc_builtin_importers
+    PROPERTY FOLDER "Engine/Resources/GoldSrc")
+
+hlclient_add_library(
     hlclient_goldsrc_lightmaps
     include/hlclient/goldsrc/lightmaps/goldsrc_world_lightmap_import.hpp
     src/goldsrc/lightmaps/goldsrc_world_lightmap_import.cpp
@@ -254,6 +321,27 @@ target_link_libraries(
 )
 set_property(
     TARGET hlclient_local_asset_source PROPERTY FOLDER "Engine/Assets/Source")
+
+add_library(hlclient_goldsrc_approved_asset_source_api INTERFACE)
+add_library(
+    hlclient::goldsrc_approved_asset_source_api ALIAS
+    hlclient_goldsrc_approved_asset_source_api)
+target_sources(
+    hlclient_goldsrc_approved_asset_source_api
+    INTERFACE include/hlclient/goldsrc/approved_asset_source.hpp)
+target_include_directories(
+    hlclient_goldsrc_approved_asset_source_api
+    INTERFACE "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(
+    hlclient_goldsrc_approved_asset_source_api
+    INTERFACE
+        hlclient::asset_api
+        hlclient::asset_dispatch
+        hlclient::local_asset_source
+        hlclient::local_resources)
+set_property(
+    TARGET hlclient_goldsrc_approved_asset_source_api
+    PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
     hlclient_asset_manager
@@ -528,12 +616,40 @@ add_library(
 target_link_libraries(
     hlclient_goldsrc_asset_dispatch
     PUBLIC
+        hlclient::goldsrc_approved_asset_source_api
         hlclient::goldsrc_resource_readiness
         hlclient::local_asset_source
         hlclient::asset_dispatch
 )
 set_property(
     TARGET hlclient_goldsrc_asset_dispatch
+    PROPERTY FOLDER "Engine/Resources/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_visual_asset_bundle
+    include/hlclient/goldsrc/visual_assets/goldsrc_studio_companion_names.hpp
+    include/hlclient/goldsrc/visual_assets/goldsrc_studio_model_source_bundle.hpp
+    include/hlclient/goldsrc/visual_assets/goldsrc_studio_model_bundle_import.hpp
+    include/hlclient/goldsrc/visual_assets/goldsrc_visual_asset_import.hpp
+    src/goldsrc/visual_assets/goldsrc_studio_companion_names.cpp
+    src/goldsrc/visual_assets/goldsrc_studio_model_source_bundle.cpp
+    src/goldsrc/visual_assets/goldsrc_studio_model_bundle_import.cpp
+    src/goldsrc/visual_assets/goldsrc_visual_asset_import.cpp
+)
+add_library(
+    hlclient::goldsrc_visual_asset_bundle ALIAS
+    hlclient_goldsrc_visual_asset_bundle)
+target_link_libraries(
+    hlclient_goldsrc_visual_asset_bundle
+    PUBLIC
+        hlclient::goldsrc_studio_model
+        hlclient::goldsrc_sprite
+        hlclient::goldsrc_approved_asset_source_api
+        hlclient::local_asset_source
+        hlclient::local_resources
+        hlclient::asset_dispatch)
+set_property(
+    TARGET hlclient_goldsrc_visual_asset_bundle
     PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
@@ -853,6 +969,7 @@ target_link_libraries(
         hlclient::asset_api
         hlclient::asset_manager
         hlclient::goldsrc_bsp
+        hlclient::goldsrc_builtin_importers
         hlclient::network
         hlclient::goldsrc
         hlclient::goldsrc_client
@@ -915,6 +1032,84 @@ target_link_libraries(
 )
 set_property(
     TARGET hlclient_bsp_compat_check PROPERTY FOLDER "Tools/Assets")
+
+add_executable(
+    hlclient_goldsrc_asset_check
+    apps/hlclient_goldsrc_asset_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_goldsrc_asset_check)
+target_link_libraries(
+    hlclient_goldsrc_asset_check
+    PRIVATE
+        hlclient::goldsrc_builtin_importers
+        hlclient::goldsrc_visual_asset_bundle
+        hlclient::local_asset_source
+        hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_goldsrc_asset_check PROPERTY FOLDER "Tools/Assets")
+
+if(BUILD_TESTING)
+    find_program(
+        HLCLIENT_TEST_POWERSHELL_EXECUTABLE
+        NAMES pwsh powershell
+        REQUIRED)
+    set(
+        HLCLIENT_GOLDSRC_ASSET_CHECK_CLI_TEST_SCRIPT
+        "${PROJECT_SOURCE_DIR}/scripts/test_goldsrc_asset_check_cli.ps1")
+
+    add_test(
+        NAME hlclient_goldsrc_asset_check_sprite_smoke
+        COMMAND
+            "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+            -NoLogo
+            -NoProfile
+            -NonInteractive
+            -ExecutionPolicy Bypass
+            -File "${HLCLIENT_GOLDSRC_ASSET_CHECK_CLI_TEST_SCRIPT}"
+            -ToolPath $<TARGET_FILE:hlclient_goldsrc_asset_check>
+            -Mode sprite-smoke)
+    set_tests_properties(
+        hlclient_goldsrc_asset_check_sprite_smoke
+        PROPERTIES TIMEOUT 30)
+
+    foreach(
+        forbidden_asset_option
+        IN ITEMS
+            native-model-path
+            native-sprite-path
+            raw-mdl
+            raw-spr
+            texture-companion-path
+            sequence-group-path
+            force-model-format
+            force-sprite-format
+            ignore-model-dependency
+            skip-animation-validation
+            dump-textures
+            dump-animation
+            render-model
+            render-sprite
+    )
+        add_test(
+            NAME
+                hlclient_goldsrc_asset_check_rejects_${forbidden_asset_option}
+            COMMAND
+                "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File "${HLCLIENT_GOLDSRC_ASSET_CHECK_CLI_TEST_SCRIPT}"
+                -ToolPath $<TARGET_FILE:hlclient_goldsrc_asset_check>
+                -Mode forbidden-option
+                -ForbiddenOption ${forbidden_asset_option}
+        )
+        set_tests_properties(
+            hlclient_goldsrc_asset_check_rejects_${forbidden_asset_option}
+            PROPERTIES TIMEOUT 30)
+    endforeach()
+endif()
 
 add_executable(
     hlclient_world_viewer

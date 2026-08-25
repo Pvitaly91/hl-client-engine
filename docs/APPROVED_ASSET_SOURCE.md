@@ -97,3 +97,25 @@ download/cache behavior; background prefetch; renderer/GPU integration; or an
 completed before a verified reopen remains outside the locator's
 identity/size evidence; the source boundary does not invent hashing as a trust
 mechanism. See [world texture resolution](WORLD_TEXTURE_RESOLUTION.md).
+
+## M4.5.2 visual companions
+
+An approved non-world model resource continues to use the existing
+`model_or_sprite` role. A self-contained Studio model or sprite is imported
+directly from its one owning `ApprovedAssetSource`, even if the backing main
+file changes or disappears after approval. Probe-only cross-category selection
+and the exact selected importer invocation occur before any Studio exact-root
+composition or re-resolution. If that one constrained Studio invocation returns
+typed `ExternalDependencyRequired`, the retained main evidence is revalidated
+lazily and its root ID is the only root eligible
+for derived `T.mdl` or `01.mdl` through `15.mdl` siblings. Exact-root discovery
+captures identity and size, closes the discovery handle, creates a locator, and
+uses the same verified incremental source opener. At most one companion is open
+at a time.
+
+No header name becomes a path and no miss advances to a fallback root. The
+published bundle contains only owning `AssetSource` values, fingerprints, and
+bounded statistics—no handle or native path. Missing, stale, wrong-profile, or
+changed companions fail transactionally. The offline checker uses this same
+boundary without network, SDL, OpenGL, or writes. See
+[Studio dependencies](GOLDSRC_STUDIO_DEPENDENCIES.md).

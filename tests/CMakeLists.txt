@@ -54,6 +54,21 @@ add_executable(hlclient_tests
     test_goldsrc_bsp_importer.cpp
     test_goldsrc_bsp_mutation_corpus.cpp
     test_goldsrc_bsp_embedded_textures.cpp
+    test_goldsrc_sprite_header.cpp
+    test_goldsrc_sprite_palette.cpp
+    test_goldsrc_sprite_frames.cpp
+    test_goldsrc_sprite_groups.cpp
+    test_goldsrc_sprite_formats.cpp
+    test_goldsrc_visual_importers.cpp
+    test_goldsrc_studio_header.cpp
+    test_goldsrc_studio_records.cpp
+    test_goldsrc_studio_skeleton.cpp
+    test_goldsrc_studio_geometry.cpp
+    test_goldsrc_studio_bodyparts.cpp
+    test_goldsrc_studio_textures.cpp
+    test_goldsrc_studio_animation.cpp
+    test_goldsrc_studio_dependencies.cpp
+    test_goldsrc_visual_asset_operation.cpp
     test_goldsrc_indexed_texture.cpp
     test_goldsrc_wad3_catalog.cpp
     test_goldsrc_wad3_texture.cpp
@@ -149,10 +164,14 @@ target_link_libraries(hlclient_tests
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_goldsrc_bsp
+        hlclient_goldsrc_builtin_importers
         hlclient_goldsrc_brush_models
         hlclient_goldsrc_indexed_texture
         hlclient_goldsrc_lightmaps
         hlclient_goldsrc_spatial
+        hlclient_goldsrc_studio_model
+        hlclient_goldsrc_sprite
+        hlclient_goldsrc_visual_asset_bundle
         hlclient_goldsrc_wad3
         hlclient_goldsrc_client
         hlclient_goldsrc_asset_dispatch

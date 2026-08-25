@@ -43,6 +43,13 @@ are compared globally. A lower-ranked category tie cannot block a unique
 higher-ranked candidate; a tie at the global best rank is terminal ambiguity.
 Candidate diagnostics are category-qualified, such as `model:synthetic-mdl`.
 
+`AssetImporterDispatcher::select` exposes that same probe-only global result;
+`import_selected` consumes it without probing again, and the ordinary
+`dispatch` call is implemented by composing those two operations. A bounded
+model-specific callback form keeps the selected registry object private while
+allowing a composition root to apply caller-owned constraints. The callback is
+synchronous, registry-normalized, and invokes the exact selected instance once.
+
 The protocol-neutral assets-layer dispatcher implements only this ranking
 mechanism. GoldSrc production composition calls it through
 `ApprovedAssetImporterDispatcher`, which accepts the bound
@@ -54,9 +61,10 @@ dispatch.
 No candidates produce `importer_not_registered`. That historical boundary
 remains covered by explicitly empty test registries, but a valid BSP v30 world
 now selects production ID `goldsrc-bsp-v30` at named priority `300`. The
-reusable `register_builtin_asset_importers` helper registers exactly that one
-world importer without a global registry. Once an importer has been selected,
-malformed data,
+reusable `register_builtin_asset_importers` helper in
+`hlclient_goldsrc_builtin_importers` registers exactly one BSP, one Studio, and
+one sprite importer without a global registry. Once an importer has been
+selected, malformed data,
 `UnsupportedFormat`, an explicit import failure, or an exception is an import
 failure rather than a no-importer boundary.
 
@@ -107,3 +115,27 @@ or textures, but malformed input and policy failures publish no partial set.
 The CLI returns success only for complete world-material bindings and exits
 before renderer initialization. See
 [world texture resolution](WORLD_TEXTURE_RESOLUTION.md).
+
+## Studio and sprite production importers
+
+M4.5.2 places the one caller-owned built-in registration composition in
+`hlclient_goldsrc_builtin_importers`. It installs exactly
+`goldsrc-bsp-v30` in the world registry,
+`goldsrc-studio-mdl-v10` in the model registry, and `goldsrc-sprite-v2` in the
+sprite registry. All use named priority 300. There is still no global registry,
+test importer, registration-order winner, or extension-only match.
+
+`IDST` and `IDSP` probes are signature/version/structure first; `.mdl` and
+`.spr` add only one confidence point. `IDSQ` is never a top-level model. The
+existing `model_or_sprite` role compares the two categories globally, selects
+IDST as model and IDSP as sprite, and keeps an exact best-rank tie ambiguous.
+A valid split Studio main source returns the typed
+`ExternalDependencyRequired` error rather than a partial asset or a parsed
+error string. The visual operation applies its Studio limits through
+`IGoldSrcStudioModelImporterWithLimits` on that exact selected caller-owned
+instance. Only that result can start the exact-root bundle operation; sprites
+and self-contained Studio models finish from retained approved bytes without a
+filesystem re-resolution. The GoldSrc visual operation then opens only its
+derived exact-root companions and invokes the pure bundle import. See
+[Studio dependencies](GOLDSRC_STUDIO_DEPENDENCIES.md) and
+[SPR v2](GOLDSRC_SPR_V2.md).

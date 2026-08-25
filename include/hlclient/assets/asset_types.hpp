@@ -1,13 +1,18 @@
 #pragma once
 
+#include <hlclient/assets/sprite_asset_types.hpp>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace hlclient::assets {
+
+struct SkeletalModelAssetData;
 
 struct AssetIdentity {
     std::string source_name;
@@ -46,6 +51,12 @@ struct ModelAsset {
     AssetIdentity identity;
     std::vector<ModelVertex> vertices;
     std::vector<std::uint32_t> indices;
+    // Null for legacy/static assets. The separately declared neutral skeletal
+    // payload avoids making the base asset API depend on one source format.
+    // Parsed skeletal state is sealed at publication. ModelAsset copies may
+    // share this owning payload, but cannot mutate another asset's validated
+    // geometry, animation, or provenance through the shared reference.
+    std::shared_ptr<const SkeletalModelAssetData> skeletal_data;
 };
 
 struct WorldVertex {
@@ -180,6 +191,7 @@ struct SpriteFrame {
 struct SpriteAsset {
     AssetIdentity identity;
     std::vector<SpriteFrame> frames;
+    std::optional<SpriteSourceAssetData> source_data;
 };
 
 struct AudioAsset {

@@ -10,6 +10,7 @@
 
 #include <hlclient/assets/asset_importer_registry.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import_stage.hpp>
 #include <hlclient/network/datagram_transport.hpp>
@@ -850,7 +851,7 @@ TEST_CASE("World texture stage retains one session and releases its upstream "
         fixture::synthetic_valid_wad3("STAGE_WAD").bytes);
 
     assets::AssetImporterRegistries registries;
-    REQUIRE(bsp::register_builtin_asset_importers(registries));
+    REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     WorldTextureStageHarness harness{root, registries};
     harness.begin_protocol();
     bool observed_local_continuation = false;
@@ -952,7 +953,7 @@ TEST_CASE("World texture stage validates the owning imported-world prerequisite"
     {
         scenario = Scenario::valid_world;
         write_stage_prerequisites(root, embedded_textured_bsp());
-        REQUIRE(bsp::register_builtin_asset_importers(registries));
+        REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     }
     SECTION("wrong imported asset variant is rejected")
     {
@@ -966,7 +967,7 @@ TEST_CASE("World texture stage validates the owning imported-world prerequisite"
         scenario = Scenario::missing_bsp_source;
         root.write("valve", "models/test_model.mdl", "model");
         root.write("valve", "sound/test_sound.wav", "sound");
-        REQUIRE(bsp::register_builtin_asset_importers(registries));
+        REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     }
 
     WorldTextureStageHarness harness{root, registries};
@@ -1045,7 +1046,7 @@ TEST_CASE("World texture stage publishes complete embedded external and mixed se
 
     write_stage_prerequisites(root, bsp_bytes);
     assets::AssetImporterRegistries registries;
-    REQUIRE(bsp::register_builtin_asset_importers(registries));
+    REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     WorldTextureStageHarness harness{root, registries};
     harness.begin_protocol();
     harness.finish();
@@ -1136,7 +1137,7 @@ TEST_CASE("World texture stage publishes typed incomplete texture sets",
 
     write_stage_prerequisites(root, bsp_bytes);
     assets::AssetImporterRegistries registries;
-    REQUIRE(bsp::register_builtin_asset_importers(registries));
+    REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     WorldTextureStageHarness harness{root, registries};
     harness.begin_protocol();
     harness.finish();
@@ -1189,7 +1190,7 @@ TEST_CASE("World texture stage rejects malformed texture inputs transactionally"
 
     write_stage_prerequisites(root, bsp_bytes);
     assets::AssetImporterRegistries registries;
-    REQUIRE(bsp::register_builtin_asset_importers(registries));
+    REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     WorldTextureStageHarness harness{root, registries};
     harness.begin_protocol();
     harness.finish();
@@ -1217,7 +1218,7 @@ TEST_CASE("World texture stage exposes bounded incremental WAD and pixel progres
 {
     fixture::ScopedLocalResourceTestRoot root;
     assets::AssetImporterRegistries registries;
-    REQUIRE(bsp::register_builtin_asset_importers(registries));
+    REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     auto config = test_config();
 
     SECTION("WAD source is read over multiple caller updates")
@@ -1294,7 +1295,7 @@ TEST_CASE("World texture stage lifecycle controls are bounded and terminal",
     fixture::ScopedLocalResourceTestRoot root;
     write_stage_prerequisites(root, embedded_textured_bsp());
     assets::AssetImporterRegistries registries;
-    REQUIRE(bsp::register_builtin_asset_importers(registries));
+    REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     auto config = test_config();
 
     SECTION("outer event backpressure fails before publication")
@@ -1378,7 +1379,7 @@ TEST_CASE("World texture stage is read-only and renderer-lightmap neutral",
     const auto before = snapshot_root(root.path());
 
     assets::AssetImporterRegistries registries;
-    REQUIRE(bsp::register_builtin_asset_importers(registries));
+    REQUIRE(hlclient::goldsrc::register_builtin_asset_importers(registries));
     WorldTextureStageHarness harness{root, registries};
     harness.begin_protocol();
     harness.finish();
