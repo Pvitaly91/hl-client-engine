@@ -8,6 +8,8 @@
 #include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_search_roots.hpp>
 #include <hlclient/local_resources/local_virtual_resource_name.hpp>
+#include <hlclient/input/input_state_tracker.hpp>
+#include <hlclient/interactive_preview/interactive_preview_controller.hpp>
 #include <hlclient/platform/sdl_runtime.hpp>
 #include <hlclient/platform/sdl_window.hpp>
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
@@ -35,6 +37,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -130,6 +133,9 @@ struct Options {
             } else if (*narrow == "spawn") {
                 options.camera_mode =
                     hlclient::world_preview::WorldPreviewCameraMode::spawn;
+            } else if (*narrow == "free-fly") {
+                options.camera_mode =
+                    hlclient::world_preview::WorldPreviewCameraMode::free_flight;
             } else {
                 return std::nullopt;
             }
@@ -195,9 +201,11 @@ void print_usage()
     std::cerr
         << "Usage: hlclient_world_viewer --basedir <Half-Life root> "
            "--game <directory> --map <maps/name.bsp> "
-           "--camera <static|orbit|spawn> "
+           "--camera <static|orbit|spawn|free-fly> "
            "[--visibility <all|frustum|pvs|pvs-frustum>] "
-           "[--brush-submodels <off|static>] [--cull <none|back>]\n";
+           "[--brush-submodels <off|static>] [--cull <none|back>]\n"
+        << "  free-fly: local noclip-style diagnostic camera; no collision, "
+           "physics, prediction, or network commands\n";
 }
 
 [[nodiscard]] std::optional<std::uint64_t> smoke_test_frame_limit()
@@ -580,26 +588,106 @@ struct PreparedWorldScene {
     // destruction.
     hlclient::renderer::opengl::OpenGlRenderer renderer;
 
+    const bool interactive_camera =
+        *options.camera_mode ==
+        hlclient::world_preview::WorldPreviewCameraMode::free_flight;
+    std::optional<hlclient::input::InputStateTracker> input_tracker;
+    std::optional<
+        hlclient::interactive_preview::InteractivePreviewController>
+        interactive_controller;
+    if (interactive_camera) {
+        input_tracker.emplace();
+        auto created = hlclient::interactive_preview::
+            InteractivePreviewController::create_project_default_v1(
+                hlclient::interactive_preview::InteractivePreviewMode::
+                    free_flight_world,
+                scene_source.world_state().camera());
+        if (!created || !created.controller) {
+            std::cerr << "interactive-camera=initialization_failed\n";
+            return 1;
+        }
+        interactive_controller.emplace(std::move(*created.controller));
+        if (!interactive_controller->seed_world_state_camera(scene_source)) {
+            std::cerr << "interactive-camera=initial-publication-failed\n";
+            return 1;
+        }
+        const auto initial_visibility =
+            scene_source.update(hlclient::client::FrameTime{0.0});
+        if (!initial_visibility) {
+            std::cerr << "interactive-camera=initial-visibility-failed\n";
+            return 1;
+        }
+    }
+
     auto previous_time = std::chrono::steady_clock::now();
     auto current_extent = window.pixel_extent();
     std::uint64_t rendered_frames = 0U;
     std::optional<std::uint64_t> non_clear_pixel_count;
+    std::uint64_t capture_failure_count = 0U;
+    std::uint64_t input_event_count = 0U;
+    bool input_focus_seeded = false;
     bool running = true;
     while (running) {
-        hlclient::platform::WindowEvent event;
-        while (window.poll_event(event)) {
-            if (event.type ==
-                hlclient::platform::WindowEventType::quit_requested) {
-                running = false;
-            } else if (event.extent.width > 0 && event.extent.height > 0) {
-                current_extent = event.extent;
+        if (input_tracker) {
+            input_tracker->begin_frame();
+            if (!input_focus_seeded) {
+                input_tracker->apply_event(
+                    window.focus_state() ==
+                            hlclient::input::InputFocusState::focused
+                        ? hlclient::input::InputEvent::focus_gained()
+                        : hlclient::input::InputEvent::focus_lost());
+                input_focus_seeded = true;
             }
+        }
+        hlclient::platform::PlatformEvent event{
+            hlclient::platform::WindowEvent{}};
+        while (window.poll_event(event)) {
+            if (const auto* window_event =
+                    std::get_if<hlclient::platform::WindowEvent>(&event)) {
+                if (window_event->type ==
+                    hlclient::platform::WindowEventType::quit_requested) {
+                    running = false;
+                } else if (window_event->type == hlclient::platform::
+                               WindowEventType::input_capture_recovery_failed) {
+                    std::cerr << "input-capture-recovery=failed\n";
+                    return 1;
+                } else if (window_event->type == hlclient::platform::
+                               WindowEventType::native_event_limit_exceeded) {
+                    std::cerr << "native-event-limit=exceeded\n";
+                    return 1;
+                } else if (window_event->extent.width > 0 &&
+                    window_event->extent.height > 0) {
+                    current_extent = window_event->extent;
+                }
+            } else if (input_tracker) {
+                input_tracker->apply_event(
+                    std::get<hlclient::input::InputEvent>(event));
+                ++input_event_count;
+            }
+        }
+        if (input_tracker &&
+            window.focus_state() ==
+                hlclient::input::InputFocusState::unfocused) {
+            const auto recovery =
+                window.request_relative_mouse_capture(false);
+            if (!recovery) {
+                ++capture_failure_count;
+                std::cerr << "input-focus-release=failed diagnostic="
+                          << recovery.diagnostic << '\n';
+                return 1;
+            }
+        }
+        std::optional<hlclient::input::InputSnapshot> input_snapshot;
+        if (input_tracker) {
+            input_snapshot.emplace(input_tracker->publish_snapshot());
+            input_tracker->end_frame();
         }
         if (!running) {
             break;
         }
 
         const auto current_time = std::chrono::steady_clock::now();
+        const auto elapsed = current_time - previous_time;
         current_extent = window.pixel_extent();
         const auto extent_update = scene_source.set_render_extent(
             hlclient::renderer::RenderExtent{
@@ -610,7 +698,46 @@ struct PreparedWorldScene {
             std::cerr << "scene-extent-update=failed\n";
             return 1;
         }
-        const auto updated = scene_source.update(current_time - previous_time);
+        if (interactive_controller && input_snapshot) {
+            const auto bounded_input_elapsed = std::min(
+                std::chrono::duration<double>{elapsed}.count(), 0.25);
+            const auto camera_update = interactive_controller->update(
+                *input_snapshot,
+                bounded_input_elapsed,
+                scene_source);
+            if (!camera_update) {
+                std::cerr << "interactive-camera="
+                          << (camera_update.error
+                                  ? hlclient::interactive_preview::to_string(
+                                        camera_update.error->code)
+                                  : std::string_view{"update_failed"})
+                          << '\n';
+                return 1;
+            }
+            if (camera_update.capture_mouse_requested) {
+                const auto capture =
+                    window.request_relative_mouse_capture(true);
+                if (!capture) {
+                    ++capture_failure_count;
+                    std::cerr << "input-capture=failed diagnostic="
+                              << capture.diagnostic << '\n';
+                    (void)window.request_relative_mouse_capture(false);
+                    return 1;
+                }
+            }
+            if (camera_update.release_mouse_requested) {
+                const auto release =
+                    window.request_relative_mouse_capture(false);
+                if (!release) {
+                    ++capture_failure_count;
+                    std::cerr << "input-release=failed diagnostic="
+                              << release.diagnostic << '\n';
+                    (void)window.request_relative_mouse_capture(false);
+                    return 1;
+                }
+            }
+        }
+        const auto updated = scene_source.update(elapsed);
         if (!updated) {
             std::cerr << "scene-update=failed\n";
             return 1;
@@ -755,6 +882,17 @@ struct PreparedWorldScene {
     std::cout << "vsync-enabled=" << (window.vsync_enabled() ? 1 : 0) << '\n';
     std::cout << "network-operations=0\n";
     std::cout << "writes-performed=0\n";
+    if (interactive_controller && input_tracker) {
+        const auto& camera_statistics = interactive_controller->statistics();
+        std::cout << "input-frames="
+                  << input_tracker->published_frame_count() << '\n';
+        std::cout << "input-events=" << input_event_count << '\n';
+        std::cout << "camera-updates="
+                  << camera_statistics.published_update_count << '\n';
+        std::cout << "camera-changes="
+                  << camera_statistics.changed_camera_count << '\n';
+        std::cout << "capture-failures=" << capture_failure_count << '\n';
+    }
 
     if (frame_limit && rendered_frames != *frame_limit) {
         std::cerr << "viewer-runtime=frame_limit_not_reached\n";

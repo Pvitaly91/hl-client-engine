@@ -16,6 +16,8 @@ enum class WorldPreviewCameraMode {
     static_camera,
     orbit,
     spawn,
+    free_flight,
+    entity_first_person,
 };
 
 enum class WorldPreviewBrushSubmodelsMode {
@@ -49,7 +51,9 @@ struct WorldPreviewSceneOptions {
 
 // Diagnostic bounds-derived source only. It never reads entity/spawn state,
 // accepts gameplay input, creates user commands, or mutates network state.
-class WorldPreviewSceneSource final : public client::IClientSceneSource {
+class WorldPreviewSceneSource final
+    : public client::IClientSceneSource,
+      public client::IInteractiveCameraPublicationTarget {
 public:
     explicit WorldPreviewSceneSource(
         std::shared_ptr<const world_render::WorldRenderPackage> package,
@@ -63,6 +67,14 @@ public:
         renderer::RenderExtent extent) override;
     [[nodiscard]] client::SceneUpdateResult update(client::FrameTime elapsed) override;
     [[nodiscard]] const client::ClientWorldState& world_state() const noexcept override;
+    void publish_camera_seed(
+        const client::RenderCameraState& camera) noexcept override;
+    [[nodiscard]] bool publish_interactive_camera(
+        const client::RenderCameraState& camera,
+        const client::InteractiveCameraMetadata& metadata) noexcept override;
+    [[nodiscard]] bool publish_dynamic_entities(
+        std::shared_ptr<const entity_render::EntitySceneRenderPackage> package,
+        std::shared_ptr<const entity_render::EntityRenderFrame> frame) noexcept;
     [[nodiscard]] assets::AssetVector3 world_center() const noexcept;
     [[nodiscard]] float world_radius() const noexcept;
     [[nodiscard]] const WorldPreviewSceneOptions& options() const noexcept;
@@ -85,6 +97,12 @@ private:
     std::uint32_t reported_fallback_reason_mask_{0U};
     std::uint32_t fallback_warning_count_{0U};
     std::uint64_t next_visibility_revision_{1U};
+    std::optional<client::RenderCameraState> last_visibility_camera_;
+    std::optional<renderer::RenderExtent> last_visibility_extent_;
+    std::shared_ptr<const world_visibility::WorldVisibilitySet>
+        last_visibility_state_;
+    std::shared_ptr<const world_visibility::WorldVisibleDrawList>
+        last_visible_draw_list_;
     std::vector<world_visibility::WorldVisibilityBrushInstanceInput>
         visibility_brush_instances_;
     std::vector<world_visibility::WorldVisibleBrushModelInput>

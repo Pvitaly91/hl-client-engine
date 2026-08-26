@@ -628,3 +628,11 @@ sprite names below explicit roots and constructs project-owned synthetic
 snapshots. `scripts\verify_local_entity_rendering.ps1` performs bounded read-only
 hash/size/write-time checks around that viewer. This validates imported asset
 rendering under synthetic playback; it does not validate stock network mapping.
+
+M4.6.1 extends the viewers with local interactive cameras. The world viewer
+accepts `--camera free-fly`; the entity viewer additionally accepts
+`--camera entity-first-person --controlled-entity <synthetic-number>`. Set
+`HLCLIENT_SMOKE_TEST_FRAMES` for bounded hidden runs: they require no physical
+input and remain stationary. Unbounded viewers use click-to-capture, Escape to
+release, WASD, Space/Control, Shift, and relative mouse look. These controls
+are offline preview semantics and emit no network command.

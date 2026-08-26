@@ -18,6 +18,8 @@
 #include <hlclient/goldsrc/precache_manifest_stage.hpp>
 #include <hlclient/goldsrc/world_render/world_render_package_stage.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import_stage.hpp>
+#include <hlclient/input/input_source.hpp>
+#include <hlclient/input/input_state_tracker.hpp>
 #include <hlclient/local_assets/local_asset_source.hpp>
 #include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_resolver.hpp>
@@ -3046,10 +3048,29 @@ int run_null_renderer(
     hlclient::core::log(LogLevel::info, "Client bootstrap complete");
 
     const std::uint64_t frame_limit = configured_frame_limit.value_or(1);
+    hlclient::input::NullInputSource input_source;
+    hlclient::input::InputStateTracker input_tracker;
     auto previous_time = std::chrono::steady_clock::now();
     std::uint64_t rendered_frames = 0;
     while ((challenge_session == nullptr && rendered_frames < frame_limit) ||
            (challenge_session != nullptr && !challenge_session->terminal())) {
+        input_source.begin_frame();
+        input_tracker.begin_frame();
+        auto input_event = hlclient::input::InputEvent::focus_lost();
+        while (input_source.poll_event(input_event)) {
+            input_tracker.apply_event(input_event);
+        }
+        input_source.end_frame();
+        const auto input_snapshot = input_tracker.publish_snapshot();
+        input_tracker.end_frame();
+        if (!input_snapshot.focused() || input_snapshot.captured() ||
+            input_snapshot.relative_mouse_delta() !=
+                hlclient::input::RelativeMouseDelta{} ||
+            input_snapshot.wheel_delta() !=
+                hlclient::input::MouseWheelDelta{}) {
+            throw std::logic_error{
+                "Null input source produced non-zero headless input"};
+        }
         const auto current_time = std::chrono::steady_clock::now();
         if (challenge_session != nullptr) {
             challenge_session->update(current_time);
@@ -3102,10 +3123,23 @@ int run_opengl_renderer(
     std::uint64_t rendered_frames = 0;
     bool running = true;
     while (running) {
-        hlclient::platform::WindowEvent event;
+        hlclient::platform::PlatformEvent event{
+            hlclient::platform::WindowEvent{}};
         while (window.poll_event(event)) {
-            if (event.type == hlclient::platform::WindowEventType::quit_requested) {
-                running = false;
+            if (const auto* window_event =
+                    std::get_if<hlclient::platform::WindowEvent>(&event)) {
+                if (window_event->type ==
+                    hlclient::platform::WindowEventType::quit_requested) {
+                    running = false;
+                } else if (window_event->type == hlclient::platform::
+                               WindowEventType::input_capture_recovery_failed) {
+                    throw std::runtime_error{
+                        "SDL input capture recovery failed"};
+                } else if (window_event->type == hlclient::platform::
+                               WindowEventType::native_event_limit_exceeded) {
+                    throw std::runtime_error{
+                        "SDL native event hard limit exceeded"};
+                }
             }
         }
         if (!running) {

@@ -625,7 +625,9 @@ For the same M4.4 scene composition without SDL, OpenGL, or GPU resources:
 ```
 
 Visibility accepts `all`, `frustum`, `pvs`, or `pvs-frustum`; brush submodels
-accept `off` or `static`; cameras accept `static`, `orbit`, or `spawn`.
+accept `off` or `static`. Historical cameras accept `static`, `orbit`, or
+`spawn`; the offline world viewer additionally accepts the project-owned
+`free-fly` diagnostic camera.
 Viewer culling accepts `none` or `back`; historical viewer defaults remain
 `all`, `off`, `static`, and `none`.
 
@@ -1172,6 +1174,15 @@ bounded snapshot interpolation, Studio pose evaluation, Sprite playback, and
 separately cached OpenGL entity resources. Stock Protocol 48 entity projection
 remains evidence-pending and fails closed; the feature is not live multiplayer
 rendering. See [runtime entity scene](docs/RUNTIME_ENTITY_SCENE.md).
+
+M4.6.1 adds a platform-neutral keyboard/mouse event stream, bounded immutable
+input snapshots, project-owned action intent, and local Z-up free-flight and
+synthetic entity-first-person cameras. SDL3 remains the sole native event-pump
+owner and renderers receive only the resulting camera. This milestone creates
+no GoldSrc `usercmd`, stock input mapping, prediction, collision, gameplay
+simulation, or network transmission. See [input architecture](docs/INPUT_ARCHITECTURE.md),
+[gameplay input intent](docs/GAMEPLAY_INPUT_INTENT.md), and
+[first-person camera](docs/FIRST_PERSON_CAMERA.md).
 
 ## License
 

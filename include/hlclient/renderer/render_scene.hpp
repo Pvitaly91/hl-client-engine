@@ -42,6 +42,24 @@ struct RenderCamera {
     float vertical_field_of_view_radians{1.0471975512F};
     float near_plane{0.1F};
     float far_plane{4'096.0F};
+
+    [[nodiscard]] friend constexpr bool operator==(
+        const RenderCamera& left,
+        const RenderCamera& right) noexcept
+    {
+        return left.position.x == right.position.x &&
+            left.position.y == right.position.y &&
+            left.position.z == right.position.z &&
+            left.target.x == right.target.x &&
+            left.target.y == right.target.y &&
+            left.target.z == right.target.z &&
+            left.up.x == right.up.x && left.up.y == right.up.y &&
+            left.up.z == right.up.z &&
+            left.vertical_field_of_view_radians ==
+                right.vertical_field_of_view_radians &&
+            left.near_plane == right.near_plane &&
+            left.far_plane == right.far_plane;
+    }
 };
 
 enum class RenderCullMode {

@@ -98,14 +98,61 @@ if(WIN32)
 endif()
 
 hlclient_add_library(
+    hlclient_input_api
+    include/hlclient/input/input_event.hpp
+    include/hlclient/input/input_snapshot.hpp
+    include/hlclient/input/input_source.hpp
+    include/hlclient/input/input_state_tracker.hpp
+    src/input/input_snapshot.cpp
+    src/input/input_source.cpp
+    src/input/input_state_tracker.cpp
+)
+add_library(hlclient::input_api ALIAS hlclient_input_api)
+target_link_libraries(hlclient_input_api PUBLIC hlclient::core)
+set_property(TARGET hlclient_input_api PROPERTY FOLDER "Engine/Platform/Input")
+
+hlclient_add_library(
+    hlclient_platform_sdl_input
+    src/platform/sdl_platform_event_translator.hpp
+    src/platform/sdl_platform_event_translator.cpp
+)
+add_library(hlclient::platform_sdl_input ALIAS hlclient_platform_sdl_input)
+target_link_libraries(
+    hlclient_platform_sdl_input
+    PUBLIC hlclient::input_api
+    PRIVATE SDL3::SDL3-shared)
+set_property(
+    TARGET hlclient_platform_sdl_input PROPERTY FOLDER "Engine/Platform/Input")
+
+hlclient_add_library(
     hlclient_platform
+    include/hlclient/platform/platform_event.hpp
     include/hlclient/platform/sdl_runtime.hpp
     include/hlclient/platform/sdl_window.hpp
     src/platform/sdl_runtime.cpp
     src/platform/sdl_window.cpp
 )
 add_library(hlclient::platform ALIAS hlclient_platform)
-target_link_libraries(hlclient_platform PRIVATE hlclient::core SDL3::SDL3-shared)
+target_link_libraries(
+    hlclient_platform
+    PUBLIC hlclient::input_api
+    PRIVATE hlclient::core hlclient::platform_sdl_input SDL3::SDL3-shared)
+set_property(TARGET hlclient_platform PROPERTY FOLDER "Engine/Platform")
+
+hlclient_add_library(
+    hlclient_gameplay_input
+    include/hlclient/gameplay_input/gameplay_input_bindings.hpp
+    include/hlclient/gameplay_input/gameplay_input_intent.hpp
+    include/hlclient/gameplay_input/gameplay_input_limits.hpp
+    src/gameplay_input/gameplay_input_bindings.cpp
+    src/gameplay_input/gameplay_input_intent.cpp
+    src/gameplay_input/gameplay_input_limits.cpp
+)
+add_library(hlclient::gameplay_input ALIAS hlclient_gameplay_input)
+target_link_libraries(
+    hlclient_gameplay_input PUBLIC hlclient::input_api hlclient::core)
+set_property(
+    TARGET hlclient_gameplay_input PROPERTY FOLDER "Engine/Client/Input")
 
 hlclient_add_library(
     hlclient_filesystem
@@ -921,6 +968,24 @@ add_library(hlclient::renderer_api ALIAS hlclient_renderer_api)
 target_link_libraries(
     hlclient_renderer_api PRIVATE hlclient::core hlclient::world_render_api)
 set_property(TARGET hlclient_renderer_api PROPERTY FOLDER "Engine/Renderer")
+target_link_libraries(hlclient_client PRIVATE hlclient::renderer_api)
+
+hlclient_add_library(
+    hlclient_gameplay_camera
+    include/hlclient/gameplay_camera/first_person_camera.hpp
+    include/hlclient/gameplay_camera/entity_first_person_camera.hpp
+    src/gameplay_camera/first_person_camera.cpp
+    src/gameplay_camera/entity_first_person_camera.cpp
+)
+add_library(hlclient::gameplay_camera ALIAS hlclient_gameplay_camera)
+target_link_libraries(
+    hlclient_gameplay_camera
+    PUBLIC
+        hlclient::gameplay_input
+        hlclient::renderer_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_gameplay_camera PROPERTY FOLDER "Engine/Client/Camera")
 
 hlclient_add_library(
     hlclient_world_visibility
@@ -1083,6 +1148,26 @@ target_link_libraries(
 set_property(TARGET hlclient_scene_api PROPERTY FOLDER "Engine/Client")
 
 hlclient_add_library(
+    hlclient_interactive_preview
+    include/hlclient/interactive_preview/interactive_entity_visibility.hpp
+    include/hlclient/interactive_preview/interactive_preview_controller.hpp
+    src/interactive_preview/interactive_entity_visibility.cpp
+    src/interactive_preview/interactive_preview_controller.cpp
+)
+add_library(hlclient::interactive_preview ALIAS hlclient_interactive_preview)
+target_link_libraries(
+    hlclient_interactive_preview
+    PUBLIC
+        hlclient::client
+        hlclient::entity_scene_render
+        hlclient::gameplay_camera
+        hlclient::gameplay_input
+        hlclient::input_api
+    PRIVATE hlclient::renderer_api)
+set_property(
+    TARGET hlclient_interactive_preview PROPERTY FOLDER "Engine/Client/Camera")
+
+hlclient_add_library(
     hlclient_world_preview
     include/hlclient/world_preview/world_preview_scene_source.hpp
     src/world_preview/world_preview_scene_source.cpp
@@ -1167,6 +1252,7 @@ target_link_libraries(
         hlclient::renderer_opengl
         hlclient::world_render
         hlclient::world_preview
+        hlclient::interactive_preview
 )
 
 add_executable(
@@ -1310,6 +1396,7 @@ target_link_libraries(
         hlclient::local_asset_source
         hlclient::local_resources
         hlclient::platform
+        hlclient::interactive_preview
         hlclient::renderer_opengl
         hlclient::glad
 )
@@ -1341,6 +1428,7 @@ target_link_libraries(
         hlclient::local_asset_source
         hlclient::local_resources
         hlclient::platform
+        hlclient::interactive_preview
         hlclient::renderer_opengl
         hlclient::glad
 )

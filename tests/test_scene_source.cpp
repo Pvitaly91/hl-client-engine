@@ -128,6 +128,156 @@ TEST_CASE("Client scene source updates state independently of render conversion"
     CHECK(connected.clear_color.blue == 0.14F);
 }
 
+TEST_CASE("Client world publishes interactive camera metadata transactionally",
+    "[client][camera][input]")
+{
+    using hlclient::client::ControlledEntityCameraStatus;
+    using hlclient::client::InteractiveCameraMetadata;
+    using hlclient::client::InteractiveCameraMode;
+
+    hlclient::client::ClientWorldState state;
+    const hlclient::client::RenderCameraState free_flight{
+        {10.0F, 20.0F, 30.0F},
+        {11.0F, 20.0F, 30.0F},
+        {0.0F, 0.0F, 1.0F},
+        1.0F,
+        0.1F,
+        8'192.0F,
+    };
+    const InteractiveCameraMetadata metadata{
+        7U,
+        3U,
+        InteractiveCameraMode::free_flight_world,
+        std::nullopt,
+        ControlledEntityCameraStatus::not_applicable,
+    };
+    REQUIRE(state.set_interactive_camera(free_flight, metadata));
+    REQUIRE(state.interactive_camera_metadata());
+    CHECK(state.input_revision() == 7U);
+    CHECK(state.camera_revision() == 3U);
+
+    const auto scene = hlclient::client::build_render_scene(state);
+    CHECK(scene.camera.position.x == free_flight.position.x);
+    CHECK(scene.camera.position.y == free_flight.position.y);
+    CHECK(scene.camera.position.z == free_flight.position.z);
+    CHECK(scene.camera.target.x == free_flight.target.x);
+    CHECK(scene.camera.target.y == free_flight.target.y);
+    CHECK(scene.camera.target.z == free_flight.target.z);
+    CHECK(scene.camera.up.x == free_flight.up.x);
+    CHECK(scene.camera.up.y == free_flight.up.y);
+    CHECK(scene.camera.up.z == free_flight.up.z);
+
+    auto invalid_metadata = metadata;
+    invalid_metadata.input_revision = 6U;
+    CHECK_FALSE(state.set_interactive_camera({}, invalid_metadata));
+    CHECK(state.camera().position.x == free_flight.position.x);
+    CHECK(state.camera().position.y == free_flight.position.y);
+    CHECK(state.camera().position.z == free_flight.position.z);
+    CHECK(state.input_revision() == 7U);
+
+    state.set_camera(free_flight);
+    CHECK_FALSE(state.interactive_camera_metadata());
+    CHECK(state.input_revision() == 0U);
+    CHECK(state.camera_revision() == 0U);
+
+    REQUIRE(state.set_interactive_camera(free_flight, metadata));
+    state.reset();
+    CHECK_FALSE(state.interactive_camera_metadata());
+}
+
+TEST_CASE("Client world rejects unrenderable cameras and stale revisions transactionally",
+    "[client][camera][input][validation][transaction]")
+{
+    using hlclient::client::ControlledEntityCameraStatus;
+    using hlclient::client::InteractiveCameraMetadata;
+    using hlclient::client::InteractiveCameraMode;
+
+    auto entities = make_dynamic_entity_fixture();
+    auto world_result = world_fixture::make_package();
+    REQUIRE(world_result);
+    auto world = std::make_shared<const hlclient::world_render::WorldRenderPackage>(
+        std::move(*world_result.package));
+    hlclient::client::ClientWorldState state;
+    state.set_static_world(world);
+    REQUIRE(state.set_dynamic_entities(entities.package, entities.frame));
+
+    const hlclient::client::RenderCameraState camera{
+        {10.0F, 20.0F, 30.0F},
+        {11.0F, 20.0F, 30.0F},
+        {0.0F, 0.0F, 1.0F},
+        1.0F,
+        0.1F,
+        8'192.0F,
+    };
+    const InteractiveCameraMetadata first{
+        7U,
+        3U,
+        InteractiveCameraMode::free_flight_world,
+        std::nullopt,
+        ControlledEntityCameraStatus::not_applicable,
+    };
+    REQUIRE(state.set_interactive_camera(camera, first));
+    const auto retained_world = state.static_world();
+    const auto retained_entities = state.entity_scene();
+    const auto retained_frame = state.entity_frame();
+    const auto retained_world_revision = state.world_revision();
+    const auto retained_entity_revision = state.entity_frame_revision();
+
+    const auto rejected_without_mutation = [&](const auto& invalid_camera,
+                                               const auto& metadata) {
+        CHECK_FALSE(state.set_interactive_camera(invalid_camera, metadata));
+        CHECK(state.camera() == camera);
+        CHECK(state.input_revision() == 7U);
+        CHECK(state.camera_revision() == 3U);
+        CHECK(state.static_world() == retained_world);
+        CHECK(state.entity_scene() == retained_entities);
+        CHECK(state.entity_frame() == retained_frame);
+        CHECK(state.world_revision() == retained_world_revision);
+        CHECK(state.entity_frame_revision() == retained_entity_revision);
+    };
+
+    auto invalid_camera = camera;
+    invalid_camera.target = invalid_camera.position;
+    rejected_without_mutation(invalid_camera, InteractiveCameraMetadata{8U, 4U,
+        InteractiveCameraMode::free_flight_world, std::nullopt,
+        ControlledEntityCameraStatus::not_applicable});
+    invalid_camera = camera;
+    invalid_camera.up = {};
+    rejected_without_mutation(invalid_camera, InteractiveCameraMetadata{8U, 4U,
+        InteractiveCameraMode::free_flight_world, std::nullopt,
+        ControlledEntityCameraStatus::not_applicable});
+    invalid_camera = camera;
+    invalid_camera.up = {1.0F, 0.0F, 0.0F};
+    rejected_without_mutation(invalid_camera, InteractiveCameraMetadata{8U, 4U,
+        InteractiveCameraMode::free_flight_world, std::nullopt,
+        ControlledEntityCameraStatus::not_applicable});
+    invalid_camera = camera;
+    invalid_camera.vertical_field_of_view_radians = 3.2F;
+    rejected_without_mutation(invalid_camera, InteractiveCameraMetadata{8U, 4U,
+        InteractiveCameraMode::free_flight_world, std::nullopt,
+        ControlledEntityCameraStatus::not_applicable});
+    rejected_without_mutation(camera, InteractiveCameraMetadata{8U, 4U,
+        InteractiveCameraMode::entity_first_person, 0U,
+        ControlledEntityCameraStatus::anchored});
+    rejected_without_mutation(camera, first);
+
+    REQUIRE(state.set_interactive_camera(camera, {8U, 3U,
+        InteractiveCameraMode::free_flight_world, std::nullopt,
+        ControlledEntityCameraStatus::not_applicable}));
+    CHECK(state.input_revision() == 8U);
+    CHECK(state.camera_revision() == 3U);
+
+    auto moved_camera = camera;
+    moved_camera.position.x += 1.0F;
+    moved_camera.target.x += 1.0F;
+    CHECK_FALSE(state.set_interactive_camera(moved_camera, {9U, 3U,
+        InteractiveCameraMode::free_flight_world, std::nullopt,
+        ControlledEntityCameraStatus::not_applicable}));
+    REQUIRE(state.set_interactive_camera(moved_camera, {9U, 4U,
+        InteractiveCameraMode::free_flight_world, std::nullopt,
+        ControlledEntityCameraStatus::not_applicable}));
+}
+
 TEST_CASE("Null renderer records compact scene metadata and lifecycle statistics", "[renderer][null]")
 {
     hlclient::renderer::null::NullRenderer renderer;
@@ -185,6 +335,83 @@ TEST_CASE("Null renderer records compact scene metadata and lifecycle statistics
     CHECK_THROWS_AS(renderer.render({}, {}), std::logic_error);
 }
 
+TEST_CASE("Null renderer accepts both interactive camera modes without input ownership",
+    "[renderer][null][camera][input]")
+{
+    using hlclient::client::ControlledEntityCameraStatus;
+    using hlclient::client::InteractiveCameraMetadata;
+    using hlclient::client::InteractiveCameraMode;
+
+    const hlclient::client::RenderCameraState free_flight{
+        {4.0F, 5.0F, 6.0F},
+        {5.0F, 5.0F, 6.0F},
+        {0.0F, 0.0F, 1.0F},
+        1.0F,
+        0.1F,
+        4'096.0F,
+    };
+    const hlclient::client::RenderCameraState entity_first_person{
+        {32.0F, 48.0F, 60.0F},
+        {32.0F, 49.0F, 60.0F},
+        {0.0F, 0.0F, 1.0F},
+        1.0F,
+        0.1F,
+        4'096.0F,
+    };
+
+    hlclient::client::ClientWorldState state;
+    hlclient::renderer::null::NullRenderer renderer;
+    renderer.initialize();
+
+    REQUIRE(state.set_interactive_camera(
+        free_flight,
+        InteractiveCameraMetadata{
+            1U,
+            1U,
+            InteractiveCameraMode::free_flight_world,
+            std::nullopt,
+            ControlledEntityCameraStatus::not_applicable,
+        }));
+    renderer.render(hlclient::client::build_render_scene(state), {640, 480});
+
+    REQUIRE(state.set_interactive_camera(
+        entity_first_person,
+        InteractiveCameraMetadata{
+            2U,
+            2U,
+            InteractiveCameraMode::entity_first_person,
+            1U,
+            ControlledEntityCameraStatus::anchored,
+        }));
+    renderer.render(hlclient::client::build_render_scene(state), {640, 480});
+
+    REQUIRE(state.interactive_camera_metadata());
+    CHECK(state.interactive_camera_metadata()->mode ==
+        InteractiveCameraMode::entity_first_person);
+    CHECK(state.interactive_camera_metadata()->controlled_entity == 1U);
+    const auto statistics = renderer.statistics();
+    CHECK(statistics.rendered_frames == 2U);
+    CHECK(statistics.camera_valid);
+    REQUIRE(statistics.last_camera);
+    CHECK(statistics.last_camera->position.x == entity_first_person.position.x);
+    CHECK(statistics.last_camera->position.y == entity_first_person.position.y);
+    CHECK(statistics.last_camera->position.z == entity_first_person.position.z);
+    CHECK(statistics.last_camera->target.x == entity_first_person.target.x);
+    CHECK(statistics.last_camera->target.y == entity_first_person.target.y);
+    CHECK(statistics.last_camera->target.z == entity_first_person.target.z);
+    CHECK(statistics.last_camera->up.x == entity_first_person.up.x);
+    CHECK(statistics.last_camera->up.y == entity_first_person.up.y);
+    CHECK(statistics.last_camera->up.z == entity_first_person.up.z);
+    CHECK(statistics.last_camera->vertical_field_of_view_radians ==
+        entity_first_person.vertical_field_of_view_radians);
+    CHECK(statistics.last_camera->near_plane == entity_first_person.near_plane);
+    CHECK(statistics.last_camera->far_plane == entity_first_person.far_plane);
+    CHECK((statistics.last_extent ==
+        hlclient::renderer::RenderExtent{640, 480}));
+    CHECK_FALSE(statistics.static_world_present);
+    CHECK_FALSE(statistics.dynamic_entity_package_present);
+}
+
 TEST_CASE("Client and Null renderer carry protocol-neutral dynamic entities",
     "[client][renderer][entity-render][null]")
 {
@@ -205,6 +432,36 @@ TEST_CASE("Client and Null renderer carry protocol-neutral dynamic entities",
         entity_render::EntityRenderResourceIdentity{
             entities.package->resource_id(),
             entities.package->resource_revision()}));
+
+    const auto retained_world_revision = state.world_revision();
+    const auto retained_entity_scene_revision = state.entity_scene_revision();
+    const auto retained_entity_frame_revision = state.entity_frame_revision();
+    const auto retained_world = state.static_world();
+    const auto retained_entity_package = state.entity_scene();
+    const auto retained_entity_frame = state.entity_frame();
+    const hlclient::client::RenderCameraState interactive_camera{
+        {12.0F, 24.0F, 36.0F},
+        {13.0F, 24.0F, 36.0F},
+        {0.0F, 0.0F, 1.0F},
+        1.0F,
+        0.1F,
+        4'096.0F,
+    };
+    const hlclient::client::InteractiveCameraMetadata interactive_metadata{
+        1U,
+        1U,
+        hlclient::client::InteractiveCameraMode::free_flight_world,
+        std::nullopt,
+        hlclient::client::ControlledEntityCameraStatus::not_applicable,
+    };
+    REQUIRE(state.set_interactive_camera(
+        interactive_camera, interactive_metadata));
+    CHECK(state.world_revision() == retained_world_revision);
+    CHECK(state.entity_scene_revision() == retained_entity_scene_revision);
+    CHECK(state.entity_frame_revision() == retained_entity_frame_revision);
+    CHECK(state.static_world() == retained_world);
+    CHECK(state.entity_scene() == retained_entity_package);
+    CHECK(state.entity_frame() == retained_entity_frame);
 
     auto other_package_result = entity_fixture::scene_package(
         entity_fixture::render_assets(true, false));

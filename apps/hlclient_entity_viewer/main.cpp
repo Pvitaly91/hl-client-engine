@@ -23,9 +23,13 @@
 #include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_search_roots.hpp>
 #include <hlclient/local_resources/local_virtual_resource_name.hpp>
+#include <hlclient/input/input_state_tracker.hpp>
+#include <hlclient/interactive_preview/interactive_entity_visibility.hpp>
+#include <hlclient/interactive_preview/interactive_preview_controller.hpp>
 #include <hlclient/platform/sdl_runtime.hpp>
 #include <hlclient/platform/sdl_window.hpp>
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
+#include <hlclient/renderer/render_camera_math.hpp>
 #include <hlclient/renderer/render_scene.hpp>
 #include <hlclient/world_preview/world_preview_scene_source.hpp>
 #include <hlclient/world_render/world_render_package_builder.hpp>
@@ -34,12 +38,14 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <locale>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -56,6 +62,9 @@ namespace {
 constexpr std::size_t kMaximumViewerVisuals = 63U;
 constexpr std::size_t kMaximumOperationUpdates = 1'000'000U;
 constexpr float kViewerEntitySpacing = 72.0F;
+constexpr hlclient::assets::AssetVector3 kViewerEntityEyeOffset{
+    0.0F, 0.0F, 28.0F};
+constexpr float kViewerFirstPersonNearPlane = 0.1F;
 
 enum class FixtureKind {
   studio,
@@ -67,6 +76,8 @@ enum class CameraMode {
   static_camera,
   orbit,
   spawn,
+  free_flight,
+  entity_first_person,
 };
 
 enum class RequestedVisualKind {
@@ -82,6 +93,7 @@ struct Options {
   std::vector<std::string> sprites;
   std::optional<FixtureKind> fixture;
   std::optional<CameraMode> camera;
+  std::optional<std::uint32_t> controlled_entity;
 };
 
 struct RequestedVisual {
@@ -153,7 +165,7 @@ narrow_printable_ascii(const std::wstring_view value) {
     if (argument != L"--basedir" && argument != L"--game" &&
         argument != L"--map" && argument != L"--model" &&
         argument != L"--sprite" && argument != L"--fixture" &&
-        argument != L"--camera") {
+        argument != L"--camera" && argument != L"--controlled-entity") {
       return std::nullopt;
     }
     if (index + 1 >= argument_count) {
@@ -202,7 +214,7 @@ narrow_printable_ascii(const std::wstring_view value) {
       } else {
         return std::nullopt;
       }
-    } else {
+    } else if (argument == L"--camera") {
       if (options.camera) {
         return std::nullopt;
       }
@@ -212,9 +224,26 @@ narrow_printable_ascii(const std::wstring_view value) {
         options.camera = CameraMode::orbit;
       } else if (*narrow == "spawn") {
         options.camera = CameraMode::spawn;
+      } else if (*narrow == "free-fly") {
+        options.camera = CameraMode::free_flight;
+      } else if (*narrow == "entity-first-person") {
+        options.camera = CameraMode::entity_first_person;
       } else {
         return std::nullopt;
       }
+    } else {
+      if (options.controlled_entity) {
+        return std::nullopt;
+      }
+      std::uint32_t entity_number = 0U;
+      const auto conversion = std::from_chars(
+          narrow->data(), narrow->data() + narrow->size(), entity_number, 10);
+      if (conversion.ec != std::errc{} ||
+          conversion.ptr != narrow->data() + narrow->size() ||
+          entity_number == 0U) {
+        return std::nullopt;
+      }
+      options.controlled_entity = entity_number;
     }
   }
 
@@ -234,6 +263,10 @@ narrow_printable_ascii(const std::wstring_view value) {
        (options.models.empty() || options.sprites.empty()))) {
     return std::nullopt;
   }
+  if ((*options.camera == CameraMode::entity_first_person) !=
+      options.controlled_entity.has_value()) {
+    return std::nullopt;
+  }
   return options;
 }
 
@@ -242,8 +275,13 @@ void print_usage() {
                "--game <directory> --map <maps/name.bsp> "
                "[--model <models/name.mdl>]... "
                "[--sprite <sprites/name.spr>]... "
-               "--fixture <studio|sprite|mixed> "
-               "--camera <static|orbit|spawn>\n";
+                "--fixture <studio|sprite|mixed> "
+                "--camera <static|orbit|spawn|free-fly|entity-first-person> "
+                "[--controlled-entity <synthetic-number>]\n"
+            << "  free-fly: local noclip-style diagnostic camera; no collision, "
+               "physics, prediction, or network commands\n"
+            << "  entity-first-person: local camera anchored to a synthetic "
+               "playback entity; not live server gameplay\n";
 }
 
 void print_failure(const std::string_view classification) {
@@ -1102,6 +1140,106 @@ publish_visual_library(const hlclient::goldsrc::PrecacheManifestState &manifest,
   };
 }
 
+struct EntityFirstPersonSeed {
+  hlclient::client::RenderCameraState camera;
+  hlclient::assets::AssetVector3 explicit_eye_offset;
+};
+
+[[nodiscard]] std::optional<EntityFirstPersonSeed>
+make_entity_first_person_seed(
+    const hlclient::client::RenderCameraState &fallback,
+    const hlclient::entity_render::EntityRenderFrame &frame,
+    const std::uint32_t controlled_entity) {
+  std::optional<hlclient::assets::AssetVector3> controlled_origin;
+  bool duplicate_controlled_entity = false;
+  const auto find_controlled = [&](const auto &instance) {
+    if (instance.entity_number != controlled_entity) {
+      return;
+    }
+    if (controlled_origin) {
+      duplicate_controlled_entity = true;
+      return;
+    }
+    controlled_origin = instance.transform.origin;
+  };
+  for (const auto &instance : frame.studio_instances()) {
+    find_controlled(instance);
+  }
+  for (const auto &instance : frame.sprite_instances()) {
+    find_controlled(instance);
+  }
+  if (!controlled_origin || duplicate_controlled_entity) {
+    return std::nullopt;
+  }
+
+  std::optional<hlclient::assets::AssetVector3> facing_origin;
+  auto nearest_distance_squared = std::numeric_limits<double>::infinity();
+  const auto consider_facing_target = [&](const auto &instance) {
+    if (instance.entity_number == controlled_entity) {
+      return;
+    }
+    const auto x = static_cast<double>(instance.transform.origin.x) -
+                   static_cast<double>(controlled_origin->x);
+    const auto y = static_cast<double>(instance.transform.origin.y) -
+                   static_cast<double>(controlled_origin->y);
+    const auto z = static_cast<double>(instance.transform.origin.z) -
+                   static_cast<double>(controlled_origin->z);
+    const auto distance_squared = x * x + y * y + z * z;
+    if (std::isfinite(distance_squared) && distance_squared > 0.0 &&
+        distance_squared < nearest_distance_squared) {
+      nearest_distance_squared = distance_squared;
+      facing_origin = instance.transform.origin;
+    }
+  };
+  for (const auto &instance : frame.studio_instances()) {
+    consider_facing_target(instance);
+  }
+  for (const auto &instance : frame.sprite_instances()) {
+    consider_facing_target(instance);
+  }
+
+  const auto eye_offset = kViewerEntityEyeOffset;
+  hlclient::client::RenderCameraState seed = fallback;
+  seed.position = {controlled_origin->x + eye_offset.x,
+                   controlled_origin->y + eye_offset.y,
+                   controlled_origin->z + eye_offset.z};
+  if (facing_origin) {
+    seed.target = {facing_origin->x + eye_offset.x,
+                   facing_origin->y + eye_offset.y,
+                   facing_origin->z + eye_offset.z};
+  } else {
+    const auto fallback_x = static_cast<double>(fallback.target.x) -
+                            static_cast<double>(fallback.position.x);
+    const auto fallback_y = static_cast<double>(fallback.target.y) -
+                            static_cast<double>(fallback.position.y);
+    const auto fallback_z = static_cast<double>(fallback.target.z) -
+                            static_cast<double>(fallback.position.z);
+    const auto length =
+        std::sqrt(fallback_x * fallback_x + fallback_y * fallback_y +
+                  fallback_z * fallback_z);
+    if (!std::isfinite(length) || length <= 0.0) {
+      return std::nullopt;
+    }
+    seed.target = {
+        static_cast<float>(static_cast<double>(seed.position.x) +
+                           fallback_x / length),
+        static_cast<float>(static_cast<double>(seed.position.y) +
+                           fallback_y / length),
+        static_cast<float>(static_cast<double>(seed.position.z) +
+                           fallback_z / length),
+    };
+  }
+  seed.up = {0.0F, 0.0F, 1.0F};
+  seed.near_plane = kViewerFirstPersonNearPlane;
+  const hlclient::renderer::RenderCamera validated{
+      seed.position, seed.target, seed.up,
+      seed.vertical_field_of_view_radians, seed.near_plane, seed.far_plane};
+  if (!hlclient::renderer::is_valid(validated)) {
+    return std::nullopt;
+  }
+  return EntityFirstPersonSeed{seed, eye_offset};
+}
+
 [[nodiscard]] int
 render_entities(PreparedWorldScene world, PreparedEntityScene prepared,
                 const Options &options,
@@ -1110,6 +1248,20 @@ render_entities(PreparedWorldScene world, PreparedEntityScene prepared,
       prepared.interpolated_counts.size() != prepared.frames.size() ||
       prepared.stepped_counts.size() != prepared.frames.size()) {
     print_failure("entity_playback_frames_invalid");
+    return 1;
+  }
+  std::uint64_t maximum_source_frame_revision = 0U;
+  for (const auto &frame : prepared.frames) {
+    if (!frame) {
+      print_failure("entity_playback_frame_missing");
+      return 1;
+    }
+    maximum_source_frame_revision =
+        std::max(maximum_source_frame_revision, frame->resource_revision());
+  }
+  if (maximum_source_frame_revision ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    print_failure("entity_visibility_revision_exhausted");
     return 1;
   }
   [[maybe_unused]] hlclient::platform::SdlRuntime sdl_runtime;
@@ -1121,6 +1273,9 @@ render_entities(PreparedWorldScene world, PreparedEntityScene prepared,
   }};
   hlclient::renderer::opengl::OpenGlRenderer renderer;
 
+  const bool interactive_camera =
+      *options.camera == CameraMode::free_flight ||
+      *options.camera == CameraMode::entity_first_person;
   hlclient::world_preview::WorldPreviewSceneOptions world_options;
   switch (*options.camera) {
   case CameraMode::static_camera:
@@ -1135,14 +1290,69 @@ render_entities(PreparedWorldScene world, PreparedEntityScene prepared,
     world_options.camera_mode =
         hlclient::world_preview::WorldPreviewCameraMode::spawn;
     break;
+  case CameraMode::free_flight:
+    world_options.camera_mode =
+        hlclient::world_preview::WorldPreviewCameraMode::free_flight;
+    break;
+  case CameraMode::entity_first_person:
+    world_options.camera_mode =
+        hlclient::world_preview::WorldPreviewCameraMode::entity_first_person;
+    break;
   }
   world_options.visibility_mode =
-      hlclient::world_visibility::WorldVisibilityMode::all;
+      interactive_camera
+          ? hlclient::world_visibility::WorldVisibilityMode::pvs_and_frustum
+          : hlclient::world_visibility::WorldVisibilityMode::all;
   world_options.brush_submodels =
       hlclient::world_preview::WorldPreviewBrushSubmodelsMode::off;
   world_options.spawn_camera = world.spawn_camera;
   hlclient::world_preview::WorldPreviewSceneSource world_source{world.package,
-                                                                world_options};
+                                                                 world_options};
+
+  std::optional<hlclient::input::InputStateTracker> input_tracker;
+  std::optional<hlclient::interactive_preview::InteractivePreviewController>
+      interactive_controller;
+  if (interactive_camera) {
+    input_tracker.emplace();
+    const auto preview_mode =
+        *options.camera == CameraMode::free_flight
+            ? hlclient::interactive_preview::InteractivePreviewMode::
+                  free_flight_world
+            : hlclient::interactive_preview::InteractivePreviewMode::
+                  entity_first_person;
+    auto initial_render_camera = world_source.world_state().camera();
+    auto explicit_eye_offset = kViewerEntityEyeOffset;
+    if (*options.camera == CameraMode::entity_first_person) {
+      const auto seeded = make_entity_first_person_seed(
+          initial_render_camera, *prepared.frames.front(),
+          *options.controlled_entity);
+      if (!seeded) {
+        print_failure("entity_camera_seed_failed");
+        return 1;
+      }
+      initial_render_camera = seeded->camera;
+      explicit_eye_offset = seeded->explicit_eye_offset;
+    }
+    auto created = hlclient::interactive_preview::InteractivePreviewController::
+        create_project_default_v1(preview_mode, initial_render_camera,
+                                  options.controlled_entity,
+                                  explicit_eye_offset);
+    if (!created || !created.controller) {
+      print_failure("interactive_camera_initialization_failed");
+      return 1;
+    }
+    interactive_controller.emplace(std::move(*created.controller));
+    if (!interactive_controller->seed_world_state_camera(world_source)) {
+      print_failure("interactive_camera_initial_publication_failed");
+      return 1;
+    }
+    const auto initial_visibility =
+        world_source.update(hlclient::client::FrameTime{0.0});
+    if (!initial_visibility) {
+      print_failure("interactive_camera_initial_visibility_failed");
+      return 1;
+    }
+  }
 
   auto previous_time = std::chrono::steady_clock::now();
   std::uint64_t rendered_frames = 0U;
@@ -1150,18 +1360,68 @@ render_entities(PreparedWorldScene world, PreparedEntityScene prepared,
   std::optional<std::uint64_t> previous_entity_frame_revision;
   std::uint64_t first_entity_frame_revision = 0U;
   std::uint64_t last_entity_frame_revision = 0U;
+  std::uint64_t next_interactive_entity_frame_revision =
+      maximum_source_frame_revision + 1U;
+  std::uint64_t entity_visibility_refilter_count = 0U;
+  std::uint64_t capture_failure_count = 0U;
+  std::uint64_t input_event_count = 0U;
+  std::shared_ptr<const hlclient::entity_render::EntityRenderFrame>
+      last_rendered_entity_frame;
+  bool input_focus_seeded = false;
   bool running = true;
   while (running) {
-    hlclient::platform::WindowEvent event;
-    while (window.poll_event(event)) {
-      if (event.type == hlclient::platform::WindowEventType::quit_requested) {
-        running = false;
+    if (input_tracker) {
+      input_tracker->begin_frame();
+      if (!input_focus_seeded) {
+        input_tracker->apply_event(
+            window.focus_state() == hlclient::input::InputFocusState::focused
+                ? hlclient::input::InputEvent::focus_gained()
+                : hlclient::input::InputEvent::focus_lost());
+        input_focus_seeded = true;
       }
+    }
+    hlclient::platform::PlatformEvent event{hlclient::platform::WindowEvent{}};
+    while (window.poll_event(event)) {
+      if (const auto *window_event =
+              std::get_if<hlclient::platform::WindowEvent>(&event)) {
+        if (window_event->type ==
+            hlclient::platform::WindowEventType::quit_requested) {
+          running = false;
+        } else if (window_event->type == hlclient::platform::
+                       WindowEventType::input_capture_recovery_failed) {
+          print_failure("input_capture_recovery_failed");
+          return 1;
+        } else if (window_event->type == hlclient::platform::
+                       WindowEventType::native_event_limit_exceeded) {
+          print_failure("native_event_limit_exceeded");
+          return 1;
+        }
+      } else if (input_tracker) {
+        input_tracker->apply_event(
+            std::get<hlclient::input::InputEvent>(event));
+        ++input_event_count;
+      }
+    }
+    if (input_tracker &&
+        window.focus_state() == hlclient::input::InputFocusState::unfocused) {
+      const auto recovery = window.request_relative_mouse_capture(false);
+      if (!recovery) {
+        ++capture_failure_count;
+        std::cerr << "input-focus-release=failed diagnostic="
+                  << recovery.diagnostic << '\n';
+        return 1;
+      }
+    }
+    std::optional<hlclient::input::InputSnapshot> input_snapshot;
+    if (input_tracker) {
+      input_snapshot.emplace(input_tracker->publish_snapshot());
+      input_tracker->end_frame();
     }
     if (!running) {
       break;
     }
     const auto current_time = std::chrono::steady_clock::now();
+    const auto elapsed = current_time - previous_time;
     const auto extent = window.pixel_extent();
     const auto render_extent =
         hlclient::renderer::RenderExtent{extent.width, extent.height};
@@ -1170,37 +1430,121 @@ render_entities(PreparedWorldScene world, PreparedEntityScene prepared,
       print_failure("world_extent_update_failed");
       return 1;
     }
-    const auto world_update = world_source.update(current_time - previous_time);
+    const auto &entity_frame = prepared.frames[static_cast<std::size_t>(
+        rendered_frames % prepared.frames.size())];
+    if (interactive_controller && input_snapshot) {
+      const auto bounded_input_elapsed = std::min(
+          std::chrono::duration<double>{elapsed}.count(), 0.25);
+      const auto camera_update = interactive_controller->update(
+          *input_snapshot, bounded_input_elapsed, world_source,
+          entity_frame.get());
+      if (!camera_update) {
+        std::cerr << "interactive-camera="
+                  << (camera_update.error
+                          ? hlclient::interactive_preview::to_string(
+                                camera_update.error->code)
+                          : std::string_view{"update_failed"})
+                  << '\n';
+        return 1;
+      }
+      if (camera_update.capture_mouse_requested) {
+        const auto capture = window.request_relative_mouse_capture(true);
+        if (!capture) {
+          ++capture_failure_count;
+          std::cerr << "input-capture=failed diagnostic="
+                    << capture.diagnostic << '\n';
+          (void)window.request_relative_mouse_capture(false);
+          return 1;
+        }
+      }
+      if (camera_update.release_mouse_requested) {
+        const auto release = window.request_relative_mouse_capture(false);
+        if (!release) {
+          ++capture_failure_count;
+          std::cerr << "input-release=failed diagnostic="
+                    << release.diagnostic << '\n';
+          (void)window.request_relative_mouse_capture(false);
+          return 1;
+        }
+      }
+    }
+    const auto world_update = world_source.update(elapsed);
     if (!world_update) {
       print_failure("world_scene_update_failed");
+      return 1;
+    }
+    std::shared_ptr<const hlclient::entity_render::EntityRenderFrame>
+        rendered_entity_frame = entity_frame;
+    if (interactive_camera) {
+      if (next_interactive_entity_frame_revision ==
+          std::numeric_limits<std::uint64_t>::max()) {
+        print_failure("entity_visibility_revision_exhausted");
+        return 1;
+      }
+      const auto &camera = world_source.world_state().camera();
+      hlclient::interactive_preview::InteractiveEntityVisibilityRefilterInput
+          refilter_input;
+      refilter_input.camera = {
+          camera.position,
+          camera.target,
+          camera.up,
+          camera.vertical_field_of_view_radians,
+          camera.near_plane,
+          camera.far_plane,
+      };
+      refilter_input.extent = world_source.options().visibility_extent;
+      refilter_input.output_frame_revision =
+          next_interactive_entity_frame_revision;
+      if (*options.camera == CameraMode::entity_first_person) {
+        refilter_input.retained_entity_number = options.controlled_entity;
+      }
+      const auto &world_visibility =
+          world_source.world_state().world_visibility();
+      if (world_visibility && world_visibility->camera_leaf_index()) {
+        const auto camera_leaf = *world_visibility->camera_leaf_index();
+        const auto &spatial = world.package->spatial_package();
+        if (spatial.pvs_table().leaf_has_usable_row(camera_leaf)) {
+          refilter_input.spatial_package = &spatial;
+          refilter_input.camera_leaf_index = camera_leaf;
+        }
+      }
+      const auto filtered = hlclient::interactive_preview::
+          InteractiveEntityVisibilityRefilter{}
+              .refilter(*prepared.package, *entity_frame, refilter_input);
+      if (!filtered || !filtered.frame) {
+        std::cerr
+            << "entity-visibility-refilter="
+            << (filtered.error
+                    ? hlclient::interactive_preview::to_string(
+                          filtered.error->code)
+                    : std::string_view{"failed"})
+            << '\n';
+        return 1;
+      }
+      rendered_entity_frame = filtered.frame;
+      ++next_interactive_entity_frame_revision;
+      ++entity_visibility_refilter_count;
+    }
+    if (!world_source.publish_dynamic_entities(
+            prepared.package, rendered_entity_frame)) {
+      print_failure("dynamic_entity_publication_failed");
       return 1;
     }
     previous_time = current_time;
     auto scene =
         hlclient::client::build_render_scene(world_source.world_state());
-    const auto &entity_frame = prepared.frames[static_cast<std::size_t>(
-        rendered_frames % prepared.frames.size())];
-    scene.dynamic_entities.emplace();
-    scene.dynamic_entities->package = prepared.package;
-    scene.dynamic_entities->frame = entity_frame;
-    const auto &frame_statistics = entity_frame->statistics();
-    scene.dynamic_entities->visibility_summary = {
-        frame_statistics.candidate_count,
-        frame_statistics.visible_count,
-        frame_statistics.studio_instance_count,
-        frame_statistics.sprite_instance_count,
-        frame_statistics.unsupported_instance_count,
-    };
     renderer.render(scene, render_extent);
     if (rendered_frames == 0U) {
-      first_entity_frame_revision = entity_frame->resource_revision();
+      first_entity_frame_revision = rendered_entity_frame->resource_revision();
     }
     if (previous_entity_frame_revision &&
-        *previous_entity_frame_revision != entity_frame->resource_revision()) {
+        *previous_entity_frame_revision !=
+            rendered_entity_frame->resource_revision()) {
       ++entity_frame_revision_changes;
     }
-    previous_entity_frame_revision = entity_frame->resource_revision();
-    last_entity_frame_revision = entity_frame->resource_revision();
+    previous_entity_frame_revision = rendered_entity_frame->resource_revision();
+    last_entity_frame_revision = rendered_entity_frame->resource_revision();
+    last_rendered_entity_frame = std::move(rendered_entity_frame);
     window.swap_buffers();
     ++rendered_frames;
     if (frame_limit && rendered_frames >= *frame_limit) {
@@ -1216,11 +1560,15 @@ render_entities(PreparedWorldScene world, PreparedEntityScene prepared,
       rendered_frames == 0U ? 0U
                             : static_cast<std::size_t>((rendered_frames - 1U) %
                                                        prepared.frames.size());
-  const auto &reported_frame = *prepared.frames[reported_frame_index];
+  const auto &reported_source_frame = *prepared.frames[reported_frame_index];
+  const auto &reported_frame = last_rendered_entity_frame
+                                   ? *last_rendered_entity_frame
+                                   : reported_source_frame;
   const auto &frame_statistics = reported_frame.statistics();
   const auto &package_statistics = prepared.package->statistics();
   std::cout << "[entity] snapshots=2\n";
-  std::cout << "[entity] sample-alpha=" << reported_frame.interpolation().alpha
+  std::cout << "[entity] sample-alpha="
+            << reported_source_frame.interpolation().alpha
             << '\n';
   std::cout << "[entity] projected=" << frame_statistics.candidate_count
             << '\n';
@@ -1262,12 +1610,27 @@ render_entities(PreparedWorldScene world, PreparedEntityScene prepared,
             << '\n';
   std::cout << "entity-frame-revision-changes=" << entity_frame_revision_changes
             << '\n';
+  std::cout << "entity-visibility-refilters="
+            << entity_visibility_refilter_count << '\n';
   std::cout << "network-operations=0\n";
   std::cout << "writes=0\n";
   std::cout << "frames=" << rendered_frames << '\n';
   std::cout << "entity-uploads=" << uploads << '\n';
   std::cout << "studio-draws=" << entity_statistics.studio_draw_count << '\n';
   std::cout << "sprite-draws=" << entity_statistics.sprite_draw_count << '\n';
+  if (interactive_controller && input_tracker) {
+    const auto &camera_statistics = interactive_controller->statistics();
+    std::cout << "input-frames=" << input_tracker->published_frame_count()
+              << '\n';
+    std::cout << "input-events=" << input_event_count << '\n';
+    std::cout << "camera-updates="
+              << camera_statistics.published_update_count << '\n';
+    std::cout << "camera-changes=" << camera_statistics.changed_camera_count
+              << '\n';
+    std::cout << "camera-anchor-missing="
+              << camera_statistics.anchor_missing_count << '\n';
+    std::cout << "capture-failures=" << capture_failure_count << '\n';
+  }
 
   if ((frame_limit && rendered_frames != *frame_limit) ||
       rendered_frames == 0U || uploads == 0U ||

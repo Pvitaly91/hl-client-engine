@@ -1,6 +1,9 @@
 #include "world_render_test_fixture.hpp"
 
 #include <hlclient/client/client_scene_source.hpp>
+#include <hlclient/input/input_event.hpp>
+#include <hlclient/input/input_state_tracker.hpp>
+#include <hlclient/interactive_preview/interactive_preview_controller.hpp>
 #include <hlclient/renderer/null/null_renderer.hpp>
 #include <hlclient/world_preview/world_preview_scene_source.hpp>
 #include <hlclient/world_scene_render/world_scene_render_types.hpp>
@@ -22,6 +25,8 @@ namespace {
 
 namespace client = hlclient::client;
 namespace fixture = hlclient::tests::world_render_fixture;
+namespace input = hlclient::input;
+namespace interactive = hlclient::interactive_preview;
 namespace renderer = hlclient::renderer;
 namespace scene_render = hlclient::world_scene_render;
 namespace spatial = hlclient::world_spatial;
@@ -373,6 +378,83 @@ TEST_CASE("World preview visibility follows the current drawable aspect",
     CHECK_FALSE(source.set_render_extent({-1, 100}));
     CHECK_FALSE(source.set_render_extent({-1, 0}));
     CHECK_FALSE(source.set_render_extent({0, -1}));
+}
+
+TEST_CASE("Externally controlled preview cameras update visibility only on change",
+          "[world-preview][scene][visibility][camera][input]")
+{
+    const auto package = make_resizable_scene_package();
+    world_preview::WorldPreviewSceneOptions options;
+    options.camera_mode = world_preview::WorldPreviewCameraMode::free_flight;
+    options.visibility_mode =
+        visibility::WorldVisibilityMode::frustum_only;
+    world_preview::WorldPreviewSceneSource source{package, options};
+
+    auto created = interactive::InteractivePreviewController::
+        create_project_default_v1(
+            interactive::InteractivePreviewMode::free_flight_world,
+            source.world_state().camera());
+    REQUIRE(created);
+    REQUIRE(created.controller);
+    auto controller = std::move(*created.controller);
+    REQUIRE(controller.seed_world_state_camera(source));
+    REQUIRE(source.update(client::FrameTime{0.0}));
+    const auto canonical_camera = source.world_state().camera();
+    const auto canonical_visibility_revision =
+        source.world_state().visibility_revision();
+
+    input::InputStateTracker tracker;
+    tracker.begin_frame();
+    tracker.apply_event(input::InputEvent::focus_gained());
+    const auto empty_snapshot = tracker.publish_snapshot();
+    tracker.end_frame();
+    const auto unchanged = controller.update(
+        empty_snapshot, 0.05, source);
+    REQUIRE(unchanged);
+    CHECK_FALSE(unchanged.camera_revision_changed);
+    CHECK(source.world_state().camera() == canonical_camera);
+    REQUIRE(source.update(client::FrameTime{0.05}));
+    CHECK(source.world_state().visibility_revision() ==
+        canonical_visibility_revision);
+
+    auto moved_camera = source.world_state().camera();
+    moved_camera.position.x += 4.0F;
+    moved_camera.target.x += 4.0F;
+    REQUIRE(source.publish_interactive_camera(
+        moved_camera,
+        client::InteractiveCameraMetadata{
+            2U,
+            2U,
+            client::InteractiveCameraMode::free_flight_world,
+            std::nullopt,
+            client::ControlledEntityCameraStatus::not_applicable,
+        }));
+    const auto world_revision = source.world_state().world_revision();
+    const auto scene_revision = source.world_state().scene_revision();
+    REQUIRE(source.update(client::FrameTime{0.0}));
+    CHECK(source.world_state().visibility_revision() ==
+        canonical_visibility_revision + 1U);
+    CHECK(source.world_state().world_revision() == world_revision);
+    CHECK(source.world_state().scene_revision() == scene_revision);
+
+    REQUIRE(source.update(client::FrameTime{0.05}));
+    CHECK(source.world_state().visibility_revision() ==
+        canonical_visibility_revision + 1U);
+
+    // Simulate a stale out-of-band mutation without adding a mutable escape to
+    // the production scene-source API. The underlying source object is mutable,
+    // so removing constness from this test-only view is well-defined.
+    auto& mutated_world_state =
+        const_cast<client::ClientWorldState&>(source.world_state());
+    mutated_world_state.clear_world_visibility();
+    CHECK_FALSE(source.world_state().world_visibility());
+    CHECK_FALSE(source.world_state().visible_draw_list());
+
+    REQUIRE(source.update(client::FrameTime{0.0}));
+    REQUIRE(source.world_state().world_visibility());
+    REQUIRE(source.world_state().visible_draw_list());
+    CHECK(source.world_state().visibility_revision() ==
+        canonical_visibility_revision + 2U);
 }
 
 TEST_CASE("World preview applies the requested PVS fallback deterministically",

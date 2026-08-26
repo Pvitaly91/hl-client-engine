@@ -299,6 +299,10 @@ struct EntityRenderFrameBuildInput {
     const world_visibility::WorldViewFrustum* view_frustum{nullptr};
     const world_spatial::WorldSpatialPackage* spatial_package{nullptr};
     std::optional<std::uint32_t> camera_leaf_index;
+    // Project diagnostic seam: a caller may retain one already-visible
+    // synthetic camera-anchor candidate while applying camera-derived PVS and
+    // frustum culling to every other entity. This is not stock self-rendering.
+    std::optional<std::uint32_t> camera_cull_exempt_entity_number;
 };
 
 class EntityRenderFrame final {

@@ -1,6 +1,7 @@
 #include <hlclient/client/client_world_state.hpp>
 
 #include <hlclient/entity_render/entity_scene_render.hpp>
+#include <hlclient/renderer/render_camera_math.hpp>
 #include <hlclient/world_render/world_render_types.hpp>
 #include <hlclient/world_scene_render/world_scene_render_types.hpp>
 #include <hlclient/world_visibility/world_visible_draw_list.hpp>
@@ -9,6 +10,43 @@
 #include <utility>
 
 namespace hlclient::client {
+namespace {
+
+[[nodiscard]] bool valid_camera(const RenderCameraState& camera) noexcept
+{
+    return renderer::is_valid(renderer::RenderCamera{
+        camera.position,
+        camera.target,
+        camera.up,
+        camera.vertical_field_of_view_radians,
+        camera.near_plane,
+        camera.far_plane,
+    });
+}
+
+[[nodiscard]] bool valid_interactive_metadata(
+    const InteractiveCameraMetadata& metadata) noexcept
+{
+    if (metadata.input_revision == 0U || metadata.camera_revision == 0U) {
+        return false;
+    }
+    switch (metadata.mode) {
+    case InteractiveCameraMode::free_flight_world:
+        return !metadata.controlled_entity &&
+            metadata.controlled_entity_status ==
+                ControlledEntityCameraStatus::not_applicable;
+    case InteractiveCameraMode::entity_first_person:
+        return metadata.controlled_entity.has_value() &&
+            *metadata.controlled_entity != 0U &&
+            (metadata.controlled_entity_status ==
+                    ControlledEntityCameraStatus::anchored ||
+                metadata.controlled_entity_status ==
+                    ControlledEntityCameraStatus::anchor_missing);
+    }
+    return false;
+}
+
+} // namespace
 
 void ClientWorldState::reset() noexcept
 {
@@ -17,6 +55,7 @@ void ClientWorldState::reset() noexcept
     clear_static_world();
     clear_dynamic_entities();
     camera_ = {};
+    interactive_camera_metadata_.reset();
     preview_render_options_ = {};
 }
 
@@ -159,6 +198,33 @@ void ClientWorldState::clear_dynamic_entities() noexcept
 void ClientWorldState::set_camera(const RenderCameraState& camera) noexcept
 {
     camera_ = camera;
+    interactive_camera_metadata_.reset();
+}
+
+bool ClientWorldState::set_interactive_camera(
+    const RenderCameraState& camera,
+    const InteractiveCameraMetadata& metadata) noexcept
+{
+    if (!valid_camera(camera) || !valid_interactive_metadata(metadata)) {
+        return false;
+    }
+    if (interactive_camera_metadata_) {
+        const auto& previous = *interactive_camera_metadata_;
+        if (metadata.input_revision <= previous.input_revision ||
+            metadata.camera_revision < previous.camera_revision ||
+            (metadata.camera_revision == previous.camera_revision &&
+                camera != camera_)) {
+            return false;
+        }
+    }
+    camera_ = camera;
+    interactive_camera_metadata_ = metadata;
+    return true;
+}
+
+void ClientWorldState::clear_interactive_camera_metadata() noexcept
+{
+    interactive_camera_metadata_.reset();
 }
 
 bool ClientWorldState::set_preview_render_options(
@@ -209,6 +275,26 @@ ClientWorldState::visible_draw_list() const noexcept
 const RenderCameraState& ClientWorldState::camera() const noexcept
 {
     return camera_;
+}
+
+const std::optional<InteractiveCameraMetadata>&
+ClientWorldState::interactive_camera_metadata() const noexcept
+{
+    return interactive_camera_metadata_;
+}
+
+std::uint64_t ClientWorldState::input_revision() const noexcept
+{
+    return interactive_camera_metadata_
+        ? interactive_camera_metadata_->input_revision
+        : 0U;
+}
+
+std::uint64_t ClientWorldState::camera_revision() const noexcept
+{
+    return interactive_camera_metadata_
+        ? interactive_camera_metadata_->camera_revision
+        : 0U;
 }
 
 const std::shared_ptr<const entity_render::EntitySceneRenderPackage>&

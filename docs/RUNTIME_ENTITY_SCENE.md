@@ -42,3 +42,10 @@ playback without further transmission. It is deterministic synthetic playback,
 not a live connected multiplayer client. Dynamic brush snapshots, gameplay
 camera/input/usercmd/prediction, server/model event execution, and downloads are
 outside M4.5.3.
+
+M4.6.1 may anchor a local camera to the exact transform of a synthetic Studio
+or Sprite instance using an explicit entity number and eye offset. It does not
+mutate the frame, infer stock player eye height, or send view angles. Missing
+anchors freeze the last valid camera and publish typed metadata. Entity package,
+frame, Studio, and Sprite cache identities remain independent of camera
+revisions. See [first-person camera](FIRST_PERSON_CAMERA.md).

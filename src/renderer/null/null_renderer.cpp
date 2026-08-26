@@ -34,6 +34,7 @@ void NullRenderer::render(const RenderScene& scene, const RenderExtent extent)
 
     statistics_.last_clear_color = scene.clear_color;
     statistics_.camera_valid = is_valid(scene.camera);
+    statistics_.last_camera = scene.camera;
     statistics_.static_world_present =
         scene.static_world.has_value() && scene.static_world->package != nullptr;
     if (statistics_.static_world_present) {

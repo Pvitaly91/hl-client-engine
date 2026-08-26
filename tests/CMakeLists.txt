@@ -16,6 +16,18 @@ add_executable(hlclient_tests
     test_connect_response_udp_integration.cpp
     test_connect_udp_integration.cpp
     test_command_line.cpp
+    test_input_events.cpp
+    test_input_state_tracker.cpp
+    test_sdl_input_translation.cpp
+    test_sdl_single_event_pump.cpp
+    test_gameplay_input_bindings.cpp
+    test_gameplay_input_intent.cpp
+    test_first_person_camera.cpp
+    test_entity_first_person_camera.cpp
+    test_interactive_entity_visibility.cpp
+    test_interactive_preview_controller.cpp
+    test_gameplay_input_camera_campaigns.cpp
+    test_opengl_interactive_camera.cpp
     test_connectionless_packet.cpp
     test_bit_reader.cpp
     test_delta_description.cpp
@@ -218,6 +230,11 @@ target_link_libraries(hlclient_tests
         hlclient_renderer_null
         hlclient_renderer_opengl
         hlclient_platform
+        hlclient_input_api
+        hlclient_platform_sdl_input
+        hlclient_gameplay_input
+        hlclient_gameplay_camera
+        hlclient_interactive_preview
         hlclient_glad
         hlclient_world_render
         hlclient_world_spatial

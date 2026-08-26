@@ -533,6 +533,12 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             std::nullopt,
             "Entity render interpolation metadata is non-finite or unordered");
     }
+    if (input.camera_cull_exempt_entity_number &&
+        *input.camera_cull_exempt_entity_number == 0U) {
+        return frame_fail(EntityRenderFrameErrorCode::invalid_configuration,
+            std::nullopt,
+            "Camera-cull exempt entity number must be nonzero");
+    }
     if ((input.spatial_package == nullptr) !=
             !input.camera_leaf_index.has_value() ||
         (input.spatial_package != nullptr &&
@@ -636,6 +642,20 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             input.studio_instances.size() * 2U +
                 input.sprite_instances.size()));
 
+        const auto apply_camera_visibility = [&input](
+                                                 const assets::WorldBounds& bounds,
+                                                 RuntimeEntityVisibilityStatus& status,
+                                                 const std::uint32_t entity_number) {
+            if (input.camera_cull_exempt_entity_number == entity_number) {
+                return CullResult::success;
+            }
+            return apply_visibility(bounds,
+                status,
+                input.view_frustum,
+                input.spatial_package,
+                input.camera_leaf_index);
+        };
+
         for (std::size_t index = 0U;
              index < input.studio_instances.size();
              ++index) {
@@ -683,11 +703,10 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
                 instance.visibility_status =
                     RuntimeEntityVisibilityStatus::unsupported_visual;
             }
-            const auto cull = apply_visibility(instance.interpolated_bounds,
+            const auto cull = apply_camera_visibility(
+                instance.interpolated_bounds,
                 instance.visibility_status,
-                input.view_frustum,
-                input.spatial_package,
-                input.camera_leaf_index);
+                instance.entity_number);
             if (cull != CullResult::success) {
                 return frame_fail(
                     cull == CullResult::spatial_query_failed
@@ -750,11 +769,9 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
                 instance.visibility_status =
                     RuntimeEntityVisibilityStatus::unsupported_visual;
             }
-            const auto cull = apply_visibility(instance.bounds,
+            const auto cull = apply_camera_visibility(instance.bounds,
                 instance.visibility_status,
-                input.view_frustum,
-                input.spatial_package,
-                input.camera_leaf_index);
+                instance.entity_number);
             if (cull != CullResult::success) {
                 return frame_fail(
                     cull == CullResult::spatial_query_failed

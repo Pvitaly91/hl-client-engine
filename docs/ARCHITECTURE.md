@@ -135,7 +135,10 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | Target | Responsibility | Must not own |
 | --- | --- | --- |
 | `hlclient_core` | logging, command-line parsing, fundamental utilities, version | SDL, sockets, protocol parsing |
-| `hlclient_platform` | SDL lifetime, windows, events/input, GL context, clocks | game protocol or world state |
+| `hlclient_input_api` | bounded physical keyboard/mouse events, immutable frame snapshots, state tracking, and null/scripted sources | SDL/native handles, filesystem, commands, network, renderer state |
+| `hlclient_platform_sdl_input` | private SDL3 scancode/button/window-event translation for the sole platform pump | gameplay actions, client/world state, renderer state |
+| `hlclient_platform` | SDL lifetime, the sole ordered platform event pump, windows, relative-mouse capture, GL context, and clocks | game protocol, gameplay bindings, or world state |
+| `hlclient_gameplay_input` | immutable project-owned physical bindings and keyboard/mouse-to-intent sampling | SDL, command strings, stock button masks, `usercmd`, network |
 | `hlclient_filesystem` | safe base/game path discovery and asset-facing I/O foundations | Steam discovery policy embedded in render code |
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
 | `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
@@ -175,11 +178,13 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_world_visibility` | OpenGL-convention frustum extraction, explicit PVS/fallback resolution, exact surface/instance selection, and stable draw-list construction | BSP/PVS byte parsing, entity behavior, filesystem, network, GPU resources |
 | `hlclient_world_scene_renderer` | immutable world/spatial/brush scene composition, renderer adapters, bounds/statistics, and stable resource identity/revision | paths, raw BSP/PVS/entity bytes, OpenGL handles, network state |
 | `hlclient_goldsrc_brush_models` | inert bounded entity metadata, qcsg/AngleMatrix initial transforms, brush instances, shared texture/lightmap render library, spawn descriptor, and scene composition | runtime entity behavior, commands/touch/use/think, snapshots, translucent rendering, GPU calls |
-| `hlclient_world_preview` | deterministic static/orbit or inert spawn diagnostic camera, per-frame visibility/draw-list composition, and neutral scene-source state | gameplay input/usercmds, runtime entity updates, network mutation, GPU calls |
+| `hlclient_world_preview` | deterministic historical static/orbit/inert-spawn cameras plus externally supplied interactive cameras, per-frame visibility/draw-list composition, and neutral scene-source state | input polling, gameplay intent, usercmds, runtime entity updates, network mutation, GPU calls |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
 | `hlclient_app_support` | explicit user-file auth adapter, bounded local-file loading, and metadata-manifest CLI exit policy | discovery, caching, Steam integration, fallback search, protocol parsing |
 | `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/sign-on/resource composition, selected manifest/asset/world-texture/render-package/spatial-scene continuations, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, native path/handle policy, runtime application, OpenGL, SDL, render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
+| `hlclient_gameplay_camera` | immutable Z-up local free-flight/entity-attached camera state, bounded controller updates, and neutral render-camera conversion | SDL, collision/physics/prediction, stock view-angle claims, network |
+| `hlclient_interactive_preview` | input-intent/camera coordination, explicit synthetic entity anchoring, camera-dependent entity visibility refiltering, and transactional `ClientWorldState` publication | SDL polling, asset loading, renderer/GPU mutation, network |
 | `hlclient_asset_api` | owning asset sources, neutral CPU geometry/textures/bindings, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
 | `hlclient_scene_api` | scene-source contract and world-state-to-render-scene conversion | concrete network/injection providers, graphics calls |
@@ -190,7 +195,8 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_bsp_compat_check` | network-free, read-only production BSP geometry/texture/render-package/spatial-scene validation with bounded aggregate compatibility diagnostics | network, SDL/OpenGL, writes, native-path or raw-asset output, gameplay |
 | `hlclient_world_texture_check` | network-free, read-only BSP/WAD texture composition for one explicit safe virtual map | stock process launch, writes, downloads/cache, renderer/GPU work, native-path or asset-byte output |
 | `hlclient_goldsrc_asset_check` | network-free, read-only canonical Studio/SPR composition for one safe virtual asset with bounded aggregate diagnostics | network/stage libraries, writes, native-path or raw-asset output, rendering/entity behavior |
-| `hlclient_world_viewer` | network-free, read-only BSP/WAD/lightmap/spatial/scene composition and configurable local diagnostic OpenGL preview for one safe virtual map | stock/network process launch, writes, downloads/cache, native map-path input, runtime gameplay |
+| `hlclient_world_viewer` | network-free, read-only BSP/WAD/lightmap/spatial/scene composition and configurable local diagnostic OpenGL preview, including free-fly input, for one safe virtual map | stock/network process launch, writes, downloads/cache, native map-path input, runtime gameplay simulation |
+| `hlclient_entity_viewer` | network-free, read-only mixed Studio/Sprite playback with historical cameras or a local synthetic entity-first-person camera | live snapshots, stock player semantics, commands, writes, network control |
 | `hlclient` | composition root and frame loop | reusable subsystem implementation |
 | `hlclient_tests` | deterministic unit/integration tests with local resources | public Internet or installed-game requirements |
 
@@ -846,6 +852,22 @@ them in separate entity-visual, pose, renderer-neutral scene, and OpenGL modules
 `RenderScene` sees only shared entity package/frame contracts; it never sees a
 GoldSrc snapshot, local-resource locator, or native path. Stock visual projection
 remains a fail-closed evidence boundary.
+
+M4.6.1 adds another project-owned source path without changing the renderer
+contract:
+
+```text
+SdlWindow sole event pump -> InputEvent -> InputStateTracker
+    -> GameplayInputIntent -> InteractivePreviewController
+    -> ClientWorldState camera -> RenderScene -> IRenderer
+```
+
+`hlclient_input_api` has no SDL dependency; `hlclient_platform_sdl_input`
+contains the private native translator; `hlclient_gameplay_input` has no
+network dependency; `hlclient_gameplay_camera` uses only neutral camera math;
+and `hlclient_interactive_preview` is the sole camera/publication coordinator.
+No input type crosses `RenderScene`, and no renderer polls SDL. The profiles
+are project-owned; stock input and `usercmd` mapping remain pending M4.6.2.
 
 ## Module and plugin policy
 

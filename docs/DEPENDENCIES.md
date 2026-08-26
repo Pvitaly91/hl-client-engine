@@ -414,6 +414,11 @@ and public Half-Life SDK reference material. It adds no runtime dependency and
 does not link SDK structs or implementation. Valve sources are consulted only
 as public rendering/math evidence; project-owned neutral records remain the ABI.
 
+M4.6.1 adds no dependency. It reuses the pinned SDL3 event, scancode, mouse,
+focus, and relative-mode APIs already required by the platform/window target.
+SDL types remain private to `hlclient_platform_sdl_input`/`hlclient_platform`;
+gameplay input, camera, client state, and renderer targets do not expose them.
+
 This runtime policy is distinct from active stock-client/HLDS research. Research
 verifiers continue to require their isolated marked copy and reject primary or
 registered Steam roots where their existing contracts specify that behavior.

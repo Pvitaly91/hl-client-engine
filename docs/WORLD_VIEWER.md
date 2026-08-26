@@ -52,7 +52,8 @@ available. It does not create a player or apply gameplay spawn behavior.
 --brush-submodels off --cull none`; M4.4.1 verification opts into
 `pvs-frustum`, `static`, and both cull modes explicitly. The PVS fallback policy
 is frustum-only for the diagnostic preview when its camera has no usable PVS
-row. There are no keyboard/mouse gameplay controls. A positive
+row. Only `free-fly` consumes local keyboard/mouse input, and it remains a
+diagnostic camera rather than gameplay control. A positive
 `HLCLIENT_SMOKE_TEST_FRAMES` value bounds the frame loop for smoke/automation
 runs; normal manual use runs until quit.
 
@@ -158,3 +159,17 @@ For a CPU-only proof, `--stop-after world-render-package` builds and validates
 the M4.3 package. `--stop-after world-spatial-scene` additionally builds the
 M4.4 spatial/scene package and applies the selected brush/spawn policy, still
 with no SDL window or GPU upload and valid with `--renderer null`.
+
+## Local free-flight camera
+
+The offline viewer also accepts `--camera free-fly`. It starts with the same
+bounds-derived diagnostic camera but leaves the cursor released. Click captures
+relative mouse input; Escape releases it; WASD moves horizontally, Space and
+Control move vertically, Shift selects the project speed multiplier, and the
+mouse changes yaw/pitch. This is a local noclip-style preview with no collision,
+gravity, player movement, prediction, stock sensitivity, or network commands.
+
+With `HLCLIENT_SMOKE_TEST_FRAMES` set, the hidden viewer does not request
+capture and needs no physical input. Camera-only changes rebuild CPU visibility
+when necessary while retaining exact world/brush/entity GPU resource identities.
+See [interactive preview](INTERACTIVE_PREVIEW.md).

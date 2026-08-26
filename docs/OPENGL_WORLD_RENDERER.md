@@ -182,3 +182,9 @@ keys: changing an entity frame updates only transforms and the bounded pose UBO,
 never world or entity static geometry. Entity material support and diagnostic
 lighting are documented separately in
 [runtime entity scene](RUNTIME_ENTITY_SCENE.md).
+
+M4.6.1 camera updates alter only the validated view/projection matrix and
+upstream CPU visibility selection. A moved or mouse-look camera must not change
+world, brush, Studio, or Sprite resource revisions or upload counters. Actual
+OpenGL camera tests use project `InputEvent` scripts rather than OS input and
+retain the existing real-context 3.3 Core capability gate.

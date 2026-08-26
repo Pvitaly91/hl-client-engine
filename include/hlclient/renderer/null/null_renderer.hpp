@@ -34,6 +34,7 @@ struct NullRendererStatistics {
     std::size_t visible_entity_count{0U};
     std::size_t unsupported_entity_count{0U};
     bool camera_valid{false};
+    std::optional<RenderCamera> last_camera;
     RenderExtent last_extent{};
 
     [[nodiscard]] friend bool operator==(

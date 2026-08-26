@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace hlclient::world_render {
 class WorldRenderPackage;
@@ -33,6 +34,24 @@ struct RenderCameraState {
     float vertical_field_of_view_radians{1.0471975512F};
     float near_plane{0.1F};
     float far_plane{4'096.0F};
+
+    [[nodiscard]] friend bool operator==(
+        const RenderCameraState& left,
+        const RenderCameraState& right) noexcept
+    {
+        return left.position.x == right.position.x &&
+            left.position.y == right.position.y &&
+            left.position.z == right.position.z &&
+            left.target.x == right.target.x &&
+            left.target.y == right.target.y &&
+            left.target.z == right.target.z &&
+            left.up.x == right.up.x && left.up.y == right.up.y &&
+            left.up.z == right.up.z &&
+            left.vertical_field_of_view_radians ==
+                right.vertical_field_of_view_radians &&
+            left.near_plane == right.near_plane &&
+            left.far_plane == right.far_plane;
+    }
 };
 
 enum class PreviewWorldCullMode {
@@ -44,7 +63,43 @@ struct PreviewRenderOptions {
     PreviewWorldCullMode cull_mode{PreviewWorldCullMode::none};
 };
 
-class ClientWorldState final {
+enum class InteractiveCameraMode {
+    free_flight_world,
+    entity_first_person,
+};
+
+enum class ControlledEntityCameraStatus {
+    not_applicable,
+    anchored,
+    anchor_missing,
+};
+
+// Compact client-owned metadata only. Input snapshots and gameplay intents
+// remain outside ClientWorldState and never cross the renderer boundary.
+struct InteractiveCameraMetadata {
+    std::uint64_t input_revision{0U};
+    std::uint64_t camera_revision{0U};
+    InteractiveCameraMode mode{InteractiveCameraMode::free_flight_world};
+    std::optional<std::uint32_t> controlled_entity;
+    ControlledEntityCameraStatus controlled_entity_status{
+        ControlledEntityCameraStatus::not_applicable};
+};
+
+// Narrow renderer-neutral publication boundary used by the interactive camera
+// controller. Implementations may preserve additional scene-source invariants
+// without exposing mutable world/resource state to the controller.
+class IInteractiveCameraPublicationTarget {
+public:
+    virtual ~IInteractiveCameraPublicationTarget() = default;
+
+    virtual void publish_camera_seed(
+        const RenderCameraState& camera) noexcept = 0;
+    [[nodiscard]] virtual bool publish_interactive_camera(
+        const RenderCameraState& camera,
+        const InteractiveCameraMetadata& metadata) noexcept = 0;
+};
+
+class ClientWorldState final : public IInteractiveCameraPublicationTarget {
 public:
     void reset() noexcept;
     void advance(std::chrono::duration<double> elapsed) noexcept;
@@ -65,6 +120,21 @@ public:
         std::shared_ptr<const entity_render::EntityRenderFrame> frame) noexcept;
     void clear_dynamic_entities() noexcept;
     void set_camera(const RenderCameraState& camera) noexcept;
+    [[nodiscard]] bool set_interactive_camera(
+        const RenderCameraState& camera,
+        const InteractiveCameraMetadata& metadata) noexcept;
+    void publish_camera_seed(
+        const RenderCameraState& camera) noexcept override
+    {
+        set_camera(camera);
+    }
+    [[nodiscard]] bool publish_interactive_camera(
+        const RenderCameraState& camera,
+        const InteractiveCameraMetadata& metadata) noexcept override
+    {
+        return set_interactive_camera(camera, metadata);
+    }
+    void clear_interactive_camera_metadata() noexcept;
     [[nodiscard]] bool set_preview_render_options(
         const PreviewRenderOptions& options) noexcept;
 
@@ -80,6 +150,10 @@ public:
     [[nodiscard]] const std::shared_ptr<const world_visibility::WorldVisibleDrawList>&
     visible_draw_list() const noexcept;
     [[nodiscard]] const RenderCameraState& camera() const noexcept;
+    [[nodiscard]] const std::optional<InteractiveCameraMetadata>&
+    interactive_camera_metadata() const noexcept;
+    [[nodiscard]] std::uint64_t input_revision() const noexcept;
+    [[nodiscard]] std::uint64_t camera_revision() const noexcept;
     [[nodiscard]] const std::shared_ptr<
         const entity_render::EntitySceneRenderPackage>&
     entity_scene() const noexcept;
@@ -102,6 +176,7 @@ private:
     std::shared_ptr<const entity_render::EntitySceneRenderPackage> entity_scene_;
     std::shared_ptr<const entity_render::EntityRenderFrame> entity_frame_;
     RenderCameraState camera_{};
+    std::optional<InteractiveCameraMetadata> interactive_camera_metadata_;
     std::uint64_t world_revision_{0U};
     std::uint64_t scene_revision_{0U};
     std::uint64_t visibility_revision_{0U};

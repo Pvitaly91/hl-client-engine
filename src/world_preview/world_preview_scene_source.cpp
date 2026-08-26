@@ -31,7 +31,9 @@ constexpr double kFullOrbitRadians = 6.28318530717958647692;
 {
     return mode == WorldPreviewCameraMode::static_camera ||
         mode == WorldPreviewCameraMode::orbit ||
-        mode == WorldPreviewCameraMode::spawn;
+        mode == WorldPreviewCameraMode::spawn ||
+        mode == WorldPreviewCameraMode::free_flight ||
+        mode == WorldPreviewCameraMode::entity_first_person;
 }
 
 [[nodiscard]] bool valid_visibility_mode(
@@ -142,6 +144,26 @@ void log_fallback_warning(
     };
 }
 
+[[nodiscard]] bool same_vector(
+    const assets::AssetVector3& left,
+    const assets::AssetVector3& right) noexcept
+{
+    return left.x == right.x && left.y == right.y && left.z == right.z;
+}
+
+[[nodiscard]] bool same_camera(
+    const client::RenderCameraState& left,
+    const client::RenderCameraState& right) noexcept
+{
+    return same_vector(left.position, right.position) &&
+        same_vector(left.target, right.target) &&
+        same_vector(left.up, right.up) &&
+        left.vertical_field_of_view_radians ==
+            right.vertical_field_of_view_radians &&
+        left.near_plane == right.near_plane &&
+        left.far_plane == right.far_plane;
+}
+
 } // namespace
 
 WorldPreviewSceneSource::WorldPreviewSceneSource(
@@ -206,12 +228,47 @@ client::SceneUpdateResult WorldPreviewSceneSource::update(
         !update_camera()) {
         return {false, "World preview orbit produced an invalid camera"};
     }
+    const bool externally_controlled_camera =
+        options_.camera_mode == WorldPreviewCameraMode::free_flight ||
+        options_.camera_mode == WorldPreviewCameraMode::entity_first_person;
+    const auto& current_visibility = world_state_.world_visibility();
+    const auto& current_draw_list = world_state_.visible_draw_list();
+    if (externally_controlled_camera && last_visibility_camera_ &&
+        last_visibility_extent_ && current_visibility && current_draw_list &&
+        current_visibility == last_visibility_state_ &&
+        current_draw_list == last_visible_draw_list_ &&
+        same_camera(*last_visibility_camera_, world_state_.camera()) &&
+        last_visibility_extent_->width == options_.visibility_extent.width &&
+        last_visibility_extent_->height == options_.visibility_extent.height) {
+        return {};
+    }
     return update_visibility();
 }
 
 const client::ClientWorldState& WorldPreviewSceneSource::world_state() const noexcept
 {
     return world_state_;
+}
+
+void WorldPreviewSceneSource::publish_camera_seed(
+    const client::RenderCameraState& camera) noexcept
+{
+    world_state_.publish_camera_seed(camera);
+}
+
+bool WorldPreviewSceneSource::publish_interactive_camera(
+    const client::RenderCameraState& camera,
+    const client::InteractiveCameraMetadata& metadata) noexcept
+{
+    return world_state_.publish_interactive_camera(camera, metadata);
+}
+
+bool WorldPreviewSceneSource::publish_dynamic_entities(
+    std::shared_ptr<const entity_render::EntitySceneRenderPackage> package,
+    std::shared_ptr<const entity_render::EntityRenderFrame> frame) noexcept
+{
+    return world_state_.set_dynamic_entities(
+        std::move(package), std::move(frame));
 }
 
 assets::AssetVector3 WorldPreviewSceneSource::world_center() const noexcept
@@ -493,6 +550,10 @@ client::SceneUpdateResult WorldPreviewSceneSource::update_visibility()
                 std::move(visibility), std::move(draw_list))) {
             return {false, "World preview visibility publication was rejected"};
         }
+        last_visibility_camera_ = world_state_.camera();
+        last_visibility_extent_ = options_.visibility_extent;
+        last_visibility_state_ = world_state_.world_visibility();
+        last_visible_draw_list_ = world_state_.visible_draw_list();
         const auto warning_bit = fallback_reason_bit(fallback_reason);
         if (warning_bit != 0U &&
             (reported_fallback_reason_mask_ & warning_bit) == 0U) {
