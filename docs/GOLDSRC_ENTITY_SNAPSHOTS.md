@@ -55,3 +55,10 @@ initial frame placement and reference-time grammar have not been confirmed; no
 decoder, state type or stage event is published for either one. Snapshot state
 is not connected to `ClientWorldState`, interpolation, prediction, model
 loading, asset binding, the renderer or the filesystem.
+
+M4.5.3 consumes this state only through a separate immutable projection layer.
+The implemented route takes caller-owned typed synthetic records and typed
+seconds; it never interprets `synthetic_raw` as seconds or looks up fields by
+name. Production stock projection still returns evidence-pending. See
+[entity visual projection](ENTITY_VISUAL_PROJECTION.md) and
+[entity interpolation](ENTITY_INTERPOLATION.md).

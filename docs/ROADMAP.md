@@ -841,7 +841,8 @@ interpolation, gameplay, or download/cache work was added. See
 
 ### M4.5.3 — Runtime entity composition, interpolation and OpenGL rendering
 
-**Status: planned.**
+**Status: completed at the deterministic synthetic playback boundary; stock
+Protocol 48 visual projection remains evidence-pending.**
 
 Apply validated runtime entity/model state only after the evidence gates and
 M4.5.2 importers are complete.
@@ -855,7 +856,7 @@ M4.5.2 importers are complete.
 The former M5–M8 entity/model/input/interpolation buckets were split into the
 active M4.5.1, M4.5.2, M4.5.3 and M4.6 sequence above. They are not additional
 or competing next milestones. The only next milestone after the completed
-M4.5.2 importer boundary is M4.5.3.
+M4.5.3 synthetic runtime-entity boundary is M4.6.
 
 ## M9 — `client.dll` API and HUD
 
@@ -931,6 +932,13 @@ authorization to bypass platform protections or deploy into third-party
 processes without consent.
 
 ## Cross-cutting gates
+
+M4.5.3 is complete at the deterministic synthetic playback boundary: runtime
+entity projection/binding, interpolation, Studio/Sprite render packages, and
+OpenGL entity drawing. Stock Protocol 48 visual-field and model-index mapping
+remain evidence-pending. M4.6 is gameplay camera, input, usercmd, and client
+prediction; M4.7 may revisit live stock entity-wire/runtime effects evidence.
+Neither is part of M4.5.3.
 
 Every milestone retains these gates:
 

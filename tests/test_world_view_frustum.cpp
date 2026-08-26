@@ -94,9 +94,10 @@ TEST_CASE("Frustum extraction reads rows from column-major OpenGL storage",
     CHECK(left.normal.y == Catch::Approx(0.0F));
     CHECK(left.normal.z == Catch::Approx(0.0F));
     CHECK(left.signed_offset == Catch::Approx(1.0F));
-    const auto& near = frustum.plane(visibility::WorldFrustumPlaneIndex::near);
-    CHECK(near.normal.z == Catch::Approx(1.0F));
-    CHECK(near.signed_offset == Catch::Approx(1.0F));
+    const auto& near_plane =
+        frustum.plane(visibility::WorldFrustumPlaneIndex::near_plane);
+    CHECK(near_plane.normal.z == Catch::Approx(1.0F));
+    CHECK(near_plane.signed_offset == Catch::Approx(1.0F));
     CHECK(classify(frustum, {{-0.5F, -0.5F, -0.5F}, {0.5F, 0.5F, 0.5F}}) ==
         visibility::WorldBoundsClassification::inside);
     CHECK(classify(frustum, {{1.5F, 0.0F, 0.0F}, {2.0F, 0.5F, 0.5F}}) ==

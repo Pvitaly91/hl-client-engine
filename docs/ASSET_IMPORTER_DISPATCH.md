@@ -139,3 +139,9 @@ filesystem re-resolution. The GoldSrc visual operation then opens only its
 derived exact-root companions and invokes the pure bundle import. See
 [Studio dependencies](GOLDSRC_STUDIO_DEPENDENCIES.md) and
 [SPR v2](GOLDSRC_SPR_V2.md).
+
+Entity playback collects only unique model references present in its selected
+snapshot pair and invokes this same `model_or_sprite` route on demand. It never
+imports the whole precache table, guesses by extension, or reopens assets from
+the renderer. Published library revisions deduplicate by exact approved-source
+and Studio-bundle identity. See [entity asset binding](ENTITY_ASSET_BINDING.md).

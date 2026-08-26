@@ -3473,6 +3473,12 @@ int run(const hlclient::core::CommandLineOptions& options)
             stop_point =
                 hlclient::goldsrc::HandshakeStopPoint::world_spatial_scene;
             break;
+        case hlclient::core::ConnectionStopPoint::entity_visual_scene:
+            // Stock Protocol 48 visual projection is deliberately sealed at
+            // the snapshot boundary. Synthetic playback is supplied by the
+            // offline entity viewer and test-owned stage inputs.
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::entity_snapshot;
+            break;
         }
         challenge_session = std::make_unique<HandshakeSession>(
             *address,
@@ -3498,7 +3504,9 @@ int run(const hlclient::core::CommandLineOptions& options)
     if ((options.stop_after ==
              hlclient::core::ConnectionStopPoint::server_baselines ||
          options.stop_after ==
-             hlclient::core::ConnectionStopPoint::entity_snapshot) &&
+             hlclient::core::ConnectionStopPoint::entity_snapshot ||
+         options.stop_after ==
+             hlclient::core::ConnectionStopPoint::entity_visual_scene) &&
         challenge_session) {
         return run_evidence_pending_post_resource_stop(*challenge_session);
     }

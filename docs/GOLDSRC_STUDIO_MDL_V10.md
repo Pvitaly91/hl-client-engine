@@ -181,3 +181,10 @@ Caller-provided lower ceilings are supported, but a value above this table is
 an invalid configuration. Exact-hard and hard-plus-one tests cover the
 configuration boundary; source counts and output totals are checked again
 before allocation and publication.
+
+M4.5.3 converts this immutable source data into renderer-neutral Studio render
+assets without changing the importer. Runtime body and skin selections are
+validated exactly, geometry retains raw texture S/T and bone indices, and
+unsupported chrome/additive/alpha material profiles remain typed. See
+[Studio pose evaluation](STUDIO_POSE_EVALUATION.md) and
+[OpenGL Studio rendering](OPENGL_STUDIO_RENDERER.md).

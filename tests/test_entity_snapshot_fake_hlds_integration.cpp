@@ -973,7 +973,9 @@ void run_complete_route(
     const std::size_t run,
     const TransportScenario scenario,
     const PublicationScenario publication_scenario =
-        PublicationScenario::complete)
+        PublicationScenario::complete,
+    hlclient::test_support::EntitySnapshotHappyRouteProof* const proof =
+        nullptr)
 {
     FakeHldsTransport transport;
     const auto remote = network::NetworkAddress::loopback(
@@ -1654,6 +1656,21 @@ void run_complete_route(
     CHECK(stage->cleanup_count() == 1U);
     CHECK(authentication_releases == 1U);
     CHECK(consistency_provider.lifetime_releases == 1U);
+    if (proof != nullptr) {
+        proof->snapshot_history =
+            std::make_shared<const goldsrc::EntitySnapshotHistoryState>(
+                *result.snapshot_history());
+        proof->network_endpoint_count = 1U;
+        proof->transmitted_packet_count_at_success = send_count_at_terminal;
+        proof->transmitted_packet_count_after_cleanup_checks =
+            transport.sent.size();
+        proof->semantic_entity_request_count = exact_payload_count(
+            transport, netchan_start, kExactSyntheticContinuationWire);
+        proof->cleanup_count = stage->cleanup_count();
+        proof->authentication_release_count = authentication_releases;
+        proof->consistency_release_count =
+            consistency_provider.lifetime_releases;
+    }
 }
 
 TEST_CASE(
@@ -1861,6 +1878,40 @@ TEST_CASE(
 } // namespace
 
 namespace hlclient::test_support {
+
+EntitySnapshotHappyRouteProof acquire_entity_snapshot_happy_route_proof()
+{
+    EntitySnapshotHappyRouteProof proof;
+    run_complete_route(
+        407U, TransportScenario::baseline, PublicationScenario::complete,
+        &proof);
+    return proof;
+}
+
+EntitySnapshotHappyRouteProof
+acquire_entity_snapshot_dropped_request_route_proof(const std::size_t run)
+{
+    EntitySnapshotHappyRouteProof proof;
+    run_complete_route(
+        500U + run,
+        TransportScenario::dropped_request,
+        PublicationScenario::complete,
+        &proof);
+    return proof;
+}
+
+EntitySnapshotHappyRouteProof
+acquire_entity_snapshot_dropped_acknowledgement_route_proof(
+    const std::size_t run)
+{
+    EntitySnapshotHappyRouteProof proof;
+    run_complete_route(
+        600U + run,
+        TransportScenario::dropped_acknowledgement,
+        PublicationScenario::complete,
+        &proof);
+    return proof;
+}
 
 void require_entity_snapshot_happy_route()
 {

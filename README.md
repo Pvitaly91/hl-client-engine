@@ -1166,6 +1166,13 @@ binding, interpolation, gameplay, or download/cache behavior. See
 [Studio dependencies](docs/GOLDSRC_STUDIO_DEPENDENCIES.md), and
 [SPR v2](docs/GOLDSRC_SPR_V2.md).
 
+M4.5.3 adds the renderer-neutral synthetic entity playback path: typed visual
+projection and exact model-slot binding, on-demand immutable visual assets,
+bounded snapshot interpolation, Studio pose evaluation, Sprite playback, and
+separately cached OpenGL entity resources. Stock Protocol 48 entity projection
+remains evidence-pending and fails closed; the feature is not live multiplayer
+rendering. See [runtime entity scene](docs/RUNTIME_ENTITY_SCENE.md).
+
 ## License
 
 Original project code and documentation are available under the [MIT License](LICENSE).

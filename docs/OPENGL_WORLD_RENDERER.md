@@ -175,3 +175,10 @@ styles, implement runtime doors/platforms/rotators, blending, dynamic lights,
 water/sky/animated-texture effects, gameplay input, or a gameplay camera. See
 [world visibility](WORLD_VISIBILITY.md) and
 [brush-submodel rendering](BRUSH_SUBMODEL_RENDERING.md).
+
+M4.5.3 composes protocol-neutral Studio and Sprite instances after the existing
+world pass. World and entity scene resources use independent identity/revision
+keys: changing an entity frame updates only transforms and the bounded pose UBO,
+never world or entity static geometry. Entity material support and diagnostic
+lighting are documented separately in
+[runtime entity scene](RUNTIME_ENTITY_SCENE.md).

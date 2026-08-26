@@ -64,3 +64,9 @@ without applying the main-file group-zero base. Header names are never used for
 source selection. Events retain their frame, event number, type, and bounded
 option bytes as inert metadata; they never invoke audio, a console, gameplay,
 or a filesystem operation.
+
+Runtime pose sampling now adds bounded fractional-frame interpolation,
+controller and mouth evaluation, one/two/four-way sequence blends, motion-axis
+suppression, and deterministic parent-to-child matrices. The source channels
+and model remain immutable; the per-playback-frame pose cache is bounded and
+events remain inert. See [Studio pose evaluation](STUDIO_POSE_EVALUATION.md).

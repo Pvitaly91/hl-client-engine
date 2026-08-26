@@ -1,5 +1,6 @@
 #include <hlclient/client/client_world_state.hpp>
 
+#include <hlclient/entity_render/entity_scene_render.hpp>
 #include <hlclient/world_render/world_render_types.hpp>
 #include <hlclient/world_scene_render/world_scene_render_types.hpp>
 #include <hlclient/world_visibility/world_visible_draw_list.hpp>
@@ -14,6 +15,7 @@ void ClientWorldState::reset() noexcept
     elapsed_seconds_ = 0.0;
     connection_requested_ = false;
     clear_static_world();
+    clear_dynamic_entities();
     camera_ = {};
     preview_render_options_ = {};
 }
@@ -33,6 +35,9 @@ void ClientWorldState::set_connection_requested(const bool requested) noexcept
 void ClientWorldState::set_static_world(
     std::shared_ptr<const world_render::WorldRenderPackage> package) noexcept
 {
+    if (entity_scene_ && entity_scene_->world_scene_association()) {
+        clear_dynamic_entities();
+    }
     world_scene_.reset();
     scene_revision_ = 0U;
     clear_world_visibility();
@@ -55,10 +60,22 @@ void ClientWorldState::set_world_scene(
         world_revision_ = 0U;
         scene_revision_ = 0U;
     }
+    if (entity_scene_) {
+        const auto association = entity_scene_->world_scene_association();
+        if (association &&
+            (!world_scene_ || association->resource_id !=
+                    world_scene_->resource_id() ||
+                association->revision != world_scene_->resource_revision())) {
+            clear_dynamic_entities();
+        }
+    }
 }
 
 void ClientWorldState::clear_static_world() noexcept
 {
+    if (entity_scene_ && entity_scene_->world_scene_association()) {
+        clear_dynamic_entities();
+    }
     static_world_.reset();
     world_scene_.reset();
     world_revision_ = 0U;
@@ -98,6 +115,45 @@ void ClientWorldState::clear_world_visibility() noexcept
     world_visibility_.reset();
     visible_draw_list_.reset();
     visibility_revision_ = 0U;
+}
+
+bool ClientWorldState::set_dynamic_entities(
+    std::shared_ptr<const entity_render::EntitySceneRenderPackage> package,
+    std::shared_ptr<const entity_render::EntityRenderFrame> frame) noexcept
+{
+    if (!package && !frame) {
+        clear_dynamic_entities();
+        return true;
+    }
+    if (!package || !frame || package->resource_id() == 0U ||
+        package->resource_revision() == 0U || frame->resource_id() == 0U ||
+        frame->resource_revision() == 0U ||
+        frame->scene_package_identity() !=
+            entity_render::EntityRenderResourceIdentity{
+                package->resource_id(), package->resource_revision()}) {
+        return false;
+    }
+    const auto world_association = package->world_scene_association();
+    if (world_association &&
+        (!world_scene_ ||
+            world_association->resource_id != world_scene_->resource_id() ||
+            world_association->revision !=
+                world_scene_->resource_revision())) {
+        return false;
+    }
+    entity_scene_ = std::move(package);
+    entity_frame_ = std::move(frame);
+    entity_scene_revision_ = entity_scene_->resource_revision();
+    entity_frame_revision_ = entity_frame_->resource_revision();
+    return true;
+}
+
+void ClientWorldState::clear_dynamic_entities() noexcept
+{
+    entity_scene_.reset();
+    entity_frame_.reset();
+    entity_scene_revision_ = 0U;
+    entity_frame_revision_ = 0U;
 }
 
 void ClientWorldState::set_camera(const RenderCameraState& camera) noexcept
@@ -155,6 +211,18 @@ const RenderCameraState& ClientWorldState::camera() const noexcept
     return camera_;
 }
 
+const std::shared_ptr<const entity_render::EntitySceneRenderPackage>&
+ClientWorldState::entity_scene() const noexcept
+{
+    return entity_scene_;
+}
+
+const std::shared_ptr<const entity_render::EntityRenderFrame>&
+ClientWorldState::entity_frame() const noexcept
+{
+    return entity_frame_;
+}
+
 std::uint64_t ClientWorldState::world_revision() const noexcept
 {
     return world_revision_;
@@ -168,6 +236,16 @@ std::uint64_t ClientWorldState::scene_revision() const noexcept
 std::uint64_t ClientWorldState::visibility_revision() const noexcept
 {
     return visibility_revision_;
+}
+
+std::uint64_t ClientWorldState::entity_scene_revision() const noexcept
+{
+    return entity_scene_revision_;
+}
+
+std::uint64_t ClientWorldState::entity_frame_revision() const noexcept
+{
+    return entity_frame_revision_;
 }
 
 const PreviewRenderOptions& ClientWorldState::preview_render_options() const noexcept

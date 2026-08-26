@@ -30,6 +30,23 @@ add_executable(hlclient_tests
     test_post_resource_signon_stream.cpp
     test_entity_snapshot_signon_stage.cpp
     test_entity_snapshot_fake_hlds_integration.cpp
+    test_entity_visual_projection.cpp
+    test_entity_visual_binding.cpp
+    test_entity_visual_asset_library.cpp
+    test_entity_visual_asset_stage.cpp
+    test_entity_snapshot_interpolation.cpp
+    test_entity_interpolation_stage.cpp
+    test_studio_pose_evaluator.cpp
+    test_studio_model_render_asset.cpp
+    test_entity_render_sprite_asset.cpp
+    test_sprite_frame_selector.cpp
+    test_sprite_billboard_basis.cpp
+    test_entity_scene_render_package.cpp
+    test_entity_scene_package_stage.cpp
+    test_entity_render_frame_composer.cpp
+    test_opengl_studio_entity_renderer.cpp
+    test_opengl_sprite_entity_renderer.cpp
+    test_runtime_entity_playback_integration.cpp
     test_game_paths.cpp
     test_goldsrc_bsp_header.cpp
     test_goldsrc_bsp_records.cpp
@@ -180,6 +197,15 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_netchan
         hlclient_goldsrc_delta_values
         hlclient_goldsrc_entity_snapshots
+        hlclient_entity_visual_projection
+        hlclient_entity_visual_assets
+        hlclient_entity_interpolation
+        hlclient_entity_interpolation_stage
+        hlclient_studio_pose
+        hlclient_entity_render_api
+        hlclient_entity_scene_render
+        hlclient_entity_scene_package_build
+        hlclient_entity_frame_composition
         hlclient_goldsrc_post_resource_signon
         hlclient_goldsrc_signon
         hlclient_goldsrc_world_textures

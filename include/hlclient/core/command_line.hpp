@@ -33,6 +33,7 @@ enum class ConnectionStopPoint {
     world_textures,
     world_render_package,
     world_spatial_scene,
+    entity_visual_scene,
 };
 
 enum class WorldVisibilityOption {
@@ -66,6 +67,7 @@ struct CommandLineOptions {
     bool show_version{false};
     bool net_trace{false};
     bool view_world{false};
+    bool view_entity_snapshot{false};
     std::optional<std::string> base_directory;
     std::string game_directory{"valve"};
     std::optional<std::string> connect_endpoint;

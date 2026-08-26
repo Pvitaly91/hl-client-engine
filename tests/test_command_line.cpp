@@ -22,6 +22,7 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     CHECK_FALSE(result.options->show_version);
     CHECK_FALSE(result.options->net_trace);
     CHECK_FALSE(result.options->view_world);
+    CHECK_FALSE(result.options->view_entity_snapshot);
     CHECK_FALSE(result.options->base_directory.has_value());
     CHECK(result.options->game_directory == "valve");
     CHECK_FALSE(result.options->connect_endpoint.has_value());
@@ -655,6 +656,48 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
               std::string::npos);
     }
 
+    SECTION("entity visual scene is an explicit local-provider boundary")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"entity-visual-scene"},
+            std::string_view{"--renderer"}, std::string_view{"null"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::entity_visual_scene);
+        CHECK_FALSE(result.options->view_entity_snapshot);
+        CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
+    SECTION("entity snapshot preview requires OpenGL")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--view-entity-snapshot"},
+            std::string_view{"--renderer"}, std::string_view{"null"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("requires --renderer opengl") !=
+              std::string::npos);
+    }
+
     SECTION("invalid stop point")
     {
         const std::array arguments{
@@ -1157,7 +1200,13 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("world-geometry") != std::string_view::npos);
     CHECK(help.find("world-textures") != std::string_view::npos);
     CHECK(help.find("world-render-package") != std::string_view::npos);
+    CHECK(help.find("entity-visual-scene") != std::string_view::npos);
     CHECK(help.find("--view-world") != std::string_view::npos);
+    CHECK(help.find("--view-entity-snapshot") != std::string_view::npos);
+    CHECK(help.find("typed stock visual-evidence boundary") !=
+          std::string_view::npos);
+    CHECK(help.find("stock visual-field and model-index mapping") !=
+          std::string_view::npos);
     CHECK(help.find("securely opens the") != std::string_view::npos);
     CHECK(help.find("valid BSP v30") != std::string_view::npos);
     CHECK(help.find("before renderer work") != std::string_view::npos);
@@ -1196,6 +1245,19 @@ TEST_CASE("Command line rejects renderer-native asset escape hatches",
         std::string_view{"--spawn-camera"},
         std::string_view{"--enable-pvs"},
         std::string_view{"--render-submodels"},
+        std::string_view{"--raw-entity"},
+        std::string_view{"--entity-state-file"},
+        std::string_view{"--snapshot-file"},
+        std::string_view{"--inject-modelindex"},
+        std::string_view{"--force-model-slot"},
+        std::string_view{"--native-model-path"},
+        std::string_view{"--native-sprite-path"},
+        std::string_view{"--execute-event"},
+        std::string_view{"--live-entity-hack"},
+        std::string_view{"--ignore-projection-evidence"},
+        std::string_view{"--force-additive"},
+        std::string_view{"--force-index-alpha"},
+        std::string_view{"--send-usercmd"},
     };
 
     for (const auto option : prohibited) {

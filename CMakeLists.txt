@@ -186,8 +186,10 @@ hlclient_add_library(
     hlclient_goldsrc_sprite
     include/hlclient/goldsrc/sprite/goldsrc_sprite_importer.hpp
     include/hlclient/goldsrc/sprite/goldsrc_sprite_parser.hpp
+    include/hlclient/goldsrc/sprite/goldsrc_sprite_playback.hpp
     src/goldsrc/sprite/goldsrc_sprite_importer.cpp
     src/goldsrc/sprite/goldsrc_sprite_parser.cpp
+    src/goldsrc/sprite/goldsrc_sprite_playback.cpp
 )
 add_library(hlclient::goldsrc_sprite ALIAS hlclient_goldsrc_sprite)
 target_link_libraries(
@@ -653,6 +655,116 @@ set_property(
     PROPERTY FOLDER "Engine/Resources/GoldSrc")
 
 hlclient_add_library(
+    hlclient_entity_visual_projection
+    include/hlclient/entity_visual/entity_visual_projection.hpp
+    src/entity_visual/entity_visual_projection.cpp
+)
+add_library(
+    hlclient::entity_visual_projection ALIAS
+    hlclient_entity_visual_projection)
+target_link_libraries(
+    hlclient_entity_visual_projection
+    PUBLIC hlclient::goldsrc_entity_snapshots hlclient::asset_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_entity_visual_projection
+    PROPERTY FOLDER "Engine/Client/Entities")
+
+hlclient_add_library(
+    hlclient_entity_visual_assets
+    include/hlclient/entity_visual/entity_pipeline_stage_types.hpp
+    include/hlclient/entity_visual/entity_visual_binding.hpp
+    include/hlclient/entity_visual/entity_visual_asset_library.hpp
+    include/hlclient/entity_visual/entity_visual_asset_stage.hpp
+    src/entity_visual/entity_visual_binding.cpp
+    src/entity_visual/entity_visual_asset_library.cpp
+    src/entity_visual/entity_visual_asset_stage.cpp
+)
+add_library(
+    hlclient::entity_visual_assets ALIAS hlclient_entity_visual_assets)
+target_link_libraries(
+    hlclient_entity_visual_assets
+    PUBLIC
+        hlclient::entity_visual_projection
+        hlclient::goldsrc_resource_readiness
+        hlclient::goldsrc_visual_asset_bundle
+        hlclient::model_asset_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_entity_visual_assets
+    PROPERTY FOLDER "Engine/Client/Entities")
+
+hlclient_add_library(
+    hlclient_entity_interpolation
+    include/hlclient/goldsrc/entity_snapshot_interpolation.hpp
+    src/goldsrc/entity_snapshot_interpolation.cpp
+)
+add_library(
+    hlclient::entity_interpolation ALIAS hlclient_entity_interpolation)
+target_link_libraries(
+    hlclient_entity_interpolation
+    PUBLIC hlclient::entity_visual_projection
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_entity_interpolation
+    PROPERTY FOLDER "Engine/Client/Entities")
+
+hlclient_add_library(
+    hlclient_entity_interpolation_stage
+    include/hlclient/entity_visual/entity_interpolation_stage.hpp
+    src/entity_visual/entity_interpolation_stage.cpp
+)
+add_library(
+    hlclient::entity_interpolation_stage ALIAS
+    hlclient_entity_interpolation_stage)
+target_link_libraries(
+    hlclient_entity_interpolation_stage
+    PUBLIC
+        hlclient::entity_interpolation
+        hlclient::entity_visual_assets
+    PRIVATE
+        hlclient::core
+        hlclient::entity_scene_render)
+set_property(
+    TARGET hlclient_entity_interpolation_stage
+    PROPERTY FOLDER "Engine/Client/Entities")
+
+hlclient_add_library(
+    hlclient_studio_pose
+    include/hlclient/goldsrc/studio/goldsrc_studio_pose.hpp
+    src/goldsrc/studio/goldsrc_studio_pose.cpp
+)
+add_library(hlclient::studio_pose ALIAS hlclient_studio_pose)
+target_link_libraries(
+    hlclient_studio_pose
+    PUBLIC hlclient::model_asset_api hlclient::asset_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_studio_pose PROPERTY FOLDER "Engine/Assets/Models")
+
+hlclient_add_library(
+    hlclient_entity_render_api
+    include/hlclient/entity_render/entity_render_types.hpp
+    include/hlclient/entity_render/studio_model_render_asset.hpp
+    include/hlclient/entity_render/sprite_render_asset.hpp
+    include/hlclient/entity_render/sprite_frame_selector.hpp
+    include/hlclient/entity_render/sprite_billboard_basis.hpp
+    src/entity_render/entity_render_types.cpp
+    src/entity_render/studio_model_render_asset.cpp
+    src/entity_render/sprite_render_asset.cpp
+    src/entity_render/sprite_frame_selector.cpp
+    src/entity_render/sprite_billboard_basis.cpp
+)
+add_library(hlclient::entity_render_api ALIAS hlclient_entity_render_api)
+target_link_libraries(
+    hlclient_entity_render_api
+    PUBLIC hlclient::model_asset_api hlclient::asset_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_entity_render_api
+    PROPERTY FOLDER "Engine/Renderer/Entities")
+
+hlclient_add_library(
     hlclient_goldsrc_world_texture_import
     include/hlclient/goldsrc/world_textures/world_texture_import.hpp
     src/goldsrc/world_textures/world_texture_import.cpp
@@ -876,6 +988,66 @@ target_link_libraries(
 set_property(
     TARGET hlclient_world_scene_renderer
     PROPERTY FOLDER "Engine/Renderer/World")
+
+hlclient_add_library(
+    hlclient_entity_scene_render
+    include/hlclient/entity_render/entity_scene_render.hpp
+    src/entity_render/entity_scene_render.cpp
+)
+add_library(
+    hlclient::entity_scene_render ALIAS hlclient_entity_scene_render)
+target_link_libraries(
+    hlclient_entity_scene_render
+    PUBLIC
+        hlclient::entity_render_api
+        hlclient::world_spatial
+        hlclient::world_visibility
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_entity_scene_render
+    PROPERTY FOLDER "Engine/Renderer/Entities")
+
+hlclient_add_library(
+    hlclient_entity_scene_package_build
+    include/hlclient/entity_render/entity_scene_package_stage.hpp
+    src/entity_render/entity_scene_package_build.cpp
+    src/entity_render/entity_scene_package_stage.cpp
+)
+add_library(
+    hlclient::entity_scene_package_build ALIAS
+    hlclient_entity_scene_package_build)
+target_link_libraries(
+    hlclient_entity_scene_package_build
+    PUBLIC
+        hlclient::entity_scene_render
+        hlclient::entity_visual_assets
+    PRIVATE
+        hlclient::core
+        hlclient::world_scene_render)
+set_property(
+    TARGET hlclient_entity_scene_package_build
+    PROPERTY FOLDER "Engine/Client/Entities")
+
+hlclient_add_library(
+    hlclient_entity_frame_composition
+    include/hlclient/entity_render/entity_render_frame_composer.hpp
+    src/entity_render/entity_render_frame_composer.cpp
+)
+add_library(
+    hlclient::entity_frame_composition ALIAS
+    hlclient_entity_frame_composition)
+target_link_libraries(
+    hlclient_entity_frame_composition
+    PUBLIC
+        hlclient::entity_scene_render
+        hlclient::entity_interpolation
+        hlclient::studio_pose
+        hlclient::goldsrc_sprite
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_entity_frame_composition
+    PROPERTY FOLDER "Engine/Client/Entities")
+
 target_link_libraries(
     hlclient_goldsrc_brush_models
     PUBLIC
@@ -888,7 +1060,10 @@ target_link_libraries(
     PUBLIC hlclient_goldsrc_brush_models)
 target_link_libraries(
     hlclient_client
-    PUBLIC hlclient_world_scene_renderer hlclient_world_visibility)
+    PUBLIC
+        hlclient_world_scene_renderer
+        hlclient_world_visibility
+        hlclient_entity_scene_render)
 
 hlclient_add_library(
     hlclient_scene_api
@@ -902,6 +1077,7 @@ target_link_libraries(
         hlclient::client
         hlclient::renderer_api
         hlclient::world_visibility
+        hlclient::entity_scene_render
     PRIVATE hlclient::core
 )
 set_property(TARGET hlclient_scene_api PROPERTY FOLDER "Engine/Client")
@@ -919,6 +1095,7 @@ target_link_libraries(
         hlclient::world_render_api
         hlclient::world_scene_render
         hlclient::world_visibility
+        hlclient::entity_scene_render
     PRIVATE hlclient::core)
 set_property(
     TARGET hlclient_world_preview PROPERTY FOLDER "Engine/Renderer/World")
@@ -935,6 +1112,7 @@ target_link_libraries(
         hlclient::renderer_api
         hlclient::world_scene_render
         hlclient::world_visibility
+        hlclient::entity_scene_render
     PRIVATE hlclient::core
 )
 set_property(TARGET hlclient_renderer_null PROPERTY FOLDER "Engine/Renderer")
@@ -943,6 +1121,8 @@ hlclient_add_library(
     hlclient_renderer_opengl
     include/hlclient/renderer/opengl/opengl_renderer.hpp
     src/renderer/opengl/opengl_renderer.cpp
+    src/renderer/opengl/opengl_entity_renderer.hpp
+    src/renderer/opengl/opengl_entity_renderer.cpp
 )
 add_library(hlclient::renderer_opengl ALIAS hlclient_renderer_opengl)
 target_link_libraries(
@@ -952,6 +1132,8 @@ target_link_libraries(
         hlclient::world_render_api
         hlclient::world_scene_render
         hlclient::world_visibility
+        hlclient::entity_scene_render
+        hlclient::entity_render_api
         hlclient::glad
         OpenGL::GL
 )
@@ -1135,6 +1317,77 @@ set_property(TARGET hlclient_world_viewer PROPERTY FOLDER "Tools/World")
 set_target_properties(
     hlclient_world_viewer
     PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_executable(
+    hlclient_entity_viewer
+    apps/hlclient_entity_viewer/main.cpp
+)
+hlclient_enable_warnings(hlclient_entity_viewer)
+target_link_libraries(
+    hlclient_entity_viewer
+    PRIVATE
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_brush_models
+        hlclient::goldsrc_builtin_importers
+        hlclient::goldsrc_world_texture_import
+        hlclient::goldsrc_lightmaps
+        hlclient::goldsrc_visual_asset_bundle
+        hlclient::entity_interpolation
+        hlclient::entity_visual_assets
+        hlclient::entity_scene_package_build
+        hlclient::entity_frame_composition
+        hlclient::world_render_package
+        hlclient::world_preview
+        hlclient::local_asset_source
+        hlclient::local_resources
+        hlclient::platform
+        hlclient::renderer_opengl
+        hlclient::glad
+)
+set_property(TARGET hlclient_entity_viewer PROPERTY FOLDER "Tools/Entities")
+set_target_properties(
+    hlclient_entity_viewer
+    PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+if(BUILD_TESTING)
+    set(
+        HLCLIENT_ENTITY_VIEWER_CLI_TEST_SCRIPT
+        "${PROJECT_SOURCE_DIR}/scripts/test_entity_viewer_cli.ps1")
+    foreach(
+        forbidden_entity_viewer_option
+        IN ITEMS
+            raw-entity
+            entity-state-file
+            snapshot-file
+            inject-modelindex
+            force-model-slot
+            native-model-path
+            native-sprite-path
+            execute-event
+            live-entity-hack
+            ignore-projection-evidence
+            force-additive
+            force-index-alpha
+            send-usercmd
+    )
+        add_test(
+            NAME
+                hlclient_entity_viewer_rejects_${forbidden_entity_viewer_option}
+            COMMAND
+                "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File "${HLCLIENT_ENTITY_VIEWER_CLI_TEST_SCRIPT}"
+                -ToolPath $<TARGET_FILE:hlclient_entity_viewer>
+                -ForbiddenOption ${forbidden_entity_viewer_option}
+        )
+        set_tests_properties(
+            hlclient_entity_viewer_rejects_${forbidden_entity_viewer_option}
+            PROPERTIES TIMEOUT 15)
+    endforeach()
+endif()
 set_target_properties(
     hlclient
     PROPERTIES
@@ -1159,6 +1412,16 @@ add_custom_command(
             "$<TARGET_FILE:SDL3::SDL3-shared>"
             "$<TARGET_FILE_DIR:hlclient_world_viewer>"
     COMMENT "Copying the SDL3 runtime next to hlclient_world_viewer"
+    VERBATIM
+)
+
+add_custom_command(
+    TARGET hlclient_entity_viewer
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:SDL3::SDL3-shared>"
+            "$<TARGET_FILE_DIR:hlclient_entity_viewer>"
+    COMMENT "Copying the SDL3 runtime next to hlclient_entity_viewer"
     VERBATIM
 )
 

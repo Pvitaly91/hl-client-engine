@@ -622,3 +622,9 @@ full process tree (including the trusted Windows console host) for TCP/UDP
 endpoints and fails if the checker launches another process. These checks report
 the evidence actually tested instead of making an unconditional network claim.
 Game files are not required by the automated build or CTest suite.
+
+The M4.5.3 offline `hlclient_entity_viewer` accepts only safe virtual map/model/
+sprite names below explicit roots and constructs project-owned synthetic
+snapshots. `scripts\verify_local_entity_rendering.ps1` performs bounded read-only
+hash/size/write-time checks around that viewer. This validates imported asset
+rendering under synthetic playback; it does not validate stock network mapping.

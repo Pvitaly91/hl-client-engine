@@ -32,8 +32,8 @@ enum class WorldFrustumPlaneIndex : std::size_t {
     right,
     bottom,
     top,
-    near,
-    far,
+    near_plane,
+    far_plane,
 };
 
 enum class WorldBoundsClassification {

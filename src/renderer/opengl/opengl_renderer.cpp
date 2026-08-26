@@ -1,7 +1,10 @@
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
 
+#include "opengl_entity_renderer.hpp"
+
 #include <hlclient/assets/world_lightmap_types.hpp>
 #include <hlclient/assets/world_texture_types.hpp>
+#include <hlclient/entity_render/entity_scene_render.hpp>
 #include <hlclient/renderer/render_camera_math.hpp>
 #include <hlclient/world_render/world_render_types.hpp>
 #include <hlclient/world_scene_render/world_scene_render_types.hpp>
@@ -1053,6 +1056,16 @@ std::string_view to_string(const OpenGlRendererErrorCode code) noexcept
         return "gl_operation_failed";
     case OpenGlRendererErrorCode::unable_to_retain_resources:
         return "unable_to_retain_resources";
+    case OpenGlRendererErrorCode::invalid_entity_scene:
+        return "invalid_entity_scene";
+    case OpenGlRendererErrorCode::entity_capability_unsupported:
+        return "entity_capability_unsupported";
+    case OpenGlRendererErrorCode::entity_buffer_upload_failed:
+        return "entity_buffer_upload_failed";
+    case OpenGlRendererErrorCode::entity_texture_upload_failed:
+        return "entity_texture_upload_failed";
+    case OpenGlRendererErrorCode::entity_draw_invalid:
+        return "entity_draw_invalid";
     }
     return "unknown";
 }
@@ -1071,6 +1084,25 @@ OpenGlRendererErrorCode OpenGlRendererError::code() const noexcept
 
 class OpenGlRenderer::Implementation final {
 public:
+    void release_entity_resources() noexcept
+    {
+        entity_renderer_.release_resources();
+    }
+
+    void render_entities(
+        const RenderDynamicEntities& entities,
+        const RenderCamera& camera,
+        const RenderMatrix4& view_projection)
+    {
+        entity_renderer_.render(entities, camera, view_projection);
+    }
+
+    [[nodiscard]] const OpenGlEntityRendererStatistics& entity_statistics()
+        const noexcept
+    {
+        return entity_renderer_.statistics();
+    }
+
     void clear_visibility_tracking() noexcept
     {
         visibility_scene_identity_.reset();
@@ -1270,6 +1302,7 @@ public:
     }
 
 private:
+    detail::OpenGlEntityRendererBackend entity_renderer_;
     std::optional<GpuWorldResources> resources_;
     std::optional<GpuSceneResources> scene_resources_;
     std::optional<world_visibility::WorldVisibilitySceneIdentity>
@@ -1329,6 +1362,7 @@ OpenGlRenderer::~OpenGlRenderer() noexcept
     // current, then release the loader. SdlWindow is deliberately declared
     // before OpenGlRenderer by both application runtimes.
     if (implementation_) {
+        implementation_->release_entity_resources();
         implementation_->release_world_resources();
         implementation_.reset();
     }
@@ -1355,6 +1389,34 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     statistics.visible_world_surface_count = 0U;
     statistics.visible_brush_instance_count = 0U;
 
+    if (scene.dynamic_entities &&
+        (!scene.dynamic_entities->package ||
+            !scene.dynamic_entities->frame)) {
+        fail(OpenGlRendererErrorCode::invalid_entity_scene,
+            "Dynamic entity scene requires both a package and a frame");
+    }
+    if (scene.dynamic_entities &&
+        scene.dynamic_entities->frame->scene_package_identity() !=
+            entity_render::EntityRenderResourceIdentity{
+                scene.dynamic_entities->package->resource_id(),
+                scene.dynamic_entities->package->resource_revision()}) {
+        fail(OpenGlRendererErrorCode::invalid_entity_scene,
+            "Dynamic entity frame does not belong to its scene package");
+    }
+    if (scene.dynamic_entities &&
+        scene.dynamic_entities->package->world_scene_association()) {
+        const auto association =
+            *scene.dynamic_entities->package->world_scene_association();
+        if (!scene.static_world || !scene.static_world->scene_package ||
+            association.resource_id !=
+                scene.static_world->scene_package->resource_id() ||
+            association.revision !=
+                scene.static_world->scene_package->resource_revision()) {
+            fail(OpenGlRendererErrorCode::invalid_entity_scene,
+                "Dynamic entity scene does not match its associated world scene");
+        }
+    }
+
     glViewport(0, 0, width, height);
     glClearColor(
         scene.clear_color.red,
@@ -1367,7 +1429,24 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         OpenGlRendererErrorCode::gl_operation_failed,
         "OpenGL frame clear");
 
-    if (!scene.static_world || width == 0 || height == 0) {
+    if (width == 0 || height == 0) {
+        ++statistics.rendered_frame_count;
+        return;
+    }
+    if (!scene.static_world) {
+        implementation_->release_world_resources();
+        if (scene.dynamic_entities) {
+            const auto matrix = camera_view_projection(
+                scene.camera, RenderExtent{width, height});
+            if (!matrix || !matrix.matrix) {
+                fail(OpenGlRendererErrorCode::camera_invalid,
+                    "Dynamic-entity camera is invalid");
+            }
+            implementation_->render_entities(
+                *scene.dynamic_entities, scene.camera, *matrix.matrix);
+        } else {
+            implementation_->release_entity_resources();
+        }
         ++statistics.rendered_frame_count;
         return;
     }
@@ -1571,6 +1650,13 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     glBindVertexArray(0U);
     glUseProgram(0U);
 
+    if (scene.dynamic_entities) {
+        implementation_->render_entities(
+            *scene.dynamic_entities, scene.camera, *matrix.matrix);
+    } else {
+        implementation_->release_entity_resources();
+    }
+
     ++statistics.rendered_frame_count;
     statistics.draw_call_count += frame.draw_calls;
     statistics.brush_draw_call_count += frame.brush_draw_calls;
@@ -1582,6 +1668,12 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
 const OpenGlWorldRendererStatistics& OpenGlRenderer::statistics() const noexcept
 {
     return implementation_->statistics();
+}
+
+const OpenGlEntityRendererStatistics& OpenGlRenderer::entity_statistics()
+    const noexcept
+{
+    return implementation_->entity_statistics();
 }
 
 } // namespace hlclient::renderer::opengl

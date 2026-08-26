@@ -2,6 +2,7 @@
 
 #include <hlclient/client/client_world_state.hpp>
 
+#include <hlclient/entity_render/entity_scene_render.hpp>
 #include <hlclient/world_visibility/world_visibility_types.hpp>
 
 #include <utility>
@@ -64,6 +65,20 @@ renderer::RenderScene build_render_scene(const ClientWorldState& world_state) no
                 };
         }
         scene.static_world.emplace(std::move(static_world));
+    }
+    if (world_state.entity_scene() && world_state.entity_frame()) {
+        const auto& statistics = world_state.entity_frame()->statistics();
+        scene.dynamic_entities.emplace(renderer::RenderDynamicEntities{
+            world_state.entity_scene(),
+            world_state.entity_frame(),
+            renderer::RenderDynamicEntityVisibilitySummary{
+                statistics.candidate_count,
+                statistics.visible_count,
+                statistics.studio_instance_count,
+                statistics.sprite_instance_count,
+                statistics.unsupported_instance_count,
+            },
+        });
     }
     return scene;
 }

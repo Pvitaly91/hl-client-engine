@@ -19,6 +19,11 @@ namespace hlclient::world_visibility {
 class WorldVisibleDrawList;
 }
 
+namespace hlclient::entity_render {
+class EntitySceneRenderPackage;
+class EntityRenderFrame;
+}
+
 namespace hlclient::renderer {
 
 struct ClearColor {
@@ -72,10 +77,25 @@ struct RenderStaticWorld {
     std::optional<RenderStaticWorldVisibilitySummary> visibility_summary;
 };
 
+struct RenderDynamicEntityVisibilitySummary {
+    std::size_t candidate_count{0U};
+    std::size_t visible_count{0U};
+    std::size_t studio_instance_count{0U};
+    std::size_t sprite_instance_count{0U};
+    std::size_t unsupported_instance_count{0U};
+};
+
+struct RenderDynamicEntities {
+    std::shared_ptr<const entity_render::EntitySceneRenderPackage> package;
+    std::shared_ptr<const entity_render::EntityRenderFrame> frame;
+    RenderDynamicEntityVisibilitySummary visibility_summary{};
+};
+
 struct RenderScene {
     ClearColor clear_color{};
     RenderCamera camera{};
     std::optional<RenderStaticWorld> static_world;
+    std::optional<RenderDynamicEntities> dynamic_entities;
 };
 
 struct RenderExtent {

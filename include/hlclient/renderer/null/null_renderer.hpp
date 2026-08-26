@@ -25,6 +25,14 @@ struct NullRendererStatistics {
     std::size_t visible_world_surface_count{0U};
     std::size_t visible_brush_instance_count{0U};
     std::size_t visible_draw_command_count{0U};
+    bool dynamic_entity_package_present{false};
+    std::optional<std::uint64_t> entity_scene_resource_id;
+    std::optional<std::uint64_t> entity_scene_revision;
+    std::optional<std::uint64_t> entity_frame_revision;
+    std::size_t studio_entity_instance_count{0U};
+    std::size_t sprite_entity_instance_count{0U};
+    std::size_t visible_entity_count{0U};
+    std::size_t unsupported_entity_count{0U};
     bool camera_valid{false};
     RenderExtent last_extent{};
 

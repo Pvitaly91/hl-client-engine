@@ -21,6 +21,11 @@ enum class OpenGlRendererErrorCode {
     draw_range_invalid,
     gl_operation_failed,
     unable_to_retain_resources,
+    invalid_entity_scene,
+    entity_capability_unsupported,
+    entity_buffer_upload_failed,
+    entity_texture_upload_failed,
+    entity_draw_invalid,
 };
 
 [[nodiscard]] std::string_view to_string(OpenGlRendererErrorCode code) noexcept;
@@ -68,6 +73,23 @@ struct OpenGlWorldRendererStatistics {
     bool active_world_resources{false};
 };
 
+struct OpenGlEntityRendererStatistics {
+    std::uint64_t entity_scene_revision{0U};
+    std::uint64_t entity_frame_revision{0U};
+    std::uint64_t studio_asset_upload_count{0U};
+    std::uint64_t sprite_asset_upload_count{0U};
+    std::uint64_t entity_frame_count{0U};
+    std::uint64_t studio_draw_count{0U};
+    std::uint64_t sprite_draw_count{0U};
+    std::uint64_t model_texture_bind_count{0U};
+    std::uint64_t sprite_texture_bind_count{0U};
+    std::uint64_t pose_ubo_update_count{0U};
+    std::uint64_t visible_entity_count{0U};
+    std::uint64_t entity_resource_release_count{0U};
+    bool entity_scene_present{false};
+    bool active_entity_resources{false};
+};
+
 class OpenGlRenderer final : public IRenderer {
 public:
     // An OpenGL 3.3 Core context must be current on the calling thread.
@@ -82,6 +104,8 @@ public:
     [[nodiscard]] const RendererInfo& information() const noexcept override;
     void render(const RenderScene& scene, RenderExtent extent) override;
     [[nodiscard]] const OpenGlWorldRendererStatistics& statistics() const noexcept;
+    [[nodiscard]] const OpenGlEntityRendererStatistics&
+    entity_statistics() const noexcept;
 
 private:
     class Implementation;

@@ -162,6 +162,8 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_goldsrc_wad3` | strict bounded WAD3 header/directory catalog, uncompressed type-`0x43` lookup, normalized duplicate rejection, and shared miptex adapter | filesystem/local-resource resolution, compiler-path interpretation, network, SDL, OpenGL, renderer/GPU work |
 | `hlclient_goldsrc_asset_dispatch` | evidence-derived resource role/plan, approved source facade, selected-world manifest continuation, and same-session terminal dispatch state | format parsing, download/cache, renderer/GPU work, extra network messages |
 | `hlclient_goldsrc_visual_asset_bundle` | canonical model-or-sprite dispatch plus transactional exact-root Studio companion composition for approved or verified local sources | network/sign-on stages, native-path input, renderer/GPU work, entity/gameplay state |
+| `hlclient_entity_interpolation` | pure bounded snapshot-pair selection and renderer-neutral synthetic projection interpolation | visual-asset import/readiness, local resources, filesystem, renderer/GPU work |
+| `hlclient_entity_interpolation_stage` | client-side ownership and sequencing from an immutable visual-asset stage result through pure interpolation to a coherently paired renderer-neutral entity frame | renderer/GPU calls, network mutation, filesystem I/O |
 | `hlclient_goldsrc_world_texture_import` | network-free retained-BSP texture resolution, sandboxed declared-WAD source opening, incremental decode, exact material bindings, and immutable complete/incomplete texture sets | sign-on/stage state, sockets, downloads/cache, entity instantiation, lightmaps, texture effects/animation, `AssetManager`, SDL, OpenGL, renderer/GPU work |
 | `hlclient_goldsrc_world_textures` | same-session terminal stage that composes asset dispatch with the CPU-only world-texture import target | texture codec duplication, SDL, OpenGL, renderer/GPU work, extra network messages after the manifest boundary |
 | `hlclient_goldsrc_lightmaps` | exact face-local GoldSrc lightmap extents, RGB/style-slot decode, deterministic padded multi-page atlases, and immutable per-surface bindings | filesystem, network, SDL, OpenGL, gamma/overbright, dynamic lighting |
@@ -839,7 +841,11 @@ Models retain source-native bone-local geometry and compressed animation;
 sprites retain indexed frames, palette, groups, intervals, and format metadata.
 No output is a render instance. Entity-number/model-index association,
 fractional interpolation, body/skin/sequence application, billboarding, blend
-state, and OpenGL upload remain deliberately outside this boundary for M4.5.3.
+state, and OpenGL upload remain outside the importer boundary. M4.5.3 implements
+them in separate entity-visual, pose, renderer-neutral scene, and OpenGL modules.
+`RenderScene` sees only shared entity package/frame contracts; it never sees a
+GoldSrc snapshot, local-resource locator, or native path. Stock visual projection
+remains a fail-closed evidence boundary.
 
 ## Module and plugin policy
 

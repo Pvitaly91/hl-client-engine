@@ -63,3 +63,9 @@ uses `IDSP`, version 2, the exact header, and bounded structural checks;
 and random `.spr` bytes do not. In the existing `model_or_sprite` role, IDSP
 selects the sprite category while IDST selects the model category; an exact
 cross-category rank tie remains ambiguous.
+
+M4.5.3 selects single/group frames and builds bounded billboard instances from
+this metadata. Normal and alpha-test formats render; additive and index-alpha
+remain typed non-renderable until their exact semantics are established. No
+importer metadata is rewritten. See
+[OpenGL Sprite rendering](OPENGL_SPRITE_RENDERER.md).

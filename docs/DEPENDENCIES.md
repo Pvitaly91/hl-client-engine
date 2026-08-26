@@ -409,6 +409,11 @@ The M4.5.2 target set is `hlclient_model_asset_api`,
 `hlclient_goldsrc_asset_check`. All are project-owned C++20/API composition;
 none adds a redistributed runtime or an SDK linkage.
 
+The entity renderer reuses the existing pinned SDL3, GLAD/OpenGL 3.3, Catch2,
+and public Half-Life SDK reference material. It adds no runtime dependency and
+does not link SDK structs or implementation. Valve sources are consulted only
+as public rendering/math evidence; project-owned neutral records remain the ABI.
+
 This runtime policy is distinct from active stock-client/HLDS research. Research
 verifiers continue to require their isolated marked copy and reject primary or
 registered Steam roots where their existing contracts specify that behavior.

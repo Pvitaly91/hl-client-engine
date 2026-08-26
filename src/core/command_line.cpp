@@ -55,6 +55,14 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             options.view_world = true;
             continue;
         }
+        if (argument == "--view-entity-snapshot") {
+            if (options.view_entity_snapshot) {
+                return failure(
+                    "--view-entity-snapshot may be specified only once");
+            }
+            options.view_entity_snapshot = true;
+            continue;
+        }
         if (!needs_value(argument)) {
             return failure("Unknown command-line argument: " + std::string{argument});
         }
@@ -122,6 +130,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::world_render_package;
             } else if (value == "world-spatial-scene") {
                 options.stop_after = ConnectionStopPoint::world_spatial_scene;
+            } else if (value == "entity-visual-scene") {
+                options.stop_after = ConnectionStopPoint::entity_visual_scene;
             } else {
                 return failure("Unsupported --stop-after value: " + std::string{value} +
                                " (expected challenge, connect-request, connect-response, "
@@ -220,14 +230,30 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         }
         options.stop_after = ConnectionStopPoint::world_spatial_scene;
     }
+    if (options.view_world && options.view_entity_snapshot) {
+        return failure(
+            "--view-world and --view-entity-snapshot are mutually exclusive");
+    }
+    if (options.view_entity_snapshot) {
+        if (stop_after_seen &&
+            options.stop_after != ConnectionStopPoint::entity_visual_scene) {
+            return failure(
+                "--view-entity-snapshot is compatible only with --stop-after "
+                "entity-visual-scene");
+        }
+        options.stop_after = ConnectionStopPoint::entity_visual_scene;
+    }
     if ((visibility_seen || brush_submodels_seen || camera_seen) &&
-        !options.view_world &&
-        options.stop_after != ConnectionStopPoint::world_spatial_scene) {
+        !options.view_world && !options.view_entity_snapshot &&
+        options.stop_after != ConnectionStopPoint::world_spatial_scene &&
+        options.stop_after != ConnectionStopPoint::entity_visual_scene) {
         return failure(
             "--visibility, --brush-submodels, and --camera require "
-            "--view-world or --stop-after world-spatial-scene");
+            "--view-world, --view-entity-snapshot, --stop-after "
+            "world-spatial-scene, or --stop-after entity-visual-scene");
     }
-    if ((stop_after_seen || options.view_world || connect_request_setting_seen) &&
+    if ((stop_after_seen || options.view_world || options.view_entity_snapshot ||
+         connect_request_setting_seen) &&
         !options.connect_endpoint) {
         return failure("Connect-request options require --connect <ip:port>");
     }
@@ -249,8 +275,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "resource-response-boundary/server-baselines/"
                        "entity-snapshot/precache-manifest/"
                        "asset-dispatch/world-geometry/world-textures/"
-                       "world-render-package/world-spatial-scene stop point or "
-                       "--view-world");
+                       "world-render-package/world-spatial-scene/"
+                       "entity-visual-scene stop point or a preview option");
     }
     if (options.authentication_provider && !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
@@ -277,7 +303,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::world_geometry ||
          options.stop_after == ConnectionStopPoint::world_textures ||
          options.stop_after == ConnectionStopPoint::world_render_package ||
-         options.stop_after == ConnectionStopPoint::world_spatial_scene) &&
+         options.stop_after == ConnectionStopPoint::world_spatial_scene ||
+         options.stop_after == ConnectionStopPoint::entity_visual_scene) &&
         !options.authentication_provider) {
         return failure(
             "Netchan bootstrap and sign-on require the explicit "
@@ -338,8 +365,19 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             "The world-spatial-scene boundary requires "
             "--resource-consistency-provider local");
     }
+    if (options.stop_after == ConnectionStopPoint::entity_visual_scene &&
+        options.resource_consistency_provider !=
+            ResourceConsistencyProviderKind::local) {
+        return failure(
+            "The entity-visual-scene boundary requires "
+            "--resource-consistency-provider local");
+    }
     if (options.view_world && options.renderer != RendererBackend::opengl) {
         return failure("--view-world requires --renderer opengl");
+    }
+    if (options.view_entity_snapshot &&
+        options.renderer != RendererBackend::opengl) {
+        return failure("--view-entity-snapshot requires --renderer opengl");
     }
 
     return CommandLineParseResult{std::move(options), {}};
@@ -359,7 +397,8 @@ bool requires_local_resource_consistency_preparation(
             options.stop_after == ConnectionStopPoint::world_geometry ||
             options.stop_after == ConnectionStopPoint::world_textures ||
             options.stop_after == ConnectionStopPoint::world_render_package ||
-            options.stop_after == ConnectionStopPoint::world_spatial_scene);
+            options.stop_after == ConnectionStopPoint::world_spatial_scene ||
+            options.stop_after == ConnectionStopPoint::entity_visual_scene);
 }
 
 std::string_view command_line_help() noexcept
@@ -380,7 +419,8 @@ Options:
                        resource-response-boundary, server-baselines,
                        entity-snapshot, precache-manifest, or
                        asset-dispatch, world-geometry, world-textures, or
-                       world-render-package, or world-spatial-scene
+                       world-render-package, world-spatial-scene, or
+                       entity-visual-scene
                        (default: challenge)
   --auth-provider <name>
                       Authentication provider for connect stages: file
@@ -392,13 +432,16 @@ Options:
                       server-baselines, entity-snapshot, precache-manifest,
                       asset-dispatch, world-geometry, or
                       world-textures, world-render-package, or
-                      world-spatial-scene
+                      world-spatial-scene, entity-visual-scene
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
   --view-world        Build the world render package, disconnect, then run the
                       local diagnostic OpenGL preview
+  --view-entity-snapshot
+                      Complete the bounded snapshot stage, close networking,
+                      then stop at the typed stock visual-evidence boundary
   --visibility <mode> World visibility: all, frustum, pvs, or pvs-frustum
                       (default: all)
   --brush-submodels <mode>
@@ -449,6 +492,11 @@ World-render-package continues locally through RGB lightmaps and a neutral CPU
 render package without initializing SDL or uploading GPU resources. View-world
 uses that same validated package only after network cleanup and requires the
 OpenGL renderer.
+Entity-visual-scene and view-entity-snapshot preserve the stock evidence gate:
+after the bounded snapshot stage, stock visual-field and model-index mapping
+return a typed evidence-pending outcome. Evidence-ready synthetic playback is
+provided by the network-free entity viewer and project-owned integration
+fixtures; it closes every network owner before local import or rendering.
 No mode implements authentication generation.
 )";
 }

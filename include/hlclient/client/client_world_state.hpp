@@ -19,6 +19,11 @@ class WorldVisibilitySet;
 class WorldVisibleDrawList;
 }
 
+namespace hlclient::entity_render {
+class EntitySceneRenderPackage;
+class EntityRenderFrame;
+}
+
 namespace hlclient::client {
 
 struct RenderCameraState {
@@ -55,6 +60,10 @@ public:
         std::shared_ptr<const world_visibility::WorldVisibleDrawList>
             draw_list) noexcept;
     void clear_world_visibility() noexcept;
+    [[nodiscard]] bool set_dynamic_entities(
+        std::shared_ptr<const entity_render::EntitySceneRenderPackage> package,
+        std::shared_ptr<const entity_render::EntityRenderFrame> frame) noexcept;
+    void clear_dynamic_entities() noexcept;
     void set_camera(const RenderCameraState& camera) noexcept;
     [[nodiscard]] bool set_preview_render_options(
         const PreviewRenderOptions& options) noexcept;
@@ -71,9 +80,16 @@ public:
     [[nodiscard]] const std::shared_ptr<const world_visibility::WorldVisibleDrawList>&
     visible_draw_list() const noexcept;
     [[nodiscard]] const RenderCameraState& camera() const noexcept;
+    [[nodiscard]] const std::shared_ptr<
+        const entity_render::EntitySceneRenderPackage>&
+    entity_scene() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const entity_render::EntityRenderFrame>&
+    entity_frame() const noexcept;
     [[nodiscard]] std::uint64_t world_revision() const noexcept;
     [[nodiscard]] std::uint64_t scene_revision() const noexcept;
     [[nodiscard]] std::uint64_t visibility_revision() const noexcept;
+    [[nodiscard]] std::uint64_t entity_scene_revision() const noexcept;
+    [[nodiscard]] std::uint64_t entity_frame_revision() const noexcept;
     [[nodiscard]] const PreviewRenderOptions& preview_render_options() const noexcept;
 
 private:
@@ -83,10 +99,14 @@ private:
     std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> world_scene_;
     std::shared_ptr<const world_visibility::WorldVisibilitySet> world_visibility_;
     std::shared_ptr<const world_visibility::WorldVisibleDrawList> visible_draw_list_;
+    std::shared_ptr<const entity_render::EntitySceneRenderPackage> entity_scene_;
+    std::shared_ptr<const entity_render::EntityRenderFrame> entity_frame_;
     RenderCameraState camera_{};
     std::uint64_t world_revision_{0U};
     std::uint64_t scene_revision_{0U};
     std::uint64_t visibility_revision_{0U};
+    std::uint64_t entity_scene_revision_{0U};
+    std::uint64_t entity_frame_revision_{0U};
     PreviewRenderOptions preview_render_options_{};
 };
 
