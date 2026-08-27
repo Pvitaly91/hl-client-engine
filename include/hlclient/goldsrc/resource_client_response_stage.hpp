@@ -349,6 +349,7 @@ public:
     [[nodiscard]] bool response_acknowledged() const noexcept;
 
 private:
+    friend class GoldSrcHandshakeCoordinator;
     friend class PrecacheManifestStage;
     friend class PostResourceEntitySnapshotStage;
 

@@ -23,6 +23,18 @@ add_executable(hlclient_tests
     test_gameplay_input_bindings.cpp
     test_gameplay_input_intent.cpp
     test_first_person_camera.cpp
+    test_goldsrc_client_move_message.cpp
+    test_goldsrc_move_checksum.cpp
+    test_goldsrc_usercmd_delta_codec.cpp
+    test_goldsrc_usercmd_duration.cpp
+    test_goldsrc_usercmd_fake_hlds_integration.cpp
+    test_goldsrc_usercmd_history.cpp
+    test_goldsrc_usercmd_input_adapter.cpp
+    test_goldsrc_usercmd_packet_planner.cpp
+    test_goldsrc_usercmd_scheduler.cpp
+    test_goldsrc_usercmd_schema_binding.cpp
+    test_goldsrc_usercmd_state.cpp
+    test_goldsrc_usercmd_transmission_stage.cpp
     test_entity_first_person_camera.cpp
     test_interactive_entity_visibility.cpp
     test_interactive_preview_controller.cpp
@@ -155,6 +167,7 @@ add_executable(hlclient_tests
     test_netchan_sequence.cpp
     test_netchan_session.cpp
     test_netchan_udp_integration.cpp
+    test_netchan_unreliable_context.cpp
     test_opengl_world_renderer.cpp
     test_scene_source.cpp
     test_service_message_stream.cpp
@@ -207,6 +220,9 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_resource_readiness
         hlclient_goldsrc_local_resources
         hlclient_goldsrc_netchan
+        hlclient_goldsrc_usercmd_api
+        hlclient_goldsrc_usercmd_codec
+        hlclient_goldsrc_usercmd_session
         hlclient_goldsrc_delta_values
         hlclient_goldsrc_entity_snapshots
         hlclient_entity_visual_projection
@@ -234,6 +250,7 @@ target_link_libraries(hlclient_tests
         hlclient_platform_sdl_input
         hlclient_gameplay_input
         hlclient_gameplay_camera
+        hlclient_gameplay_camera_render_adapter
         hlclient_interactive_preview
         hlclient_glad
         hlclient_world_render

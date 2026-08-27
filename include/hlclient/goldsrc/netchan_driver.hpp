@@ -117,6 +117,13 @@ enum class NetchanDriverErrorCode {
     reliable_queue_failed,
     unreliable_payload_too_large,
     unreliable_payload_pending,
+    unreliable_context_unavailable,
+    stale_unreliable_context,
+    foreign_unreliable_context,
+    unreliable_context_mismatch,
+    unreliable_context_identity_overflow,
+    unreliable_context_revision_overflow,
+    transmitted_packet_count_overflow,
     fragment_reassembly_failed,
     secondary_stream_pending_m3,
     fragment_transfer_timed_out,
@@ -138,6 +145,56 @@ struct NetchanDriverOperationResult {
     [[nodiscard]] explicit operator bool() const noexcept
     {
         return !error.has_value();
+    }
+};
+
+struct NetchanOutgoingReliableComposition {
+    ReliableTransmitDecision decision{ReliableTransmitDecision::none};
+    std::size_t reliable_payload_size{0U};
+    bool reliable_sequence{false};
+    bool fragmented_sequence{false};
+    std::optional<NetchanFragmentBuildPlan> fragment;
+};
+
+class NetchanDriver;
+
+// Move-only, metadata-only capability for one exact future unreliable send.
+// The opaque implementation retains a read-only NetchanSession transmit probe;
+// it never exposes a mutable session or a caller-controlled sequence override.
+class NetchanOutgoingContextPlan final {
+public:
+    ~NetchanOutgoingContextPlan();
+
+    NetchanOutgoingContextPlan(const NetchanOutgoingContextPlan&) = delete;
+    NetchanOutgoingContextPlan& operator=(const NetchanOutgoingContextPlan&) = delete;
+    NetchanOutgoingContextPlan(NetchanOutgoingContextPlan&&) noexcept;
+    NetchanOutgoingContextPlan& operator=(NetchanOutgoingContextPlan&&) noexcept;
+
+    [[nodiscard]] NetchanSequence next_outgoing_sequence() const noexcept;
+    [[nodiscard]] std::uint64_t context_revision() const noexcept;
+    [[nodiscard]] std::uint64_t plan_identity() const noexcept;
+    [[nodiscard]] const NetchanOutgoingReliableComposition&
+    reliable_composition() const noexcept;
+    [[nodiscard]] std::size_t maximum_unreliable_payload_size() const noexcept;
+
+private:
+    class Implementation;
+
+    explicit NetchanOutgoingContextPlan(
+        std::unique_ptr<Implementation> implementation) noexcept;
+
+    friend class NetchanDriver;
+
+    std::unique_ptr<Implementation> implementation_;
+};
+
+struct NetchanOutgoingContextPrepareResult {
+    std::optional<NetchanOutgoingContextPlan> plan;
+    std::optional<NetchanDriverError> error;
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return plan.has_value();
     }
 };
 
@@ -272,6 +329,13 @@ public:
         std::span<const std::byte> payload);
     [[nodiscard]] NetchanDriverOperationResult submit_unreliable(
         std::span<const std::byte> payload);
+    [[nodiscard]] NetchanOutgoingContextPrepareResult
+    prepare_unreliable_context();
+    [[nodiscard]] NetchanDriverOperationResult commit_unreliable(
+        NetchanOutgoingContextPlan&& plan,
+        std::span<const std::byte> payload);
+    [[nodiscard]] NetchanDriverOperationResult abandon_unreliable(
+        NetchanOutgoingContextPlan&& plan);
     [[nodiscard]] std::optional<NetchanDriverEvent> poll_event();
 
     [[nodiscard]] bool valid_configuration() const noexcept;
@@ -285,6 +349,12 @@ public:
     last_valid_packet_time() const noexcept;
     [[nodiscard]] std::size_t pending_event_count() const noexcept;
     [[nodiscard]] std::size_t transmitted_packet_count() const noexcept;
+    // Identity of the most recent sequence-bound unreliable context whose
+    // datagram reached IDatagramTransport::send_to successfully. This narrow
+    // receipt lets the owner commit semantic history without inferring success
+    // from the driver's aggregate TX counter.
+    [[nodiscard]] std::optional<std::uint64_t>
+    last_sent_unreliable_context_identity() const noexcept;
     [[nodiscard]] std::size_t cleanup_count() const noexcept;
     [[nodiscard]] const NetchanSession& session() const noexcept;
     [[nodiscard]] const NetchanNormalReassembler& normal_reassembler() const noexcept;
@@ -344,6 +414,20 @@ private:
         return "unreliable_payload_too_large";
     case NetchanDriverErrorCode::unreliable_payload_pending:
         return "unreliable_payload_pending";
+    case NetchanDriverErrorCode::unreliable_context_unavailable:
+        return "unreliable_context_unavailable";
+    case NetchanDriverErrorCode::stale_unreliable_context:
+        return "stale_unreliable_context";
+    case NetchanDriverErrorCode::foreign_unreliable_context:
+        return "foreign_unreliable_context";
+    case NetchanDriverErrorCode::unreliable_context_mismatch:
+        return "unreliable_context_mismatch";
+    case NetchanDriverErrorCode::unreliable_context_identity_overflow:
+        return "unreliable_context_identity_overflow";
+    case NetchanDriverErrorCode::unreliable_context_revision_overflow:
+        return "unreliable_context_revision_overflow";
+    case NetchanDriverErrorCode::transmitted_packet_count_overflow:
+        return "transmitted_packet_count_overflow";
     case NetchanDriverErrorCode::fragment_reassembly_failed:
         return "fragment_reassembly_failed";
     case NetchanDriverErrorCode::secondary_stream_pending_m3:

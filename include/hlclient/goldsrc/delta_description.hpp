@@ -1,7 +1,5 @@
 #pragma once
 
-#include <hlclient/goldsrc/service_message_stream.hpp>
-
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -11,6 +9,8 @@
 #include <vector>
 
 namespace hlclient::goldsrc {
+
+class ResourcePhaseBoundary;
 
 inline constexpr std::uint8_t kDeltaDescriptionOpcode = 14U;
 inline constexpr std::uint8_t kStockPostDeltaBoundaryOpcode = 44U;

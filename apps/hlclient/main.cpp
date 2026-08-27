@@ -3260,6 +3260,33 @@ int run_evidence_pending_post_resource_stop(HandshakeSession& session)
     return 2;
 }
 
+int run_evidence_pending_usercmd_stop(HandshakeSession& session)
+{
+    hlclient::core::log(
+        LogLevel::info,
+        "[usercmd] profile=stock_protocol_48_evidence_pending");
+    while (!session.terminal()) {
+        session.update(hlclient::goldsrc::ChallengeExchangeClock::now());
+        if (!session.terminal()) {
+            std::this_thread::yield();
+        }
+    }
+    const auto boundary_result = session.report_result();
+    if (boundary_result != 0) {
+        return boundary_result;
+    }
+    hlclient::core::log(LogLevel::info, "[usercmd] sampled=0");
+    hlclient::core::log(LogLevel::info, "[usercmd] history=0");
+    hlclient::core::log(LogLevel::info, "[usercmd] carrier=pending");
+    hlclient::core::log(LogLevel::info, "[usercmd] checksum=pending");
+    hlclient::core::log(LogLevel::info, "[usercmd] transmitted=0");
+    hlclient::core::log(
+        LogLevel::error,
+        "[usercmd] runtime_signon_evidence_pending; stock move opcode, "
+        "envelope, checksum, and unreliable carrier are not enabled");
+    return 2;
+}
+
 int run(const hlclient::core::CommandLineOptions& options)
 {
     print_version();
@@ -3487,6 +3514,10 @@ int run(const hlclient::core::CommandLineOptions& options)
             stop_point =
                 hlclient::goldsrc::HandshakeStopPoint::entity_snapshot;
             break;
+        case hlclient::core::ConnectionStopPoint::usercmd_boundary:
+            stop_point =
+                hlclient::goldsrc::HandshakeStopPoint::usercmd_boundary;
+            break;
         case hlclient::core::ConnectionStopPoint::precache_manifest:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::precache_manifest;
             break;
@@ -3533,6 +3564,12 @@ int run(const hlclient::core::CommandLineOptions& options)
                 ? production_world_render_package_config(options)
                 : hlclient::goldsrc::WorldRenderPackageStageConfig{},
             options.net_trace);
+    }
+
+    if (options.stop_after ==
+            hlclient::core::ConnectionStopPoint::usercmd_boundary &&
+        challenge_session) {
+        return run_evidence_pending_usercmd_stop(*challenge_session);
     }
 
     if ((options.stop_after ==

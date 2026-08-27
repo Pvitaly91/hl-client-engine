@@ -94,6 +94,21 @@ hlclient_goldsrc_asset_check
     -> hlclient_local_asset_source
     -> hlclient_local_resources
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
+hlclient_goldsrc_signon -> hlclient_goldsrc_delta_schema
+hlclient_goldsrc_delta_values -> hlclient_goldsrc_delta_schema
+hlclient_goldsrc_usercmd_api -> hlclient_core
+hlclient_goldsrc_usercmd_codec
+    -> hlclient_goldsrc_usercmd_api
+    -> hlclient_goldsrc_delta_schema
+hlclient_goldsrc_usercmd_session
+    -> hlclient_goldsrc_usercmd_codec
+    -> hlclient_goldsrc_netchan
+    -> hlclient_gameplay_input
+    -> hlclient_gameplay_camera
+hlclient_gameplay_camera_render_adapter
+    -> hlclient_gameplay_camera
+    -> hlclient_renderer_api
+hlclient_usercmd_check -> hlclient_goldsrc_usercmd_codec
 hlclient_goldsrc_world_texture_import
     -> hlclient_goldsrc_bsp
     -> hlclient_goldsrc_wad3
@@ -418,6 +433,21 @@ M4.6.1 adds no dependency. It reuses the pinned SDL3 event, scancode, mouse,
 focus, and relative-mode APIs already required by the platform/window target.
 SDL types remain private to `hlclient_platform_sdl_input`/`hlclient_platform`;
 gameplay input, camera, client state, and renderer targets do not expose them.
+
+M4.6.2 also adds no third-party dependency. Its usercmd target set is
+`hlclient_goldsrc_usercmd_api`, `hlclient_goldsrc_usercmd_codec`,
+`hlclient_goldsrc_usercmd_session`, and the offline
+`hlclient_usercmd_check`. The API and codec are project-owned C++20 and own no
+SDL, OpenGL, filesystem, renderer implementation, socket, or transport object.
+The codec reuses the extracted socket-free `hlclient_goldsrc_delta_schema`
+types rather than the stateful sign-on target and performs no I/O. The session
+target composes the existing renderer-independent gameplay intent/camera
+contracts and retained `hlclient_goldsrc_netchan` driver; it creates no
+additional socket or network backend. Renderer conversion is isolated in
+`hlclient_gameplay_camera_render_adapter`, which the usercmd targets do not
+link. The checker opens no socket and adds no runtime package.
+Public Half-Life SDK `usercmd_t` declarations remain a semantic cross-check:
+no SDK object code, native struct cast, or SDK wire ABI enters these targets.
 
 This runtime policy is distinct from active stock-client/HLDS research. Research
 verifiers continue to require their isolated marked copy and reject primary or

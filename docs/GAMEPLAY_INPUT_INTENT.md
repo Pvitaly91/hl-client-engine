@@ -39,6 +39,12 @@ respectively, and camera revisions at `uint64_t` maximum. The hard event cap is
 20–140 degrees. Exact hard bounds are accepted; limit-plus-one and non-finite
 values fail before publication.
 
-There is intentionally no conversion to `usercmd` bytes, stock button bits,
-`msec`, impulse, weapon selection, checksum, command number, or network TX.
-M4.6.2 owns that evidence and codec boundary.
+The M4.6.1 intent layer intentionally performs no conversion to `usercmd`
+bytes, stock button bits, `msec`, impulse, weapon selection, checksum, command
+identity, or network TX. M4.6.2 adds a separate
+`synthetic_explicit_v1` adapter that consumes this immutable intent, maps only
+its documented project actions, and keeps diagnostic vertical movement out of
+`upmove`. Stock input mapping remains evidence-pending with zero accepted
+stock usercmd runs and zero verified move packets. See the
+[GoldSrc usercmd boundary](GOLDSRC_USERCMD.md) and
+[transmission lifecycle](GOLDSRC_USERCMD_TRANSMISSION.md).

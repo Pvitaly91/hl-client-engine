@@ -351,7 +351,8 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
     SECTION("entity diagnostic stop points require and schedule the local provider")
     {
         for (const auto stop : {std::string_view{"server-baselines"},
-                                std::string_view{"entity-snapshot"}}) {
+                                std::string_view{"entity-snapshot"},
+                                std::string_view{"usercmd-boundary"}}) {
             CAPTURE(stop);
             const std::array arguments{
                 std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
@@ -365,10 +366,12 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             };
             const auto result = parse_command_line(arguments);
             REQUIRE(result);
-            CHECK(result.options->stop_after ==
-                  (stop == "server-baselines"
-                       ? hlclient::core::ConnectionStopPoint::server_baselines
-                       : hlclient::core::ConnectionStopPoint::entity_snapshot));
+            const auto expected = stop == "server-baselines"
+                ? hlclient::core::ConnectionStopPoint::server_baselines
+                : stop == "entity-snapshot"
+                    ? hlclient::core::ConnectionStopPoint::entity_snapshot
+                    : hlclient::core::ConnectionStopPoint::usercmd_boundary;
+            CHECK(result.options->stop_after == expected);
             CHECK(hlclient::core::requires_local_resource_consistency_preparation(
                 *result.options));
         }
@@ -377,7 +380,8 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
     SECTION("entity diagnostic stop points reject a missing local provider")
     {
         for (const auto stop : {std::string_view{"server-baselines"},
-                                std::string_view{"entity-snapshot"}}) {
+                                std::string_view{"entity-snapshot"},
+                                std::string_view{"usercmd-boundary"}}) {
             const std::array arguments{
                 std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
                 std::string_view{"--stop-after"}, stop,

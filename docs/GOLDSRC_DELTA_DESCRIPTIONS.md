@@ -7,6 +7,12 @@
 > fail-before-read stock decoder and a sealed synthetic-neutral test profile;
 > it never reuses the description presence-mask grammar by assumption. See
 > [runtime delta values](GOLDSRC_RUNTIME_DELTA_VALUES.md).
+>
+> M4.6.2 additionally validates the exact 15-field `usercmd_t` description
+> through one explicit schema-binding table. Only its sealed synthetic
+> usercmd codec is executable; stock usercmd runtime grammar remains pending
+> with zero accepted stock usercmd runs and zero verified move packets. See
+> [GoldSrc usercmd](GOLDSRC_USERCMD.md).
 
 M2.4.3 extends the exact retained M2.4.2 service payload from its opcode-14
 cursor through the complete delta-description sequence. The implementation is
@@ -138,6 +144,14 @@ schema and duplicate schemas within one registry are rejected transactionally.
 The registry provides exact linear lookup because preserving wire order is the
 primary contract; no unordered container is the source of truth.
 
+The `usercmd_t` row is consumed by M4.6.2 only through
+`GoldSrcUserCmdSchemaBindingEntry`: all 15 names, order, base types, signed
+modifiers, storage sizes, significant bits, multipliers, description offsets,
+and presence masks must match before the synthetic codec can run. Description
+offsets remain metadata and are never treated as C/C++ object offsets. This
+binding does not establish a stock client-move mask, scalar formula, envelope,
+checksum, cadence, or server acceptance.
+
 ## Typed parser and registry
 
 `DeltaDescriptionParser::parse()` consumes exactly one opcode-14 message and
@@ -249,7 +263,9 @@ project-client-to-stock-server claim.
   only by the later M3.1.1 continuation);
 - opcode-43 body semantics, resource count/entries, consistency data, resource
   response, precache, or download behavior;
-- runtime use of the registry for entity/clientdata/usercmd/snapshot decoding;
+- stock runtime use of the registry for entity/clientdata/usercmd/snapshot
+  decoding; M4.5.1's generic and M4.6.2's usercmd-specific synthetic profiles
+  do not close that evidence gap;
 - live project-client-to-stock-HLDS sign-on, pending a production Steam
   authentication provider;
 - independent stock duplicate-batch and truncated-fragment delta projections;

@@ -525,6 +525,28 @@ without mutation, pending B while A crosses the wrap, promotion of B at sequence
 2 with the opposite generation, and B's final clear. The exact half-range
 remains fail-closed as ambiguous.
 
+### Sequence-bound unreliable usercmd context
+
+M4.6.2 adds a move-only `NetchanOutgoingContextPlan` for a caller that must
+encode an unreliable suffix against the driver's exact next outgoing sequence.
+The receipt also binds the current reliable decision, fragment/sequence flags,
+driver revision, and remaining suffix capacity. `commit_unreliable()` accepts
+only the matching unconsumed plan from the same retained driver; stale,
+foreign, header-mismatched, or over-capacity contexts fail without advancing
+session or usercmd history state.
+
+Once accepted, the same `NetchanDriver` and already-bound socket own the suffix
+and attempt that contextual send before another receive can change reliable
+composition. The usercmd bytes remain one-shot unreliable data; a later packet
+may contain newly encoded backup commands, but the bytes are never retained or
+queued as a reliable workaround. This is an executable synthetic transmission
+contract only. Stock client-move opcode, envelope, checksum, reliable-prefix
+coexistence, and server acceptance remain evidence-pending with zero accepted
+stock usercmd runs and zero verified move packets. See the
+[GoldSrc usercmd checksum](GOLDSRC_USERCMD_CHECKSUM.md),
+[client-move message](GOLDSRC_CLIENT_MOVE_MESSAGE.md), and
+[usercmd transmission lifecycle](GOLDSRC_USERCMD_TRANSMISSION.md).
+
 ## Layering and opaque runtime boundary
 
 The M2.3.3 layering is:
@@ -626,6 +648,8 @@ The following remain **pending** in this profile:
 - acknowledgement bit 30;
 - split/special packet decoding and public protocol extensions;
 - stock isolation of reliable-prefix/unreliable-suffix ordering;
+- stock client-move use of that suffix, including exact sequence/checksum and
+  simultaneous reliable-prefix behavior;
 - stock behavior for a matching-generation ACK between first and latest send;
 - stock behavior for an already-accepted identical reliable body under a newer
   packet sequence;

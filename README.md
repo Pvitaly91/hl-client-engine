@@ -51,9 +51,19 @@ repeated grammar, coherent map differentials, and exact list endpoints. Live
 `hlclient` to stock HLDS, slot-1/file semantics, general `svc_*` parsing, a
 Steam authentication provider, custom-resource list bodies, live-stock
 readiness/precache interoperability validation, resource downloads/cache,
-snapshots, gameplay, and a public
+stock runtime snapshots/gameplay, and a public
 raw payload/command CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
+
+M4.6.2 adds a separate bounded usercmd boundary: immutable fixed-width command
+state, an exact 15-field descriptor binding, duration/scheduling/history/backup
+planning, and a synthetic delta/envelope/checksum transmitted as an unreliable
+suffix through a sequence-bound context on the same retained driver/socket.
+Only project-owned synthetic profiles are executable. The clean-room stock
+usercmd corpus remains at zero accepted runs and zero verified move packets, so
+stock opcode, envelope, checksum, cadence, input mapping, runtime readiness,
+and server acceptance fail closed. No prediction, collision, command replay,
+or reconciliation is implemented.
 
 ## Reference platform
 
@@ -94,6 +104,16 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DHLCLIENT_WARNINGS_AS_E
 cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
+
+The synthetic usercmd checker is an additional Win32 target:
+
+```powershell
+cmake --build build --config Debug --target hlclient_usercmd_check
+.\build\bin\Debug\hlclient_usercmd_check.exe --profile synthetic --scenario batch
+```
+
+It performs a typed bounded encode/decode round trip without opening a socket;
+it is not a stock interoperability check.
 
 The generated solution is:
 
@@ -961,6 +981,8 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
   `hlclient_hash_md5`, `hlclient_local_resources`;
 - `hlclient_network`, `hlclient_goldsrc`, `hlclient_goldsrc_netchan`,
   `hlclient_goldsrc_signon`, `hlclient_goldsrc_client`,
+  `hlclient_goldsrc_usercmd_api`, `hlclient_goldsrc_usercmd_codec`,
+  `hlclient_goldsrc_usercmd_session`,
   `hlclient_goldsrc_local_resources`, `hlclient_resource_consistency_api`,
   `hlclient_resource_consistency_local`, `hlclient_auth`,
   `hlclient_app_support`, `hlclient_client`;
@@ -983,7 +1005,8 @@ CMake groups the Visual Studio projects into `Apps`, `Engine`, `Tests`,
 - `hlclient_renderer_api`, `hlclient_renderer_opengl`,
   `hlclient_renderer_null`;
 - `hlclient_local_resource_check`, `hlclient_world_texture_check`, and
-  `hlclient_goldsrc_asset_check` (network-free read-only diagnostics), plus
+  `hlclient_goldsrc_asset_check` (network-free read-only diagnostics),
+  `hlclient_usercmd_check` (offline synthetic codec checker), plus
   `hlclient_world_viewer` (network-free read-only OpenGL preview);
 - `hlclient_tests`;
 - SDL3, bzip2, Catch2, GLAD2, and the Half-Life SDK reference target under
@@ -999,6 +1022,11 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc initial sign-on](docs/GOLDSRC_INITIAL_SIGNON.md),
 [GoldSrc server info](docs/GOLDSRC_SERVERINFO.md),
 [GoldSrc delta descriptions](docs/GOLDSRC_DELTA_DESCRIPTIONS.md),
+[GoldSrc usercmd](docs/GOLDSRC_USERCMD.md),
+[GoldSrc usercmd delta](docs/GOLDSRC_USERCMD_DELTA.md),
+[GoldSrc client-move message](docs/GOLDSRC_CLIENT_MOVE_MESSAGE.md),
+[GoldSrc usercmd checksum](docs/GOLDSRC_USERCMD_CHECKSUM.md),
+[GoldSrc usercmd transmission](docs/GOLDSRC_USERCMD_TRANSMISSION.md),
 [GoldSrc movement environment](docs/GOLDSRC_MOVEVARS.md),
 [GoldSrc user info](docs/GOLDSRC_USERINFO.md),
 [GoldSrc resource transition](docs/GOLDSRC_RESOURCE_TRANSITION.md),
@@ -1183,6 +1211,16 @@ no GoldSrc `usercmd`, stock input mapping, prediction, collision, gameplay
 simulation, or network transmission. See [input architecture](docs/INPUT_ARCHITECTURE.md),
 [gameplay input intent](docs/GAMEPLAY_INPUT_INTENT.md), and
 [first-person camera](docs/FIRST_PERSON_CAMERA.md).
+
+M4.6.2 adds project-owned synthetic usercmd state, exact schema binding,
+duration quantization, delta/envelope/checksum codecs, fixed-step scheduling,
+bounded transactional history/packet planning, and sequence-bound unreliable
+submission through the retained Netchan driver. Deterministic tests cover the
+codec and fake-peer lifecycle; the offline checker covers six named scenarios.
+Stock exact wire/runtime behavior remains evidence-pending at zero accepted
+runs and zero verified move packets, and the production boundary sends zero
+usercmd packets. See [GoldSrc usercmd](docs/GOLDSRC_USERCMD.md) and
+[GoldSrc usercmd transmission](docs/GOLDSRC_USERCMD_TRANSMISSION.md).
 
 ## License
 

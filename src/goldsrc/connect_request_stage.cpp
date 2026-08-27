@@ -855,6 +855,7 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::resource_list_boundary ||
                 stop_point_ == HandshakeStopPoint::resource_list ||
                 stop_point_ == HandshakeStopPoint::resource_response_boundary ||
+                stop_point_ == HandshakeStopPoint::usercmd_boundary ||
                 stop_point_ == HandshakeStopPoint::server_baselines ||
                 stop_point_ == HandshakeStopPoint::entity_snapshot ||
                 stop_point_ == HandshakeStopPoint::precache_manifest ||
@@ -945,20 +946,24 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                     std::move(resource_transition_trace_callback),
                     std::move(resource_list_trace_callback));
             }
-            if (stop_point_ == HandshakeStopPoint::resource_response_boundary) {
-                resource_client_response_stage_.emplace(
-                    transport,
-                    remote_endpoint,
-                    std::move(resource_response_config),
-                    resource_consistency_provider,
-                    std::move(signon_trace_callback),
-                    std::move(pre_resource_trace_callback),
-                    std::move(delta_trace_callback),
-                    std::move(movement_environment_trace_callback),
-                    std::move(user_info_trace_callback),
-                    std::move(resource_transition_trace_callback),
-                    std::move(resource_list_trace_callback),
-                    std::move(resource_response_trace_callback));
+            if (stop_point_ == HandshakeStopPoint::resource_response_boundary ||
+                stop_point_ == HandshakeStopPoint::usercmd_boundary) {
+                resource_client_response_stage_.reset(
+                    new ResourceClientResponseStage(
+                        transport,
+                        remote_endpoint,
+                        std::move(resource_response_config),
+                        resource_consistency_provider,
+                        std::move(signon_trace_callback),
+                        std::move(pre_resource_trace_callback),
+                        std::move(delta_trace_callback),
+                        std::move(movement_environment_trace_callback),
+                        std::move(user_info_trace_callback),
+                        std::move(resource_transition_trace_callback),
+                        std::move(resource_list_trace_callback),
+                        std::move(resource_response_trace_callback),
+                        stop_point_ == HandshakeStopPoint::usercmd_boundary,
+                        false));
             }
             if (stop_point_ == HandshakeStopPoint::server_baselines ||
                 stop_point_ == HandshakeStopPoint::entity_snapshot) {
@@ -1597,6 +1602,18 @@ GoldSrcHandshakeCoordinator::resource_client_response_error() const noexcept
                ? resource_client_response_stage_->error()
                : empty;
 }
+
+NetchanDriver*
+GoldSrcHandshakeCoordinator::retained_usercmd_driver() noexcept
+{
+    if (stop_point_ != HandshakeStopPoint::usercmd_boundary ||
+        state_ != GoldSrcHandshakeState::resource_response_boundary_reached ||
+        !resource_client_response_stage_) {
+        return nullptr;
+    }
+    return resource_client_response_stage_->retained_driver();
+}
+
 const std::optional<PostResourceSignonState>&
 GoldSrcHandshakeCoordinator::post_resource_result() const noexcept
 {
@@ -1802,6 +1819,7 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::resource_list_boundary &&
          stop_point_ != HandshakeStopPoint::resource_list &&
          stop_point_ != HandshakeStopPoint::resource_response_boundary &&
+         stop_point_ != HandshakeStopPoint::usercmd_boundary &&
          stop_point_ != HandshakeStopPoint::server_baselines &&
          stop_point_ != HandshakeStopPoint::entity_snapshot &&
          stop_point_ != HandshakeStopPoint::precache_manifest &&
@@ -1844,6 +1862,7 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
           stop_point_ != HandshakeStopPoint::resource_list_boundary &&
           stop_point_ != HandshakeStopPoint::resource_list &&
           stop_point_ != HandshakeStopPoint::resource_response_boundary &&
+          stop_point_ != HandshakeStopPoint::usercmd_boundary &&
           stop_point_ != HandshakeStopPoint::server_baselines &&
           stop_point_ != HandshakeStopPoint::entity_snapshot &&
            stop_point_ != HandshakeStopPoint::precache_manifest &&
@@ -1866,7 +1885,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
          !resource_transition_stage_) ||
          (stop_point_ == HandshakeStopPoint::resource_list &&
           !resource_list_stage_) ||
-         (stop_point_ == HandshakeStopPoint::resource_response_boundary &&
+         ((stop_point_ == HandshakeStopPoint::resource_response_boundary ||
+           stop_point_ == HandshakeStopPoint::usercmd_boundary) &&
           !resource_client_response_stage_) ||
          ((stop_point_ == HandshakeStopPoint::server_baselines ||
            stop_point_ == HandshakeStopPoint::entity_snapshot) &&
@@ -1975,7 +1995,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         }
         return;
     }
-    if (stop_point_ == HandshakeStopPoint::resource_response_boundary) {
+    if (stop_point_ == HandshakeStopPoint::resource_response_boundary ||
+        stop_point_ == HandshakeStopPoint::usercmd_boundary) {
         const bool resource_response_started =
             resource_client_response_stage_->start(
                 now,

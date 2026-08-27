@@ -2,7 +2,6 @@
 
 #include <hlclient/assets/asset_types.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
-#include <hlclient/renderer/render_scene.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -282,16 +281,6 @@ struct GameplayCameraUpdateResult {
     }
 };
 
-struct RenderCameraBuildResult {
-    std::optional<renderer::RenderCamera> camera;
-    std::optional<GameplayCameraError> error;
-
-    [[nodiscard]] explicit operator bool() const noexcept
-    {
-        return camera.has_value();
-    }
-};
-
 // All directions use source-native, right-handed Z-up coordinates. Yaw zero
 // faces +X, positive yaw rotates toward +Y and positive pitch looks upward.
 [[nodiscard]] std::optional<double> normalize_yaw_degrees(
@@ -308,9 +297,6 @@ struct RenderCameraBuildResult {
     double yaw_degrees) noexcept;
 [[nodiscard]] std::optional<assets::AssetVector3> right_from_yaw(
     double yaw_degrees) noexcept;
-[[nodiscard]] RenderCameraBuildResult build_render_camera(
-    const GameplayCameraState& state) noexcept;
-
 class LocalFreeFlightCameraController final {
 public:
     [[nodiscard]] GameplayCameraUpdateResult update(

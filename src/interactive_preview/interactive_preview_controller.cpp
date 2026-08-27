@@ -1,5 +1,7 @@
 #include <hlclient/interactive_preview/interactive_preview_controller.hpp>
 
+#include <hlclient/gameplay_camera/render_camera_adapter.hpp>
+
 #include <hlclient/entity_render/entity_scene_render.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
 #include <hlclient/gameplay_input/gameplay_input_limits.hpp>

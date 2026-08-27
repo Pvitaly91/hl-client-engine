@@ -147,8 +147,12 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_local_resources` | explicit validated local environment/search roots, byte-exact virtual names, path-safe locators, exact-root verified reopen, Win32 read-only handle sandbox, final-handle containment, stable equality-only identity, bounded resolution and streaming inspection | sockets, server messages, downloads, cache/assets, renderer |
 | `hlclient_resource_consistency_api` | path-free bounded provider requirements, move-only asynchronous operation/session/material ownership, cancellation, and private opaque-material handoff | filesystem/path policy, local lookup, checksum calculation, sockets, GoldSrc list types, assets, renderer |
 | `hlclient_resource_consistency_local` | pre-network preparation of the fixed `tempdecal.wad` compatibility target and one-shot nonblocking provider operation | server-derived paths, response codec/layout, network creation, writes, downloads, cache, assets |
+| `hlclient_goldsrc_delta_schema` | socket-free LSB bit reader, delta descriptor parser, immutable schema metadata, and bounded schema registry | Netchan/session state, sign-on stages, sockets, resources, filesystem, renderer |
 | `hlclient_goldsrc_signon` | exact fixed initial/transition requests, strict `BZ2\0` decoding, owning immutable sign-on/list/response states, historical neutral opcode-43 and zero-TX resource-list stop, exact standard list and neutral 41-byte opcode-5 codecs, carrier/tail separation, provider-required response stage, same-driver semantic-once lifecycle, and next-payload opcode boundary | arbitrary commands, custom/player-resource bodies, production consistency material, resource resolution, runtime application, command execution, filesystem, renderer, SDL, assets, world state |
 | `hlclient_goldsrc_delta_values` | immutable schema-aligned generic values, bounded transactional synthetic-neutral runtime-mask/scalar mechanics, and fail-before-read stock evidence boundary | schema reparsing, native/HLSDK struct writes, stock mask claims, wall clock, filesystem, assets, renderer |
+| `hlclient_goldsrc_usercmd_api` | immutable fixed-width usercmd semantic state, validated compatibility/input/schema profiles, bounded limits, project-local command identity, and pure duration quantization | delta schema parsing, wire bytes, sockets, input polling, renderer, prediction/collision |
+| `hlclient_goldsrc_usercmd_codec` | exact 15-field descriptor binding plus synthetic-only bit writer, delta codec, client-move envelope, and sequence-aware checksum | stock wire/runtime claims, native `usercmd_t` layout, history/scheduling, input mapping, sockets, filesystem, SDL/rendering |
+| `hlclient_goldsrc_usercmd_session` | synthetic input/camera adaptation, fixed-step scheduling, bounded history/backup planning, and transactional same-driver unreliable transmission through a sequence-bound context | caller sequence overrides, second sockets/sessions, reliable usercmd workaround, stock compatibility claims, prediction/collision/reconciliation |
 | `hlclient_goldsrc_entity_snapshots` | immutable generic baseline/full/delta/history state, explicit add/remove and exact-base mechanics, strict ordering, bounded retention, and sealed synthetic-neutral builders | stock entity wire/opcode claims, clientdata prediction, model binding, filesystem, renderer |
 | `hlclient_goldsrc_post_resource_signon` | exact unconsumed post-response cursor, bounded metadata transcript, typed request evidence gate, private same-driver/source-payload continuation, and a sealed four-control-fixture synthetic stage that publishes typed baseline/full/delta state for fake-HLDS tests | arbitrary commands/raw injection, stock request invention, stock entity-body decoding without evidence, opcode scanning, stufftext execution, assets, entity rendering |
 | `hlclient_goldsrc_local_resources` | evidence-gated resource-type/name classification and ordered metadata-only `LocalResourceInventoryState` adapter | sign-on transport, readiness/precache decisions, downloads/cache, file contents, asset loading |
@@ -183,7 +187,8 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_app_support` | explicit user-file auth adapter, bounded local-file loading, and metadata-manifest CLI exit policy | discovery, caching, Steam integration, fallback search, protocol parsing |
 | `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/sign-on/resource composition, selected manifest/asset/world-texture/render-package/spatial-scene continuations, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, native path/handle policy, runtime application, OpenGL, SDL, render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
-| `hlclient_gameplay_camera` | immutable Z-up local free-flight/entity-attached camera state, bounded controller updates, and neutral render-camera conversion | SDL, collision/physics/prediction, stock view-angle claims, network |
+| `hlclient_gameplay_camera` | immutable Z-up local free-flight/entity-attached camera state and bounded renderer-independent controller updates | SDL, renderer types, collision/physics/prediction, stock view-angle claims, network |
+| `hlclient_gameplay_camera_render_adapter` | narrow validated conversion from neutral gameplay camera state to `RenderCamera` | input polling, gameplay control, network, renderer mutation/GPU work |
 | `hlclient_interactive_preview` | input-intent/camera coordination, explicit synthetic entity anchoring, camera-dependent entity visibility refiltering, and transactional `ClientWorldState` publication | SDL polling, asset loading, renderer/GPU mutation, network |
 | `hlclient_asset_api` | owning asset sources, neutral CPU geometry/textures/bindings, typed importer and registry contracts | filesystem I/O, SDL, OpenGL, sockets, SDK types |
 | `hlclient_asset_manager` | virtual-file reads and dispatch through typed registries | format parsing, renderer resources, caches |
@@ -195,6 +200,7 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_bsp_compat_check` | network-free, read-only production BSP geometry/texture/render-package/spatial-scene validation with bounded aggregate compatibility diagnostics | network, SDL/OpenGL, writes, native-path or raw-asset output, gameplay |
 | `hlclient_world_texture_check` | network-free, read-only BSP/WAD texture composition for one explicit safe virtual map | stock process launch, writes, downloads/cache, renderer/GPU work, native-path or asset-byte output |
 | `hlclient_goldsrc_asset_check` | network-free, read-only canonical Studio/SPR composition for one safe virtual asset with bounded aggregate diagnostics | network/stage libraries, writes, native-path or raw-asset output, rendering/entity behavior |
+| `hlclient_usercmd_check` | deterministic offline construction, encode/decode, and summary of named synthetic usercmd scenarios | stock evidence claims, sockets/server contact, arbitrary raw fields, runtime stage mutation |
 | `hlclient_world_viewer` | network-free, read-only BSP/WAD/lightmap/spatial/scene composition and configurable local diagnostic OpenGL preview, including free-fly input, for one safe virtual map | stock/network process launch, writes, downloads/cache, native map-path input, runtime gameplay simulation |
 | `hlclient_entity_viewer` | network-free, read-only mixed Studio/Sprite playback with historical cameras or a local synthetic entity-first-person camera | live snapshots, stock player semantics, commands, writes, network control |
 | `hlclient` | composition root and frame loop | reusable subsystem implementation |
@@ -805,9 +811,17 @@ order:
     the configured terminal challenge/connect-request/connect-response/
     netchan-bootstrap/signon-boundary/pre-resource/delta-schemas/movevars/
     user-info/resource-list-boundary/resource-list/resource-response-boundary/
-    precache-manifest outcome, let driver terminal cleanup release its optional
-    lifetime exactly once, then shut down renderer resources before their
-    platform dependencies.
+    precache-manifest/usercmd-boundary outcome, let driver terminal cleanup
+    release its optional lifetime exactly once, then shut down renderer
+    resources before their platform dependencies.
+
+The production `usercmd-boundary` diagnostic follows the existing required
+local-resource/authentication path only as far as the fail-closed stock
+post-resource evidence boundary. It reports zero sampled commands, zero
+history entries, and zero transmitted usercmd packets, then exits nonzero; it
+does not construct a synthetic message for a production endpoint. Synthetic
+codec/stage operation is exercised by project-owned checker/fake-peer tests and
+is not exposed by the production composition root.
 
 The standalone viewer is a separate composition root: it begins with one safe
 virtual map under an explicit user-owned local environment, validates all CPU
@@ -867,7 +881,27 @@ contains the private native translator; `hlclient_gameplay_input` has no
 network dependency; `hlclient_gameplay_camera` uses only neutral camera math;
 and `hlclient_interactive_preview` is the sole camera/publication coordinator.
 No input type crosses `RenderScene`, and no renderer polls SDL. The profiles
-are project-owned; stock input and `usercmd` mapping remain pending M4.6.2.
+are project-owned; stock input and `usercmd` mapping remain evidence-pending.
+
+M4.6.2 adds a separate synthetic-only path without changing the renderer
+contract:
+
+```text
+GameplayInputIntent + immutable first-person camera
+    -> input adapter -> fixed-step scheduler -> bounded history/planner
+    -> exact 15-field binding -> delta/envelope/checksum
+    -> sequence-bound Netchan context -> same driver/socket unreliable suffix
+```
+
+The codec targets see only the narrow socket-free delta-schema API and do not
+see sign-on stages, SDL, filesystem, renderer implementations, or a socket.
+The session target receives the existing neutral intent/camera values and
+retained driver explicitly; render conversion lives in a separate adapter
+target. Every stock usercmd profile fails before usercmd encoding/submission:
+accepted stock runs and verified move packets are both zero.
+No collision, movement prediction, acknowledged-command replay, or server
+reconciliation is part of M4.6.2. See [GoldSrc usercmd](GOLDSRC_USERCMD.md) and
+the [usercmd transmission lifecycle](GOLDSRC_USERCMD_TRANSMISSION.md).
 
 ## Module and plugin policy
 

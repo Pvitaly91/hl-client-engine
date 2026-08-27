@@ -12,6 +12,9 @@
 #include "../src/goldsrc/precache_asset_dispatch_stage_test_access.hpp"
 
 #include <hlclient/auth/authentication_provider.hpp>
+#include <hlclient/gameplay_camera/first_person_camera.hpp>
+#include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
+#include <hlclient/gameplay_input/gameplay_input_intent.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
 #include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
 #include <hlclient/goldsrc/challenge_protocol.hpp>
@@ -20,6 +23,9 @@
 #include <hlclient/goldsrc/local_resource_mapping.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
 #include <hlclient/goldsrc/netchan_payload_transform.hpp>
+#include <hlclient/goldsrc/usercmd_schema_binding.hpp>
+#include <hlclient/goldsrc/usercmd_transmission_stage.hpp>
+#include <hlclient/input/input_state_tracker.hpp>
 #include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_runtime.hpp>
 #include <hlclient/network/udp_socket.hpp>
@@ -69,9 +75,12 @@ using namespace std::chrono_literals;
 namespace assets = hlclient::assets;
 namespace auth = hlclient::auth;
 namespace bsp = hlclient::goldsrc::bsp;
+namespace camera = hlclient::gameplay_camera;
 namespace consistency = hlclient::resource_consistency;
 namespace delta_fixture = hlclient::test::delta_fixture;
 namespace goldsrc = hlclient::goldsrc;
+namespace gameplay = hlclient::gameplay_input;
+namespace input = hlclient::input;
 namespace move_fixture = hlclient::test::move_vars_fixture;
 namespace network = hlclient::network;
 namespace resource_fixture = resource_list_test_fixture;
@@ -434,6 +443,183 @@ resource_client_response_config()
     config.maximum_driver_events_per_update = 64U;
     config.response.maximum_response_stage_events = 64U;
     return config;
+}
+
+[[nodiscard]] goldsrc::GoldSrcUserCmdSchemaBinding usercmd_binding()
+{
+    auto registry = goldsrc::make_synthetic_usercmd_schema_registry();
+    REQUIRE(registry);
+    auto result = goldsrc::bind_goldsrc_usercmd_schema(*registry.registry);
+    REQUIRE(result);
+    return std::move(*result.binding);
+}
+
+[[nodiscard]] gameplay::GameplayInputIntent forward_usercmd_intent()
+{
+    input::InputStateTracker tracker;
+    tracker.begin_frame();
+    tracker.apply_event(input::InputEvent::focus_gained());
+    tracker.apply_event(
+        input::InputEvent::key_pressed(input::PhysicalKey::w));
+    const auto snapshot = tracker.publish_snapshot();
+    tracker.end_frame();
+    auto bindings = gameplay::GameplayInputBindings::project_default_v1();
+    REQUIRE(bindings);
+    auto built = gameplay::GameplayInputIntentBuilder{}.build(
+        snapshot,
+        *bindings.bindings,
+        gameplay::MouseLookConfig{},
+        0.01);
+    REQUIRE(built);
+    return std::move(*built.intent);
+}
+
+[[nodiscard]] camera::GameplayCameraState usercmd_camera()
+{
+    camera::GameplayCameraStateCreateInfo info;
+    info.yaw_degrees = 45.0;
+    info.pitch_degrees = -10.0;
+    auto result = camera::GameplayCameraState::create(info);
+    REQUIRE(result);
+    return std::move(*result.state);
+}
+
+inline constexpr std::array<std::uint8_t, 15U>
+    kIndependentUserCmdFieldWidths{
+        9U, 8U, 16U, 16U, 16U, 12U, 8U, 12U,
+        12U, 8U, 16U, 6U, 16U, 16U, 16U};
+
+struct IndependentlyDecodedSingleUserCmdMove {
+    std::uint8_t loss_metadata{0U};
+    std::size_t backup_count{0U};
+    std::size_t new_count{0U};
+    std::uint16_t delta_bits{0U};
+    std::size_t bytes_consumed{0U};
+    std::vector<std::size_t> changed_field_order;
+    std::array<std::uint32_t, 15U> raw_fields{};
+};
+
+[[nodiscard]] std::optional<std::uint32_t> read_usercmd_lsb_bits_independently(
+    const std::span<const std::byte> bytes,
+    std::size_t& bit_offset,
+    const std::size_t bit_limit,
+    const std::uint8_t width)
+{
+    if (width > 32U || bit_offset > bit_limit ||
+        width > bit_limit - bit_offset || bit_limit > bytes.size() * 8U) {
+        return std::nullopt;
+    }
+    std::uint32_t value = 0U;
+    for (std::uint8_t bit = 0U; bit < width; ++bit) {
+        const auto absolute = bit_offset + bit;
+        const auto source =
+            std::to_integer<std::uint8_t>(bytes[absolute / 8U]);
+        value |= static_cast<std::uint32_t>(
+                     (source >> (absolute & 7U)) & 1U)
+                 << bit;
+    }
+    bit_offset += width;
+    return value;
+}
+
+[[nodiscard]] std::uint8_t update_usercmd_crc8_independently(
+    std::uint8_t crc,
+    const std::uint8_t value) noexcept
+{
+    crc ^= value;
+    for (std::size_t bit = 0U; bit < 8U; ++bit) {
+        crc = (crc & 0x80U) != 0U
+            ? static_cast<std::uint8_t>((crc << 1U) ^ 0x07U)
+            : static_cast<std::uint8_t>(crc << 1U);
+    }
+    return crc;
+}
+
+[[nodiscard]] std::uint8_t usercmd_checksum_independently(
+    const std::uint32_t outgoing_sequence,
+    const std::span<const std::byte> checksum_body) noexcept
+{
+    auto crc = std::uint8_t{0xa7U};
+    for (std::size_t byte = 0U; byte < 4U; ++byte) {
+        crc = update_usercmd_crc8_independently(
+            crc,
+            static_cast<std::uint8_t>(outgoing_sequence >> (byte * 8U)));
+    }
+    for (const auto value : checksum_body) {
+        crc = update_usercmd_crc8_independently(
+            crc, std::to_integer<std::uint8_t>(value));
+    }
+    // The synthetic profile commits the zero bit-remainder byte explicitly.
+    return update_usercmd_crc8_independently(crc, 0U);
+}
+
+[[nodiscard]] IndependentlyDecodedSingleUserCmdMove
+decode_single_usercmd_move_independently(
+    const std::span<const std::byte> payload,
+    const std::uint32_t outgoing_sequence)
+{
+    REQUIRE(payload.size() >= 6U);
+    REQUIRE(std::to_integer<std::uint8_t>(payload[0U]) == 0xe1U);
+    CHECK(std::to_integer<std::uint8_t>(payload[1U]) ==
+          usercmd_checksum_independently(
+              outgoing_sequence, payload.subspan(2U)));
+
+    IndependentlyDecodedSingleUserCmdMove result;
+    result.loss_metadata = std::to_integer<std::uint8_t>(payload[2U]);
+    const auto count_byte = std::to_integer<std::uint8_t>(payload[3U]);
+    result.backup_count = count_byte & 0x0fU;
+    result.new_count = count_byte >> 4U;
+    REQUIRE(result.backup_count + result.new_count == 1U);
+
+    result.delta_bits = static_cast<std::uint16_t>(
+        std::to_integer<std::uint8_t>(payload[4U])) |
+        static_cast<std::uint16_t>(
+            std::to_integer<std::uint8_t>(payload[5U]) << 8U);
+    REQUIRE(result.delta_bits != 0U);
+    const auto delta_bytes =
+        (static_cast<std::size_t>(result.delta_bits) + 7U) / 8U;
+    REQUIRE(payload.size() == 6U + delta_bytes);
+    const auto delta = payload.subspan(6U, delta_bytes);
+    auto bit_offset = std::size_t{0U};
+    const auto mask_byte_count = read_usercmd_lsb_bits_independently(
+        delta, bit_offset, result.delta_bits, 8U);
+    REQUIRE(mask_byte_count);
+    REQUIRE(*mask_byte_count <= 2U);
+    std::array<std::uint8_t, 2U> mask{};
+    for (std::size_t index = 0U; index < *mask_byte_count; ++index) {
+        const auto mask_byte = read_usercmd_lsb_bits_independently(
+            delta, bit_offset, result.delta_bits, 8U);
+        REQUIRE(mask_byte);
+        mask[index] = static_cast<std::uint8_t>(*mask_byte);
+    }
+    if (*mask_byte_count != 0U) {
+        REQUIRE(mask[*mask_byte_count - 1U] != 0U);
+    }
+    REQUIRE((mask[1U] & 0x80U) == 0U);
+
+    for (std::size_t field = 0U; field < result.raw_fields.size(); ++field) {
+        if ((mask[field / 8U] &
+             (std::uint8_t{1U} << (field & 7U))) == 0U) {
+            continue;
+        }
+        const auto raw = read_usercmd_lsb_bits_independently(
+            delta,
+            bit_offset,
+            result.delta_bits,
+            kIndependentUserCmdFieldWidths[field]);
+        REQUIRE(raw);
+        result.raw_fields[field] = *raw;
+        result.changed_field_order.push_back(field);
+    }
+    while ((bit_offset & 7U) != 0U) {
+        const auto padding = read_usercmd_lsb_bits_independently(
+            delta, bit_offset, result.delta_bits, 1U);
+        REQUIRE(padding);
+        REQUIRE(*padding == 0U);
+    }
+    REQUIRE(bit_offset == result.delta_bits);
+    result.bytes_consumed = payload.size();
+    return result;
 }
 
 [[nodiscard]] std::vector<std::vector<std::byte>> delta_schemas()
@@ -2271,7 +2457,8 @@ void run_resource_response_with_provider(
     consistency::IResourceConsistencyProvider& provider,
     const std::span<const std::byte, 41U> expected_response,
     const std::uint32_t expected_byte_count,
-    IntegrationResourceConsistencyProvider* synthetic_provider)
+    IntegrationResourceConsistencyProvider* synthetic_provider,
+    const bool continue_with_synthetic_usercmd = false)
 {
     INFO("fake-HLDS resource-response run " << run + 1U);
     network::NetworkRuntime runtime;
@@ -2296,7 +2483,9 @@ void run_resource_response_with_provider(
     goldsrc::GoldSrcHandshakeCoordinator handshake{
         transport,
         *server_endpoint,
-        goldsrc::HandshakeStopPoint::resource_response_boundary,
+        continue_with_synthetic_usercmd
+            ? goldsrc::HandshakeStopPoint::usercmd_boundary
+            : goldsrc::HandshakeStopPoint::resource_response_boundary,
         std::move(prepared.request),
         challenge_config(),
         {},
@@ -2641,6 +2830,63 @@ void run_resource_response_with_provider(
     CHECK(traces.responses_transmitted == 1U);
     CHECK(traces.responses_acknowledged == 1U);
     CHECK(traces.response_boundaries == 1U);
+
+    if (continue_with_synthetic_usercmd) {
+        CHECK(authentication_releases == 0U);
+        auto* const retained_driver = handshake.retained_usercmd_driver();
+        REQUIRE(retained_driver != nullptr);
+        CHECK(retained_driver->state() == goldsrc::NetchanDriverState::active);
+        CHECK(retained_driver->remote_endpoint() == *server_endpoint);
+        REQUIRE(retained_driver->local_endpoint());
+        CHECK(*retained_driver->local_endpoint() == started.client_endpoint);
+
+        const auto schema_binding = usercmd_binding();
+        goldsrc::GoldSrcUserCmdTransmissionStage usercmd_stage{
+            *retained_driver,
+            schema_binding,
+            {goldsrc::GoldSrcUserCmdSessionPrerequisiteProfile::
+                 synthetic_runtime_ready_v1,
+                true}};
+        const auto intent = forward_usercmd_intent();
+        const auto camera_state = usercmd_camera();
+        REQUIRE(usercmd_stage.update(now + 2ms, intent, camera_state));
+        REQUIRE(usercmd_stage.update(now + 12ms, intent, camera_state));
+        CHECK(usercmd_stage.sampled_command_count() == 1U);
+        CHECK(usercmd_stage.transmitted_packet_count() == 1U);
+        const auto usercmd_history = usercmd_stage.history();
+        REQUIRE(usercmd_history.size() == 1U);
+        REQUIRE(usercmd_history.entries()[0U].command);
+        CHECK(usercmd_history.entries()[0U].command->forward_move() == 400.0F);
+        CHECK(usercmd_history.entries()[0U].new_transmission_count == 1U);
+
+        const auto move_packet = decode_client_packet(
+            receive_bounded(*server, goldsrc::kMaximumNetchanDatagramSize),
+            started.client_endpoint);
+        CHECK_FALSE(move_packet.header.sequence.flags.reliable);
+        REQUIRE_FALSE(move_packet.payload.empty());
+        const auto decoded_move = decode_single_usercmd_move_independently(
+            move_packet.payload,
+            move_packet.header.sequence.sequence.value());
+        CHECK(decoded_move.bytes_consumed == move_packet.payload.size());
+        CHECK(move_packet.payload.size() == 15U);
+        CHECK(decoded_move.loss_metadata == 0U);
+        CHECK(decoded_move.backup_count == 0U);
+        CHECK(decoded_move.new_count == 1U);
+        CHECK(decoded_move.delta_bits == 72U);
+        CHECK(decoded_move.changed_field_order ==
+              std::vector<std::size_t>{1U, 2U, 3U, 5U});
+        constexpr std::array<std::uint32_t, 15U> expected_raw_fields{
+            0U, 10U, 8'192U, 63'716U, 0U, 400U, 0U, 0U,
+            0U, 0U, 0U, 0U, 0U, 0U, 0U};
+        CHECK(decoded_move.raw_fields == expected_raw_fields);
+
+        usercmd_stage.close(now + 13ms);
+        CHECK(retained_driver->state() == goldsrc::NetchanDriverState::closed);
+        CHECK(retained_driver->cleanup_count() == 1U);
+        CHECK(authentication_releases == 1U);
+    } else {
+        CHECK(handshake.retained_usercmd_driver() == nullptr);
+    }
     if (synthetic_provider != nullptr) {
         CHECK(synthetic_provider->begins == 1U);
         CHECK(synthetic_provider->updates == 1U);
@@ -2648,7 +2894,8 @@ void run_resource_response_with_provider(
         CHECK(synthetic_provider->material_count == 1U);
         CHECK(synthetic_provider->opaque_byte_count == 16U);
         CHECK(synthetic_provider->filesystem_calls == 0U);
-        CHECK(synthetic_provider->lifetime_releases == 1U);
+        CHECK(synthetic_provider->lifetime_releases ==
+              (continue_with_synthetic_usercmd ? 0U : 1U));
     }
     CHECK(authentication_releases == 1U);
     CHECK(handshake.error_context().empty());
@@ -2659,7 +2906,8 @@ void run_resource_response_with_provider(
     handshake.update(now + 100ms);
     handshake.cancel(now + 200ms);
     if (synthetic_provider != nullptr) {
-        CHECK(synthetic_provider->lifetime_releases == 1U);
+        CHECK(synthetic_provider->lifetime_releases ==
+              (continue_with_synthetic_usercmd ? 0U : 1U));
     }
     CHECK(authentication_releases == 1U);
     require_no_datagram(*server);
@@ -6118,6 +6366,23 @@ TEST_CASE("Fake HLDS resource-response baseline repeats 20 of 20",
         run_resource_response(
             run,
             ResourceResponseIntegrationScenario::baseline);
+    }
+}
+
+TEST_CASE("Fake HLDS full coordinator route retains one driver through first usercmd 20 of 20",
+          "[goldsrc][usercmd][udp][full-route][repeat-20]")
+{
+    for (std::size_t run = 0U; run < 20U; ++run) {
+        IntegrationResourceConsistencyProvider provider;
+        run_resource_response_with_provider(
+            run,
+            ResourceResponseIntegrationScenario::baseline,
+            provider,
+            kExactResourceResponse,
+            0x01020304U,
+            &provider,
+            true);
+        CHECK(provider.lifetime_releases == 1U);
     }
 }
 

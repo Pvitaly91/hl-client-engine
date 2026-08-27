@@ -1841,6 +1841,7 @@ TEST_CASE(
         goldsrc::HandshakeStopPoint::resource_list_boundary,
         goldsrc::HandshakeStopPoint::resource_list,
         goldsrc::HandshakeStopPoint::resource_response_boundary,
+        goldsrc::HandshakeStopPoint::usercmd_boundary,
         goldsrc::HandshakeStopPoint::precache_manifest,
     };
 

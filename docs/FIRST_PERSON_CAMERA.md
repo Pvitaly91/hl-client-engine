@@ -41,3 +41,11 @@ The frozen state must already match the active pitch, FOV, and depth-plane
 configuration; a caller that changes configuration without republishing a
 compatible camera receives a typed `invalid_input` result rather than stale
 camera metadata.
+
+M4.6.2 may read the absolute pitch/yaw/roll from this immutable camera only
+through the project-owned `synthetic_explicit_v1` usercmd adapter. That path is
+not stock view-angle evidence: the clean-room usercmd corpus still has zero
+accepted stock runs and zero verified move packets. It also adds no collision,
+movement simulation, prediction, replay, or reconciliation. See
+[GoldSrc usercmd](GOLDSRC_USERCMD.md) and its
+[transmission lifecycle](GOLDSRC_USERCMD_TRANSMISSION.md).

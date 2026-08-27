@@ -3,6 +3,7 @@
 
 #include <hlclient/gameplay_camera/entity_first_person_camera.hpp>
 #include <hlclient/gameplay_camera/first_person_camera.hpp>
+#include <hlclient/gameplay_camera/render_camera_adapter.hpp>
 #include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
 #include <hlclient/input/input_state_tracker.hpp>

@@ -118,6 +118,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::server_baselines;
             } else if (value == "entity-snapshot") {
                 options.stop_after = ConnectionStopPoint::entity_snapshot;
+            } else if (value == "usercmd-boundary") {
+                options.stop_after = ConnectionStopPoint::usercmd_boundary;
             } else if (value == "precache-manifest") {
                 options.stop_after = ConnectionStopPoint::precache_manifest;
             } else if (value == "asset-dispatch") {
@@ -139,7 +141,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                                "delta-schemas, movevars, user-info, or "
                                "resource-list-boundary, resource-list, or "
                                "resource-response-boundary, server-baselines, "
-                               "entity-snapshot, precache-manifest, or "
+                               "entity-snapshot, usercmd-boundary, precache-manifest, or "
                                "asset-dispatch, world-geometry, world-textures, or "
                                "world-render-package, or world-spatial-scene)");
             }
@@ -273,7 +275,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "signon-boundary/pre-resource/delta-schemas/movevars/"
                        "user-info/resource-list-boundary/resource-list/"
                        "resource-response-boundary/server-baselines/"
-                       "entity-snapshot/precache-manifest/"
+                       "entity-snapshot/usercmd-boundary/precache-manifest/"
                        "asset-dispatch/world-geometry/world-textures/"
                        "world-render-package/world-spatial-scene/"
                        "entity-visual-scene stop point or a preview option");
@@ -298,6 +300,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::resource_response_boundary ||
          options.stop_after == ConnectionStopPoint::server_baselines ||
          options.stop_after == ConnectionStopPoint::entity_snapshot ||
+         options.stop_after == ConnectionStopPoint::usercmd_boundary ||
          options.stop_after == ConnectionStopPoint::precache_manifest ||
          options.stop_after == ConnectionStopPoint::asset_dispatch ||
          options.stop_after == ConnectionStopPoint::world_geometry ||
@@ -323,11 +326,12 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             "--resource-consistency-provider local");
     }
     if ((options.stop_after == ConnectionStopPoint::server_baselines ||
-         options.stop_after == ConnectionStopPoint::entity_snapshot) &&
+         options.stop_after == ConnectionStopPoint::entity_snapshot ||
+         options.stop_after == ConnectionStopPoint::usercmd_boundary) &&
         options.resource_consistency_provider !=
             ResourceConsistencyProviderKind::local) {
         return failure(
-            "The server-baselines and entity-snapshot stop points require "
+            "The server-baselines, entity-snapshot, and usercmd-boundary stop points require "
             "--resource-consistency-provider local");
     }
     if (options.stop_after == ConnectionStopPoint::asset_dispatch &&
@@ -392,6 +396,7 @@ bool requires_local_resource_consistency_preparation(
                 ConnectionStopPoint::resource_response_boundary ||
             options.stop_after == ConnectionStopPoint::server_baselines ||
             options.stop_after == ConnectionStopPoint::entity_snapshot ||
+            options.stop_after == ConnectionStopPoint::usercmd_boundary ||
             options.stop_after == ConnectionStopPoint::precache_manifest ||
             options.stop_after == ConnectionStopPoint::asset_dispatch ||
             options.stop_after == ConnectionStopPoint::world_geometry ||
@@ -417,7 +422,7 @@ Options:
                        delta-schemas, movevars, user-info, or
                        resource-list-boundary, resource-list, or
                        resource-response-boundary, server-baselines,
-                       entity-snapshot, precache-manifest, or
+                       entity-snapshot, usercmd-boundary, precache-manifest, or
                        asset-dispatch, world-geometry, world-textures, or
                        world-render-package, world-spatial-scene, or
                        entity-visual-scene
@@ -429,8 +434,8 @@ Options:
   --resource-consistency-provider <name>
                       Explicit read-only response provider: local; requires
                       --basedir and is prepared only for resource-response-boundary,
-                      server-baselines, entity-snapshot, precache-manifest,
-                      asset-dispatch, world-geometry, or
+                      server-baselines, entity-snapshot, usercmd-boundary,
+                      precache-manifest, asset-dispatch, world-geometry, or
                       world-textures, world-render-package, or
                       world-spatial-scene, entity-visual-scene
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
@@ -498,6 +503,11 @@ return a typed evidence-pending outcome. Evidence-ready synthetic playback is
 provided by the network-free entity viewer and project-owned integration
 fixtures; it closes every network owner before local import or rendering.
 No mode implements authentication generation.
+Usercmd-boundary retains the explicit post-resource-response usercmd handoff on
+that same session, reports the exact runtime/checksum evidence-pending status,
+sends zero usercmd packets, and exits nonzero. Synthetic usercmd transmission
+is available only in tests/fake peers and the offline hlclient_usercmd_check
+tool.
 )";
 }
 

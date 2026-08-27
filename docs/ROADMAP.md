@@ -853,11 +853,29 @@ M4.5.2 importers are complete.
 
 ### M4.6.2 — Clean-room GoldSrc usercmd capture, codec and transmission lifecycle
 
-**Status: next; evidence and implementation pending.**
+**Status: completed at the deterministic synthetic codec/transmission boundary;
+stock Protocol 48 usercmd wire and runtime behavior remain evidence-pending.**
+
+The project now has an immutable fixed-width usercmd state and duration
+quantizer; exact 15-field descriptor binding; bounded synthetic delta,
+client-move envelope, and sequence-aware checksum; fixed-step scheduling;
+transactional history/backup planning; and same-driver unreliable submission
+through a sequence-bound Netchan context. The offline checker and fake-peer
+tests exercise idle, movement, look, buttons, batching, loss/backup, reliable
+coexistence, duplicate, and reorder cases. All executable profiles are
+synthetic. The clean-room stock corpus has zero accepted runs and zero verified
+move packets, so stock opcode/envelope/checksum/cadence/input mapping and server
+acceptance fail closed. No prediction, collision, command replay, or
+reconciliation was added. See [GoldSrc usercmd](GOLDSRC_USERCMD.md),
+[usercmd delta](GOLDSRC_USERCMD_DELTA.md),
+[client-move message](GOLDSRC_CLIENT_MOVE_MESSAGE.md),
+[usercmd checksum](GOLDSRC_USERCMD_CHECKSUM.md), and
+[usercmd transmission](GOLDSRC_USERCMD_TRANSMISSION.md).
 
 ### M4.6.3 — Local movement prediction and server reconciliation
 
-**Status: planned after M4.6.2.**
+**Status: next; local prediction, command-history replay, and server
+reconciliation are not implemented.**
 
 M4.7 retains the stock entity-wire/live runtime compatibility work. M3.3
 retains download/cache. Neither is part of M4.6.1.
@@ -866,8 +884,8 @@ retains download/cache. Neither is part of M4.6.1.
 
 The former M5–M8 entity/model/input/interpolation buckets were split into the
 active M4.5.1, M4.5.2, M4.5.3 and M4.6 sequence above. They are not additional
-or competing next milestones. The only next milestone after completed M4.6.1
-is M4.6.2.
+or competing next milestones. The only next milestone after completed M4.6.2
+is M4.6.3.
 
 ## M9 — `client.dll` API and HUD
 
@@ -949,10 +967,12 @@ entity projection/binding, interpolation, Studio/Sprite render packages, and
 OpenGL entity drawing. Stock Protocol 48 visual-field and model-index mapping
 remain evidence-pending. M4.6.1 is complete at the project-owned local input
 and first-person preview boundary: neutral input snapshots, gameplay intent,
-free-flight, and synthetic entity anchoring. M4.6.2 is next and exclusively
-owns clean-room GoldSrc `usercmd` evidence, codec, and transmission lifecycle;
-M4.6.3 owns movement prediction/reconciliation. M4.7 may revisit live stock
-entity-wire/runtime effects evidence.
+free-flight, and synthetic entity anchoring. M4.6.2 is complete at its bounded
+synthetic `usercmd` codec/transmission boundary while stock exact wire/runtime
+behavior remains evidence-pending at zero accepted runs and zero verified move
+packets. M4.6.3 is next and owns local prediction, command-history replay, and
+server reconciliation. M4.7 may revisit live stock entity-wire/runtime effects
+evidence.
 
 Every milestone retains these gates:
 

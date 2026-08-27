@@ -50,6 +50,7 @@ enum class HandshakeStopPoint {
     resource_list_boundary,
     resource_list,
     resource_response_boundary,
+    usercmd_boundary,
     server_baselines,
     entity_snapshot,
     precache_manifest,
@@ -360,6 +361,10 @@ public:
     resource_client_response_result() const noexcept;
     [[nodiscard]] const std::optional<ResourceClientResponseStageError>&
     resource_client_response_error() const noexcept;
+    // Available only at the explicit usercmd handoff boundary. The driver is
+    // the same owner created after ACCEPT and retains its original transport
+    // and authentication lifetime until the caller closes it.
+    [[nodiscard]] NetchanDriver* retained_usercmd_driver() noexcept;
     [[nodiscard]] const std::optional<PostResourceSignonState>&
     post_resource_result() const noexcept;
     [[nodiscard]] const std::optional<PostResourceEntitySnapshotStageError>&
@@ -433,7 +438,7 @@ private:
     std::optional<UserInfoSignonStage> user_info_stage_;
     std::optional<ResourceTransitionStage> resource_transition_stage_;
     std::optional<ResourceListStage> resource_list_stage_;
-    std::optional<ResourceClientResponseStage> resource_client_response_stage_;
+    std::unique_ptr<ResourceClientResponseStage> resource_client_response_stage_;
     std::unique_ptr<PostResourceEntitySnapshotStage>
         post_resource_entity_snapshot_stage_;
     std::unique_ptr<PrecacheManifestStage> precache_manifest_stage_;

@@ -160,6 +160,7 @@ Runtime output is organized per configuration:
 ```text
 build\bin\Debug\hlclient.exe
 build\bin\Debug\hlclient_bsp_compat_check.exe
+build\bin\Debug\hlclient_usercmd_check.exe
 build\bin\Debug\hlclient_world_viewer.exe
 build\bin\Debug\SDL3.dll
 build\lib\Debug\...
@@ -636,3 +637,70 @@ accepts `--camera free-fly`; the entity viewer additionally accepts
 input and remain stationary. Unbounded viewers use click-to-capture, Escape to
 release, WASD, Space/Control, Shift, and relative mouse look. These controls
 are offline preview semantics and emit no network command.
+
+## GoldSrc usercmd checker
+
+M4.6.2 adds three project-owned Win32 library targets and one offline checker:
+
+```powershell
+cmake --build build --config Debug --target `
+  hlclient_goldsrc_usercmd_api `
+  hlclient_goldsrc_usercmd_codec `
+  hlclient_goldsrc_usercmd_session `
+  hlclient_usercmd_check
+```
+
+The checker accepts only the sealed synthetic profile and one named scenario:
+
+```powershell
+.\build\bin\Debug\hlclient_usercmd_check.exe `
+  --profile synthetic --scenario idle
+.\build\bin\Debug\hlclient_usercmd_check.exe `
+  --profile synthetic --scenario batch
+.\build\bin\Debug\hlclient_usercmd_check.exe `
+  --profile synthetic --scenario loss-recovery
+```
+
+The complete scenario set is `idle`, `move`, `look`, `buttons`, `batch`, and
+`loss-recovery`; CTest registers all six. The tool constructs typed fixtures,
+binds the exact 15-field schema, performs a bounded encode/decode round trip,
+and prints aggregate geometry only. It opens no socket, contacts no server, and
+is not stock interoperability evidence. The session target's scheduler,
+history, planner, same-driver sequence context, unreliable carrier, and
+fake-peer lifecycle remain covered by `hlclient_tests`.
+
+The production `hlclient --stop-after usercmd-boundary` route remains an
+intentional non-success diagnostic: it reaches the fail-closed stock evidence
+boundary, reports zero sampled/history/transmitted usercmds, sends no usercmd
+packet, and exits nonzero. The stock corpus currently has zero accepted runs
+and zero verified move packets. See [GoldSrc usercmd](GOLDSRC_USERCMD.md),
+[client-move message](GOLDSRC_CLIENT_MOVE_MESSAGE.md), and
+[usercmd transmission](GOLDSRC_USERCMD_TRANSMISSION.md).
+
+The stock research verifier defaults to a zero-process, zero-write pending
+check:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\verify_stock_usercmd.ps1 -ValidateEvidencePending
+```
+
+An operational run requires an explicit isolated research copy and one named
+bounded relay scenario:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\verify_stock_usercmd.ps1 `
+  -ResearchHalfLifeRoot "C:\research\Half-Life-isolated" `
+  -Game valve -Map boot_camp -Scenario Baseline
+```
+
+The other scenario names are `DropOneClientSequenced`,
+`DropTwoConsecutiveClientSequenced`, `DropOneServerSequenced`,
+`DuplicateOldClientSequenced`, and `ReorderTwoClientSequenced`. The harness
+validates the exact process, window, and loopback endpoint owners; forwards
+bytes through one learned client endpoint and one connected upstream socket;
+writes only bounded structural metadata below ignored `manual-artifacts`; and
+accepts a transport run only after complete restoration proves
+`external-file-drift=none`. It injects no input and does not promote a capture
+to accepted stock usercmd evidence without independent review.

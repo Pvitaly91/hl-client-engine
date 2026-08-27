@@ -18,6 +18,14 @@ scalar representation or enclosing entity-message grammar.
 No field offset is used and decoded values are never written into an HLSDK or
 other native C struct.
 
+M4.6.2 has a separate usercmd-specific binding for the exact 15-field
+`usercmd_t` descriptor. It validates every descriptor property and feeds only
+the sealed synthetic usercmd delta codec; it neither changes this generic
+decoder nor promotes its grammar to stock. The clean-room stock usercmd corpus
+still contains zero accepted runs and zero verified move packets. See
+[GoldSrc usercmd](GOLDSRC_USERCMD.md) and
+[GoldSrc usercmd delta](GOLDSRC_USERCMD_DELTA.md).
+
 ## Generic owning state
 
 `DeltaObjectState` owns the exact per-field schema descriptor used to construct

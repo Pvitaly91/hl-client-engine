@@ -502,10 +502,23 @@ set_property(
     PROPERTY FOLDER "Engine/Resource Consistency")
 
 hlclient_add_library(
-    hlclient_goldsrc_signon
+    hlclient_goldsrc_delta_schema
     include/hlclient/goldsrc/bit_reader.hpp
-    include/hlclient/goldsrc/client_message.hpp
     include/hlclient/goldsrc/delta_description.hpp
+    src/goldsrc/bit_reader.cpp
+    src/goldsrc/delta_description.cpp
+)
+add_library(
+    hlclient::goldsrc_delta_schema ALIAS hlclient_goldsrc_delta_schema)
+target_link_libraries(
+    hlclient_goldsrc_delta_schema PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_delta_schema
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Delta")
+
+hlclient_add_library(
+    hlclient_goldsrc_signon
+    include/hlclient/goldsrc/client_message.hpp
     include/hlclient/goldsrc/delta_description_stage.hpp
     include/hlclient/goldsrc/initial_signon_stage.hpp
     include/hlclient/goldsrc/move_vars.hpp
@@ -523,10 +536,9 @@ hlclient_add_library(
     include/hlclient/goldsrc/service_payload_envelope.hpp
     include/hlclient/goldsrc/user_info_signon_stage.hpp
     include/hlclient/goldsrc/user_info_update.hpp
-    src/goldsrc/bit_reader.cpp
     src/goldsrc/client_message.cpp
-    src/goldsrc/delta_description.cpp
     src/goldsrc/delta_description_stage.cpp
+    src/goldsrc/delta_description_stream.cpp
     src/goldsrc/initial_signon_stage.cpp
     src/goldsrc/move_vars.cpp
     src/goldsrc/movement_environment_stage.cpp
@@ -549,6 +561,7 @@ target_link_libraries(
     hlclient_goldsrc_signon
     PUBLIC
         hlclient::goldsrc
+        hlclient::goldsrc_delta_schema
         hlclient::goldsrc_netchan
         hlclient::network
         hlclient::resource_consistency_api
@@ -567,11 +580,51 @@ add_library(
     hlclient::goldsrc_delta_values ALIAS hlclient_goldsrc_delta_values)
 target_link_libraries(
     hlclient_goldsrc_delta_values
-    PUBLIC hlclient::goldsrc_signon
+    PUBLIC hlclient::goldsrc_delta_schema
     PRIVATE hlclient::core)
 set_property(
     TARGET hlclient_goldsrc_delta_values
     PROPERTY FOLDER "Engine/Network/GoldSrc/Delta")
+
+hlclient_add_library(
+    hlclient_goldsrc_usercmd_api
+    include/hlclient/goldsrc/usercmd_duration.hpp
+    include/hlclient/goldsrc/usercmd_state.hpp
+    src/goldsrc/usercmd_duration.cpp
+    src/goldsrc/usercmd_state.cpp
+)
+add_library(
+    hlclient::goldsrc_usercmd_api ALIAS hlclient_goldsrc_usercmd_api)
+target_link_libraries(
+    hlclient_goldsrc_usercmd_api PUBLIC hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_usercmd_api
+    PROPERTY FOLDER "Engine/Network/GoldSrc/UserCmd")
+
+hlclient_add_library(
+    hlclient_goldsrc_usercmd_codec
+    include/hlclient/goldsrc/bit_writer.hpp
+    include/hlclient/goldsrc/client_move_message.hpp
+    include/hlclient/goldsrc/move_checksum.hpp
+    include/hlclient/goldsrc/usercmd_delta_codec.hpp
+    include/hlclient/goldsrc/usercmd_schema_binding.hpp
+    src/goldsrc/bit_writer.cpp
+    src/goldsrc/client_move_message.cpp
+    src/goldsrc/move_checksum.cpp
+    src/goldsrc/usercmd_delta_codec.cpp
+    src/goldsrc/usercmd_schema_binding.cpp
+)
+add_library(
+    hlclient::goldsrc_usercmd_codec ALIAS hlclient_goldsrc_usercmd_codec)
+target_link_libraries(
+    hlclient_goldsrc_usercmd_codec
+    PUBLIC
+        hlclient::goldsrc_usercmd_api
+        hlclient::goldsrc_delta_schema
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_usercmd_codec
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Client Move")
 
 hlclient_add_library(
     hlclient_goldsrc_entity_snapshots
@@ -981,11 +1034,56 @@ add_library(hlclient::gameplay_camera ALIAS hlclient_gameplay_camera)
 target_link_libraries(
     hlclient_gameplay_camera
     PUBLIC
+        hlclient::asset_api
         hlclient::gameplay_input
-        hlclient::renderer_api
     PRIVATE hlclient::core)
 set_property(
     TARGET hlclient_gameplay_camera PROPERTY FOLDER "Engine/Client/Camera")
+
+hlclient_add_library(
+    hlclient_gameplay_camera_render_adapter
+    include/hlclient/gameplay_camera/render_camera_adapter.hpp
+    src/gameplay_camera/render_camera_adapter.cpp
+)
+add_library(
+    hlclient::gameplay_camera_render_adapter ALIAS
+    hlclient_gameplay_camera_render_adapter)
+target_link_libraries(
+    hlclient_gameplay_camera_render_adapter
+    PUBLIC
+        hlclient::gameplay_camera
+        hlclient::renderer_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_gameplay_camera_render_adapter
+    PROPERTY FOLDER "Engine/Client/Camera")
+
+hlclient_add_library(
+    hlclient_goldsrc_usercmd_session
+    include/hlclient/goldsrc/usercmd_history.hpp
+    include/hlclient/goldsrc/usercmd_input_adapter.hpp
+    include/hlclient/goldsrc/usercmd_packet_planner.hpp
+    include/hlclient/goldsrc/usercmd_scheduler.hpp
+    include/hlclient/goldsrc/usercmd_transmission_stage.hpp
+    src/goldsrc/usercmd_history.cpp
+    src/goldsrc/usercmd_input_adapter.cpp
+    src/goldsrc/usercmd_packet_planner.cpp
+    src/goldsrc/usercmd_scheduler.cpp
+    src/goldsrc/usercmd_transmission_stage.cpp
+)
+add_library(
+    hlclient::goldsrc_usercmd_session ALIAS hlclient_goldsrc_usercmd_session)
+target_link_libraries(
+    hlclient_goldsrc_usercmd_session
+    PUBLIC
+        hlclient::goldsrc_usercmd_codec
+        hlclient::goldsrc_netchan
+        hlclient::gameplay_input
+        hlclient::gameplay_camera
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_usercmd_session
+    PROPERTY FOLDER "Engine/Network/GoldSrc/UserCmd")
 
 hlclient_add_library(
     hlclient_world_visibility
@@ -1163,7 +1261,9 @@ target_link_libraries(
         hlclient::gameplay_camera
         hlclient::gameplay_input
         hlclient::input_api
-    PRIVATE hlclient::renderer_api)
+    PRIVATE
+        hlclient::gameplay_camera_render_adapter
+        hlclient::renderer_api)
 set_property(
     TARGET hlclient_interactive_preview PROPERTY FOLDER "Engine/Client/Camera")
 
@@ -1242,6 +1342,7 @@ target_link_libraries(
         hlclient::goldsrc_client
         hlclient::goldsrc_resource_readiness
         hlclient::goldsrc_local_resources
+        hlclient::goldsrc_usercmd_session
         hlclient::goldsrc_world_textures
         hlclient::goldsrc_world_render
         hlclient::resource_consistency_local
@@ -1316,6 +1417,32 @@ target_link_libraries(
 )
 set_property(
     TARGET hlclient_goldsrc_asset_check PROPERTY FOLDER "Tools/Assets")
+
+add_executable(
+    hlclient_usercmd_check
+    apps/hlclient_usercmd_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_usercmd_check)
+target_link_libraries(
+    hlclient_usercmd_check PRIVATE hlclient::goldsrc_usercmd_codec)
+set_property(
+    TARGET hlclient_usercmd_check PROPERTY FOLDER "Tools/Network")
+
+if(BUILD_TESTING)
+    foreach(
+        usercmd_scenario
+        IN ITEMS idle move look buttons batch loss-recovery)
+        add_test(
+            NAME hlclient_usercmd_check_${usercmd_scenario}
+            COMMAND
+                $<TARGET_FILE:hlclient_usercmd_check>
+                --profile synthetic
+                --scenario ${usercmd_scenario})
+        set_tests_properties(
+            hlclient_usercmd_check_${usercmd_scenario}
+            PROPERTIES TIMEOUT 15)
+    endforeach()
+endif()
 
 if(BUILD_TESTING)
     find_program(

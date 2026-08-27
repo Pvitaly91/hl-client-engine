@@ -1,7 +1,6 @@
 #include <hlclient/gameplay_camera/first_person_camera.hpp>
 
 #include <hlclient/gameplay_input/gameplay_input_limits.hpp>
-#include <hlclient/renderer/render_camera_math.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -179,13 +178,26 @@ constexpr double kMaximumSpeedMultiplier = 16.0;
     const FirstPersonCameraConfigCreateInfo& create_info) noexcept
 {
     const auto& mouse = create_info.mouse_look_config;
-    renderer::RenderCamera representable_camera;
-    representable_camera.vertical_field_of_view_radians =
-        static_cast<float>(create_info.vertical_fov_radians);
-    representable_camera.near_plane =
-        static_cast<float>(create_info.near_plane);
-    representable_camera.far_plane =
-        static_cast<float>(create_info.far_plane);
+    const auto representable_as_float = [](const double value) noexcept {
+        return std::isfinite(static_cast<float>(value));
+    };
+    const auto representable_projection = [&create_info]() noexcept {
+        const auto field_of_view =
+            static_cast<float>(create_info.vertical_fov_radians);
+        const auto near_plane = static_cast<float>(create_info.near_plane);
+        const auto far_plane = static_cast<float>(create_info.far_plane);
+        if (!std::isfinite(field_of_view) || !std::isfinite(near_plane) ||
+            !std::isfinite(far_plane) || near_plane <= 0.0F ||
+            far_plane <= near_plane) {
+            return false;
+        }
+        const auto tangent = std::tan(field_of_view * 0.5F);
+        const auto depth_denominator = near_plane - far_plane;
+        return std::isfinite(tangent) && tangent > 0.0F &&
+            std::isfinite((far_plane + near_plane) / depth_denominator) &&
+            std::isfinite(
+                (2.0F * far_plane * near_plane) / depth_denominator);
+    };
     return std::isfinite(mouse.degrees_per_pixel_x) &&
         std::isfinite(mouse.degrees_per_pixel_y) &&
         std::isfinite(mouse.maximum_delta_per_frame) &&
@@ -226,7 +238,10 @@ constexpr double kMaximumSpeedMultiplier = 16.0;
         create_info.maximum_position_magnitude <=
             kHardMaximumPositionMagnitude &&
         create_info.maximum_camera_revisions > 0U &&
-        renderer::is_valid(representable_camera);
+        representable_as_float(create_info.vertical_fov_radians) &&
+        representable_as_float(create_info.near_plane) &&
+        representable_as_float(create_info.far_plane) &&
+        representable_projection();
 }
 
 [[nodiscard]] bool valid_intent(
@@ -393,12 +408,12 @@ GameplayCameraState::CreationResult GameplayCameraState::create(
     auto normalized = create_info;
     normalized.yaw_degrees = *normalized_yaw;
     GameplayCameraState candidate{normalized};
-    const auto rendered = build_render_camera(candidate);
-    if (!rendered) {
+    if (!forward_from_yaw_pitch(
+            candidate.yaw_degrees(), candidate.pitch_degrees())) {
         return {std::nullopt,
             GameplayCameraError{
                 GameplayCameraErrorCode::camera_validation_failed,
-                "camera state does not produce a valid render camera"}};
+                "camera state does not produce a finite camera basis"}};
     }
     return {std::optional<GameplayCameraState>{std::move(candidate)},
         std::nullopt};
@@ -700,41 +715,6 @@ std::optional<assets::AssetVector3> right_from_yaw(
         0.0F,
     };
     return finite(result) ? std::optional{result} : std::nullopt;
-}
-
-RenderCameraBuildResult build_render_camera(
-    const GameplayCameraState& state) noexcept
-{
-    const auto forward = forward_from_yaw_pitch(
-        state.yaw_degrees(), state.pitch_degrees());
-    if (!forward || !finite(state.position())) {
-        return {std::nullopt,
-            GameplayCameraError{GameplayCameraErrorCode::non_finite_camera,
-                "camera basis contains a non-finite value"}};
-    }
-    const auto target_x = static_cast<double>(state.position().x) +
-        static_cast<double>(forward->x);
-    const auto target_y = static_cast<double>(state.position().y) +
-        static_cast<double>(forward->y);
-    const auto target_z = static_cast<double>(state.position().z) +
-        static_cast<double>(forward->z);
-    renderer::RenderCamera camera;
-    camera.position = state.position();
-    camera.target = {static_cast<float>(target_x),
-        static_cast<float>(target_y),
-        static_cast<float>(target_z)};
-    camera.up = world_up();
-    camera.vertical_field_of_view_radians =
-        static_cast<float>(state.vertical_fov_radians());
-    camera.near_plane = static_cast<float>(state.near_plane());
-    camera.far_plane = static_cast<float>(state.far_plane());
-    if (!finite(camera.target) || !renderer::is_valid(camera)) {
-        return {std::nullopt,
-            GameplayCameraError{
-                GameplayCameraErrorCode::camera_validation_failed,
-                "first-person state failed renderer camera validation"}};
-    }
-    return {camera, std::nullopt};
 }
 
 GameplayCameraUpdateResult LocalFreeFlightCameraController::update(

@@ -6,6 +6,81 @@
 #include <utility>
 
 namespace hlclient::goldsrc {
+
+class NetchanDriverContextIdentity final {
+};
+
+class NetchanOutgoingContextPlan::Implementation final {
+public:
+    Implementation(
+        NetchanTransmitPlan session_probe,
+        std::shared_ptr<const NetchanDriverContextIdentity> driver_identity,
+        const std::uint64_t context_revision,
+        const std::uint64_t plan_identity,
+        NetchanOutgoingReliableComposition reliable_composition,
+        const std::size_t maximum_unreliable_payload_size)
+        : next_outgoing_sequence_{
+              session_probe.packet().header.sequence.sequence},
+          expected_header_{session_probe.packet().header},
+          session_probe_{std::move(session_probe)},
+          driver_identity_{std::move(driver_identity)},
+          context_revision_{context_revision},
+          plan_identity_{plan_identity},
+          reliable_composition_{std::move(reliable_composition)},
+          maximum_unreliable_payload_size_{maximum_unreliable_payload_size}
+    {
+    }
+
+    NetchanSequence next_outgoing_sequence_;
+    NetchanHeader expected_header_;
+    NetchanTransmitPlan session_probe_;
+    std::shared_ptr<const NetchanDriverContextIdentity> driver_identity_;
+    std::uint64_t context_revision_{0U};
+    std::uint64_t plan_identity_{0U};
+    NetchanOutgoingReliableComposition reliable_composition_;
+    std::size_t maximum_unreliable_payload_size_{0U};
+    bool consumable_{true};
+};
+
+NetchanOutgoingContextPlan::NetchanOutgoingContextPlan(
+    std::unique_ptr<Implementation> implementation) noexcept
+    : implementation_{std::move(implementation)}
+{
+}
+
+NetchanOutgoingContextPlan::~NetchanOutgoingContextPlan() = default;
+NetchanOutgoingContextPlan::NetchanOutgoingContextPlan(
+    NetchanOutgoingContextPlan&&) noexcept = default;
+NetchanOutgoingContextPlan& NetchanOutgoingContextPlan::operator=(
+    NetchanOutgoingContextPlan&&) noexcept = default;
+
+NetchanSequence NetchanOutgoingContextPlan::next_outgoing_sequence() const noexcept
+{
+    return implementation_->next_outgoing_sequence_;
+}
+
+std::uint64_t NetchanOutgoingContextPlan::context_revision() const noexcept
+{
+    return implementation_->context_revision_;
+}
+
+std::uint64_t NetchanOutgoingContextPlan::plan_identity() const noexcept
+{
+    return implementation_->plan_identity_;
+}
+
+const NetchanOutgoingReliableComposition&
+NetchanOutgoingContextPlan::reliable_composition() const noexcept
+{
+    return implementation_->reliable_composition_;
+}
+
+std::size_t
+NetchanOutgoingContextPlan::maximum_unreliable_payload_size() const noexcept
+{
+    return implementation_->maximum_unreliable_payload_size_;
+}
+
 namespace {
 
 [[nodiscard]] bool terminal_state(const NetchanDriverState state) noexcept
@@ -68,6 +143,22 @@ namespace {
     }};
 }
 
+[[nodiscard]] NetchanOutgoingContextPrepareResult context_prepare_failure(
+    const NetchanDriverErrorCode code,
+    std::string context,
+    const std::optional<NetchanSessionErrorCode> session_code = std::nullopt)
+{
+    return NetchanOutgoingContextPrepareResult{
+        std::nullopt,
+        NetchanDriverError{
+            code,
+            std::nullopt,
+            session_code,
+            bounded_context(std::move(context)),
+        },
+    };
+}
+
 [[nodiscard]] bool headers_equal(
     const NetchanHeader& left,
     const NetchanHeader& right) noexcept
@@ -77,6 +168,53 @@ namespace {
            left.sequence.flags.fragmented == right.sequence.flags.fragmented &&
            left.acknowledgement.sequence == right.acknowledgement.sequence &&
            left.acknowledgement.reliable == right.acknowledgement.reliable;
+}
+
+[[nodiscard]] bool fragment_plans_equal(
+    const std::optional<NetchanFragmentBuildPlan>& left,
+    const std::optional<NetchanFragmentBuildPlan>& right) noexcept
+{
+    if (left.has_value() != right.has_value()) {
+        return false;
+    }
+    if (!left) {
+        return true;
+    }
+    return left->transfer_id == right->transfer_id &&
+           left->fragment_index == right->fragment_index &&
+           left->fragment_count == right->fragment_count &&
+           left->canonical_offset == right->canonical_offset &&
+           left->canonical_length == right->canonical_length &&
+           left->retransmission == right->retransmission;
+}
+
+[[nodiscard]] std::size_t unreliable_capacity_for_context(
+    const NetchanDriverConfig& config,
+    const NetchanTransmitPlan& plan) noexcept
+{
+    const auto& packet = plan.packet();
+    const auto maximum_datagram_size = packet.header.sequence.flags.fragmented
+                                           ? config.maximum_fragment_datagram_size
+                                           : config.maximum_datagram_size;
+    if (maximum_datagram_size < kNetchanHeaderSize) {
+        return 0U;
+    }
+    auto maximum_body_size = maximum_datagram_size - kNetchanHeaderSize;
+    if (packet.header.sequence.flags.fragmented) {
+        constexpr auto descriptor_size =
+            kStockProtocol48PresentFragmentDescriptorSize +
+            kStockProtocol48FragmentPresenceSize;
+        if (maximum_body_size < descriptor_size) {
+            return 0U;
+        }
+        maximum_body_size -= descriptor_size;
+    }
+    if (plan.reliable_payload_size() > maximum_body_size) {
+        return 0U;
+    }
+    return std::min(
+        config.maximum_unreliable_payload_size,
+        maximum_body_size - plan.reliable_payload_size());
 }
 
 class EventRing final {
@@ -378,6 +516,30 @@ public:
         }
 
         std::size_t outgoing_packets_this_update = 0U;
+        if (pending_contextual_plan_) {
+            // A committed context owns the exact current sequence/reliable
+            // composition. Send it before RX can admit an ACK and invalidate
+            // that accepted checksum context. Legacy unreliable work keeps the
+            // historical receive-first scheduling below.
+            if (!check_fragment_timeout(now)) {
+                return;
+            }
+            if (last_valid_packet_time_ &&
+                now - *last_valid_packet_time_ >=
+                    config_.channel_inactivity_timeout) {
+                enter_terminal(
+                    NetchanDriverState::timed_out,
+                    NetchanDriverErrorCode::channel_inactivity_timed_out,
+                    "Netchan channel inactivity timeout elapsed",
+                    now,
+                    NetchanDriverTraceClassification::channel_timed_out,
+                    NetchanDriverEventType::channel_timed_out);
+                return;
+            }
+            if (!send_contextual_pending(now, outgoing_packets_this_update)) {
+                return;
+            }
+        }
         for (std::size_t received_count = 0U;
              received_count < config_.maximum_datagrams_per_update &&
              state_ == NetchanDriverState::active &&
@@ -464,6 +626,11 @@ public:
                 NetchanDriverErrorCode::not_active,
                 "Reliable payload requires an active netchan driver");
         }
+        if (!payload.empty() && pending_contextual_plan_) {
+            return operation_failure(
+                NetchanDriverErrorCode::unreliable_payload_pending,
+                "A committed sequence-bound unreliable payload must send before reliable state changes");
+        }
         const auto queued = session_.queue_reliable(payload);
         if (!queued) {
             return operation_failure(
@@ -496,12 +663,284 @@ public:
                 NetchanDriverErrorCode::unreliable_payload_too_large,
                 "Unreliable payload exceeds the configured one-shot bound");
         }
-        if (!pending_unreliable_payload_.empty()) {
+        if (!pending_unreliable_payload_.empty() || pending_contextual_plan_) {
             return operation_failure(
                 NetchanDriverErrorCode::unreliable_payload_pending,
                 "Only one owning unreliable payload may be pending");
         }
+        if (outgoing_context_revision_ ==
+            std::numeric_limits<std::uint64_t>::max()) {
+            return operation_failure(
+                NetchanDriverErrorCode::unreliable_context_revision_overflow,
+                "Unreliable context revision is exhausted");
+        }
         pending_unreliable_payload_.assign(payload.begin(), payload.end());
+        ++outgoing_context_revision_;
+        return {};
+    }
+
+    [[nodiscard]] NetchanOutgoingContextPrepareResult
+    prepare_unreliable_context()
+    {
+        if (trace_callback_active_) {
+            return context_prepare_failure(
+                NetchanDriverErrorCode::reentrant_operation,
+                "Netchan trace callbacks cannot prepare outgoing context");
+        }
+        if (state_ != NetchanDriverState::active) {
+            return context_prepare_failure(
+                NetchanDriverErrorCode::not_active,
+                "Outgoing context requires an active netchan driver");
+        }
+        if (!session_.first_acknowledgement_sent()) {
+            return context_prepare_failure(
+                NetchanDriverErrorCode::unreliable_context_unavailable,
+                "Sequence-bound unreliable context is unavailable before the first channel acknowledgement");
+        }
+        if (!pending_unreliable_payload_.empty() || pending_contextual_plan_) {
+            return context_prepare_failure(
+                NetchanDriverErrorCode::unreliable_payload_pending,
+                "Only one owning unreliable payload may be pending");
+        }
+        if (next_outgoing_context_plan_identity_ ==
+            std::numeric_limits<std::uint64_t>::max()) {
+            return context_prepare_failure(
+                NetchanDriverErrorCode::unreliable_context_identity_overflow,
+                "Outgoing context plan identity is exhausted");
+        }
+
+        NetchanTransmitPrepareResult prepared;
+        try {
+            prepared = session_.prepare_outgoing_packet();
+        } catch (...) {
+            return context_prepare_failure(
+                NetchanDriverErrorCode::packet_encode_failed,
+                "Netchan session threw while preparing outgoing context");
+        }
+        if (!prepared || !prepared.plan) {
+            return context_prepare_failure(
+                NetchanDriverErrorCode::unreliable_context_unavailable,
+                "Netchan session could not prepare outgoing context",
+                prepared.error ? std::optional{prepared.error->code}
+                               : std::nullopt);
+        }
+        if (prepared.plan->reliable_decision() ==
+            ReliableTransmitDecision::advance_fragment_sequence) {
+            static_cast<void>(session_.abandon_outgoing_packet(
+                std::move(*prepared.plan)));
+            return context_prepare_failure(
+                NetchanDriverErrorCode::unreliable_context_unavailable,
+                "The next sequence is reserved for a fragment classifier advance");
+        }
+
+        const auto capacity = unreliable_capacity_for_context(config_, *prepared.plan);
+        if (capacity == 0U) {
+            static_cast<void>(session_.abandon_outgoing_packet(
+                std::move(*prepared.plan)));
+            return context_prepare_failure(
+                NetchanDriverErrorCode::unreliable_context_unavailable,
+                "Current reliable composition leaves no unreliable payload capacity");
+        }
+
+        const auto& packet = prepared.plan->packet();
+        NetchanOutgoingReliableComposition composition{
+            prepared.plan->reliable_decision(),
+            prepared.plan->reliable_payload_size(),
+            packet.header.sequence.flags.reliable,
+            packet.header.sequence.flags.fragmented,
+            prepared.plan->fragment_plan(),
+        };
+        const auto plan_identity = next_outgoing_context_plan_identity_;
+        auto implementation =
+            std::make_unique<NetchanOutgoingContextPlan::Implementation>(
+                std::move(*prepared.plan),
+                outgoing_context_identity_,
+                outgoing_context_revision_,
+                plan_identity,
+                std::move(composition),
+                capacity);
+        ++next_outgoing_context_plan_identity_;
+        return NetchanOutgoingContextPrepareResult{
+            NetchanOutgoingContextPlan{std::move(implementation)},
+            std::nullopt,
+        };
+    }
+
+    [[nodiscard]] NetchanDriverOperationResult commit_unreliable(
+        NetchanOutgoingContextPlan&& plan,
+        const std::span<const std::byte> payload)
+    {
+        if (trace_callback_active_) {
+            return operation_failure(
+                NetchanDriverErrorCode::reentrant_operation,
+                "Netchan trace callbacks cannot commit outgoing context");
+        }
+        if (!plan.implementation_) {
+            return operation_failure(
+                NetchanDriverErrorCode::stale_unreliable_context,
+                "Outgoing context was already moved or consumed");
+        }
+        auto& context = *plan.implementation_;
+        if (context.driver_identity_ != outgoing_context_identity_) {
+            return operation_failure(
+                NetchanDriverErrorCode::foreign_unreliable_context,
+                "Outgoing context belongs to another netchan driver");
+        }
+        if (!context.consumable_) {
+            return operation_failure(
+                NetchanDriverErrorCode::stale_unreliable_context,
+                "Outgoing context was already consumed");
+        }
+        if (state_ != NetchanDriverState::active) {
+            return operation_failure(
+                NetchanDriverErrorCode::not_active,
+                "Outgoing context requires an active netchan driver");
+        }
+        if (context.context_revision_ != outgoing_context_revision_) {
+            context.consumable_ = false;
+            return operation_failure(
+                NetchanDriverErrorCode::stale_unreliable_context,
+                "Driver unreliable state changed after context preparation");
+        }
+        if (payload.empty()) {
+            return abandon_unreliable(std::move(plan));
+        }
+        if (payload.size() > context.maximum_unreliable_payload_size_ ||
+            payload.size() > config_.maximum_unreliable_payload_size) {
+            return operation_failure(
+                NetchanDriverErrorCode::unreliable_payload_too_large,
+                "Unreliable payload exceeds the prepared context capacity");
+        }
+        if (!pending_unreliable_payload_.empty() || pending_contextual_plan_) {
+            return operation_failure(
+                NetchanDriverErrorCode::unreliable_payload_pending,
+                "Only one owning unreliable payload may be pending");
+        }
+        if (outgoing_context_revision_ ==
+            std::numeric_limits<std::uint64_t>::max()) {
+            return operation_failure(
+                NetchanDriverErrorCode::unreliable_context_revision_overflow,
+                "Unreliable context revision is exhausted");
+        }
+
+        const auto abandoned = session_.abandon_outgoing_packet(
+            std::move(context.session_probe_));
+        context.consumable_ = false;
+        if (!abandoned) {
+            const auto session_code = abandoned.error
+                                          ? std::optional{abandoned.error->code}
+                                          : std::nullopt;
+            const auto driver_code =
+                session_code == NetchanSessionErrorCode::foreign_outgoing_transaction
+                    ? NetchanDriverErrorCode::foreign_unreliable_context
+                    : NetchanDriverErrorCode::stale_unreliable_context;
+            return operation_failure(
+                driver_code,
+                "Netchan session context changed after outgoing preparation",
+                std::nullopt,
+                session_code);
+        }
+
+        NetchanTransmitPrepareResult prepared;
+        try {
+            prepared = session_.prepare_outgoing_packet(payload);
+        } catch (...) {
+            return operation_failure(
+                NetchanDriverErrorCode::packet_encode_failed,
+                "Netchan session threw while binding unreliable payload");
+        }
+        if (!prepared || !prepared.plan) {
+            return operation_failure(
+                NetchanDriverErrorCode::unreliable_context_mismatch,
+                "Netchan session rejected payload for a validated outgoing context",
+                std::nullopt,
+                prepared.error ? std::optional{prepared.error->code}
+                               : std::nullopt);
+        }
+
+        const auto& actual_packet = prepared.plan->packet();
+        const auto& expected = context.reliable_composition_;
+        const bool metadata_matches =
+            actual_packet.header.sequence.sequence ==
+                context.next_outgoing_sequence_ &&
+            headers_equal(actual_packet.header, context.expected_header_) &&
+            prepared.plan->reliable_decision() == expected.decision &&
+            prepared.plan->reliable_payload_size() ==
+                expected.reliable_payload_size &&
+            actual_packet.header.sequence.flags.reliable ==
+                expected.reliable_sequence &&
+            actual_packet.header.sequence.flags.fragmented ==
+                expected.fragmented_sequence &&
+            prepared.plan->unreliable_payload_size() == payload.size() &&
+            fragment_plans_equal(
+                prepared.plan->fragment_plan(), expected.fragment);
+        if (!metadata_matches) {
+            static_cast<void>(session_.abandon_outgoing_packet(
+                std::move(*prepared.plan)));
+            return operation_failure(
+                NetchanDriverErrorCode::unreliable_context_mismatch,
+                "Prepared outgoing packet does not match its validated context");
+        }
+
+        pending_contextual_plan_.emplace(std::move(*prepared.plan));
+        pending_contextual_plan_identity_ = context.plan_identity_;
+        ++outgoing_context_revision_;
+        return {};
+    }
+
+    [[nodiscard]] NetchanDriverOperationResult abandon_unreliable(
+        NetchanOutgoingContextPlan&& plan)
+    {
+        if (trace_callback_active_) {
+            return operation_failure(
+                NetchanDriverErrorCode::reentrant_operation,
+                "Netchan trace callbacks cannot abandon outgoing context");
+        }
+        if (!plan.implementation_) {
+            return operation_failure(
+                NetchanDriverErrorCode::stale_unreliable_context,
+                "Outgoing context was already moved or consumed");
+        }
+        auto& context = *plan.implementation_;
+        if (context.driver_identity_ != outgoing_context_identity_) {
+            return operation_failure(
+                NetchanDriverErrorCode::foreign_unreliable_context,
+                "Outgoing context belongs to another netchan driver");
+        }
+        if (!context.consumable_) {
+            return operation_failure(
+                NetchanDriverErrorCode::stale_unreliable_context,
+                "Outgoing context was already consumed");
+        }
+        if (state_ != NetchanDriverState::active) {
+            return operation_failure(
+                NetchanDriverErrorCode::not_active,
+                "Outgoing context requires an active netchan driver");
+        }
+        if (context.context_revision_ != outgoing_context_revision_) {
+            context.consumable_ = false;
+            return operation_failure(
+                NetchanDriverErrorCode::stale_unreliable_context,
+                "Driver unreliable state changed after context preparation");
+        }
+
+        const auto abandoned = session_.abandon_outgoing_packet(
+            std::move(context.session_probe_));
+        context.consumable_ = false;
+        if (!abandoned) {
+            const auto session_code = abandoned.error
+                                          ? std::optional{abandoned.error->code}
+                                          : std::nullopt;
+            const auto driver_code =
+                session_code == NetchanSessionErrorCode::foreign_outgoing_transaction
+                    ? NetchanDriverErrorCode::foreign_unreliable_context
+                    : NetchanDriverErrorCode::stale_unreliable_context;
+            return operation_failure(
+                driver_code,
+                "Netchan session context changed before abandonment",
+                std::nullopt,
+                session_code);
+        }
         return {};
     }
 
@@ -542,6 +981,11 @@ public:
     [[nodiscard]] std::size_t transmitted_packet_count() const noexcept
     {
         return transmitted_packet_count_;
+    }
+    [[nodiscard]] std::optional<std::uint64_t>
+    last_sent_unreliable_context_identity() const noexcept
+    {
+        return last_sent_unreliable_context_identity_;
     }
     [[nodiscard]] std::size_t cleanup_count() const noexcept { return cleanup_count_; }
     [[nodiscard]] const NetchanSession& session() const noexcept { return session_; }
@@ -1453,6 +1897,86 @@ private:
         return true;
     }
 
+    [[nodiscard]] bool send_contextual_pending(
+        const NetchanDriverTimePoint now,
+        std::size_t& outgoing_packets_this_update)
+    {
+        if (!pending_contextual_plan_) {
+            return true;
+        }
+        if (outgoing_packets_this_update >=
+            config_.maximum_outgoing_packets_per_update) {
+            enter_terminal(
+                NetchanDriverState::protocol_error,
+                NetchanDriverErrorCode::invalid_configuration,
+                "Committed outgoing context exceeds the bounded TX update budget",
+                now,
+                NetchanDriverTraceClassification::protocol_failure,
+                NetchanDriverEventType::protocol_error);
+            return false;
+        }
+
+        auto& plan = *pending_contextual_plan_;
+        if (!pending_contextual_plan_identity_) {
+            enter_terminal(
+                NetchanDriverState::protocol_error,
+                NetchanDriverErrorCode::unreliable_context_mismatch,
+                "Committed outgoing context has no retained plan identity",
+                now,
+                NetchanDriverTraceClassification::protocol_failure,
+                NetchanDriverEventType::protocol_error);
+            return false;
+        }
+        const auto sent_plan_identity = *pending_contextual_plan_identity_;
+        const auto* const fragment_plan =
+            plan.fragment_plan() ? &*plan.fragment_plan() : nullptr;
+        std::size_t fragment_transfer_size = 0U;
+        if (fragment_plan != nullptr) {
+            if (const auto& active_transfer =
+                    session_.outgoing_fragment_transfer()) {
+                fragment_transfer_size = active_transfer->canonical_bytes.size();
+            } else {
+                fragment_transfer_size =
+                    session_.pending_reliable_payload().size();
+            }
+        }
+
+        const auto& packet = plan.packet();
+        auto encoded = encode_packet(packet, now);
+        if (!encoded) {
+            return false;
+        }
+        if (!send_datagram(
+                *encoded,
+                packet.header,
+                packet.payload.size(),
+                now,
+                fragment_plan,
+                fragment_transfer_size)) {
+            return false;
+        }
+        last_sent_unreliable_context_identity_ = sent_plan_identity;
+        ++outgoing_packets_this_update;
+        const auto committed = session_.commit_outgoing_send(std::move(plan));
+        pending_contextual_plan_.reset();
+        pending_contextual_plan_identity_.reset();
+        if (!committed) {
+            enter_terminal(
+                NetchanDriverState::protocol_error,
+                NetchanDriverErrorCode::packet_encode_failed,
+                "Sent sequence-bound outgoing packet could not be committed",
+                now,
+                NetchanDriverTraceClassification::protocol_failure,
+                NetchanDriverEventType::protocol_error,
+                std::nullopt,
+                committed.error ? std::optional{committed.error->code}
+                                : std::nullopt);
+            return false;
+        }
+        acknowledgement_pending_ = false;
+        return true;
+    }
+
     void send_pending(
         const NetchanDriverTimePoint now,
         std::size_t& outgoing_packets_this_update)
@@ -1599,6 +2123,17 @@ private:
         const NetchanFragmentBuildPlan* const fragment_plan = nullptr,
         const std::size_t fragment_transfer_size = 0U)
     {
+        if (transmitted_packet_count_ ==
+            std::numeric_limits<std::size_t>::max()) {
+            enter_terminal(
+                NetchanDriverState::protocol_error,
+                NetchanDriverErrorCode::transmitted_packet_count_overflow,
+                "Netchan transmitted-packet counter is exhausted",
+                now,
+                NetchanDriverTraceClassification::protocol_failure,
+                NetchanDriverEventType::protocol_error);
+            return false;
+        }
         network::DatagramSendResult sent;
         try {
             sent = transport_.send_to(remote_endpoint_, datagram);
@@ -1708,6 +2243,8 @@ private:
         session_.clear_reliable_state();
         reassembler_.clear();
         std::vector<std::byte>{}.swap(pending_unreliable_payload_);
+        pending_contextual_plan_.reset();
+        pending_contextual_plan_identity_.reset();
         acknowledgement_pending_ = false;
         connection_lifetime_.reset();
     }
@@ -1772,6 +2309,9 @@ private:
     NetchanDriverTraceCallback trace_callback_;
     bool trace_callback_active_{false};
     NetchanSession session_;
+    std::shared_ptr<const NetchanDriverContextIdentity>
+        outgoing_context_identity_{
+            std::make_shared<const NetchanDriverContextIdentity>()};
     NetchanNormalReassembler reassembler_;
     EventRing events_;
     bool configuration_valid_{false};
@@ -1782,10 +2322,15 @@ private:
     std::optional<NetchanDriverTimePoint> last_update_;
     std::optional<NetchanDriverTimePoint> last_valid_packet_time_;
     std::vector<std::byte> pending_unreliable_payload_;
+    std::optional<NetchanTransmitPlan> pending_contextual_plan_;
+    std::optional<std::uint64_t> pending_contextual_plan_identity_;
+    std::optional<std::uint64_t> last_sent_unreliable_context_identity_;
     bool acknowledgement_pending_{false};
     bool cleanup_done_{false};
     std::size_t transmitted_packet_count_{0U};
     std::size_t cleanup_count_{0U};
+    std::uint64_t outgoing_context_revision_{0U};
+    std::uint64_t next_outgoing_context_plan_identity_{1U};
 };
 
 NetchanDriver::NetchanDriver(
@@ -1839,6 +2384,26 @@ NetchanDriverOperationResult NetchanDriver::submit_unreliable(
     return implementation_->submit_unreliable(payload);
 }
 
+NetchanOutgoingContextPrepareResult
+NetchanDriver::prepare_unreliable_context()
+{
+    return implementation_->prepare_unreliable_context();
+}
+
+NetchanDriverOperationResult NetchanDriver::commit_unreliable(
+    NetchanOutgoingContextPlan&& plan,
+    const std::span<const std::byte> payload)
+{
+    return implementation_->commit_unreliable(
+        std::move(plan), payload);
+}
+
+NetchanDriverOperationResult NetchanDriver::abandon_unreliable(
+    NetchanOutgoingContextPlan&& plan)
+{
+    return implementation_->abandon_unreliable(std::move(plan));
+}
+
 std::optional<NetchanDriverEvent> NetchanDriver::poll_event()
 {
     return implementation_->poll_event();
@@ -1889,6 +2454,12 @@ std::size_t NetchanDriver::pending_event_count() const noexcept
 std::size_t NetchanDriver::transmitted_packet_count() const noexcept
 {
     return implementation_->transmitted_packet_count();
+}
+
+std::optional<std::uint64_t>
+NetchanDriver::last_sent_unreliable_context_identity() const noexcept
+{
+    return implementation_->last_sent_unreliable_context_identity();
 }
 
 std::size_t NetchanDriver::cleanup_count() const noexcept
