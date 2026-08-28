@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/assets/asset_types.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_bsp_collision_source.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_format.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_face_geometry_builder.hpp>
 #include <hlclient/goldsrc/spatial/goldsrc_spatial_package_builder.hpp>
@@ -41,6 +42,8 @@ struct GoldSrcBspImportLimits {
     std::size_t maximum_texture_name_bytes{kGoldSrcBspTextureNameWireSize};
     std::uint32_t maximum_texture_dimension{16'384U};
     std::uint64_t maximum_texture_texels{268'435'456ULL};
+    std::size_t maximum_collision_validation_steps{
+        kGoldSrcBspDefaultMaximumCollisionValidationSteps};
 };
 
 [[nodiscard]] bool valid_goldsrc_bsp_import_limits(
@@ -82,12 +85,16 @@ enum class GoldSrcBspErrorCode {
     invalid_leaf_reference,
     invalid_marksurface_reference,
     invalid_clipnode_reference,
+    node_cycle,
+    clipnode_cycle,
+    collision_validation_limit_exceeded,
     invalid_light_offset,
     broken_face_edge_loop,
     degenerate_face,
     nonplanar_face,
     invalid_face_winding,
     geometry_limit_exceeded,
+    unable_to_retain_collision_source,
     unable_to_retain_world,
 };
 
@@ -161,6 +168,7 @@ struct GoldSrcBspGeometryStatistics {
 struct GoldSrcBspParsedDocument {
     assets::WorldAsset world_asset;
     GoldSrcBspSpatialSource spatial_source;
+    GoldSrcBspCollisionSource collision_source;
     std::vector<GoldSrcBspBrushSubmodelAsset> brush_submodels;
     std::vector<std::byte> entity_lump_bytes;
     // Fixed-record lumps report record counts. Variable byte lumps report byte

@@ -6,8 +6,6 @@
 namespace hlclient::goldsrc::brush_models {
 namespace {
 
-constexpr float kDegreesToRadians = 0.01745329251994329577F;
-
 [[nodiscard]] BrushSubmodelTransformResult fail_transform(
     const BrushSubmodelTransformErrorCode code,
     const std::string_view context) noexcept
@@ -22,11 +20,6 @@ constexpr float kDegreesToRadians = 0.01745329251994329577F;
     return {std::nullopt, BrushSubmodelTransformError{code, context}};
 }
 
-[[nodiscard]] bool zero_vector(const assets::AssetVector3& value) noexcept
-{
-    return value.x == 0.0F && value.y == 0.0F && value.z == 0.0F;
-}
-
 [[nodiscard]] bool valid_bounds(const assets::WorldBounds& bounds) noexcept
 {
     return renderer::is_finite(bounds.minimum) &&
@@ -38,70 +31,35 @@ constexpr float kDegreesToRadians = 0.01745329251994329577F;
 
 } // namespace
 
-std::string_view to_string(const BrushSubmodelTransformErrorCode code) noexcept
-{
-    switch (code) {
-    case BrushSubmodelTransformErrorCode::non_finite_input:
-        return "non_finite_input";
-    case BrushSubmodelTransformErrorCode::unsupported_source_model_origin:
-        return "unsupported_source_model_origin";
-    case BrushSubmodelTransformErrorCode::invalid_local_bounds:
-        return "invalid_local_bounds";
-    case BrushSubmodelTransformErrorCode::non_finite_result:
-        return "non_finite_result";
-    }
-    return "unknown";
-}
-
 BrushSubmodelTransformResult make_brush_submodel_transform(
     const assets::AssetVector3& entity_origin,
     const assets::AssetVector3& entity_angles_degrees,
     const assets::AssetVector3& source_model_origin) noexcept
 {
-    if (!renderer::is_finite(entity_origin) ||
-        !renderer::is_finite(entity_angles_degrees) ||
-        !renderer::is_finite(source_model_origin)) {
-        return fail_transform(BrushSubmodelTransformErrorCode::non_finite_input,
-            "Brush origin, angles and source-model origin must be finite");
+    const auto rigid = make_brush_rigid_transform(
+        entity_origin, entity_angles_degrees, source_model_origin);
+    if (!rigid) {
+        return fail_transform(rigid.error->code, rigid.error->context);
     }
-    if (!zero_vector(source_model_origin)) {
-        return fail_transform(
-            BrushSubmodelTransformErrorCode::unsupported_source_model_origin,
-            "Pinned qcsg evidence supports only zero dmodel origin");
-    }
-
-    const auto pitch = entity_angles_degrees.x * kDegreesToRadians;
-    const auto yaw = entity_angles_degrees.y * kDegreesToRadians;
-    const auto roll = entity_angles_degrees.z * kDegreesToRadians;
-    if (!std::isfinite(pitch) || !std::isfinite(yaw) || !std::isfinite(roll)) {
-        return fail_transform(BrushSubmodelTransformErrorCode::non_finite_result,
-            "Degree-to-radian conversion is not finite");
-    }
-
-    const auto sine_pitch = std::sin(pitch);
-    const auto cosine_pitch = std::cos(pitch);
-    const auto sine_yaw = std::sin(yaw);
-    const auto cosine_yaw = std::cos(yaw);
-    const auto sine_roll = std::sin(roll);
-    const auto cosine_roll = std::cos(roll);
+    const auto& basis = rigid.transform->rotation_basis;
 
     renderer::RenderMatrix4 model_matrix;
     model_matrix.values = {
-        cosine_pitch * cosine_yaw,
-        cosine_pitch * sine_yaw,
-        -sine_pitch,
+        basis.local_x_in_world.x,
+        basis.local_x_in_world.y,
+        basis.local_x_in_world.z,
         0.0F,
-        sine_roll * sine_pitch * cosine_yaw - cosine_roll * sine_yaw,
-        sine_roll * sine_pitch * sine_yaw + cosine_roll * cosine_yaw,
-        sine_roll * cosine_pitch,
+        basis.local_y_in_world.x,
+        basis.local_y_in_world.y,
+        basis.local_y_in_world.z,
         0.0F,
-        cosine_roll * sine_pitch * cosine_yaw + sine_roll * sine_yaw,
-        cosine_roll * sine_pitch * sine_yaw - sine_roll * cosine_yaw,
-        cosine_roll * cosine_pitch,
+        basis.local_z_in_world.x,
+        basis.local_z_in_world.y,
+        basis.local_z_in_world.z,
         0.0F,
-        entity_origin.x,
-        entity_origin.y,
-        entity_origin.z,
+        rigid.transform->translation.x,
+        rigid.transform->translation.y,
+        rigid.transform->translation.z,
         1.0F,
     };
     if (!renderer::is_finite(model_matrix)) {
@@ -141,9 +99,9 @@ BrushSubmodelTransformResult make_brush_submodel_transform(
 
     return {
         BrushSubmodelTransform{
-            entity_origin,
-            entity_angles_degrees,
-            source_model_origin,
+            rigid.transform->translation,
+            rigid.transform->rotation_degrees,
+            rigid.transform->source_model_origin,
             model_matrix,
             inverse_matrix,
             {
@@ -157,8 +115,8 @@ BrushSubmodelTransformResult make_brush_submodel_transform(
                 model_matrix.values[9U],
                 model_matrix.values[10U],
             },
-            BrushSubmodelCoordinateProfile::qcsg_entity_origin_relative_v1,
-            BrushSubmodelTransformProfile::valve_angle_matrix_entity_origin_v1,
+            rigid.transform->coordinate_profile,
+            rigid.transform->transform_profile,
         },
         std::nullopt,
     };

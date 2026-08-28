@@ -449,6 +449,29 @@ link. The checker opens no socket and adds no runtime package.
 Public Half-Life SDK `usercmd_t` declarations remain a semantic cross-check:
 no SDK object code, native struct cast, or SDK wire ABI enters these targets.
 
+M4.6.3.1 adds no third-party dependency. Its clean dependency direction is:
+
+```text
+hlclient_collision_api -> hlclient_asset_api
+hlclient_goldsrc_bsp_collision
+    -> hlclient_collision_api
+    -> hlclient_goldsrc_bsp
+hlclient_goldsrc_brush_transform -> hlclient_asset_api
+hlclient_goldsrc_collision_scene
+    -> hlclient_collision_api
+    -> hlclient_goldsrc_bsp_collision
+    -> hlclient_goldsrc_brush_transform
+hlclient_collision_check
+    -> local read-only resource/source APIs
+    -> hlclient_goldsrc_bsp_collision
+    -> hlclient_hash_sha256
+```
+
+Collision targets do not link renderer, OpenGL, SDL, `NetchanDriver`, gameplay
+intent, usercmd, or movement code. The public Valve SDK supplies header/source
+evidence for BSP v30 records and compiler hull extents only; no SDK object code
+or stock trace implementation is linked or copied.
+
 This runtime policy is distinct from active stock-client/HLDS research. Research
 verifiers continue to require their isolated marked copy and reject primary or
 registered Steam roots where their existing contracts specify that behavior.

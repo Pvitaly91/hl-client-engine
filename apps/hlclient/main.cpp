@@ -4,6 +4,7 @@
 #include <hlclient/assets/asset_manager.hpp>
 #include <hlclient/client/client_scene_source.hpp>
 #include <hlclient/client/client_world_state.hpp>
+#include <hlclient/collision/collision_world_query.hpp>
 #include <hlclient/core/command_line.hpp>
 #include <hlclient/core/log.hpp>
 #include <hlclient/core/version.hpp>
@@ -11,6 +12,7 @@
 #include <hlclient/filesystem/rooted_file_system.hpp>
 #include <hlclient/goldsrc/connect_request_stage.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/collision/goldsrc_collision_world_builder.hpp>
 #include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
 #include <hlclient/goldsrc/local_resource_inventory.hpp>
 #include <hlclient/goldsrc/local_resource_mapping.hpp>
@@ -35,6 +37,7 @@
 #include <hlclient/resource_consistency/prepared_local_resource_consistency_provider.hpp>
 #include <hlclient/world_preview/world_preview_scene_source.hpp>
 
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -2944,6 +2947,13 @@ public:
         return handshake_.world_spawn_camera_result();
     }
 
+    [[nodiscard]] const std::optional<
+        hlclient::goldsrc::ApprovedAssetDispatchState>&
+    asset_dispatch_state() const noexcept
+    {
+        return handshake_.asset_dispatch_result();
+    }
+
 private:
     std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment>
         local_resource_environment_;
@@ -3238,6 +3248,100 @@ int run_asset_dispatch_stop(
         require_world_render_package);
 }
 
+[[nodiscard]] int build_and_report_collision_world(
+    const HandshakeSession& session)
+{
+    const auto& dispatch_state = session.asset_dispatch_state();
+    if (!dispatch_state || !dispatch_state->dispatch_result().imported()) {
+        hlclient::core::log(
+            LogLevel::error,
+            "Collision-world boundary has no imported BSP prerequisite");
+        return 1;
+    }
+    const auto attachment = std::dynamic_pointer_cast<const
+        hlclient::goldsrc::bsp::GoldSrcBspCollisionImportAttachment>(
+        dispatch_state->dispatch_result().attachment);
+    if (!attachment) {
+        hlclient::core::log(
+            LogLevel::error,
+            "Collision-world boundary did not receive canonical BSP collision state");
+        return 1;
+    }
+    const auto built = hlclient::goldsrc::collision::
+        GoldSrcCollisionWorldBuilder::build(attachment->collision_source());
+    if (!built || !built.package || built.package->models().empty()) {
+        const auto code = built.error
+            ? hlclient::goldsrc::collision::to_string(built.error->code)
+            : std::string_view{"unable_to_publish"};
+        hlclient::core::log(
+            LogLevel::error,
+            "Collision-world build failed: " + std::string{code});
+        return 1;
+    }
+
+    const auto& world = built.package->models().front();
+    const hlclient::assets::AssetVector3 center{
+        world.source_bounds.minimum.x +
+            (world.source_bounds.maximum.x - world.source_bounds.minimum.x) *
+                0.5F,
+        world.source_bounds.minimum.y +
+            (world.source_bounds.maximum.y - world.source_bounds.minimum.y) *
+                0.5F,
+        world.source_bounds.minimum.z +
+            (world.source_bounds.maximum.z - world.source_bounds.minimum.z) *
+                0.5F,
+    };
+    hlclient::collision::CollisionWorldQuery query{built.package};
+    hlclient::collision::CollisionQueryScratch scratch;
+    std::size_t point_probe_count = 0U;
+    std::size_t trace_probe_count = 0U;
+    for (const auto hull : std::array{
+             hlclient::collision::CollisionHullOrdinal::point,
+             hlclient::collision::CollisionHullOrdinal::standing_32x32x72,
+             hlclient::collision::CollisionHullOrdinal::large_64_cube,
+             hlclient::collision::CollisionHullOrdinal::duck_32x32x36}) {
+        if (!query.point_contents(
+                hlclient::collision::CollisionPointContentsRequest{
+                    center, 0U, hull},
+                scratch)) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Collision-world deterministic point probe failed");
+            return 1;
+        }
+        ++point_probe_count;
+        hlclient::collision::CollisionTraceRequest trace;
+        trace.start = center;
+        trace.end = center;
+        trace.hull = hull;
+        if (!query.trace_hull(trace, scratch)) {
+            hlclient::core::log(
+                LogLevel::error,
+                "Collision-world deterministic stationary trace failed");
+            return 1;
+        }
+        ++trace_probe_count;
+    }
+
+    const auto& statistics = built.package->statistics();
+    hlclient::core::log(
+        LogLevel::info,
+        "[collision] profile=valve_bsp_v30_clip_hulls_v1, planes=" +
+            std::to_string(built.package->planes().size()) + ", nodes=" +
+            std::to_string(built.package->nodes().size()) + ", leaves=" +
+            std::to_string(built.package->leaves().size()) + ", clipnodes=" +
+            std::to_string(built.package->clipnodes().size()) + ", models=" +
+            std::to_string(built.package->models().size()) + ", hull-roots=" +
+            std::to_string(statistics.model_hull_root_count) +
+            ", point-probes=" + std::to_string(point_probe_count) +
+            ", trace-probes=" + std::to_string(trace_probe_count));
+    hlclient::core::log(
+        LogLevel::info,
+        "Collision-world CPU boundary completed without texture, renderer, "
+        "OpenGL, SDL, or movement work");
+    return 0;
+}
+
 int run_evidence_pending_post_resource_stop(HandshakeSession& session)
 {
     hlclient::core::log(
@@ -3307,6 +3411,8 @@ int run(const hlclient::core::CommandLineOptions& options)
             hlclient::core::ConnectionStopPoint::asset_dispatch ||
         options.stop_after ==
             hlclient::core::ConnectionStopPoint::world_geometry ||
+        options.stop_after ==
+            hlclient::core::ConnectionStopPoint::collision_world ||
         world_texture_pipeline_requested;
 
     hlclient::assets::AssetImporterRegistries asset_importers;
@@ -3356,6 +3462,8 @@ int run(const hlclient::core::CommandLineOptions& options)
                    hlclient::core::ConnectionStopPoint::asset_dispatch ||
                options.stop_after ==
                    hlclient::core::ConnectionStopPoint::world_geometry ||
+               options.stop_after ==
+                   hlclient::core::ConnectionStopPoint::collision_world ||
                world_texture_pipeline_requested) {
         hlclient::core::log(
             LogLevel::info,
@@ -3527,6 +3635,9 @@ int run(const hlclient::core::CommandLineOptions& options)
         case hlclient::core::ConnectionStopPoint::world_geometry:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::asset_dispatch;
             break;
+        case hlclient::core::ConnectionStopPoint::collision_world:
+            stop_point = hlclient::goldsrc::HandshakeStopPoint::asset_dispatch;
+            break;
         case hlclient::core::ConnectionStopPoint::world_textures:
             stop_point = hlclient::goldsrc::HandshakeStopPoint::world_textures;
             break;
@@ -3587,6 +3698,8 @@ int run(const hlclient::core::CommandLineOptions& options)
          options.stop_after ==
              hlclient::core::ConnectionStopPoint::world_geometry ||
          options.stop_after ==
+             hlclient::core::ConnectionStopPoint::collision_world ||
+         options.stop_after ==
              hlclient::core::ConnectionStopPoint::world_textures ||
          options.stop_after ==
              hlclient::core::ConnectionStopPoint::world_render_package ||
@@ -3596,12 +3709,19 @@ int run(const hlclient::core::CommandLineOptions& options)
         const int cpu_result = run_asset_dispatch_stop(
             *challenge_session,
             options.stop_after ==
-                hlclient::core::ConnectionStopPoint::world_geometry,
+                    hlclient::core::ConnectionStopPoint::world_geometry ||
+                options.stop_after ==
+                    hlclient::core::ConnectionStopPoint::collision_world,
             options.stop_after ==
                 hlclient::core::ConnectionStopPoint::world_textures,
             world_render_package_requested);
         if (cpu_result != 0) {
             return cpu_result;
+        }
+
+        if (options.stop_after ==
+            hlclient::core::ConnectionStopPoint::collision_world) {
+            return build_and_report_collision_world(*challenge_session);
         }
 
         const bool spatial_scene_requested =

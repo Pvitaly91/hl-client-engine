@@ -9,6 +9,7 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -329,7 +330,10 @@ bool valid_goldsrc_bsp_import_limits(const GoldSrcBspImportLimits& limits) noexc
            limits.maximum_texture_dimension > 0U &&
            limits.maximum_texture_dimension <= kGoldSrcBspHardMaximumTextureDimension &&
            limits.maximum_texture_texels > 0U &&
-           limits.maximum_texture_texels <= kGoldSrcBspHardMaximumTextureTexels;
+           limits.maximum_texture_texels <= kGoldSrcBspHardMaximumTextureTexels &&
+           limits.maximum_collision_validation_steps > 0U &&
+           limits.maximum_collision_validation_steps <=
+               kGoldSrcBspHardMaximumCollisionValidationSteps;
 }
 
 assets::AssetSourceFingerprint goldsrc_bsp_source_fingerprint(
@@ -396,6 +400,10 @@ std::string_view to_string(const GoldSrcBspErrorCode code) noexcept
         return "invalid_marksurface_reference";
     case GoldSrcBspErrorCode::invalid_clipnode_reference:
         return "invalid_clipnode_reference";
+    case GoldSrcBspErrorCode::node_cycle: return "node_cycle";
+    case GoldSrcBspErrorCode::clipnode_cycle: return "clipnode_cycle";
+    case GoldSrcBspErrorCode::collision_validation_limit_exceeded:
+        return "collision_validation_limit_exceeded";
     case GoldSrcBspErrorCode::invalid_light_offset: return "invalid_light_offset";
     case GoldSrcBspErrorCode::broken_face_edge_loop: return "broken_face_edge_loop";
     case GoldSrcBspErrorCode::degenerate_face: return "degenerate_face";
@@ -403,6 +411,8 @@ std::string_view to_string(const GoldSrcBspErrorCode code) noexcept
     case GoldSrcBspErrorCode::invalid_face_winding: return "invalid_face_winding";
     case GoldSrcBspErrorCode::geometry_limit_exceeded:
         return "geometry_limit_exceeded";
+    case GoldSrcBspErrorCode::unable_to_retain_collision_source:
+        return "unable_to_retain_collision_source";
     case GoldSrcBspErrorCode::unable_to_retain_world: return "unable_to_retain_world";
     }
     return "unknown";
@@ -479,7 +489,7 @@ public:
             !decode_surfedges() || !decode_textures() || !decode_texinfo() ||
             !decode_faces() || !decode_nodes() || !decode_leaves() ||
             !decode_marksurfaces() || !decode_clipnodes() || !decode_models() ||
-            !validate_references()) {
+            !validate_references() || !validate_collision_graphs()) {
             return GoldSrcBspParseResult{std::nullopt, std::move(error_)};
         }
 
@@ -1790,6 +1800,185 @@ private:
         return true;
     }
 
+    struct CollisionGraphValidationOutput {
+        std::uint64_t reachable_count{0U};
+        std::uint64_t unreachable_count{0U};
+        std::uint64_t maximum_root_depth{0U};
+    };
+
+    struct CollisionGraphFrame {
+        std::size_t source_index{0U};
+        std::size_t next_child{0U};
+    };
+
+    template <class Record>
+    [[nodiscard]] bool validate_collision_graph(const std::vector<Record>& records,
+                                                const std::span<const std::int32_t> roots,
+                                                const GoldSrcBspLumpId lump_id,
+                                                const std::size_t wire_size,
+                                                const GoldSrcBspErrorCode cycle_error,
+                                                CollisionGraphValidationOutput& output)
+    {
+        constexpr std::uint8_t unvisited = 0U;
+        constexpr std::uint8_t active = 1U;
+        constexpr std::uint8_t complete = 2U;
+
+        std::vector<std::uint8_t> states(records.size(), unvisited);
+        std::vector<std::uint8_t> reachable(records.size(), 0U);
+        std::vector<std::size_t> subtree_depths(records.size(), 0U);
+        std::vector<CollisionGraphFrame> stack;
+        stack.reserve(records.size());
+
+        const auto traverse = [this, &records, &states, &reachable, &subtree_depths, &stack,
+                               lump_id, wire_size, cycle_error](const std::size_t root,
+                                                                const bool root_reachable) -> bool {
+            if (root >= records.size()) {
+                return false;
+            }
+            if (states[root] == complete) {
+                if (root_reachable) {
+                    reachable[root] = 1U;
+                }
+                return true;
+            }
+
+            stack.clear();
+            states[root] = active;
+            if (root_reachable) {
+                reachable[root] = 1U;
+            }
+            stack.push_back(CollisionGraphFrame{root, 0U});
+
+            while (!stack.empty()) {
+                auto& frame = stack.back();
+                if (collision_validation_steps_ >= limits_.maximum_collision_validation_steps) {
+                    return fail(GoldSrcBspErrorCode::collision_validation_limit_exceeded, lump_id,
+                                absolute_record_offset(lump_id, frame.source_index, wire_size),
+                                frame.source_index,
+                                "BSP collision graph exceeds the configured iterative validation "
+                                "limit");
+                }
+                ++collision_validation_steps_;
+
+                if (frame.next_child < 2U) {
+                    const auto child_ordinal = frame.next_child;
+                    ++frame.next_child;
+                    const auto child = records[frame.source_index].children[child_ordinal];
+                    if (child < 0) {
+                        continue;
+                    }
+                    const auto child_index = static_cast<std::size_t>(child);
+                    if (child_index >= records.size()) {
+                        return false;
+                    }
+                    if (root_reachable) {
+                        reachable[child_index] = 1U;
+                    }
+                    if (states[child_index] == active) {
+                        return fail(cycle_error, lump_id,
+                                    absolute_record_offset(lump_id, frame.source_index, wire_size) +
+                                        4U + child_ordinal * 2U,
+                                    frame.source_index,
+                                    lump_id == GoldSrcBspLumpId::nodes
+                                        ? "BSP node graph contains a cycle"
+                                        : "BSP clipnode graph contains a cycle");
+                    }
+                    if (states[child_index] == unvisited) {
+                        states[child_index] = active;
+                        stack.push_back(CollisionGraphFrame{child_index, 0U});
+                    }
+                    continue;
+                }
+
+                std::size_t depth = 1U;
+                for (const auto child : records[frame.source_index].children) {
+                    if (child >= 0) {
+                        depth =
+                            std::max(depth, subtree_depths[static_cast<std::size_t>(child)] + 1U);
+                    }
+                }
+                subtree_depths[frame.source_index] = depth;
+                states[frame.source_index] = complete;
+                stack.pop_back();
+            }
+            return true;
+        };
+
+        // Model roots are traversed first so reachability remains distinct
+        // from the subsequent whole-lump structural cycle check.
+        for (const auto signed_root : roots) {
+            if (signed_root < 0 || !traverse(static_cast<std::size_t>(signed_root), true)) {
+                return false;
+            }
+        }
+        for (std::size_t source_index = 0U; source_index < records.size(); ++source_index) {
+            if (states[source_index] == unvisited && !traverse(source_index, false)) {
+                return false;
+            }
+        }
+
+        output.reachable_count = static_cast<std::uint64_t>(
+            std::count(reachable.begin(), reachable.end(), std::uint8_t{1U}));
+        output.unreachable_count =
+            static_cast<std::uint64_t>(records.size()) - output.reachable_count;
+        for (const auto signed_root : roots) {
+            if (signed_root >= 0) {
+                output.maximum_root_depth =
+                    std::max(output.maximum_root_depth,
+                             static_cast<std::uint64_t>(
+                                 subtree_depths[static_cast<std::size_t>(signed_root)]));
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool validate_collision_graphs()
+    {
+        try {
+            std::vector<std::int32_t> hull0_roots;
+            hull0_roots.reserve(models_.size());
+            std::vector<std::int32_t> clip_hull_roots;
+            clip_hull_roots.reserve(models_.size() * 3U);
+            for (const auto& model : models_) {
+                hull0_roots.push_back(model.headnodes[0U]);
+                for (std::size_t hull = 1U; hull < model.headnodes.size(); ++hull) {
+                    if (model.headnodes[hull] >= 0) {
+                        clip_hull_roots.push_back(model.headnodes[hull]);
+                    }
+                }
+            }
+
+            CollisionGraphValidationOutput node_output;
+            CollisionGraphValidationOutput clipnode_output;
+            if (!validate_collision_graph(nodes_, hull0_roots, GoldSrcBspLumpId::nodes,
+                                          kGoldSrcBspNodeWireSize, GoldSrcBspErrorCode::node_cycle,
+                                          node_output) ||
+                !validate_collision_graph(clipnodes_, clip_hull_roots, GoldSrcBspLumpId::clipnodes,
+                                          kGoldSrcBspClipnodeWireSize,
+                                          GoldSrcBspErrorCode::clipnode_cycle, clipnode_output)) {
+                return false;
+            }
+
+            collision_graph_statistics_.reachable_hull0_nodes = node_output.reachable_count;
+            collision_graph_statistics_.unreachable_hull0_nodes = node_output.unreachable_count;
+            collision_graph_statistics_.reachable_clipnodes = clipnode_output.reachable_count;
+            collision_graph_statistics_.unreachable_clipnodes = clipnode_output.unreachable_count;
+            collision_graph_statistics_.maximum_tree_depth =
+                std::max(node_output.maximum_root_depth, clipnode_output.maximum_root_depth);
+            collision_graph_statistics_.validation_step_count =
+                static_cast<std::uint64_t>(collision_validation_steps_);
+            return true;
+        } catch (const std::bad_alloc&) {
+            return fail(GoldSrcBspErrorCode::unable_to_retain_collision_source, std::nullopt, 0U,
+                        std::nullopt,
+                        "Unable to retain bounded BSP collision graph validation state");
+        } catch (const std::length_error&) {
+            return fail(GoldSrcBspErrorCode::unable_to_retain_collision_source, std::nullopt, 0U,
+                        std::nullopt,
+                        "BSP collision graph validation state exceeds container limits");
+        }
+    }
+
     [[nodiscard]] std::optional<assets::WorldAsset> build_model_geometry(
         const std::size_t model_index,
         std::size_t& polygon_edge_pair_tests,
@@ -2174,6 +2363,215 @@ private:
         }
         return world;
     }
+
+    static void count_collision_terminal(const std::int32_t contents,
+                                         GoldSrcBspCollisionSourceStatistics& statistics) noexcept
+    {
+        switch (contents) {
+        case -1:
+            ++statistics.terminal_empty_count;
+            break;
+        case -2:
+            ++statistics.terminal_solid_count;
+            break;
+        case -3:
+        case -4:
+        case -5:
+        case -9:
+        case -10:
+        case -11:
+        case -12:
+        case -13:
+        case -14:
+            ++statistics.terminal_liquid_count;
+            break;
+        default:
+            ++statistics.terminal_special_count;
+            break;
+        }
+    }
+
+    [[nodiscard]] static GoldSrcBspCollisionSourceNodeChild collision_node_child(
+        const std::int16_t child)
+    {
+        if (child >= 0) {
+            return GoldSrcBspCollisionSourceNodeReference{static_cast<std::uint32_t>(child)};
+        }
+        return GoldSrcBspCollisionSourceLeafReference{
+            static_cast<std::uint32_t>(-static_cast<std::int32_t>(child) - 1)};
+    }
+
+    [[nodiscard]] static GoldSrcBspCollisionSourceClipnodeChild collision_clipnode_child(
+        const std::int16_t child)
+    {
+        if (child >= 0) {
+            return GoldSrcBspCollisionSourceClipnodeReference{static_cast<std::uint32_t>(child)};
+        }
+        return GoldSrcContentsCode{static_cast<std::int32_t>(child)};
+    }
+
+    [[nodiscard]] static GoldSrcBspCollisionSourceClipHullRoot collision_clip_hull_root(
+        const std::int32_t root)
+    {
+        if (root >= 0) {
+            return GoldSrcBspCollisionSourceClipnodeReference{static_cast<std::uint32_t>(root)};
+        }
+        return GoldSrcContentsCode{root};
+    }
+
+    [[nodiscard]] static GoldSrcBspCollisionSourceClipHull collision_clip_hull(
+        const GoldSrcBspCollisionHullOrdinal ordinal, const std::int32_t root,
+        const GoldSrcBspCollisionHullExtents extents)
+    {
+        return GoldSrcBspCollisionSourceClipHull{
+            ordinal,
+            GoldSrcBspCollisionTreeDomain::clipnode_contents,
+            collision_clip_hull_root(root),
+            extents,
+            GoldSrcBspCollisionCompatibilityProfile::valve_bsp_v30_clip_hulls_v1,
+            GoldSrcBspCollisionEvidenceProfile::
+                public_valve_bsp_compiler_and_original_map_validation,
+        };
+    }
+
+    [[nodiscard]] std::optional<GoldSrcBspCollisionSource> build_collision_source(
+        const assets::AssetSourceFingerprint source_fingerprint)
+    {
+        try {
+            GoldSrcBspCollisionSource source;
+            source.source_fingerprint = source_fingerprint;
+
+            source.planes.reserve(planes_.size());
+            for (std::size_t source_index = 0U; source_index < planes_.size(); ++source_index) {
+                const auto& plane = planes_[source_index];
+                source.planes.push_back(GoldSrcBspCollisionSourcePlane{
+                    static_cast<std::uint32_t>(source_index),
+                    plane.normal,
+                    plane.distance,
+                    plane.type,
+                });
+            }
+
+            source.nodes.reserve(nodes_.size());
+            for (std::size_t source_index = 0U; source_index < nodes_.size(); ++source_index) {
+                const auto& node = nodes_[source_index];
+                source.nodes.push_back(GoldSrcBspCollisionSourceNode{
+                    static_cast<std::uint32_t>(source_index),
+                    static_cast<std::uint32_t>(node.plane_index),
+                    {collision_node_child(node.children[0U]),
+                     collision_node_child(node.children[1U])},
+                    assets::WorldBounds{
+                        assets::AssetVector3{
+                            static_cast<float>(node.minimums[0U]),
+                            static_cast<float>(node.minimums[1U]),
+                            static_cast<float>(node.minimums[2U]),
+                        },
+                        assets::AssetVector3{
+                            static_cast<float>(node.maximums[0U]),
+                            static_cast<float>(node.maximums[1U]),
+                            static_cast<float>(node.maximums[2U]),
+                        },
+                    },
+                    static_cast<std::uint32_t>(node.first_face),
+                    static_cast<std::uint32_t>(node.face_count),
+                });
+            }
+
+            auto statistics = collision_graph_statistics_;
+            source.leaves.reserve(leaves_.size());
+            for (std::size_t source_index = 0U; source_index < leaves_.size(); ++source_index) {
+                const auto& leaf = leaves_[source_index];
+                count_collision_terminal(leaf.contents, statistics);
+                source.leaves.push_back(GoldSrcBspCollisionSourceLeaf{
+                    static_cast<std::uint32_t>(source_index),
+                    GoldSrcContentsCode{leaf.contents},
+                    assets::WorldBounds{
+                        assets::AssetVector3{
+                            static_cast<float>(leaf.minimums[0U]),
+                            static_cast<float>(leaf.minimums[1U]),
+                            static_cast<float>(leaf.minimums[2U]),
+                        },
+                        assets::AssetVector3{
+                            static_cast<float>(leaf.maximums[0U]),
+                            static_cast<float>(leaf.maximums[1U]),
+                            static_cast<float>(leaf.maximums[2U]),
+                        },
+                    },
+                });
+            }
+
+            source.clipnodes.reserve(clipnodes_.size());
+            for (std::size_t source_index = 0U; source_index < clipnodes_.size(); ++source_index) {
+                const auto& clipnode = clipnodes_[source_index];
+                for (const auto child : clipnode.children) {
+                    if (child < 0) {
+                        count_collision_terminal(static_cast<std::int32_t>(child), statistics);
+                    }
+                }
+                source.clipnodes.push_back(GoldSrcBspCollisionSourceClipnode{
+                    static_cast<std::uint32_t>(source_index),
+                    static_cast<std::uint32_t>(clipnode.plane_index),
+                    {collision_clipnode_child(clipnode.children[0U]),
+                     collision_clipnode_child(clipnode.children[1U])},
+                });
+            }
+
+            source.models.reserve(models_.size());
+            for (std::size_t source_index = 0U; source_index < models_.size(); ++source_index) {
+                const auto& model = models_[source_index];
+                for (std::size_t hull = 1U; hull < model.headnodes.size(); ++hull) {
+                    if (model.headnodes[hull] < 0) {
+                        ++statistics.direct_terminal_root_count;
+                        count_collision_terminal(model.headnodes[hull], statistics);
+                    }
+                }
+                source.models.push_back(GoldSrcBspCollisionSourceModel{
+                    static_cast<std::uint32_t>(source_index),
+                    model.origin,
+                    assets::WorldBounds{model.minimums, model.maximums},
+                    GoldSrcBspCollisionSourcePointHull{
+                        GoldSrcBspCollisionHullOrdinal::point,
+                        GoldSrcBspCollisionTreeDomain::node_leaf,
+                        GoldSrcBspCollisionSourceNodeReference{
+                            static_cast<std::uint32_t>(model.headnodes[0U])},
+                        kGoldSrcBspPointHullExtents,
+                        GoldSrcBspCollisionCompatibilityProfile::valve_bsp_v30_clip_hulls_v1,
+                        GoldSrcBspCollisionEvidenceProfile::
+                            public_valve_bsp_compiler_and_original_map_validation,
+                    },
+                    collision_clip_hull(GoldSrcBspCollisionHullOrdinal::standing_32x32x72,
+                                        model.headnodes[1U], kGoldSrcBspStandingHullExtents),
+                    collision_clip_hull(GoldSrcBspCollisionHullOrdinal::large_64_cube,
+                                        model.headnodes[2U], kGoldSrcBspLargeHullExtents),
+                    collision_clip_hull(GoldSrcBspCollisionHullOrdinal::duck_32x32x36,
+                                        model.headnodes[3U], kGoldSrcBspDuckHullExtents),
+                    static_cast<std::uint32_t>(model.visible_leaf_count),
+                    static_cast<std::uint32_t>(model.first_face),
+                    static_cast<std::uint32_t>(model.face_count),
+                });
+            }
+
+            statistics.plane_count = static_cast<std::uint64_t>(planes_.size());
+            statistics.node_count = static_cast<std::uint64_t>(nodes_.size());
+            statistics.leaf_count = static_cast<std::uint64_t>(leaves_.size());
+            statistics.clipnode_count = static_cast<std::uint64_t>(clipnodes_.size());
+            statistics.model_count = static_cast<std::uint64_t>(models_.size());
+            statistics.model_hull_root_count = static_cast<std::uint64_t>(models_.size()) * 4U;
+            source.statistics = statistics;
+            return source;
+        } catch (const std::bad_alloc&) {
+            static_cast<void>(fail(GoldSrcBspErrorCode::unable_to_retain_collision_source,
+                                   std::nullopt, 0U, std::nullopt,
+                                   "Unable to retain bounded owning BSP collision source"));
+            return std::nullopt;
+        } catch (const std::length_error&) {
+            static_cast<void>(fail(GoldSrcBspErrorCode::unable_to_retain_collision_source,
+                                   std::nullopt, 0U, std::nullopt,
+                                   "BSP collision source exceeds container limits"));
+            return std::nullopt;
+        }
+    }
+
     [[nodiscard]] std::optional<GoldSrcBspParsedDocument> build_world()
     {
         const auto& world_model = models_.front();
@@ -2203,6 +2601,10 @@ private:
         }
         const auto source_fingerprint = goldsrc_bsp_source_fingerprint(source_);
         world->source_content_fingerprint = source_fingerprint;
+        auto collision_source = build_collision_source(source_fingerprint);
+        if (!collision_source) {
+            return std::nullopt;
+        }
 
         std::size_t retained_vertex_count = world->vertices.size();
         std::size_t retained_index_count = world->indices.size();
@@ -2388,6 +2790,7 @@ private:
         return GoldSrcBspParsedDocument{
             std::move(*world),
             std::move(spatial_source),
+            std::move(*collision_source),
             std::move(brush_submodels),
             std::move(entity_lump_bytes),
             lump_element_counts_,
@@ -2413,6 +2816,8 @@ private:
     std::vector<Clipnode> clipnodes_;
     std::vector<Model> models_;
     GoldSrcBspGeometryStatistics geometry_statistics_{};
+    GoldSrcBspCollisionSourceStatistics collision_graph_statistics_{};
+    std::size_t collision_validation_steps_{0U};
     std::optional<GoldSrcBspError> error_;
 };
 

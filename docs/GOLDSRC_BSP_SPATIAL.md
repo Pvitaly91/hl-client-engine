@@ -44,3 +44,12 @@ order, and deduplicates leaves. Both operations are bounded and cycle-safe.
 The spatial layer does not decide rendering, parse entities, decode textures,
 or issue network or GPU operations. Visibility consumes this package through
 format-neutral query and membership APIs.
+
+## Collision is a sibling CPU package
+
+M4.6.3.1 does not overload the PVS package with physical collision semantics.
+The canonical BSP parser publishes a sibling collision source: hull 0 uses its
+node/leaf graph, while hulls 1–3 use clipnodes and signed contents terminals.
+`GoldSrcCollisionWorldBuilder` publishes an independent immutable
+`CollisionWorldPackage`; render scenes never receive clipnodes and collision
+queries never depend on visibility or renderer state.

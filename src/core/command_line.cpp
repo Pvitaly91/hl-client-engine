@@ -126,6 +126,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::asset_dispatch;
             } else if (value == "world-geometry") {
                 options.stop_after = ConnectionStopPoint::world_geometry;
+            } else if (value == "collision-world") {
+                options.stop_after = ConnectionStopPoint::collision_world;
             } else if (value == "world-textures") {
                 options.stop_after = ConnectionStopPoint::world_textures;
             } else if (value == "world-render-package") {
@@ -142,7 +144,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                                "resource-list-boundary, resource-list, or "
                                "resource-response-boundary, server-baselines, "
                                "entity-snapshot, usercmd-boundary, precache-manifest, or "
-                               "asset-dispatch, world-geometry, world-textures, or "
+                               "asset-dispatch, world-geometry, collision-world, world-textures, or "
                                "world-render-package, or world-spatial-scene)");
             }
         } else if (argument == "--auth-provider") {
@@ -276,7 +278,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "user-info/resource-list-boundary/resource-list/"
                        "resource-response-boundary/server-baselines/"
                        "entity-snapshot/usercmd-boundary/precache-manifest/"
-                       "asset-dispatch/world-geometry/world-textures/"
+                       "asset-dispatch/world-geometry/collision-world/world-textures/"
                        "world-render-package/world-spatial-scene/"
                        "entity-visual-scene stop point or a preview option");
     }
@@ -304,6 +306,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::precache_manifest ||
          options.stop_after == ConnectionStopPoint::asset_dispatch ||
          options.stop_after == ConnectionStopPoint::world_geometry ||
+         options.stop_after == ConnectionStopPoint::collision_world ||
          options.stop_after == ConnectionStopPoint::world_textures ||
          options.stop_after == ConnectionStopPoint::world_render_package ||
          options.stop_after == ConnectionStopPoint::world_spatial_scene ||
@@ -346,6 +349,13 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             ResourceConsistencyProviderKind::local) {
         return failure(
             "The world-geometry stop point requires "
+            "--resource-consistency-provider local");
+    }
+    if (options.stop_after == ConnectionStopPoint::collision_world &&
+        options.resource_consistency_provider !=
+            ResourceConsistencyProviderKind::local) {
+        return failure(
+            "The collision-world stop point requires "
             "--resource-consistency-provider local");
     }
     if (options.stop_after == ConnectionStopPoint::world_textures &&
@@ -400,6 +410,7 @@ bool requires_local_resource_consistency_preparation(
             options.stop_after == ConnectionStopPoint::precache_manifest ||
             options.stop_after == ConnectionStopPoint::asset_dispatch ||
             options.stop_after == ConnectionStopPoint::world_geometry ||
+            options.stop_after == ConnectionStopPoint::collision_world ||
             options.stop_after == ConnectionStopPoint::world_textures ||
             options.stop_after == ConnectionStopPoint::world_render_package ||
             options.stop_after == ConnectionStopPoint::world_spatial_scene ||
@@ -423,7 +434,8 @@ Options:
                        resource-list-boundary, resource-list, or
                        resource-response-boundary, server-baselines,
                        entity-snapshot, usercmd-boundary, precache-manifest, or
-                       asset-dispatch, world-geometry, world-textures, or
+                       asset-dispatch, world-geometry, collision-world,
+                       world-textures, or
                        world-render-package, world-spatial-scene, or
                        entity-visual-scene
                        (default: challenge)
@@ -435,9 +447,9 @@ Options:
                       Explicit read-only response provider: local; requires
                       --basedir and is prepared only for resource-response-boundary,
                       server-baselines, entity-snapshot, usercmd-boundary,
-                      precache-manifest, asset-dispatch, world-geometry, or
-                      world-textures, world-render-package, or
-                      world-spatial-scene, entity-visual-scene
+                      precache-manifest, asset-dispatch, world-geometry,
+                      collision-world, world-textures, world-render-package,
+                      world-spatial-scene, or entity-visual-scene
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
@@ -490,6 +502,9 @@ production GoldSrc world importer.
 World-geometry follows that same retained route, requires a non-empty owning
 CPU WorldAsset, reports bounded geometry counts, and stops before texture,
 lightmap, renderer, or GPU work.
+Collision-world builds an immutable CPU collision package from that canonical
+BSP import, runs bounded deterministic probes, and stops without texture,
+lightmap, SDL, OpenGL, renderer, movement, or prediction work.
 World-textures continues only from an imported CPU world, decodes embedded and
 declared WAD3 textures into owning RGBA mip levels, and stops before lightmaps,
 renderer, or GPU work.

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hlclient/assets/asset_types.hpp>
+#include <hlclient/goldsrc/brush_models/goldsrc_brush_rigid_transform.hpp>
 #include <hlclient/renderer/render_camera_math.hpp>
 
 #include <array>
@@ -8,38 +8,6 @@
 #include <string_view>
 
 namespace hlclient::goldsrc::brush_models {
-
-enum class BrushSubmodelCoordinateProfile {
-    // GoldSrc qcsg removes the origin brush, writes its center to entity
-    // `origin`, then subtracts that origin from the remaining brush planes.
-    // Pinned evidence: utils/qcsg/map.c:197-225 and
-    // utils/qcsg/brush.c:803-820.
-    qcsg_entity_origin_relative_v1,
-};
-
-enum class BrushSubmodelTransformProfile {
-    // Entity angles are [pitch, yaw, roll]. The rotation follows Valve's
-    // column-vector AngleMatrix profile: (YAW * PITCH) * ROLL.
-    // Pinned evidence: cl_dll/studio_util.cpp:21-48 and
-    // utils/qrad/lightmap.c:965-990.
-    valve_angle_matrix_entity_origin_v1,
-};
-
-enum class BrushSubmodelTransformErrorCode {
-    non_finite_input,
-    unsupported_source_model_origin,
-    invalid_local_bounds,
-    non_finite_result,
-};
-
-[[nodiscard]] std::string_view to_string(
-    BrushSubmodelTransformErrorCode code) noexcept;
-
-struct BrushSubmodelTransformError {
-    BrushSubmodelTransformErrorCode code{
-        BrushSubmodelTransformErrorCode::non_finite_input};
-    std::string_view context;
-};
 
 struct BrushSubmodelTransform {
     assets::AssetVector3 translation{};

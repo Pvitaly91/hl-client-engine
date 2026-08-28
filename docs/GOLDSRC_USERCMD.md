@@ -223,6 +223,9 @@ millisecond duration, and rejects time reversal, lag beyond its catch-up bound,
 time overflow, and sequence exhaustion. One rendered frame is not assumed to
 equal one command.
 
-M4.6.2 contains no collision, gravity, movement simulation, command
+M4.6.2 itself contains no collision, gravity, movement simulation, command
 prediction, server-time mapping, replay/reconciliation, or entity projection.
-Those concerns remain outside this milestone; M4.6.3 is not implemented here.
+M4.6.3.1 subsequently added an independent immutable BSP collision/query API
+without changing this usercmd wire/session boundary. Usercmd application and
+movement begin no earlier than M4.6.3.2; replay and reconciliation remain
+M4.6.3.3 work.

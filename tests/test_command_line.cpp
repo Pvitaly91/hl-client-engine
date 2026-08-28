@@ -472,6 +472,28 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             *result.options));
     }
 
+    SECTION("collision world requires and schedules the local provider")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"},
+            std::string_view{"collision-world"},
+            std::string_view{"--auth-provider"}, std::string_view{"file"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"C:/Games/Half-Life"},
+            std::string_view{"--renderer"}, std::string_view{"null"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::collision_world);
+        CHECK(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
     SECTION("world geometry rejects a missing local provider")
     {
         const std::array arguments{
@@ -1202,6 +1224,11 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("precache-manifest") != std::string_view::npos);
     CHECK(help.find("asset-dispatch") != std::string_view::npos);
     CHECK(help.find("world-geometry") != std::string_view::npos);
+    CHECK(help.find("collision-world") != std::string_view::npos);
+    CHECK(help.find("Collision-world builds an immutable CPU collision package") !=
+          std::string_view::npos);
+    CHECK(help.find("SDL, OpenGL, renderer, movement, or prediction work") !=
+          std::string_view::npos);
     CHECK(help.find("world-textures") != std::string_view::npos);
     CHECK(help.find("world-render-package") != std::string_view::npos);
     CHECK(help.find("entity-visual-scene") != std::string_view::npos);

@@ -244,3 +244,19 @@ snapshots selected-map and relevant-WAD metadata plus the approved-root
 inventory, and fails on any drift. Tracked evidence contains aggregate metadata
 only; maps, WADs, raw face arrays, native paths, texture names, and entity text
 are never published or committed.
+
+## M4.6.3.1 canonical collision handoff
+
+The same `GoldSrcBspParser` invocation now also publishes an owning
+`GoldSrcBspCollisionSource`. Planes come from the already normalized canonical
+records; nodes, leaves, clipnodes, and all model headnodes stay in explicitly
+different typed domains. No collision consumer reopens or reparses BSP bytes.
+Every model/hull root is checked by bounded iterative graph validation with
+cycle detection; shared acyclic subtrees remain valid and unreachable global
+records are counted.
+
+The source holds no raw BSP bytes or native path. Generic world dispatch keeps
+it as an immutable format attachment from that same importer invocation so the
+CPU `collision-world` boundary can build a package without a second parse. See
+[GoldSrc BSP collision](GOLDSRC_BSP_COLLISION.md) and
+[collision hulls](GOLDSRC_COLLISION_HULLS.md).

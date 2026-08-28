@@ -22,6 +22,34 @@ struct ImporterCounts {
   int imports{0};
 };
 
+class SyntheticAttachment final : public assets::AssetImportAttachment {
+public:
+  explicit SyntheticAttachment(const int marker) : marker_{marker} {}
+  [[nodiscard]] int marker() const noexcept { return marker_; }
+
+private:
+  int marker_{0};
+};
+
+class AttachedWorldImporter final : public assets::IWorldImporter {
+public:
+  [[nodiscard]] std::string_view id() const noexcept override {
+    return "attached-world";
+  }
+
+  [[nodiscard]] assets::AssetProbeConfidence
+  probe(const assets::AssetProbe &) const noexcept override {
+    return 100U;
+  }
+
+  [[nodiscard]] assets::WorldAssetResult
+  import(const assets::AssetSource &) const override {
+    return assets::WorldAssetResult::success(
+        assets::WorldAsset{},
+        std::make_shared<const SyntheticAttachment>(42));
+  }
+};
+
 enum class ImportBehavior {
   success,
   malformed,
@@ -148,6 +176,24 @@ TEST_CASE("World dispatch probes and imports only the world category",
   CHECK(sprite.probes == 0);
   CHECK(image.probes == 0);
   CHECK(audio.probes == 0);
+}
+
+TEST_CASE("World dispatch preserves an immutable importer attachment",
+          "[assets][dispatch][attachment]") {
+  assets::AssetImporterRegistries registries;
+  REQUIRE(registries.worlds.register_importer(
+      std::make_unique<AttachedWorldImporter>(), 0));
+  const assets::AssetImporterDispatcher dispatcher{registries};
+
+  const auto result =
+      dispatcher.dispatch(make_source(), assets::AssetDispatchRole::world);
+
+  REQUIRE(result.imported());
+  REQUIRE(result.attachment);
+  const auto attachment =
+      std::dynamic_pointer_cast<const SyntheticAttachment>(result.attachment);
+  REQUIRE(attachment);
+  CHECK(attachment->marker() == 42);
 }
 
 TEST_CASE("Audio dispatch ignores a misleading model extension",

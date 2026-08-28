@@ -704,3 +704,38 @@ writes only bounded structural metadata below ignored `manual-artifacts`; and
 accepts a transport run only after complete restoration proves
 `external-file-drift=none`. It injects no input and does not promote a capture
 to accepted stock usercmd evidence without independent review.
+
+## GoldSrc BSP collision checker
+
+Build the CPU-only package/query targets and offline checker with the required
+Win32 warnings-as-errors configuration:
+
+```powershell
+cmake --build build --config Debug --target `
+  hlclient_collision_api hlclient_goldsrc_bsp_collision `
+  hlclient_goldsrc_collision_scene hlclient_collision_check
+
+.\build\bin\Debug\hlclient_collision_check.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" `
+  --game valve --map maps/crossfire.bsp `
+  --scenario deterministic-probes
+```
+
+The checker accepts only a safe virtual map under an explicit user-owned root,
+opens it through `LocalResourceEnvironment`, parses it once, and prints only
+counts and structural/query SHA-256 values. It opens no socket and performs no
+write, SDL, OpenGL, texture, or movement work. Verify multiple maps and all
+three scenarios twice with:
+
+```powershell
+.\scripts\verify_local_bsp_collision.ps1 `
+  -ToolPath .\build\bin\Debug\hlclient_collision_check.exe `
+  -Basedir "D:\Steam\steamapps\common\Half-Life" `
+  -Game valve `
+  -Maps @('maps/boot_camp.bsp','maps/crossfire.bsp','maps/stalkyard.bsp')
+```
+
+Success requires deterministic summaries, nonzero structural/query work, and
+`external-file-drift=none`. The production CPU stop spelling is
+`--stop-after collision-world`; it requires the existing local consistency
+provider and remains valid with `--renderer null`.

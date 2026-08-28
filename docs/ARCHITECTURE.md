@@ -900,8 +900,31 @@ retained driver explicitly; render conversion lives in a separate adapter
 target. Every stock usercmd profile fails before usercmd encoding/submission:
 accepted stock runs and verified move packets are both zero.
 No collision, movement prediction, acknowledged-command replay, or server
-reconciliation is part of M4.6.2. See [GoldSrc usercmd](GOLDSRC_USERCMD.md) and
+reconciliation is part of the M4.6.2 usercmd targets. See [GoldSrc usercmd](GOLDSRC_USERCMD.md) and
 the [usercmd transmission lifecycle](GOLDSRC_USERCMD_TRANSMISSION.md).
+
+## M4.6.3.1 collision ownership
+
+```text
+verified AssetSource -> one GoldSrcBspParser invocation
+    -> WorldAsset / spatial source / collision source attachment
+    -> GoldSrcCollisionWorldBuilder -> immutable CollisionWorldPackage
+    -> caller-owned CollisionQueryScratch -> reentrant point and hull queries
+```
+
+`hlclient_collision_api` is renderer-, network-, filesystem-, SDL-, and
+OpenGL-neutral. `hlclient_goldsrc_bsp_collision` adapts only canonical owning
+BSP records; it accepts no raw byte source. Hull 0 preserves the node/leaf
+domain, hulls 1–3 preserve clipnode/contents, and all four exact compiler
+profiles are explicit. `hlclient_goldsrc_collision_scene` adds only explicit
+rigid brush instances and stable tie ordering. The stock role provider opts no
+brush into solidity; dynamic doors/platforms remain future runtime work.
+
+The production `collision-world` route aliases the already established
+approved-asset network boundary, then builds and probes collision CPU state.
+It changes no packet, ACK, `new`, `sendres`, opcode-5, or usercmd behavior and
+does not place clipnodes in render state. See [collision package](COLLISION_WORLD_PACKAGE.md)
+and [trace API](COLLISION_TRACE_API.md).
 
 ## Module and plugin policy
 

@@ -240,6 +240,18 @@ struct ProbeLumpRange {
 
 } // namespace
 
+GoldSrcBspCollisionImportAttachment::GoldSrcBspCollisionImportAttachment(
+    GoldSrcBspCollisionSource collision_source)
+    : collision_source_{std::move(collision_source)}
+{
+}
+
+const GoldSrcBspCollisionSource&
+GoldSrcBspCollisionImportAttachment::collision_source() const noexcept
+{
+    return collision_source_;
+}
+
 GoldSrcBspWorldImporter::GoldSrcBspWorldImporter(GoldSrcBspImportLimits limits)
     : limits_{std::move(limits)}
 {
@@ -335,9 +347,13 @@ assets::WorldAssetResult GoldSrcBspWorldImporter::import(
         });
     }
 
+    auto collision_attachment =
+        std::make_shared<const GoldSrcBspCollisionImportAttachment>(
+            std::move(parsed.document->collision_source));
     auto world = std::move(parsed.document->world_asset);
     world.identity.source_name = path_as_utf8(source.virtual_path());
-    return assets::WorldAssetResult::success(std::move(world));
+    return assets::WorldAssetResult::success(
+        std::move(world), std::move(collision_attachment));
 }
 
 } // namespace hlclient::goldsrc::bsp

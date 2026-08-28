@@ -31,6 +31,7 @@ enum class ConnectionStopPoint {
     precache_manifest,
     asset_dispatch,
     world_geometry,
+    collision_world,
     world_textures,
     world_render_package,
     world_spatial_scene,

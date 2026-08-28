@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -55,12 +56,33 @@ struct AssetError {
     std::vector<std::string> candidate_importer_ids;
 };
 
+// Optional immutable format-owned state produced by the same canonical
+// importer invocation as the public asset. Generic dispatch retains the
+// attachment without interpreting it; format-specific CPU stages may recover
+// a known derived type. Renderer-facing assets remain free of parser-private
+// records and no second source parse is required.
+class AssetImportAttachment {
+public:
+    virtual ~AssetImportAttachment() = default;
+
+    AssetImportAttachment(const AssetImportAttachment&) = delete;
+    AssetImportAttachment& operator=(const AssetImportAttachment&) = delete;
+    AssetImportAttachment(AssetImportAttachment&&) = delete;
+    AssetImportAttachment& operator=(AssetImportAttachment&&) = delete;
+
+protected:
+    AssetImportAttachment() = default;
+};
+
 template<class Asset>
 class AssetResult final {
 public:
-    [[nodiscard]] static AssetResult success(Asset asset)
+    [[nodiscard]] static AssetResult success(
+        Asset asset,
+        std::shared_ptr<const AssetImportAttachment> attachment = {})
     {
-        return AssetResult{std::in_place_index<0>, std::move(asset)};
+        return AssetResult{
+            std::in_place_index<0>, std::move(asset), std::move(attachment)};
     }
 
     [[nodiscard]] static AssetResult failure(AssetError error)
@@ -103,14 +125,31 @@ public:
         return std::get<AssetError>(std::move(storage_));
     }
 
+    [[nodiscard]] const std::shared_ptr<const AssetImportAttachment>&
+    attachment() const noexcept
+    {
+        return attachment_;
+    }
+
+    [[nodiscard]] std::shared_ptr<const AssetImportAttachment>
+    take_attachment() noexcept
+    {
+        return std::move(attachment_);
+    }
+
 private:
     template<std::size_t Index, class Value>
-    explicit AssetResult(std::in_place_index_t<Index> index, Value&& value)
-        : storage_{index, std::forward<Value>(value)}
+    explicit AssetResult(
+        std::in_place_index_t<Index> index,
+        Value&& value,
+        std::shared_ptr<const AssetImportAttachment> attachment = {})
+        : storage_{index, std::forward<Value>(value)},
+          attachment_{std::move(attachment)}
     {
     }
 
     std::variant<Asset, AssetError> storage_;
+    std::shared_ptr<const AssetImportAttachment> attachment_;
 };
 
 template<class Asset>

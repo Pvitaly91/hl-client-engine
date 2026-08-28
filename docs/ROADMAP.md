@@ -872,20 +872,38 @@ reconciliation was added. See [GoldSrc usercmd](GOLDSRC_USERCMD.md),
 [usercmd checksum](GOLDSRC_USERCMD_CHECKSUM.md), and
 [usercmd transmission](GOLDSRC_USERCMD_TRANSMISSION.md).
 
-### M4.6.3 — Local movement prediction and server reconciliation
+### M4.6.3.1 — BSP collision world and trace API
 
-**Status: next; local prediction, command-history replay, and server
-reconciliation are not implemented.**
+**Status: completed.**
+
+One canonical BSP parse now retains normalized planes, the distinct hull-0
+node/leaf tree, clipnodes, all four model roots, exact compiler hull extents,
+typed contents, and aggregate reachability/cycle statistics. An immutable
+`CollisionWorldPackage` supports reentrant point, stationary, and bounded
+iterative hull traces under `project_deterministic_bsp_hull_trace_v1`.
+Explicit translated/rotated brush models are queryable, while stock entity
+solidity remains evidence-pending and world collision is the production
+default. The checker and read-only verifier validate deterministic aggregates
+on user-owned BSPs. This is not an exact `PM_PlayerTrace` claim.
+
+### M4.6.3.2 — Deterministic local movement kernel
+
+**Status: next; walking, gravity, friction, acceleration, jumping, and steps
+are not implemented.**
+
+### M4.6.3.3 — Replay and reconciliation
+
+**Status: planned after M4.6.3.2.**
 
 M4.7 retains the stock entity-wire/live runtime compatibility work. M3.3
-retains download/cache. Neither is part of M4.6.1.
+retains download/cache. Neither is part of M4.6.3.1.
 
 ## Superseded milestone numbering
 
 The former M5–M8 entity/model/input/interpolation buckets were split into the
 active M4.5.1, M4.5.2, M4.5.3 and M4.6 sequence above. They are not additional
-or competing next milestones. The only next milestone after completed M4.6.2
-is M4.6.3.
+or competing next milestones. The only next milestone after completed
+M4.6.3.1 is M4.6.3.2.
 
 ## M9 — `client.dll` API and HUD
 
@@ -970,9 +988,10 @@ and first-person preview boundary: neutral input snapshots, gameplay intent,
 free-flight, and synthetic entity anchoring. M4.6.2 is complete at its bounded
 synthetic `usercmd` codec/transmission boundary while stock exact wire/runtime
 behavior remains evidence-pending at zero accepted runs and zero verified move
-packets. M4.6.3 is next and owns local prediction, command-history replay, and
-server reconciliation. M4.7 may revisit live stock entity-wire/runtime effects
-evidence.
+packets. M4.6.3.1 is complete at the project-owned BSP collision/trace
+boundary. M4.6.3.2 is next and owns the deterministic local movement kernel;
+M4.6.3.3 retains command replay, prediction history, and reconciliation. M4.7
+may revisit live stock entity-wire/runtime effects evidence.
 
 Every milestone retains these gates:
 

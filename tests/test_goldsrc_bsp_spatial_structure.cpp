@@ -224,7 +224,7 @@ TEST_CASE("Clipnode planes and child domains are checked without collision trave
     }
 }
 
-TEST_CASE("An in-range cycle is not traversed by the M4.1 metadata validator",
+TEST_CASE("The canonical parser rejects an in-range hull-0 node cycle",
     "[goldsrc-bsp][spatial][cycle]")
 {
     fixture::SyntheticBspBuilder builder;
@@ -232,9 +232,11 @@ TEST_CASE("An in-range cycle is not traversed by the M4.1 metadata validator",
     node.children[0] = 0;
     const auto result = bsp::GoldSrcBspParser::parse(
         builder.set_nodes(std::span{&node, 1U}).build());
-    INFO((result.error ? result.error->context : std::string{}));
-    REQUIRE(result);
-    CHECK(result.document->world_asset.surfaces.size() == 1U);
+    REQUIRE_FALSE(result);
+    REQUIRE_FALSE(result.document);
+    REQUIRE(result.error);
+    CHECK(result.error->code == bsp::GoldSrcBspErrorCode::node_cycle);
+    CHECK(result.error->lump_id == bsp::GoldSrcBspLumpId::nodes);
 }
 
 } // namespace

@@ -75,3 +75,20 @@ Only absent or decimal `rendermode = 0` is renderable. Nonzero modes are kept
 with a typed unsupported status and never rendered as opaque. Instance bounds
 are transformed from all eight local AABB corners, queried against the world
 spatial tree, and retain deduplicated non-solid PVS-addressable touched leaves.
+
+## M4.6.3.1 collision boundary
+
+The renderer-facing transform now delegates its rigid math to the neutral
+`BrushRigidTransform` API. Collision can transform world segments to
+model-local space, trace an exact compiled hull, preserve its fraction, and
+rotate the hit normal/plane back to world space without depending on renderer
+or OpenGL types. The broad phase rejects only against a conservative bound
+proven from exact axial constraints in the selected BSP hull tree; unproven
+source bounds always fall through to the exact trace. It never substitutes an
+AABB for a rotated BSP hull.
+
+Collision models exist for BSP models 1..N, but model presence is not evidence
+of runtime solidity. The stock role provider returns `evidence_pending`; only
+an explicit synthetic provider may opt an instance into solid composition.
+Doors, platforms, water, illusionaries, and triggers are not guessed from
+classnames. See [static brush collision](STATIC_BRUSH_COLLISION_BOUNDARY.md).

@@ -150,12 +150,15 @@ imported_result(AssetResult<Asset> imported,
                 std::vector<AssetDispatchProbeCandidate> candidates) {
   const auto qualified_id = qualified_importer_id(category, raw_importer_id);
   if (imported) {
+    auto attachment = imported.take_attachment();
     std::optional<ImportedAsset> asset;
     asset.emplace(std::in_place_type<Asset>, std::move(imported).value());
-    return AssetDispatchResult{
+    auto result = AssetDispatchResult{
         AssetDispatchState::imported, std::move(asset), category, qualified_id,
         std::move(candidates),        std::nullopt,
     };
+    result.attachment = std::move(attachment);
+    return result;
   }
 
   auto error = std::move(imported).error();

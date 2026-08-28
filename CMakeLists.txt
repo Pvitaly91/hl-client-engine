@@ -72,6 +72,15 @@ target_link_libraries(hlclient_hash_md5 PUBLIC hlclient::core)
 set_property(TARGET hlclient_hash_md5 PROPERTY FOLDER "Engine/Core/Hash")
 
 hlclient_add_library(
+    hlclient_hash_sha256
+    include/hlclient/hash/sha256.hpp
+    src/hash/sha256.cpp
+)
+add_library(hlclient::hash_sha256 ALIAS hlclient_hash_sha256)
+target_link_libraries(hlclient_hash_sha256 PUBLIC hlclient::core)
+set_property(TARGET hlclient_hash_sha256 PROPERTY FOLDER "Engine/Core/Hash")
+
+hlclient_add_library(
     hlclient_local_resources
     include/hlclient/local_resources/local_resource_identity.hpp
     include/hlclient/local_resources/local_resource_search_roots.hpp
@@ -182,6 +191,19 @@ add_library(hlclient::asset_api ALIAS hlclient_asset_api)
 target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
 set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
 
+hlclient_add_library(
+    hlclient_collision_api
+    include/hlclient/collision/collision_contents.hpp
+    include/hlclient/collision/collision_world_package.hpp
+    include/hlclient/collision/collision_world_query.hpp
+    src/collision/collision_contents.cpp
+    src/collision/collision_world_package.cpp
+    src/collision/collision_world_query.cpp
+)
+add_library(hlclient::collision_api ALIAS hlclient_collision_api)
+target_link_libraries(hlclient_collision_api PUBLIC hlclient::asset_api)
+set_property(TARGET hlclient_collision_api PROPERTY FOLDER "Engine/Collision")
+
 add_library(hlclient_model_asset_api INTERFACE)
 add_library(hlclient::model_asset_api ALIAS hlclient_model_asset_api)
 target_sources(
@@ -277,6 +299,7 @@ set_property(
 hlclient_add_library(
     hlclient_goldsrc_bsp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_format.hpp
+    include/hlclient/goldsrc/bsp/goldsrc_bsp_collision_source.hpp
     include/hlclient/goldsrc/bsp/goldsrc_face_geometry_builder.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_texture_source_parser.hpp
@@ -300,6 +323,20 @@ target_link_libraries(
 set_property(
     TARGET hlclient_goldsrc_bsp
     PROPERTY FOLDER "Engine/Assets/Formats/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_bsp_collision
+    include/hlclient/goldsrc/collision/goldsrc_collision_world_builder.hpp
+    src/goldsrc/collision/goldsrc_collision_world_builder.cpp
+)
+add_library(
+    hlclient::goldsrc_bsp_collision ALIAS hlclient_goldsrc_bsp_collision)
+target_link_libraries(
+    hlclient_goldsrc_bsp_collision
+    PUBLIC hlclient::collision_api hlclient::goldsrc_bsp)
+set_property(
+    TARGET hlclient_goldsrc_bsp_collision
+    PROPERTY FOLDER "Engine/Collision/GoldSrc")
 
 hlclient_add_library(
     hlclient_goldsrc_builtin_importers
@@ -1108,6 +1145,37 @@ set_property(
     PROPERTY FOLDER "Engine/Renderer/World/Visibility")
 
 hlclient_add_library(
+    hlclient_goldsrc_brush_transform
+    include/hlclient/goldsrc/brush_models/goldsrc_brush_rigid_transform.hpp
+    src/goldsrc/brush_models/goldsrc_brush_rigid_transform.cpp
+)
+add_library(
+    hlclient::goldsrc_brush_transform ALIAS hlclient_goldsrc_brush_transform)
+target_link_libraries(
+    hlclient_goldsrc_brush_transform PUBLIC hlclient::asset_api)
+set_property(
+    TARGET hlclient_goldsrc_brush_transform
+    PROPERTY FOLDER "Engine/Collision/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_collision_scene
+    include/hlclient/goldsrc/collision/goldsrc_brush_collision_scene.hpp
+    src/goldsrc/collision/goldsrc_brush_collision_scene.cpp
+)
+add_library(
+    hlclient::goldsrc_collision_scene ALIAS
+    hlclient_goldsrc_collision_scene)
+target_link_libraries(
+    hlclient_goldsrc_collision_scene
+    PUBLIC
+        hlclient::collision_api
+        hlclient::goldsrc_bsp_collision
+        hlclient::goldsrc_brush_transform)
+set_property(
+    TARGET hlclient_goldsrc_collision_scene
+    PROPERTY FOLDER "Engine/Collision/GoldSrc")
+
+hlclient_add_library(
     hlclient_goldsrc_brush_models
     include/hlclient/goldsrc/brush_models/brush_submodel_instances.hpp
     include/hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp
@@ -1128,6 +1196,7 @@ target_link_libraries(
     hlclient_goldsrc_brush_models
     PUBLIC
         hlclient::goldsrc_bsp
+        hlclient::goldsrc_brush_transform
         hlclient::renderer_api
         hlclient::world_spatial)
 set_property(
@@ -1336,6 +1405,7 @@ target_link_libraries(
         hlclient::asset_api
         hlclient::asset_manager
         hlclient::goldsrc_bsp
+        hlclient::goldsrc_bsp_collision
         hlclient::goldsrc_builtin_importers
         hlclient::network
         hlclient::goldsrc
@@ -1401,6 +1471,24 @@ target_link_libraries(
 )
 set_property(
     TARGET hlclient_bsp_compat_check PROPERTY FOLDER "Tools/Assets")
+
+add_executable(
+    hlclient_collision_check
+    apps/hlclient_collision_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_collision_check)
+target_link_libraries(
+    hlclient_collision_check
+    PRIVATE
+        hlclient::collision_api
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_bsp_collision
+        hlclient::hash_sha256
+        hlclient::local_asset_source
+        hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_collision_check PROPERTY FOLDER "Tools/Collision")
 
 add_executable(
     hlclient_goldsrc_asset_check

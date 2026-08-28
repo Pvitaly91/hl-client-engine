@@ -16,6 +16,12 @@ add_executable(hlclient_tests
     test_connect_response_udp_integration.cpp
     test_connect_udp_integration.cpp
     test_command_line.cpp
+    test_collision_contents.cpp
+    test_collision_brush_model_trace.cpp
+    test_collision_hull_trace.cpp
+    test_collision_point_contents.cpp
+    test_collision_scene_composition.cpp
+    test_collision_world_package.cpp
     test_input_events.cpp
     test_input_state_tracker.cpp
     test_sdl_input_translation.cpp
@@ -73,6 +79,7 @@ add_executable(hlclient_tests
     test_runtime_entity_playback_integration.cpp
     test_game_paths.cpp
     test_goldsrc_bsp_header.cpp
+    test_goldsrc_bsp_collision_source.cpp
     test_goldsrc_bsp_records.cpp
     test_goldsrc_bsp_textures.cpp
     test_goldsrc_bsp_face_loop.cpp
@@ -83,6 +90,8 @@ add_executable(hlclient_tests
     test_goldsrc_bsp_spatial_structure.cpp
     test_goldsrc_entity_document.cpp
     test_goldsrc_brush_transform.cpp
+    test_goldsrc_brush_rigid_transform.cpp
+    test_goldsrc_collision_world_builder.cpp
     test_goldsrc_brush_render_library.cpp
     test_goldsrc_spawn_camera.cpp
     test_goldsrc_world_scene_builder.cpp
@@ -121,6 +130,7 @@ add_executable(hlclient_tests
     test_initial_signon_stage.cpp
     test_initial_signon_udp_integration.cpp
     test_md5.cpp
+    test_sha256.cpp
     test_local_resource_paths.cpp
     test_local_resource_search_roots.cpp
     test_local_read_only_file.cpp
@@ -202,10 +212,14 @@ target_link_libraries(hlclient_tests
         hlclient_asset_api
         hlclient_asset_dispatch
         hlclient_asset_manager
+        hlclient_collision_api
         hlclient_core
         hlclient_filesystem
         hlclient_goldsrc
         hlclient_goldsrc_bsp
+        hlclient_goldsrc_bsp_collision
+        hlclient_goldsrc_brush_transform
+        hlclient_goldsrc_collision_scene
         hlclient_goldsrc_builtin_importers
         hlclient_goldsrc_brush_models
         hlclient_goldsrc_indexed_texture
@@ -239,6 +253,7 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_world_textures
         hlclient_goldsrc_world_render
         hlclient_hash_md5
+        hlclient_hash_sha256
         hlclient_local_resources
         hlclient_local_asset_source
         hlclient_network
@@ -293,4 +308,72 @@ set_tests_properties(
         ENVIRONMENT "HLCLIENT_SMOKE_TEST_FRAMES=2"
         TIMEOUT 30
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_executable(
+    hlclient_collision_fixture_writer
+    write_synthetic_collision_fixture.cpp
+)
+target_compile_features(hlclient_collision_fixture_writer PRIVATE cxx_std_20)
+hlclient_enable_warnings(hlclient_collision_fixture_writer)
+set_target_properties(
+    hlclient_collision_fixture_writer
+    PROPERTIES FOLDER "Tests/Fixtures"
+)
+
+set(
+    HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT
+    "${CMAKE_CURRENT_BINARY_DIR}/collision-checker-fixture"
+)
+add_test(
+    NAME hlclient_collision_check_synthetic_fixture_setup
+    COMMAND
+        $<TARGET_FILE:hlclient_collision_fixture_writer>
+        "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+)
+set_tests_properties(
+    hlclient_collision_check_synthetic_fixture_setup
+    PROPERTIES
+        FIXTURES_SETUP hlclient_collision_checker_fixture
+        TIMEOUT 30
+)
+
+add_test(
+    NAME hlclient_collision_check_synthetic_summary
+    COMMAND
+        $<TARGET_FILE:hlclient_collision_check>
+        --basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+        --game valve
+        --map maps/test_collision.bsp
+        --scenario summary
+)
+add_test(
+    NAME hlclient_collision_check_synthetic_deterministic_probes
+    COMMAND
+        $<TARGET_FILE:hlclient_collision_check>
+        --basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+        --game valve
+        --map maps/test_collision.bsp
+        --scenario deterministic-probes
+)
+set_tests_properties(
+    hlclient_collision_check_synthetic_summary
+    hlclient_collision_check_synthetic_deterministic_probes
+    PROPERTIES
+        FIXTURES_REQUIRED hlclient_collision_checker_fixture
+        PASS_REGULAR_EXPRESSION "\\[collision\\] result=success"
+        TIMEOUT 30
+)
+
+add_test(
+    NAME hlclient_collision_check_synthetic_fixture_cleanup
+    COMMAND
+        "${CMAKE_COMMAND}" -E remove_directory
+        "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+)
+set_tests_properties(
+    hlclient_collision_check_synthetic_fixture_cleanup
+    PROPERTIES
+        FIXTURES_CLEANUP hlclient_collision_checker_fixture
+        TIMEOUT 30
 )

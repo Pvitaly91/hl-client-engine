@@ -6,7 +6,8 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.4.1's explicit Valve BSP-v30 geometry
+The repository has implemented M4.6.3.1's renderer/network-neutral GoldSrc BSP
+collision world and deterministic project trace profile, alongside M4.4.1's explicit Valve BSP-v30 geometry
 compatibility profile on top of M4.4's bounded renderer-neutral spatial,
 visibility, and static brush-submodel path, M4.3's first static-world rendering
 path, M4.1 CPU BSP geometry, and M4.2 embedded/WAD3 RGBA textures. The
@@ -62,8 +63,18 @@ suffix through a sequence-bound context on the same retained driver/socket.
 Only project-owned synthetic profiles are executable. The clean-room stock
 usercmd corpus remains at zero accepted runs and zero verified move packets, so
 stock opcode, envelope, checksum, cadence, input mapping, runtime readiness,
-and server acceptance fail closed. No prediction, collision, command replay,
-or reconciliation is implemented.
+and server acceptance fail closed. M4.6.3.1 now supplies canonical BSP
+collision planes, the hull-0 node/leaf domain, hulls 1–3 in the
+clipnode/contents domain, exact compiler hull extents, typed contents,
+point/stationary queries, bounded iterative traces, and explicit rigid
+brush-model queries. It does not add movement, prediction, command replay,
+reconciliation, or automatic stock brush solidity.
+
+The CPU-only production boundary is `--stop-after collision-world`. The
+network-free `hlclient_collision_check` and
+`scripts/verify_local_bsp_collision.ps1` validate user-owned maps read-only and
+emit aggregate SHA-256 evidence without map paths, raw planes, probe positions,
+or game bytes.
 
 ## Reference platform
 

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -86,6 +87,9 @@ struct AssetDispatchResult {
   // Only candidates at the globally best confidence/priority rank.
   std::vector<AssetDispatchProbeCandidate> top_candidates;
   std::optional<AssetError> error;
+  // Opaque immutable state from the selected importer invocation. Generic
+  // dispatch never interprets it.
+  std::shared_ptr<const AssetImportAttachment> attachment;
 
   [[nodiscard]] bool imported() const noexcept {
     return state == AssetDispatchState::imported && asset.has_value();

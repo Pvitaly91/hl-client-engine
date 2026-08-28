@@ -308,3 +308,8 @@ unparsed, and no response is sent.
 - a resource-list body parser, response producer, download, cache, or precache;
 - filesystem, asset-manager, URL, shell, SDL, OpenGL, or game-data coupling;
 - raw payload/body logging or a CLI that injects/skips/overrides movevars.
+
+M4.6.3.1 later added a separate immutable BSP collision package, but it still
+does not apply these MoveVars or implement movement. M4.6.3.2 is the first
+milestone permitted to consume both validated collision and optional MoveVars
+inside a deterministic local movement kernel.
