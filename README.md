@@ -6,8 +6,10 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.6.3.1's renderer/network-neutral GoldSrc BSP
-collision world and deterministic project trace profile, alongside M4.4.1's explicit Valve BSP-v30 geometry
+The repository has implemented M4.6.3.2's deterministic local dry-walk
+movement kernel and player-walk viewer on M4.6.3.1's renderer/network-neutral
+GoldSrc BSP collision world and deterministic project trace profile, alongside
+M4.4.1's explicit Valve BSP-v30 geometry
 compatibility profile on top of M4.4's bounded renderer-neutral spatial,
 visibility, and static brush-submodel path, M4.3's first static-world rendering
 path, M4.1 CPU BSP geometry, and M4.2 embedded/WAD3 RGBA textures. The
@@ -67,8 +69,14 @@ and server acceptance fail closed. M4.6.3.1 now supplies canonical BSP
 collision planes, the hull-0 node/leaf domain, hulls 1–3 in the
 clipnode/contents domain, exact compiler hull extents, typed contents,
 point/stationary queries, bounded iterative traces, and explicit rigid
-brush-model queries. It does not add movement, prediction, command replay,
-reconciliation, or automatic stock brush solidity.
+brush-model queries. M4.6.3.1 itself does not assign stock brush solidity.
+M4.6.3.2 now adds immutable player state, validated MoveVars adaptation,
+fixed-command walking/air movement, gravity, horizontal ground friction,
+acceleration, wall sliding, steps, jump edges, immediate standing/duck hulls,
+and a player-anchored camera. Only the named public-Valve-informed dry-walk
+subset and synthetic command semantics execute; full `PM_Move`, water,
+ladders, dynamic brushes, stuck recovery, prediction, command replay and
+reconciliation remain absent.
 
 The CPU-only production boundary is `--stop-after collision-world`. The
 network-free `hlclient_collision_check` and
@@ -125,6 +133,26 @@ cmake --build build --config Debug --target hlclient_usercmd_check
 
 It performs a typed bounded encode/decode round trip without opening a socket;
 it is not a stock interoperability check.
+
+The local movement checker and player-walk viewer are also Win32 targets:
+
+```powershell
+cmake --build build --config Debug --target `
+  hlclient_movement_check hlclient_world_viewer
+
+.\build\bin\Debug\hlclient_movement_check.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve `
+  --map maps/crossfire.bsp --scenario deterministic-route
+
+.\build\bin\Debug\hlclient_world_viewer.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve `
+  --map maps/crossfire.bsp --camera player-walk `
+  --visibility pvs-frustum --brush-submodels static --cull back
+```
+
+Both tools are offline and read-only. The viewer uses world-only collision and
+a project-owned movement environment; visible stock brush entities are not
+automatically solid. See [player-walk viewer](docs/PLAYER_WALK_VIEWER.md).
 
 The generated solution is:
 
@@ -1232,6 +1260,15 @@ Stock exact wire/runtime behavior remains evidence-pending at zero accepted
 runs and zero verified move packets, and the production boundary sends zero
 usercmd packets. See [GoldSrc usercmd](docs/GOLDSRC_USERCMD.md) and
 [GoldSrc usercmd transmission](docs/GOLDSRC_USERCMD_TRANSMISSION.md).
+
+M4.6.3.2 adds the immutable
+[`LocalPlayerMovementState`](docs/LOCAL_PLAYER_MOVEMENT_STATE.md), a pure
+[GoldSrc local movement](docs/GOLDSRC_LOCAL_MOVEMENT.md) kernel, explicit
+world-only/synthetic-static collision adapters, a fixed-step local controller,
+and the offline [player-walk mode](docs/PLAYER_WALK_VIEWER.md). Public Valve
+movement equations and named literals inform only the declared dry-walk
+subset. No SDK implementation is linked, no network packet changes, and no
+prediction/reconciliation state is introduced.
 
 ## License
 

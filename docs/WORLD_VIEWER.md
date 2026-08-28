@@ -173,3 +173,25 @@ With `HLCLIENT_SMOKE_TEST_FRAMES` set, the hidden viewer does not request
 capture and needs no physical input. Camera-only changes rebuild CPU visibility
 when necessary while retaining exact world/brush/entity GPU resource identities.
 See [interactive preview](INTERACTIVE_PREVIEW.md).
+
+## Local player-walk camera
+
+`--camera player-walk` is a distinct offline mode with a collision-valid dry
+player spawn, fixed synthetic command cadence, gravity, friction,
+ground/air acceleration, sliding, steps, jumping and standing/duck hulls.
+
+```powershell
+.\build\bin\Debug\hlclient_world_viewer.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve `
+  --map maps/crossfire.bsp --camera player-walk `
+  --visibility pvs-frustum --brush-submodels static --cull back
+```
+
+Click captures, Escape releases, WASD walks, Space jumps, Ctrl ducks and the
+mouse looks. The viewer uses world-only movement collision and the explicit
+project offline movement environment. `--brush-submodels static` affects
+render composition only; stock brush solidity is not inferred. Water/ladders,
+dynamic brushes, stuck recovery, prediction and reconciliation are absent.
+
+Camera-only publications retain immutable scene and GPU resource identities.
+See [player-walk viewer and checker](PLAYER_WALK_VIEWER.md).

@@ -27,6 +27,7 @@ enum class GameplayCameraMode {
     spawn,
     free_flight,
     entity_first_person,
+    player_walk,
 };
 
 enum class GameplayCameraAnchorStatus {

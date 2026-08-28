@@ -226,6 +226,17 @@ equal one command.
 M4.6.2 itself contains no collision, gravity, movement simulation, command
 prediction, server-time mapping, replay/reconciliation, or entity projection.
 M4.6.3.1 subsequently added an independent immutable BSP collision/query API
-without changing this usercmd wire/session boundary. Usercmd application and
-movement begin no earlier than M4.6.3.2; replay and reconciliation remain
-M4.6.3.3 work.
+without changing this usercmd wire/session boundary.
+
+M4.6.3.2 applies only `synthetic_usercmd_v1` to local movement. The kernel uses
+`msec`, view angles, forward move, side move, buttons and contiguous command
+sequence. Duration is `msec * 0.001`; pitch is retained for the camera while
+movement direction uses yaw only. `up_move`, light level, impulse, weapon and
+impact fields are not executed. Named synthetic jump/duck bits drive press-edge
+jump and immediate hull selection. The synthetic run bit is inert in the
+kernel; command movement values determine wish speed.
+
+`LocalPlayerMovementController` uses the scheduler and adapter without placing
+local commands in network history or a transport. Pending one-shot edges are
+consumed only by the first successfully simulated command. Stock semantics,
+prediction history, replay and reconciliation remain M4.6.3.3/M4.7 work.

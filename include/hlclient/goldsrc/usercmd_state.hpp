@@ -12,6 +12,16 @@ inline constexpr std::size_t kGoldSrcUserCmdSchemaFieldCount = 15U;
 inline constexpr std::size_t kDefaultGoldSrcUserCmdHistoryEntries = 64U;
 inline constexpr std::size_t kMaximumGoldSrcUserCmdHistoryEntries = 256U;
 
+// Stable synthetic command-state button bits.  These live beside the command
+// value type so offline consumers do not need the gameplay input adapter.
+inline constexpr std::uint16_t kSyntheticGoldSrcButtonAttack = 1U << 0U;
+inline constexpr std::uint16_t kSyntheticGoldSrcButtonJump = 1U << 1U;
+inline constexpr std::uint16_t kSyntheticGoldSrcButtonDuck = 1U << 2U;
+inline constexpr std::uint16_t kSyntheticGoldSrcButtonUse = 1U << 5U;
+inline constexpr std::uint16_t kSyntheticGoldSrcButtonAttack2 = 1U << 11U;
+inline constexpr std::uint16_t kSyntheticGoldSrcButtonRun = 1U << 12U;
+inline constexpr std::uint16_t kSyntheticGoldSrcButtonReload = 1U << 13U;
+
 enum class GoldSrcUserCmdCompatibilityProfile : std::uint8_t {
     synthetic_usercmd_v1,
     stock_protocol_48_build_10210,

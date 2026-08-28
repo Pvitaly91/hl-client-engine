@@ -57,6 +57,17 @@ published.
 ## Scope boundary
 
 The four hulls are immutable collision-source metadata. The BSP parser does
-not decide which hull a future movement state should use, does not infer brush
-solidity from class names, and does not implement movement, prediction, or
-network behavior. Exact stock runtime trace behavior remains evidence-pending.
+not decide which hull a movement state should use and does not infer brush
+solidity from class names. Exact stock runtime trace behavior remains
+evidence-pending.
+
+M4.6.3.2 makes player selection in the higher-level movement adapter only:
+
+| Player state | Collision ordinal | Compiler extents |
+| --- | --- | --- |
+| standing | `standing_32x32x72` (hull 1) | `(-16,-16,-36)..(16,16,36)` |
+| ducked | `duck_32x32x36` (hull 3) | `(-16,-16,-18)..(16,16,18)` |
+
+Hull 0 and hull 2 are not selected automatically. Immediate transitions test
+the complete destination hull before publication. The parser and collision API
+still contain no movement, prediction or network behavior.

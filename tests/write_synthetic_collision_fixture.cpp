@@ -16,16 +16,29 @@ namespace {
 {
     hlclient::tests::SyntheticBspBuilder builder;
 
+    std::array<hlclient::tests::SyntheticBspPlane, 4U> planes{};
+    planes[0U].distance = 0.0F;
+    planes[1U].distance = 36.0F;
+    planes[2U].distance = 32.0F;
+    planes[3U].distance = 18.0F;
+    builder.set_planes(planes);
+
     constexpr std::array clipnodes{
-        hlclient::tests::SyntheticBspClipnode{
-            0,
-            {-1, -2},
-        },
+        hlclient::tests::SyntheticBspClipnode{1, {-1, -2}},
+        hlclient::tests::SyntheticBspClipnode{2, {-1, -2}},
+        hlclient::tests::SyntheticBspClipnode{3, {-1, -2}},
     };
     builder.set_clipnodes(clipnodes);
 
+    hlclient::tests::SyntheticBspNode world_node;
+    // BSP node children index leaves (-1 is leaf zero, -2 is leaf one),
+    // whereas clipnode children are literal contents codes. Keep the same
+    // empty-above/solid-below half-space for the point and player hulls.
+    world_node.children = {-2, -1};
+    builder.set_nodes(std::span{&world_node, 1U});
+
     hlclient::tests::SyntheticBspModel world_model;
-    world_model.headnodes = {0, 0, 0, 0};
+    world_model.headnodes = {0, 0, 1, 2};
     builder.set_models(std::span{&world_model, 1U});
 
     constexpr std::string_view entities =
@@ -34,7 +47,8 @@ namespace {
         "}\n"
         "{\n"
         "\"classname\" \"info_player_start\"\n"
-        "\"origin\" \"32 32 32\"\n"
+        "\"origin\" \"32 32 64\"\n"
+        "\"angle\" \"0\"\n"
         "}\n";
     auto& entity_lump =
         builder.lump(hlclient::tests::SyntheticBspLumpId::entities);
@@ -47,6 +61,20 @@ namespace {
     entity_lump.push_back(std::byte{0U});
 
     return builder.build();
+}
+
+[[nodiscard]] bool write_fixture(
+    const std::filesystem::path& path,
+    const std::span<const std::byte> bytes)
+{
+    std::ofstream output{path, std::ios::binary | std::ios::trunc};
+    if (!output) {
+        return false;
+    }
+    output.write(
+        reinterpret_cast<const char*>(bytes.data()),
+        static_cast<std::streamsize>(bytes.size()));
+    return static_cast<bool>(output);
 }
 
 } // namespace
@@ -67,16 +95,8 @@ int main(const int argc, const char* const* const argv)
     }
 
     const auto bytes = collision_fixture_bytes();
-    std::ofstream output{
-        maps / "test_collision.bsp", std::ios::binary | std::ios::trunc};
-    if (!output) {
-        std::cerr << "unable to open the synthetic fixture output\n";
-        return 1;
-    }
-    output.write(
-        reinterpret_cast<const char*>(bytes.data()),
-        static_cast<std::streamsize>(bytes.size()));
-    if (!output) {
+    if (!write_fixture(maps / "test_collision.bsp", bytes) ||
+        !write_fixture(maps / "test_movement.bsp", bytes)) {
         std::cerr << "unable to write the synthetic fixture\n";
         return 1;
     }

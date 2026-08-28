@@ -163,6 +163,18 @@ add_executable(hlclient_tests
     test_local_resource_consistency_provider.cpp
     test_move_vars.cpp
     test_movement_environment_stage.cpp
+    test_local_player_movement_state.cpp
+    test_goldsrc_movement_environment.cpp
+    test_goldsrc_movement_math.cpp
+    test_local_movement_collision.cpp
+    test_goldsrc_local_movement_gravity.cpp
+    test_goldsrc_local_movement_ground.cpp
+    test_goldsrc_local_movement_jump.cpp
+    test_goldsrc_local_movement_duck.cpp
+    test_goldsrc_local_movement_slide.cpp
+    test_goldsrc_local_movement_step.cpp
+    test_local_player_movement_integration.cpp
+    test_player_walk_camera.cpp
     test_post_movevars_stream.cpp
     test_network_address.cpp
     test_netchan_bootstrap.cpp
@@ -216,6 +228,7 @@ target_link_libraries(hlclient_tests
         hlclient_core
         hlclient_filesystem
         hlclient_goldsrc
+        hlclient_goldsrc_byte_io
         hlclient_goldsrc_bsp
         hlclient_goldsrc_bsp_collision
         hlclient_goldsrc_brush_transform
@@ -233,9 +246,12 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_asset_dispatch
         hlclient_goldsrc_resource_readiness
         hlclient_goldsrc_local_resources
+        hlclient_goldsrc_local_movement
+        hlclient_goldsrc_move_vars_api
         hlclient_goldsrc_netchan
         hlclient_goldsrc_usercmd_api
         hlclient_goldsrc_usercmd_codec
+        hlclient_goldsrc_usercmd_sampling
         hlclient_goldsrc_usercmd_session
         hlclient_goldsrc_delta_values
         hlclient_goldsrc_entity_snapshots
@@ -266,6 +282,7 @@ target_link_libraries(hlclient_tests
         hlclient_gameplay_input
         hlclient_gameplay_camera
         hlclient_gameplay_camera_render_adapter
+        hlclient_local_player_controller
         hlclient_interactive_preview
         hlclient_glad
         hlclient_world_render
@@ -356,12 +373,50 @@ add_test(
         --map maps/test_collision.bsp
         --scenario deterministic-probes
 )
+add_test(
+    NAME hlclient_movement_check_synthetic_deterministic_route
+    COMMAND
+        $<TARGET_FILE:hlclient_movement_check>
+        --basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+        --game valve
+        --map maps/test_movement.bsp
+        --scenario deterministic-route
+)
+add_test(
+    NAME hlclient_movement_verify_synthetic_deterministic_route
+    COMMAND
+        "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+        -NoLogo
+        -NoProfile
+        -NonInteractive
+        -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/scripts/verify_local_player_movement.ps1"
+        -ToolPath $<TARGET_FILE:hlclient_movement_check>
+        -Basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+        -Game valve
+        -Maps maps/test_movement.bsp
+        -Scenarios deterministic-route
+)
 set_tests_properties(
     hlclient_collision_check_synthetic_summary
     hlclient_collision_check_synthetic_deterministic_probes
     PROPERTIES
         FIXTURES_REQUIRED hlclient_collision_checker_fixture
         PASS_REGULAR_EXPRESSION "\\[collision\\] result=success"
+        TIMEOUT 30
+)
+set_tests_properties(
+    hlclient_movement_check_synthetic_deterministic_route
+    PROPERTIES
+        FIXTURES_REQUIRED hlclient_collision_checker_fixture
+        PASS_REGULAR_EXPRESSION "\\[movement\\] grounded=true"
+        TIMEOUT 30
+)
+set_tests_properties(
+    hlclient_movement_verify_synthetic_deterministic_route
+    PROPERTIES
+        FIXTURES_REQUIRED hlclient_collision_checker_fixture
+        PASS_REGULAR_EXPRESSION "\\[movement-verify\\] result=success"
         TIMEOUT 30
 )
 

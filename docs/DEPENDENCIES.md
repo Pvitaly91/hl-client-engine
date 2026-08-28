@@ -95,6 +95,7 @@ hlclient_goldsrc_asset_check
     -> hlclient_local_resources
 hlclient_goldsrc_signon -> hlclient_resource_consistency_api
 hlclient_goldsrc_signon -> hlclient_goldsrc_delta_schema
+hlclient_goldsrc_signon -> hlclient_goldsrc_move_vars_api
 hlclient_goldsrc_delta_values -> hlclient_goldsrc_delta_schema
 hlclient_goldsrc_usercmd_api -> hlclient_core
 hlclient_goldsrc_usercmd_codec
@@ -103,6 +104,9 @@ hlclient_goldsrc_usercmd_codec
 hlclient_goldsrc_usercmd_session
     -> hlclient_goldsrc_usercmd_codec
     -> hlclient_goldsrc_netchan
+    -> hlclient_goldsrc_usercmd_sampling
+hlclient_goldsrc_usercmd_sampling
+    -> hlclient_goldsrc_usercmd_api
     -> hlclient_gameplay_input
     -> hlclient_gameplay_camera
 hlclient_gameplay_camera_render_adapter
@@ -477,6 +481,31 @@ verifiers continue to require their isolated marked copy and reject primary or
 registered Steam roots where their existing contracts specify that behavior.
 Allowing explicit read-only runtime access does not relax research isolation,
 and a local provider check does not by itself establish stock interoperability.
+
+M4.6.3.2 adds no third-party dependency. Its project-owned target direction is:
+
+```text
+hlclient_movement_api -> hlclient_asset_api / hlclient_core
+hlclient_goldsrc_local_movement
+    -> hlclient_movement_api
+    -> hlclient_collision_api / hlclient_goldsrc_collision_scene
+    -> hlclient_goldsrc_move_vars_api / hlclient_goldsrc_usercmd_api
+hlclient_local_player_controller
+    -> hlclient_goldsrc_local_movement
+    -> hlclient_gameplay_input / hlclient_gameplay_camera
+    -> hlclient_goldsrc_usercmd_sampling
+    -> hlclient_goldsrc_bsp (renderer-neutral entity transform parsing)
+hlclient_movement_check
+    -> local read-only source APIs / BSP collision / hash
+hlclient_world_viewer
+    -> hlclient_local_player_controller / existing SDL3+OpenGL viewer stack
+```
+
+The pinned Valve SDK is equation, named-literal and hull/view-offset evidence
+only. No `pm_shared.c` object, `playermove_t` ABI, global `pmove`, SDK callback
+or third-party movement implementation is compiled or linked. Automated tests
+use project-authored fixtures; user-owned maps remain optional read-only
+validation inputs and are not build dependencies.
 
 ## Updating a dependency
 

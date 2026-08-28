@@ -1,4 +1,5 @@
 #include "entity_render/entity_opengl_test_support.hpp"
+#include "local_movement_test_fixture.hpp"
 #include "world_render_test_fixture.hpp"
 
 #include <hlclient/gameplay_camera/entity_first_person_camera.hpp>
@@ -7,9 +8,12 @@
 #include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
 #include <hlclient/input/input_state_tracker.hpp>
+#include <hlclient/local_player/local_player_movement_controller.hpp>
 #include <hlclient/renderer/render_camera_math.hpp>
 #include <hlclient/renderer/render_scene.hpp>
 #include <hlclient/world_render/world_render_types.hpp>
+#include <hlclient/world_scene_render/world_scene_render_types.hpp>
+#include <hlclient/world_spatial/world_spatial_types.hpp>
 
 #include <glad/gl.h>
 
@@ -34,9 +38,13 @@ namespace entity_build_fixture = hlclient::tests::entity_render_fixture;
 namespace entity_fixture = hlclient::tests::entity_opengl_fixture;
 namespace gameplay = hlclient::gameplay_input;
 namespace input = hlclient::input;
+namespace local_movement_fixture = hlclient::tests::local_movement;
+namespace local_player = hlclient::local_player;
 namespace renderer = hlclient::renderer;
 namespace world_fixture = hlclient::tests::world_render_fixture;
 namespace world_render = hlclient::world_render;
+namespace scene_render = hlclient::world_scene_render;
+namespace world_spatial = hlclient::world_spatial;
 
 constexpr std::size_t repeated_campaign_count = 20U;
 constexpr double campaign_frame_seconds = 0.025;
@@ -56,7 +64,8 @@ constexpr std::array<std::byte, 4U> test_clear_pixel{
     const gameplay::GameplayInputBindings& bindings,
     const bool move_forward,
     const std::int32_t mouse_x,
-    const std::int32_t mouse_y)
+    const std::int32_t mouse_y,
+    const bool jump = false)
 {
     input::InputStateTracker tracker;
     tracker.begin_frame();
@@ -65,6 +74,10 @@ constexpr std::array<std::byte, 4U> test_clear_pixel{
     if (move_forward) {
         tracker.apply_event(
             input::InputEvent::key_pressed(input::PhysicalKey::w));
+    }
+    if (jump) {
+        tracker.apply_event(
+            input::InputEvent::key_pressed(input::PhysicalKey::space));
     }
     if (mouse_x != 0 || mouse_y != 0) {
         tracker.apply_event(
@@ -110,6 +123,87 @@ constexpr std::array<std::byte, 4U> test_clear_pixel{
         renderer::RenderBaselineLightStylePolicy::source_slot_zero,
     });
     return scene;
+}
+
+[[nodiscard]] std::shared_ptr<const scene_render::WorldSceneRenderPackage>
+player_walk_scene_package(
+    const std::shared_ptr<const world_render::WorldRenderPackage>& package)
+{
+    const auto bounds = package->bounds();
+    world_spatial::WorldSpatialNode node;
+    node.plane_index = 0U;
+    node.children = {
+        world_spatial::WorldSpatialNodeChild{
+            world_spatial::WorldSpatialNodeChildKind::leaf, 1U},
+        world_spatial::WorldSpatialNodeChild{
+            world_spatial::WorldSpatialNodeChildKind::leaf, 0U},
+    };
+    node.bounds = bounds;
+
+    world_spatial::WorldSpatialLeaf solid_leaf;
+    solid_leaf.source_leaf_index = 0U;
+    solid_leaf.bounds = bounds;
+    solid_leaf.surface_membership.source_leaf_index = 0U;
+    solid_leaf.solid_or_special = true;
+
+    world_spatial::WorldSpatialLeaf visible_leaf;
+    visible_leaf.source_leaf_index = 1U;
+    visible_leaf.bounds = bounds;
+    visible_leaf.pvs_row_index = 0U;
+    visible_leaf.pvs_bit_addressable = true;
+    visible_leaf.surface_membership.source_leaf_index = 1U;
+    visible_leaf.surface_membership.source_marksurface_count =
+        static_cast<std::uint32_t>(package->surface_ranges().size());
+    for (std::size_t index = 0U; index < package->surface_ranges().size();
+         ++index) {
+        visible_leaf.surface_membership.world_surface_indices.push_back(
+            static_cast<std::uint32_t>(index));
+    }
+
+    world_spatial::WorldSpatialPackage spatial{
+        {world_spatial::WorldSpatialPlane{
+            {1.0F, 0.0F, 0.0F}, 0.0F, 0}},
+        {node},
+        {solid_leaf, visible_leaf},
+        world_spatial::WorldPvsTable{
+            1U,
+            1U,
+            {{std::byte{0x01U}}},
+            {std::nullopt, 0U},
+            0U},
+        world_spatial::WorldSpatialModelMetadata{0U, 1U, bounds},
+        world_spatial::WorldSpatialStatistics{
+            1U,
+            1U,
+            2U,
+            package->surface_ranges().size(),
+            package->surface_ranges().size(),
+            1U,
+            1U},
+        world_spatial::WorldSpatialCompatibilityProfile::
+            goldsrc_bsp_v30_leaf_one_is_pvs_bit_zero,
+        world_spatial::WorldSpatialEvidenceProfile::
+            canonical_validated_bsp_records};
+
+    std::vector<std::uint32_t> brush_surface_indices;
+    brush_surface_indices.reserve(package->surface_ranges().size());
+    for (std::size_t index = 0U; index < package->surface_ranges().size();
+         ++index) {
+        brush_surface_indices.push_back(static_cast<std::uint32_t>(index));
+    }
+    std::vector<scene_render::BrushSubmodelRenderModel> brush_models;
+    brush_models.emplace_back(
+        1U, bounds, std::move(brush_surface_indices));
+    scene_render::BrushSubmodelRenderLibrary brush_library{
+        package, std::move(brush_models)};
+
+    auto built = scene_render::WorldSceneRenderPackageBuilder{}.build(
+        package, std::move(spatial), std::move(brush_library));
+    INFO((built.error ? built.error->context : std::string{}));
+    REQUIRE(built);
+    REQUIRE(built.package);
+    return std::make_shared<const scene_render::WorldSceneRenderPackage>(
+        std::move(*built.package));
 }
 
 [[nodiscard]] camera::GameplayCameraSourceFrameIdentity frame_identity(
@@ -299,6 +393,150 @@ TEST_CASE("OpenGL world camera campaigns change pixels without static reupload 2
     CHECK(context->renderer().statistics().rendered_frame_count == 40U);
     CHECK(context->renderer().statistics().draw_call_count == 40U);
     CHECK(context->renderer().statistics().triangle_count == 80U);
+    CHECK(glGetError() == GL_NO_ERROR);
+    context->release_renderer();
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("OpenGL player-walk movement changes camera pixels without resource reupload",
+    "[renderer][opengl][input][gameplay-camera][player-walk][local-movement][integration][actual-context]")
+{
+    auto package_result = world_fixture::make_package();
+    REQUIRE(package_result);
+    REQUIRE(package_result.package);
+    auto package = std::make_shared<const world_render::WorldRenderPackage>(
+        std::move(*package_result.package));
+    const auto scene_package = player_walk_scene_package(package);
+
+    auto context = entity_fixture::try_context();
+    if (!context || !entity_fixture::capable_context()) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    context->initialize_renderer();
+
+    const auto initial_state = local_movement_fixture::make_state(
+        {8.0F, -40.0F, 36.0F});
+    local_player::LocalPlayerMovementController controller{
+        initial_state, local_movement_fixture::make_environment()};
+    local_player::LocalPlayerMovementController reference_controller{
+        initial_state, local_movement_fixture::make_environment()};
+    REQUIRE(controller.valid_configuration());
+    REQUIRE(reference_controller.valid_configuration());
+
+    local_movement_fixture::DeterministicLocalMovementCollision collision;
+    local_movement_fixture::DeterministicLocalMovementCollision
+        reference_collision;
+    hlclient::goldsrc::movement::GoldSrcLocalMovementScratch scratch;
+    hlclient::goldsrc::movement::GoldSrcLocalMovementScratch reference_scratch;
+    const auto bindings = default_bindings();
+    const auto setup_intent = active_intent(bindings, true, -900, 520);
+    REQUIRE(setup_intent.look_delta_yaw_degrees() == Catch::Approx(90.0));
+    REQUIRE(setup_intent.look_delta_pitch_degrees() == Catch::Approx(-52.0));
+    const auto setup =
+        controller.update(0, setup_intent, collision, scratch);
+    const auto reference_setup = reference_controller.update(
+        0, setup_intent, reference_collision, reference_scratch);
+    REQUIRE(setup);
+    REQUIRE(reference_setup);
+    REQUIRE(setup.generated_command_count == 0U);
+    REQUIRE(reference_setup.generated_command_count == 0U);
+    REQUIRE(setup.final_state_signature == reference_setup.final_state_signature);
+    REQUIRE(controller.camera().mode() ==
+        camera::GameplayCameraMode::player_walk);
+    REQUIRE(controller.camera().yaw_degrees() == Catch::Approx(90.0));
+    REQUIRE(controller.camera().pitch_degrees() == Catch::Approx(-52.0));
+
+    const auto initial_camera = camera::build_render_camera(controller.camera());
+    REQUIRE(initial_camera);
+    REQUIRE(initial_camera.camera);
+    auto scene = world_scene(package, *initial_camera.camera);
+    REQUIRE(scene.static_world);
+    scene.static_world->scene_package = scene_package;
+    context->renderer().render(scene, test_extent);
+    const auto initial_pixels = entity_fixture::framebuffer();
+    REQUIRE(entity_fixture::has_non_clear_pixel(
+        initial_pixels, test_clear_pixel));
+    const auto initial_statistics = context->renderer().statistics();
+    REQUIRE(initial_statistics.active_world_resources);
+    REQUIRE(initial_statistics.scene_present);
+    REQUIRE(initial_statistics.upload_count == 1U);
+    REQUIRE(initial_statistics.scene_upload_count == 1U);
+    REQUIRE(initial_statistics.brush_upload_count == 1U);
+
+    constexpr std::int64_t movement_step_nanoseconds = 10'000'000;
+    constexpr std::int64_t movement_step_count = 6;
+    std::uint64_t jump_count = 0U;
+    for (std::int64_t step = 1; step <= movement_step_count; ++step) {
+        INFO("movement step " << step << " of " << movement_step_count);
+        const auto command_intent = step == 1
+            ? active_intent(bindings, false, 0, 0)
+            : step == 4
+            ? active_intent(bindings, true, -50, 0)
+            : active_intent(bindings, true, 0, 0, step == 5);
+        const auto update = controller.update(
+            step * movement_step_nanoseconds,
+            command_intent,
+            collision,
+            scratch);
+        const auto reference_update = reference_controller.update(
+            step * movement_step_nanoseconds,
+            command_intent,
+            reference_collision,
+            reference_scratch);
+        REQUIRE(update);
+        REQUIRE(reference_update);
+        REQUIRE(update.generated_command_count == 1U);
+        REQUIRE(reference_update.generated_command_count == 1U);
+        REQUIRE(update.final_state_signature ==
+            reference_update.final_state_signature);
+        jump_count += update.statistics.jump_count;
+        REQUIRE(controller.camera().position().x == Catch::Approx(
+            reference_controller.camera().position().x));
+        REQUIRE(controller.camera().position().y == Catch::Approx(
+            reference_controller.camera().position().y));
+        REQUIRE(controller.camera().position().z == Catch::Approx(
+            reference_controller.camera().position().z));
+    }
+
+    REQUIRE(controller.player_state().source_command_sequence() == 6U);
+    REQUIRE(jump_count == 1U);
+    REQUIRE_FALSE(controller.player_state().ground_state().grounded());
+    REQUIRE(controller.player_state().origin().y > initial_state.origin().y);
+    REQUIRE(controller.camera().position().y >
+        initial_camera.camera->position.y);
+    REQUIRE(controller.camera().position().x == Catch::Approx(
+        controller.player_state().origin().x));
+    REQUIRE(controller.camera().position().y == Catch::Approx(
+        controller.player_state().origin().y));
+    REQUIRE(controller.camera().position().z == Catch::Approx(
+        controller.player_state().origin().z +
+        controller.player_state().view_offset().z));
+
+    const auto moved_camera = camera::build_render_camera(controller.camera());
+    REQUIRE(moved_camera);
+    REQUIRE(moved_camera.camera);
+    const auto initial_matrix = renderer::camera_view_projection(
+        *initial_camera.camera, test_extent);
+    const auto moved_matrix = renderer::camera_view_projection(
+        *moved_camera.camera, test_extent);
+    REQUIRE(initial_matrix);
+    REQUIRE(moved_matrix);
+    REQUIRE(*initial_matrix.matrix != *moved_matrix.matrix);
+    scene.camera = *moved_camera.camera;
+    context->renderer().render(scene, test_extent);
+    const auto moved_pixels = entity_fixture::framebuffer();
+    REQUIRE(entity_fixture::has_non_clear_pixel(
+        moved_pixels, test_clear_pixel));
+    REQUIRE(moved_pixels != initial_pixels);
+
+    const auto& moved_statistics = context->renderer().statistics();
+    CHECK(moved_statistics.upload_count == initial_statistics.upload_count);
+    CHECK(moved_statistics.scene_upload_count ==
+        initial_statistics.scene_upload_count);
+    CHECK(moved_statistics.brush_upload_count ==
+        initial_statistics.brush_upload_count);
+    CHECK(moved_statistics.rendered_frame_count == 2U);
+    CHECK(moved_statistics.failed_upload_count == 0U);
     CHECK(glGetError() == GL_NO_ERROR);
     context->release_renderer();
     CHECK(glGetError() == GL_NO_ERROR);

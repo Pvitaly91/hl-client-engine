@@ -1,10 +1,19 @@
 #include <hlclient/client/client_scene_source.hpp>
+#include <hlclient/gameplay_camera/render_camera_adapter.hpp>
+#include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
+#include <hlclient/gameplay_input/gameplay_input_intent.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_world_scene_builder.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_entity_document.hpp>
+#include <hlclient/goldsrc/collision/goldsrc_collision_world_builder.hpp>
 #include <hlclient/goldsrc/lightmaps/goldsrc_world_lightmap_import.hpp>
+#include <hlclient/goldsrc/movement/goldsrc_movement_environment.hpp>
+#include <hlclient/goldsrc/movement/local_movement_collision.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import.hpp>
 #include <hlclient/local_assets/local_asset_source.hpp>
+#include <hlclient/local_player/local_player_movement_controller.hpp>
+#include <hlclient/local_player/local_player_spawn_selector.hpp>
 #include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_search_roots.hpp>
 #include <hlclient/local_resources/local_virtual_resource_name.hpp>
@@ -20,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -136,6 +146,9 @@ struct Options {
             } else if (*narrow == "free-fly") {
                 options.camera_mode =
                     hlclient::world_preview::WorldPreviewCameraMode::free_flight;
+            } else if (*narrow == "player-walk") {
+                options.camera_mode =
+                    hlclient::world_preview::WorldPreviewCameraMode::player_walk;
             } else {
                 return std::nullopt;
             }
@@ -201,11 +214,14 @@ void print_usage()
     std::cerr
         << "Usage: hlclient_world_viewer --basedir <Half-Life root> "
            "--game <directory> --map <maps/name.bsp> "
-           "--camera <static|orbit|spawn|free-fly> "
+           "--camera <static|orbit|spawn|free-fly|player-walk> "
            "[--visibility <all|frustum|pvs|pvs-frustum>] "
            "[--brush-submodels <off|static>] [--cull <none|back>]\n"
         << "  free-fly: local noclip-style diagnostic camera; no collision, "
-           "physics, prediction, or network commands\n";
+           "physics, prediction, or network commands\n"
+        << "  player-walk: click captures, Escape releases, WASD walks, "
+           "Space jumps, Ctrl ducks, and the mouse looks; local world-only "
+           "collision, no prediction or network commands\n";
 }
 
 [[nodiscard]] std::optional<std::uint64_t> smoke_test_frame_limit()
@@ -425,7 +441,97 @@ struct PreparedWorldScene {
         spawn_camera;
     hlclient::goldsrc::brush_models::GoldSrcWorldSceneBuildStatistics
         build_statistics{};
+    struct PreparedLocalPlayer {
+        std::shared_ptr<
+            const hlclient::collision::CollisionWorldPackage>
+            collision_world;
+        hlclient::local_player::LocalPlayerSpawnDescriptor spawn;
+        hlclient::movement::LocalPlayerMovementState initial_state;
+        hlclient::goldsrc::movement::GoldSrcMovementEnvironment environment;
+        hlclient::local_player::LocalPlayerSpawnSelectionStatistics
+            spawn_statistics{};
+    };
+    std::optional<PreparedLocalPlayer> local_player;
 };
+
+[[nodiscard]] std::optional<PreparedWorldScene::PreparedLocalPlayer>
+prepare_local_player(
+    const hlclient::goldsrc::bsp::GoldSrcBspParsedDocument& document)
+{
+    namespace goldsrc_collision = hlclient::goldsrc::collision;
+    namespace goldsrc_movement = hlclient::goldsrc::movement;
+
+    auto built_collision =
+        goldsrc_collision::GoldSrcCollisionWorldBuilder::build(document);
+    if (!built_collision || !built_collision.package) {
+        const auto code = built_collision.error
+            ? goldsrc_collision::to_string(built_collision.error->code)
+            : std::string_view{"collision_world_build_failed"};
+        std::cerr << "movement-collision-world=" << code << '\n';
+        return std::nullopt;
+    }
+
+    auto parsed_entities =
+        hlclient::goldsrc::bsp::GoldSrcEntityDocumentParser::parse(
+            document.entity_lump_bytes);
+    if (!parsed_entities || !parsed_entities.document) {
+        const auto code = parsed_entities.error
+            ? hlclient::goldsrc::bsp::to_string(parsed_entities.error->code)
+            : std::string_view{"entity_document_parse_failed"};
+        std::cerr << "movement-entity-document=" << code << '\n';
+        return std::nullopt;
+    }
+
+    goldsrc_movement::WorldOnlyMovementCollision collision{
+        built_collision.package};
+    hlclient::collision::CollisionQueryScratch collision_scratch;
+    auto selected = hlclient::local_player::LocalPlayerSpawnSelector::select(
+        *parsed_entities.document,
+        collision,
+        collision_scratch);
+    if (!selected || !selected.descriptor) {
+        const auto code = selected.error
+            ? hlclient::local_player::to_string(selected.error->code)
+            : std::string_view{"no_valid_local_player_spawn"};
+        std::cerr << "movement-spawn=" << code << '\n';
+        return std::nullopt;
+    }
+
+    auto built_environment = goldsrc_movement::GoldSrcMovementEnvironmentBuilder::
+        project_owned_offline_baseline();
+    if (!built_environment || !built_environment.environment) {
+        const auto code = built_environment.error
+            ? goldsrc_movement::to_string(built_environment.error->code)
+            : std::string_view{"movement_environment_build_failed"};
+        std::cerr << "movement-environment=" << code << '\n';
+        return std::nullopt;
+    }
+
+    hlclient::movement::LocalPlayerMovementStateCreateInfo state_info;
+    state_info.origin = selected.descriptor->origin;
+    state_info.view_angles = selected.descriptor->view_angles_degrees;
+    state_info.hull = hlclient::movement::PlayerMovementHull::standing;
+    state_info.mode = hlclient::movement::PlayerMovementMode::airborne;
+    state_info.ground.contact_position = selected.descriptor->origin;
+    state_info.source_command_sequence = 0U;
+    auto created_state =
+        hlclient::movement::LocalPlayerMovementState::create(state_info);
+    if (!created_state || !created_state.state) {
+        const auto code = created_state.error
+            ? hlclient::movement::to_string(created_state.error->code)
+            : std::string_view{"movement_state_build_failed"};
+        std::cerr << "movement-state=" << code << '\n';
+        return std::nullopt;
+    }
+
+    return PreparedWorldScene::PreparedLocalPlayer{
+        std::move(built_collision.package),
+        std::move(*selected.descriptor),
+        std::move(*created_state.state),
+        std::move(*built_environment.environment),
+        selected.statistics,
+    };
+}
 
 [[nodiscard]] std::optional<PreparedWorldScene> build_world_scene(
     const hlclient::goldsrc::bsp::GoldSrcBspParsedDocument& document,
@@ -555,6 +661,81 @@ struct PreparedWorldScene {
     return non_clear;
 }
 
+[[nodiscard]] std::optional<hlclient::client::RenderCameraState>
+build_client_player_camera(
+    const hlclient::gameplay_camera::GameplayCameraState& camera) noexcept
+{
+    auto built = hlclient::gameplay_camera::build_render_camera(camera);
+    if (!built || !built.camera ||
+        !hlclient::renderer::is_valid(*built.camera)) {
+        return std::nullopt;
+    }
+    return hlclient::client::RenderCameraState{
+        built.camera->position,
+        built.camera->target,
+        built.camera->up,
+        built.camera->vertical_field_of_view_radians,
+        built.camera->near_plane,
+        built.camera->far_plane,
+    };
+}
+
+struct ViewerMovementStatistics {
+    std::uint64_t command_count{0U};
+    std::uint64_t jump_count{0U};
+    std::uint64_t collision_count{0U};
+    std::uint64_t step_count{0U};
+    std::uint64_t start_solid_count{0U};
+    std::uint64_t all_solid_count{0U};
+};
+
+[[nodiscard]] bool checked_add(
+    std::uint64_t& destination,
+    const std::uint64_t value) noexcept
+{
+    if (destination > UINT64_MAX - value) {
+        return false;
+    }
+    destination += value;
+    return true;
+}
+
+[[nodiscard]] bool accumulate_movement_statistics(
+    ViewerMovementStatistics& destination,
+    const hlclient::local_player::LocalPlayerMovementControllerUpdateResult&
+        update) noexcept
+{
+    return checked_add(destination.command_count,
+               static_cast<std::uint64_t>(update.generated_command_count)) &&
+        checked_add(destination.jump_count, update.statistics.jump_count) &&
+        checked_add(destination.collision_count,
+            update.statistics.collision_hit_count) &&
+        checked_add(destination.step_count,
+            update.statistics.step_success_count) &&
+        checked_add(destination.start_solid_count,
+            update.statistics.start_solid_count) &&
+        checked_add(destination.all_solid_count,
+            update.statistics.all_solid_count);
+}
+
+[[nodiscard]] std::uint64_t movement_origin_hash(
+    const hlclient::assets::AssetVector3& origin) noexcept
+{
+    std::uint64_t hash = 14'695'981'039'346'656'037ULL;
+    const std::array components{
+        std::bit_cast<std::uint32_t>(origin.x),
+        std::bit_cast<std::uint32_t>(origin.y),
+        std::bit_cast<std::uint32_t>(origin.z),
+    };
+    for (const auto component : components) {
+        for (std::size_t byte = 0U; byte < sizeof(component); ++byte) {
+            hash ^= static_cast<std::uint8_t>(component >> (byte * 8U));
+            hash *= 1'099'511'628'211ULL;
+        }
+    }
+    return hash;
+}
+
 [[nodiscard]] int render_world(
     PreparedWorldScene prepared,
     const Options& options,
@@ -573,6 +754,60 @@ struct PreparedWorldScene {
     if (!package) {
         std::cerr << "viewer-runtime=world_package_unavailable\n";
         return 1;
+    }
+
+    const bool player_walk_camera =
+        *options.camera_mode ==
+        hlclient::world_preview::WorldPreviewCameraMode::player_walk;
+    std::optional<hlclient::goldsrc::movement::WorldOnlyMovementCollision>
+        player_collision;
+    std::optional<hlclient::local_player::LocalPlayerMovementController>
+        player_controller;
+    std::optional<hlclient::gameplay_input::GameplayInputBindings>
+        player_bindings;
+    hlclient::goldsrc::movement::GoldSrcLocalMovementScratch movement_scratch;
+    ViewerMovementStatistics movement_statistics;
+    if (player_walk_camera) {
+        if (!prepared.local_player) {
+            std::cerr << "movement-runtime=preparation_unavailable\n";
+            return 1;
+        }
+        auto& local_player = *prepared.local_player;
+        player_collision.emplace(local_player.collision_world);
+        if (!player_collision->valid()) {
+            std::cerr << "movement-runtime=collision_unavailable\n";
+            return 1;
+        }
+        player_controller.emplace(
+            std::move(local_player.initial_state),
+            std::move(local_player.environment));
+        if (!player_controller->valid_configuration()) {
+            std::cerr << "movement-runtime=controller_initialization_failed\n";
+            return 1;
+        }
+        auto built_bindings = hlclient::gameplay_input::GameplayInputBindings::
+            project_default_v1();
+        if (!built_bindings || !built_bindings.bindings) {
+            std::cerr << "movement-runtime=input_bindings_unavailable\n";
+            return 1;
+        }
+        player_bindings.emplace(std::move(*built_bindings.bindings));
+
+        const auto initial_camera =
+            build_client_player_camera(player_controller->camera());
+        if (!initial_camera) {
+            std::cerr << "movement-runtime=initial_camera_failed\n";
+            return 1;
+        }
+        scene_source.publish_camera_seed(*initial_camera);
+        const auto initial_visibility =
+            scene_source.update(hlclient::client::FrameTime{0.0});
+        if (!initial_visibility) {
+            std::cerr << "movement-runtime=initial_visibility_failed\n";
+            return 1;
+        }
+        std::cout << "[movement] collision=world-only\n";
+        std::cout << "[movement] brush-solidity=stock-evidence-pending\n";
     }
 
     // Every CPU prerequisite and the immutable package are valid before SDL
@@ -595,8 +830,10 @@ struct PreparedWorldScene {
     std::optional<
         hlclient::interactive_preview::InteractivePreviewController>
         interactive_controller;
-    if (interactive_camera) {
+    if (interactive_camera || player_walk_camera) {
         input_tracker.emplace();
+    }
+    if (interactive_camera) {
         auto created = hlclient::interactive_preview::
             InteractivePreviewController::create_project_default_v1(
                 hlclient::interactive_preview::InteractivePreviewMode::
@@ -735,6 +972,107 @@ struct PreparedWorldScene {
                     (void)window.request_relative_mouse_capture(false);
                     return 1;
                 }
+            }
+        }
+        if (player_controller && player_collision && player_bindings &&
+            input_snapshot) {
+            const auto bounded_input_elapsed = std::min(
+                std::chrono::duration<double>{elapsed}.count(), 0.25);
+            auto built_intent =
+                hlclient::gameplay_input::GameplayInputIntentBuilder{}.build(
+                    *input_snapshot,
+                    *player_bindings,
+                    player_controller->config().camera.mouse_look_config(),
+                    bounded_input_elapsed);
+            if (!built_intent || !built_intent.intent) {
+                std::cerr << "movement-input="
+                          << (built_intent.error
+                                  ? hlclient::gameplay_input::to_string(
+                                        built_intent.error->code)
+                                  : std::string_view{"intent_build_failed"})
+                          << '\n';
+                return 1;
+            }
+
+            std::int64_t movement_time_nanoseconds = 0;
+            if (frame_limit) {
+                const auto interval =
+                    player_controller->config().scheduler.
+                        command_interval_nanoseconds;
+                if (rendered_frames >
+                    static_cast<std::uint64_t>(
+                        std::numeric_limits<std::int64_t>::max()) /
+                        interval) {
+                    std::cerr << "movement-runtime=smoke_time_overflow\n";
+                    return 1;
+                }
+                movement_time_nanoseconds = static_cast<std::int64_t>(
+                    rendered_frames * interval);
+            } else {
+                movement_time_nanoseconds =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        current_time.time_since_epoch())
+                        .count();
+            }
+
+            auto movement_update = player_controller->update(
+                movement_time_nanoseconds,
+                *built_intent.intent,
+                *player_collision,
+                movement_scratch);
+            if (!movement_update) {
+                std::cerr << "[movement] result="
+                          << (movement_update.error
+                                  ? hlclient::local_player::to_string(
+                                        movement_update.error->code)
+                                  : std::string_view{"update_failed"})
+                          << '\n';
+                return 1;
+            }
+            if (!accumulate_movement_statistics(
+                    movement_statistics, movement_update)) {
+                std::cerr << "movement-runtime=statistics_overflow\n";
+                return 1;
+            }
+
+            if (built_intent.intent->capture_mouse_requested()) {
+                const auto capture =
+                    window.request_relative_mouse_capture(true);
+                if (!capture) {
+                    ++capture_failure_count;
+                    std::cerr << "input-capture=failed diagnostic="
+                              << capture.diagnostic << '\n';
+                    (void)window.request_relative_mouse_capture(false);
+                    return 1;
+                }
+            }
+            if (built_intent.intent->release_mouse_requested()) {
+                const auto release =
+                    window.request_relative_mouse_capture(false);
+                if (!release) {
+                    ++capture_failure_count;
+                    std::cerr << "input-release=failed diagnostic="
+                              << release.diagnostic << '\n';
+                    (void)window.request_relative_mouse_capture(false);
+                    return 1;
+                }
+            }
+
+            const auto player_camera =
+                build_client_player_camera(player_controller->camera());
+            if (!player_camera ||
+                !scene_source.publish_interactive_camera(
+                    *player_camera,
+                    hlclient::client::InteractiveCameraMetadata{
+                        input_snapshot->sequence(),
+                        player_controller->camera().revision(),
+                        hlclient::client::InteractiveCameraMode::player_walk,
+                        std::nullopt,
+                        hlclient::client::ControlledEntityCameraStatus::
+                            not_applicable,
+                    })) {
+                std::cerr << "movement-runtime=camera_publication_failed\n";
+                return 1;
             }
         }
         const auto updated = scene_source.update(elapsed);
@@ -893,6 +1231,36 @@ struct PreparedWorldScene {
                   << camera_statistics.changed_camera_count << '\n';
         std::cout << "capture-failures=" << capture_failure_count << '\n';
     }
+    if (player_controller && input_tracker) {
+        const auto& state = player_controller->player_state();
+        std::cout << "input-frames="
+                  << input_tracker->published_frame_count() << '\n';
+        std::cout << "input-events=" << input_event_count << '\n';
+        std::cout << "capture-failures=" << capture_failure_count << '\n';
+        std::cout << "[movement] profile="
+                  << hlclient::movement::to_string(
+                         state.compatibility_profile())
+                  << '\n';
+        std::cout << "[movement] commands="
+                  << movement_statistics.command_count << '\n';
+        std::cout << "[movement] origin-hash="
+                  << movement_origin_hash(state.origin()) << '\n';
+        std::cout << "[movement] grounded="
+                  << (state.ground_state().grounded() ? "true" : "false")
+                  << '\n';
+        std::cout << "[movement] hull="
+                  << hlclient::movement::to_string(state.hull()) << '\n';
+        std::cout << "[movement] jumps=" << movement_statistics.jump_count
+                  << '\n';
+        std::cout << "[movement] collisions="
+                  << movement_statistics.collision_count << '\n';
+        std::cout << "[movement] steps=" << movement_statistics.step_count
+                  << '\n';
+        std::cout << "[movement] startsolid="
+                  << movement_statistics.start_solid_count << '\n';
+        std::cout << "[movement] allsolid="
+                  << movement_statistics.all_solid_count << '\n';
+    }
 
     if (frame_limit && rendered_frames != *frame_limit) {
         std::cerr << "viewer-runtime=frame_limit_not_reached\n";
@@ -911,6 +1279,16 @@ struct PreparedWorldScene {
                     renderer_statistics.triangle_count == 0U)))) {
         std::cerr << "viewer-runtime=world_render_incomplete\n";
         return 1;
+    }
+    if (player_controller) {
+        if (movement_statistics.start_solid_count != 0U ||
+            movement_statistics.all_solid_count != 0U ||
+            movement_statistics.command_count !=
+                player_controller->player_state().source_command_sequence()) {
+            std::cerr << "[movement] result=invalid_summary\n";
+            return 1;
+        }
+        std::cout << "[movement] result=success\n";
     }
     return 0;
 }
@@ -1036,12 +1414,24 @@ struct PreparedWorldScene {
         if (!world_package) {
             return std::nullopt;
         }
-        return build_world_scene(
+        auto prepared_scene = build_world_scene(
             document,
             std::move(world_package),
             retained_bsp_source,
             environment,
             *options);
+        if (!prepared_scene) {
+            return std::nullopt;
+        }
+        if (*options->camera_mode ==
+            hlclient::world_preview::WorldPreviewCameraMode::player_walk) {
+            auto local_player = prepare_local_player(document);
+            if (!local_player) {
+                return std::nullopt;
+            }
+            prepared_scene->local_player.emplace(std::move(*local_player));
+        }
+        return prepared_scene;
     }();
 
     // The returned scene owns only renderer-neutral immutable packages. The

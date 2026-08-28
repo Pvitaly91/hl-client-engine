@@ -85,6 +85,7 @@ constexpr double kMaximumSpeedMultiplier = 16.0;
     case GameplayCameraMode::orbit:
     case GameplayCameraMode::spawn:
     case GameplayCameraMode::free_flight:
+    case GameplayCameraMode::player_walk:
     case GameplayCameraMode::entity_first_person:
         break;
     default:
@@ -322,6 +323,7 @@ std::string_view to_string(const GameplayCameraMode mode) noexcept
     case GameplayCameraMode::orbit: return "orbit";
     case GameplayCameraMode::spawn: return "spawn";
     case GameplayCameraMode::free_flight: return "free_flight";
+    case GameplayCameraMode::player_walk: return "player_walk";
     case GameplayCameraMode::entity_first_person:
         return "entity_first_person";
     }

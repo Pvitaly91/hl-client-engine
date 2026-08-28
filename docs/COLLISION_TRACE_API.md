@@ -134,3 +134,19 @@ Exceeding the configured scratch byte budget reports
 reports `unable_to_prepare_scratch`.
 Scratch is reset before return, the package remains immutable, and no partial
 `CollisionTraceResult` is published.
+
+## Movement-facing adapter
+
+`ILocalMovementCollision` narrows the general query API to `point_contents`,
+`test_position` and `trace_hull` for a typed standing/ducked player. Its result
+retains solid flags, fraction, endpoint, optional plane/hit identity, normalized
+start/end/blocking contents and bounded traversal statistics. The movement
+kernel treats absent required blocking metadata, query failure, `start_solid`
+and `all_solid` as transactional errors; it never continues from a partial
+trace.
+
+The production `world_only_v1` adapter queries the immutable BSP world package.
+The separate `explicit_synthetic_static_brush_v1` adapter composes only an
+explicitly role-tagged synthetic brush scene. Liquid flags stop the dry-walk
+kernel; they still do not implement swimming. Collision remains independent of
+movement and does not link back to movement targets.

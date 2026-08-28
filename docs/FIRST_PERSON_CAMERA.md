@@ -27,9 +27,9 @@ uses bounded elapsed time, a default speed of 320 source units/second, and a
 default Shift multiplier of 2.0. Mouse displacement is frame-time
 independent.
 
-The controller implements no collision, gravity, acceleration, friction,
-ground state, player hull, movement simulation, prediction, or
-reconciliation.
+The diagnostic free-flight controller implements no collision, gravity,
+acceleration, friction, ground state, player hull, movement simulation,
+prediction, or reconciliation.
 
 An entity-first-person camera consumes an explicit synthetic entity number,
 interpolated origin, local eye offset, and source-frame identity. The default
@@ -49,3 +49,19 @@ accepted stock runs and zero verified move packets. It also adds no collision,
 movement simulation, prediction, replay, or reconciliation. See
 [GoldSrc usercmd](GOLDSRC_USERCMD.md) and its
 [transmission lifecycle](GOLDSRC_USERCMD_TRANSMISSION.md).
+
+## Player-walk camera
+
+M4.6.3.2 adds `GameplayCameraMode::player_walk` as a publication mode, not a
+physics implementation inside the camera target. `LocalPlayerMovementController`
+anchors the camera at `LocalPlayerMovementState::origin() + view_offset()`, so
+standing and ducked eye Z values are 28 and 12. Mouse look uses the existing
+normalized-yaw/bounded-pitch configuration; movement wish direction uses yaw
+only.
+
+Camera revision advances only when the published position/orientation/mode
+changes. `ClientWorldState` receives the converted camera and interactive
+metadata, while the renderer still receives no movement state, collision
+package, usercmd or MoveVars. Player-walk camera updates can rebuild CPU
+visibility but retain GPU world/scene resource identities. See
+[local movement](GOLDSRC_LOCAL_MOVEMENT.md).

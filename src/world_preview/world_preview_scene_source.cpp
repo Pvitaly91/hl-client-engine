@@ -33,6 +33,7 @@ constexpr double kFullOrbitRadians = 6.28318530717958647692;
         mode == WorldPreviewCameraMode::orbit ||
         mode == WorldPreviewCameraMode::spawn ||
         mode == WorldPreviewCameraMode::free_flight ||
+        mode == WorldPreviewCameraMode::player_walk ||
         mode == WorldPreviewCameraMode::entity_first_person;
 }
 
@@ -230,6 +231,7 @@ client::SceneUpdateResult WorldPreviewSceneSource::update(
     }
     const bool externally_controlled_camera =
         options_.camera_mode == WorldPreviewCameraMode::free_flight ||
+        options_.camera_mode == WorldPreviewCameraMode::player_walk ||
         options_.camera_mode == WorldPreviewCameraMode::entity_first_person;
     const auto& current_visibility = world_state_.world_visibility();
     const auto& current_draw_list = world_state_.visible_draw_list();

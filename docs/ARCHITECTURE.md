@@ -141,18 +141,21 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_gameplay_input` | immutable project-owned physical bindings and keyboard/mouse-to-intent sampling | SDL, command strings, stock button masks, `usercmd`, network |
 | `hlclient_filesystem` | safe base/game path discovery and asset-facing I/O foundations | Steam discovery policy embedded in render code |
 | `hlclient_network` | address values, Winsock lifetime, nonblocking datagram transport | GoldSrc message meaning |
-| `hlclient_goldsrc` | byte readers/writers, connectionless codecs, strict info strings, and opaque auth value | sockets, retries, files, logging, OpenGL, UI |
+| `hlclient_goldsrc_byte_io` | protocol-neutral bounded GoldSrc byte reader/writer primitives | sockets, transport/session state, files, renderer |
+| `hlclient_goldsrc` | connectionless codecs, strict info strings, and opaque auth value, layered on the byte-I/O primitive | retries, files, logging, OpenGL, UI |
 | `hlclient_goldsrc_netchan` | netchan classifier/base/fragment codec, payload transform, wrap-safe persistent session, bounded pending plus one reliable unit in flight, transactional unfragmented/fragment sends, filesystem-free slot-0 normal reassembly, bounded same-transport driver, owning events, metadata-only traces, and first-ACK compatibility primitive | transport creation/closure, authentication semantics or bytes, slot-1/file interpretation, decompression, files, `svc_*`, world/render state |
 | `hlclient_hash_md5` | project-owned incremental MD5 required only for GoldSrc compatibility material | filesystem, external crypto libraries, trust/security policy, GoldSrc wire types |
 | `hlclient_local_resources` | explicit validated local environment/search roots, byte-exact virtual names, path-safe locators, exact-root verified reopen, Win32 read-only handle sandbox, final-handle containment, stable equality-only identity, bounded resolution and streaming inspection | sockets, server messages, downloads, cache/assets, renderer |
 | `hlclient_resource_consistency_api` | path-free bounded provider requirements, move-only asynchronous operation/session/material ownership, cancellation, and private opaque-material handoff | filesystem/path policy, local lookup, checksum calculation, sockets, GoldSrc list types, assets, renderer |
 | `hlclient_resource_consistency_local` | pre-network preparation of the fixed `tempdecal.wad` compatibility target and one-shot nonblocking provider operation | server-derived paths, response codec/layout, network creation, writes, downloads, cache, assets |
 | `hlclient_goldsrc_delta_schema` | socket-free LSB bit reader, delta descriptor parser, immutable schema metadata, and bounded schema registry | Netchan/session state, sign-on stages, sockets, resources, filesystem, renderer |
+| `hlclient_goldsrc_move_vars_api` | immutable validated MoveVars state/codec and post-delta boundary value, layered only on byte I/O and delta schema | sign-on lifecycle, Netchan/session state, sockets, movement simulation, renderer |
 | `hlclient_goldsrc_signon` | exact fixed initial/transition requests, strict `BZ2\0` decoding, owning immutable sign-on/list/response states, historical neutral opcode-43 and zero-TX resource-list stop, exact standard list and neutral 41-byte opcode-5 codecs, carrier/tail separation, provider-required response stage, same-driver semantic-once lifecycle, and next-payload opcode boundary | arbitrary commands, custom/player-resource bodies, production consistency material, resource resolution, runtime application, command execution, filesystem, renderer, SDL, assets, world state |
 | `hlclient_goldsrc_delta_values` | immutable schema-aligned generic values, bounded transactional synthetic-neutral runtime-mask/scalar mechanics, and fail-before-read stock evidence boundary | schema reparsing, native/HLSDK struct writes, stock mask claims, wall clock, filesystem, assets, renderer |
 | `hlclient_goldsrc_usercmd_api` | immutable fixed-width usercmd semantic state, validated compatibility/input/schema profiles, bounded limits, project-local command identity, and pure duration quantization | delta schema parsing, wire bytes, sockets, input polling, renderer, prediction/collision |
 | `hlclient_goldsrc_usercmd_codec` | exact 15-field descriptor binding plus synthetic-only bit writer, delta codec, client-move envelope, and sequence-aware checksum | stock wire/runtime claims, native `usercmd_t` layout, history/scheduling, input mapping, sockets, filesystem, SDL/rendering |
-| `hlclient_goldsrc_usercmd_session` | synthetic input/camera adaptation, fixed-step scheduling, bounded history/backup planning, and transactional same-driver unreliable transmission through a sequence-bound context | caller sequence overrides, second sockets/sessions, reliable usercmd workaround, stock compatibility claims, prediction/collision/reconciliation |
+| `hlclient_goldsrc_usercmd_sampling` | network-free synthetic input/camera adaptation and fixed-step command scheduling | history, packet planning/transmission, sockets, stock compatibility claims, prediction/collision/reconciliation |
+| `hlclient_goldsrc_usercmd_session` | bounded history/backup planning and transactional same-driver unreliable transmission through a sequence-bound context, layered on usercmd sampling and codec targets | caller sequence overrides, second sockets/sessions, reliable usercmd workaround, stock compatibility claims, prediction/collision/reconciliation |
 | `hlclient_goldsrc_entity_snapshots` | immutable generic baseline/full/delta/history state, explicit add/remove and exact-base mechanics, strict ordering, bounded retention, and sealed synthetic-neutral builders | stock entity wire/opcode claims, clientdata prediction, model binding, filesystem, renderer |
 | `hlclient_goldsrc_post_resource_signon` | exact unconsumed post-response cursor, bounded metadata transcript, typed request evidence gate, private same-driver/source-payload continuation, and a sealed four-control-fixture synthetic stage that publishes typed baseline/full/delta state for fake-HLDS tests | arbitrary commands/raw injection, stock request invention, stock entity-body decoding without evidence, opcode scanning, stufftext execution, assets, entity rendering |
 | `hlclient_goldsrc_local_resources` | evidence-gated resource-type/name classification and ordered metadata-only `LocalResourceInventoryState` adapter | sign-on transport, readiness/precache decisions, downloads/cache, file contents, asset loading |
@@ -925,6 +928,32 @@ approved-asset network boundary, then builds and probes collision CPU state.
 It changes no packet, ACK, `new`, `sendres`, opcode-5, or usercmd behavior and
 does not place clipnodes in render state. See [collision package](COLLISION_WORLD_PACKAGE.md)
 and [trace API](COLLISION_TRACE_API.md).
+
+## M4.6.3.2 local movement ownership
+
+```text
+hlclient_movement_api (immutable state/touches/statistics)
+    <- hlclient_goldsrc_local_movement
+       (MoveVars environment + pure kernel + collision adapters)
+    <- hlclient_local_player_controller
+       (fixed synthetic scheduler/input adapter + player camera +
+        renderer-neutral BSP entity-transform parser for spawn metadata)
+    <- offline movement checker / world-viewer player-walk composition
+```
+
+The kernel receives const previous state, typed synthetic command, immutable
+environment, collision interface and caller-owned scratch. It reads no clock,
+input, renderer, file or network state. Success publishes one complete
+successor; error leaves the previous state unchanged. Collision targets do not
+depend on movement.
+
+The local controller receives caller-supplied monotonic time and composes the
+existing scheduler/adapter without usercmd network history. The renderer sees
+only the normal camera/scene boundary. Production player-walk collision is
+world-only; explicit synthetic static brushes are opt-in test/scene metadata,
+and dynamic/stock brush solidity is not inferred. Full `PM_Move`, liquids,
+ladders, stuck recovery, prediction, replay and reconciliation remain outside
+this ownership graph.
 
 ## Module and plugin policy
 

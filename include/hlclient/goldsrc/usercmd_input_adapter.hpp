@@ -10,14 +10,6 @@
 
 namespace hlclient::goldsrc {
 
-inline constexpr std::uint16_t kSyntheticGoldSrcButtonAttack = 1U << 0U;
-inline constexpr std::uint16_t kSyntheticGoldSrcButtonJump = 1U << 1U;
-inline constexpr std::uint16_t kSyntheticGoldSrcButtonDuck = 1U << 2U;
-inline constexpr std::uint16_t kSyntheticGoldSrcButtonUse = 1U << 5U;
-inline constexpr std::uint16_t kSyntheticGoldSrcButtonAttack2 = 1U << 11U;
-inline constexpr std::uint16_t kSyntheticGoldSrcButtonRun = 1U << 12U;
-inline constexpr std::uint16_t kSyntheticGoldSrcButtonReload = 1U << 13U;
-
 struct GoldSrcUserCmdMovementSpeedConfig {
     float forward_speed{400.0F};
     float backward_speed{400.0F};

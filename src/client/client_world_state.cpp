@@ -32,6 +32,7 @@ namespace {
     }
     switch (metadata.mode) {
     case InteractiveCameraMode::free_flight_world:
+    case InteractiveCameraMode::player_walk:
         return !metadata.controlled_entity &&
             metadata.controlled_entity_status ==
                 ControlledEntityCameraStatus::not_applicable;

@@ -739,3 +739,46 @@ Success requires deterministic summaries, nonzero structural/query work, and
 `external-file-drift=none`. The production CPU stop spelling is
 `--stop-after collision-world`; it requires the existing local consistency
 provider and remains valid with `--renderer null`.
+
+## Deterministic local movement tools
+
+Build the movement libraries, read-only checker and viewer in the required
+Win32 configuration:
+
+```powershell
+cmake --build build --config Debug --target `
+  hlclient_movement_api hlclient_goldsrc_local_movement `
+  hlclient_local_player_controller hlclient_movement_check `
+  hlclient_world_viewer
+
+.\build\bin\Debug\hlclient_movement_check.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" `
+  --game valve --map maps/crossfire.bsp `
+  --scenario deterministic-route
+```
+
+The checker accepts `summary`, `spawn-settle`, `walk-forward`, `strafe-wall`,
+`jump`, `step`, `duck` and `deterministic-route`. It executes a scenario twice,
+requires identical state/counter summaries and prints no raw position,
+velocity or asset bytes.
+
+Run the read-only three-map campaign with:
+
+```powershell
+.\scripts\verify_local_player_movement.ps1 `
+  -ToolPath .\build\bin\Debug\hlclient_movement_check.exe `
+  -Basedir "D:\Steam\steamapps\common\Half-Life" `
+  -Game valve `
+  -Maps @('maps/boot_camp.bsp','maps/crossfire.bsp','maps/stalkyard.bsp') `
+  -Scenarios @('spawn-settle','walk-forward','jump','deterministic-route')
+```
+
+Success requires two equal summaries per route, zero network operations, zero
+solid-start summaries, unchanged selected BSP metadata/hash, unchanged root
+inventory and `external-file-drift=none`.
+
+For visual testing use `hlclient_world_viewer` with
+`--camera player-walk`; the complete command and controls are in
+[PLAYER_WALK_VIEWER.md](PLAYER_WALK_VIEWER.md). An actual OpenGL 3.3 Core host
+is required for graphical verification. Unavailable/legacy GL is a capability
+skip, not a reason to skip CPU tests.

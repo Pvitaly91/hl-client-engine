@@ -56,3 +56,18 @@ first-person self rendering.
 
 These viewers are offline diagnostics. They provide no live multiplayer
 control and send no input packet.
+
+## Player-walk publication
+
+The world viewer's `--camera player-walk` route uses the same input snapshot
+and camera publication boundary but replaces noclip translation with
+`LocalPlayerMovementController`. Its collision-valid spawn, immutable state,
+fixed synthetic commands and world-only traces remain outside
+`InteractivePreviewController`; free-fly behavior is unchanged.
+
+`InteractiveCameraMode::player_walk` carries input and camera revision metadata
+into `ClientWorldState`. The scene source refilters CPU PVS/frustum state from
+the new camera without reopening assets or re-uploading world, brush, Studio or
+Sprite resources. Click/Escape control relative capture, WASD walks, Space
+jumps, Ctrl ducks and mouse motion looks. This remains an offline diagnostic
+and sends zero network operations.

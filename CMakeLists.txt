@@ -204,6 +204,16 @@ add_library(hlclient::collision_api ALIAS hlclient_collision_api)
 target_link_libraries(hlclient_collision_api PUBLIC hlclient::asset_api)
 set_property(TARGET hlclient_collision_api PROPERTY FOLDER "Engine/Collision")
 
+hlclient_add_library(
+    hlclient_movement_api
+    include/hlclient/movement/local_player_movement_state.hpp
+    src/movement/local_player_movement_state.cpp
+)
+add_library(hlclient::movement_api ALIAS hlclient_movement_api)
+target_link_libraries(
+    hlclient_movement_api PUBLIC hlclient::asset_api PRIVATE hlclient::core)
+set_property(TARGET hlclient_movement_api PROPERTY FOLDER "Engine/Simulation")
+
 add_library(hlclient_model_asset_api INTERFACE)
 add_library(hlclient::model_asset_api ALIAS hlclient_model_asset_api)
 target_sources(
@@ -305,12 +315,14 @@ hlclient_add_library(
     include/hlclient/goldsrc/bsp/goldsrc_bsp_texture_source_parser.hpp
     include/hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp
     include/hlclient/goldsrc/bsp/goldsrc_entity_document.hpp
+    include/hlclient/goldsrc/bsp/goldsrc_entity_transform.hpp
     include/hlclient/goldsrc/bsp/goldsrc_worldspawn_wad_references.hpp
     src/goldsrc/bsp/goldsrc_face_geometry_builder.cpp
     src/goldsrc/bsp/goldsrc_bsp_parser.cpp
     src/goldsrc/bsp/goldsrc_bsp_texture_source_parser.cpp
     src/goldsrc/bsp/goldsrc_bsp_world_importer.cpp
     src/goldsrc/bsp/goldsrc_entity_document.cpp
+    src/goldsrc/bsp/goldsrc_entity_transform.cpp
     src/goldsrc/bsp/goldsrc_worldspawn_wad_references.cpp
 )
 add_library(hlclient::goldsrc_bsp ALIAS hlclient_goldsrc_bsp)
@@ -461,16 +473,25 @@ if(WIN32)
 endif()
 
 hlclient_add_library(
-    hlclient_goldsrc
+    hlclient_goldsrc_byte_io
     include/hlclient/goldsrc/byte_reader.hpp
     include/hlclient/goldsrc/byte_writer.hpp
+    src/goldsrc/byte_reader.cpp
+    src/goldsrc/byte_writer.cpp
+)
+add_library(hlclient::goldsrc_byte_io ALIAS hlclient_goldsrc_byte_io)
+target_link_libraries(hlclient_goldsrc_byte_io PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_byte_io
+    PROPERTY FOLDER "Engine/Protocol/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc
     include/hlclient/goldsrc/challenge_protocol.hpp
     include/hlclient/goldsrc/connect_request.hpp
     include/hlclient/goldsrc/connect_response.hpp
     include/hlclient/goldsrc/connectionless_packet.hpp
     include/hlclient/goldsrc/info_string.hpp
-    src/goldsrc/byte_reader.cpp
-    src/goldsrc/byte_writer.cpp
     src/goldsrc/challenge_protocol.cpp
     src/goldsrc/connect_request.cpp
     src/goldsrc/connect_response.cpp
@@ -478,7 +499,12 @@ hlclient_add_library(
     src/goldsrc/info_string.cpp
 )
 add_library(hlclient::goldsrc ALIAS hlclient_goldsrc)
-target_link_libraries(hlclient_goldsrc PUBLIC hlclient::network PRIVATE hlclient::core)
+target_link_libraries(
+    hlclient_goldsrc
+    PUBLIC
+        hlclient::goldsrc_byte_io
+        hlclient::network
+    PRIVATE hlclient::core)
 set_property(TARGET hlclient_goldsrc PROPERTY FOLDER "Engine/Network/GoldSrc")
 
 hlclient_add_library(
@@ -544,6 +570,7 @@ hlclient_add_library(
     include/hlclient/goldsrc/delta_description.hpp
     src/goldsrc/bit_reader.cpp
     src/goldsrc/delta_description.cpp
+    src/goldsrc/post_delta_boundary.cpp
 )
 add_library(
     hlclient::goldsrc_delta_schema ALIAS hlclient_goldsrc_delta_schema)
@@ -554,11 +581,27 @@ set_property(
     PROPERTY FOLDER "Engine/Network/GoldSrc/Delta")
 
 hlclient_add_library(
+    hlclient_goldsrc_move_vars_api
+    include/hlclient/goldsrc/move_vars.hpp
+    src/goldsrc/move_vars.cpp
+)
+add_library(
+    hlclient::goldsrc_move_vars_api ALIAS hlclient_goldsrc_move_vars_api)
+target_link_libraries(
+    hlclient_goldsrc_move_vars_api
+    PUBLIC
+        hlclient::goldsrc_byte_io
+        hlclient::goldsrc_delta_schema
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_move_vars_api
+    PROPERTY FOLDER "Engine/Protocol/GoldSrc/Movement")
+
+hlclient_add_library(
     hlclient_goldsrc_signon
     include/hlclient/goldsrc/client_message.hpp
     include/hlclient/goldsrc/delta_description_stage.hpp
     include/hlclient/goldsrc/initial_signon_stage.hpp
-    include/hlclient/goldsrc/move_vars.hpp
     include/hlclient/goldsrc/movement_environment_stage.hpp
     include/hlclient/goldsrc/pre_resource_signon_stage.hpp
     include/hlclient/goldsrc/resource_list.hpp
@@ -577,7 +620,6 @@ hlclient_add_library(
     src/goldsrc/delta_description_stage.cpp
     src/goldsrc/delta_description_stream.cpp
     src/goldsrc/initial_signon_stage.cpp
-    src/goldsrc/move_vars.cpp
     src/goldsrc/movement_environment_stage.cpp
     src/goldsrc/pre_resource_signon_stage.cpp
     src/goldsrc/resource_list.cpp
@@ -599,6 +641,7 @@ target_link_libraries(
     PUBLIC
         hlclient::goldsrc
         hlclient::goldsrc_delta_schema
+        hlclient::goldsrc_move_vars_api
         hlclient::goldsrc_netchan
         hlclient::network
         hlclient::resource_consistency_api
@@ -1096,16 +1139,32 @@ set_property(
     PROPERTY FOLDER "Engine/Client/Camera")
 
 hlclient_add_library(
+    hlclient_goldsrc_usercmd_sampling
+    include/hlclient/goldsrc/usercmd_input_adapter.hpp
+    include/hlclient/goldsrc/usercmd_scheduler.hpp
+    src/goldsrc/usercmd_input_adapter.cpp
+    src/goldsrc/usercmd_scheduler.cpp
+)
+add_library(
+    hlclient::goldsrc_usercmd_sampling ALIAS hlclient_goldsrc_usercmd_sampling)
+target_link_libraries(
+    hlclient_goldsrc_usercmd_sampling
+    PUBLIC
+        hlclient::goldsrc_usercmd_api
+        hlclient::gameplay_input
+        hlclient::gameplay_camera
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_usercmd_sampling
+    PROPERTY FOLDER "Engine/Client/GoldSrc/UserCmd")
+
+hlclient_add_library(
     hlclient_goldsrc_usercmd_session
     include/hlclient/goldsrc/usercmd_history.hpp
-    include/hlclient/goldsrc/usercmd_input_adapter.hpp
     include/hlclient/goldsrc/usercmd_packet_planner.hpp
-    include/hlclient/goldsrc/usercmd_scheduler.hpp
     include/hlclient/goldsrc/usercmd_transmission_stage.hpp
     src/goldsrc/usercmd_history.cpp
-    src/goldsrc/usercmd_input_adapter.cpp
     src/goldsrc/usercmd_packet_planner.cpp
-    src/goldsrc/usercmd_scheduler.cpp
     src/goldsrc/usercmd_transmission_stage.cpp
 )
 add_library(
@@ -1115,8 +1174,7 @@ target_link_libraries(
     PUBLIC
         hlclient::goldsrc_usercmd_codec
         hlclient::goldsrc_netchan
-        hlclient::gameplay_input
-        hlclient::gameplay_camera
+        hlclient::goldsrc_usercmd_sampling
     PRIVATE hlclient::core)
 set_property(
     TARGET hlclient_goldsrc_usercmd_session
@@ -1176,6 +1234,33 @@ set_property(
     PROPERTY FOLDER "Engine/Collision/GoldSrc")
 
 hlclient_add_library(
+    hlclient_goldsrc_local_movement
+    include/hlclient/goldsrc/movement/goldsrc_local_movement.hpp
+    include/hlclient/goldsrc/movement/goldsrc_movement_environment.hpp
+    include/hlclient/goldsrc/movement/goldsrc_movement_math.hpp
+    include/hlclient/goldsrc/movement/local_movement_collision.hpp
+    src/goldsrc/movement/goldsrc_local_movement.cpp
+    src/goldsrc/movement/goldsrc_movement_environment.cpp
+    src/goldsrc/movement/goldsrc_movement_math.cpp
+    src/goldsrc/movement/local_movement_collision.cpp
+)
+add_library(
+    hlclient::goldsrc_local_movement ALIAS
+    hlclient_goldsrc_local_movement)
+target_link_libraries(
+    hlclient_goldsrc_local_movement
+    PUBLIC
+        hlclient::collision_api
+        hlclient::goldsrc_collision_scene
+        hlclient::goldsrc_move_vars_api
+        hlclient::goldsrc_usercmd_api
+        hlclient::movement_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_local_movement
+    PROPERTY FOLDER "Engine/Simulation/GoldSrc")
+
+hlclient_add_library(
     hlclient_goldsrc_brush_models
     include/hlclient/goldsrc/brush_models/brush_submodel_instances.hpp
     include/hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp
@@ -1202,6 +1287,29 @@ target_link_libraries(
 set_property(
     TARGET hlclient_goldsrc_brush_models
     PROPERTY FOLDER "Engine/Renderer/World/Brush Models")
+
+hlclient_add_library(
+    hlclient_local_player_controller
+    include/hlclient/local_player/local_player_movement_controller.hpp
+    include/hlclient/local_player/local_player_spawn_selector.hpp
+    src/local_player/local_player_movement_controller.cpp
+    src/local_player/local_player_spawn_selector.cpp
+)
+add_library(
+    hlclient::local_player_controller ALIAS hlclient_local_player_controller)
+target_link_libraries(
+    hlclient_local_player_controller
+    PUBLIC
+        hlclient::gameplay_camera
+        hlclient::gameplay_input
+        hlclient::goldsrc_local_movement
+        hlclient::goldsrc_usercmd_sampling
+    PRIVATE
+        hlclient::core
+        hlclient::goldsrc_bsp)
+set_property(
+    TARGET hlclient_local_player_controller
+    PROPERTY FOLDER "Engine/Client/Movement")
 
 hlclient_add_library(
     hlclient_world_scene_renderer
@@ -1491,6 +1599,24 @@ set_property(
     TARGET hlclient_collision_check PROPERTY FOLDER "Tools/Collision")
 
 add_executable(
+    hlclient_movement_check
+    apps/hlclient_movement_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_movement_check)
+target_link_libraries(
+    hlclient_movement_check
+    PRIVATE
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_bsp_collision
+        hlclient::hash_sha256
+        hlclient::local_asset_source
+        hlclient::local_player_controller
+        hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_movement_check PROPERTY FOLDER "Tools/Movement")
+
+add_executable(
     hlclient_goldsrc_asset_check
     apps/hlclient_goldsrc_asset_check/main.cpp
 )
@@ -1612,6 +1738,7 @@ target_link_libraries(
         hlclient::local_resources
         hlclient::platform
         hlclient::interactive_preview
+        hlclient::local_player_controller
         hlclient::renderer_opengl
         hlclient::glad
 )

@@ -300,16 +300,39 @@ not imply that a typed resource-list body exists. Opcode 43 is validated at
 the exact cursor and remains unconsumed; all body bytes remain unread and
 unparsed, and no response is sent.
 
+## M4.6.3.2 movement environment
+
+`GoldSrcMovementEnvironmentBuilder::from_move_vars` is the first explicit
+consumer of validated `MoveVarsState`. The executable
+`movevars_dry_walk_subset_v1` environment copies and validates:
+
+- executed: gravity, stop speed, maximum speed, acceleration, air
+  acceleration, friction, step size, maximum velocity and entity gravity;
+- retained but deferred: water acceleration, water friction, edge friction,
+  bounce, z maximum and wave height.
+
+All fields must be finite and within the configured safety magnitude. Gravity,
+maximum speed, maximum velocity and entity gravity must be positive; the other
+executed coefficients must be non-negative. Invalid captured values receive no
+fallback defaults. Source MoveVars compatibility/evidence profiles remain
+attached to the immutable environment.
+
+The offline checker/viewer instead asks explicitly for
+`project_owned_offline_baseline_v1`, with its own evidence profile. That path
+does not claim that a server supplied the values. See
+[GoldSrc local movement](GOLDSRC_LOCAL_MOVEMENT.md).
+
 ## Deliberately absent
 
-- movement simulation, `PM_Move`, client prediction, camera gravity, or physics;
+- full `PM_Move`, client prediction, reconciliation, water/ladder movement or
+  server-authoritative physics;
 - renderer clipping/sky application, audio/environment application, or world
   mutation;
 - a resource-list body parser, response producer, download, cache, or precache;
 - filesystem, asset-manager, URL, shell, SDL, OpenGL, or game-data coupling;
 - raw payload/body logging or a CLI that injects/skips/overrides movevars.
 
-M4.6.3.1 later added a separate immutable BSP collision package, but it still
-does not apply these MoveVars or implement movement. M4.6.3.2 is the first
-milestone permitted to consume both validated collision and optional MoveVars
-inside a deterministic local movement kernel.
+M4.6.3.1 added the separate immutable BSP collision package. M4.6.3.2 now
+combines that package with the validated dry-walk MoveVars subset inside a
+local pure kernel. The original sign-on stage remains metadata-only and does
+not mutate movement, camera, renderer or network behavior.

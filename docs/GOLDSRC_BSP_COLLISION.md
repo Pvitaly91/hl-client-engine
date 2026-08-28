@@ -88,3 +88,18 @@ This boundary establishes BSP structure and compiler-hull compatibility. It
 does not claim exact stock `PM_PlayerTrace` fractions, engine epsilon behavior,
 player hull-selection rules, entity solidity classification, movement, or
 prediction compatibility.
+
+## Local movement adapter
+
+M4.6.3.2 consumes this immutable package through
+`WorldOnlyMovementCollision`. The adapter normalizes contents, maps standing
+and ducked player hulls explicitly, and translates trace planes/hit metadata
+into pointer-free movement records. Production player-walk queries world model
+zero only.
+
+`SyntheticBrushMovementCollision` is a separate test/explicit-scene profile
+for brush instances already assigned the synthetic static-solid role. Neither
+adapter infers solidity from classname. Stock doors, platforms, conveyors and
+other dynamic brush transforms remain absent. This use of BSP data supports
+the declared deterministic dry-walk subset; it does not upgrade the collision
+profile into an exact stock `PM_PlayerTrace` or prediction claim.

@@ -48,3 +48,15 @@ its documented project actions, and keeps diagnostic vertical movement out of
 stock usercmd runs and zero verified move packets. See the
 [GoldSrc usercmd boundary](GOLDSRC_USERCMD.md) and
 [transmission lifecycle](GOLDSRC_USERCMD_TRANSMISSION.md).
+
+M4.6.3.2's local player controller is a separate consumer of the same intent.
+It samples intent through the fixed synthetic scheduler, retains pressed-button
+one-shots until the first successfully simulated command, and clears focused
+movement when the intent becomes neutral after focus loss. WASD produces only
+horizontal forward/side command values, Space and Ctrl map to the named
+synthetic jump/duck bits, and mouse deltas update the player-walk camera.
+
+This does not change the intent contract into a stock input mapping. The
+synthetic speed/run bit does not scale dry-walk movement, and no intent is sent
+over the network by the local controller. See
+[player-walk viewer](PLAYER_WALK_VIEWER.md).

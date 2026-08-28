@@ -66,6 +66,7 @@ struct PreviewRenderOptions {
 enum class InteractiveCameraMode {
     free_flight_world,
     entity_first_person,
+    player_walk,
 };
 
 enum class ControlledEntityCameraStatus {
