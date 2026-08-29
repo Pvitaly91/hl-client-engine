@@ -46,6 +46,15 @@ struct LocalPlayerMovementControllerError {
     std::string_view context;
 };
 
+// Optional exact-match filter for caller-owned diagnostics.  The controller
+// evaluates it only against touches returned by successfully simulated
+// commands.  Speculative direct/step traces that the movement kernel discards
+// never reach this boundary.
+struct LocalPlayerMovementCommittedTouchFilter final {
+    movement::PlayerMovementHitIdentity hit{};
+    movement::PlayerMovementPlane plane{};
+};
+
 struct LocalPlayerMovementControllerUpdateResult {
     std::optional<movement::LocalPlayerMovementState> player_state;
     std::optional<gameplay_camera::GameplayCameraState> camera;
@@ -53,6 +62,7 @@ struct LocalPlayerMovementControllerUpdateResult {
     std::optional<LocalPlayerMovementControllerError> error;
     std::size_t generated_command_count{0U};
     std::uint64_t final_state_signature{0U};
+    std::uint64_t committed_touch_match_count{0U};
     bool player_state_changed{false};
     bool camera_revision_changed{false};
 
@@ -93,12 +103,15 @@ public:
         const noexcept;
     [[nodiscard]] gameplay_input::GameplayButtonMask pending_one_shots()
         const noexcept;
+    void discard_pending_input() noexcept;
 
     [[nodiscard]] LocalPlayerMovementControllerUpdateResult update(
         std::int64_t monotonic_time_nanoseconds,
         const gameplay_input::GameplayInputIntent& intent,
         const goldsrc::movement::ILocalMovementCollision& collision,
-        goldsrc::movement::GoldSrcLocalMovementScratch& scratch);
+        goldsrc::movement::GoldSrcLocalMovementScratch& scratch,
+        const LocalPlayerMovementCommittedTouchFilter*
+            committed_touch_filter = nullptr);
 
 private:
     [[nodiscard]] std::optional<gameplay_camera::GameplayCameraState>

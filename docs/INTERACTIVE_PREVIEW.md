@@ -71,3 +71,10 @@ the new camera without reopening assets or re-uploading world, brush, Studio or
 Sprite resources. Click/Escape control relative capture, WASD walks, Space
 jumps, Ctrl ducks and mouse motion looks. This remains an offline diagnostic
 and sends zero network operations.
+
+A typed player-walk failure is a one-way simulation latch, not permission to
+publish a partial camera or close an otherwise healthy renderer. The last valid
+camera/visibility state remains published, held input and relative capture are
+released, and polling/render/swap continue until close. The process still
+returns nonzero after close. Metadata-only summaries are available through
+`--movement-diagnostics summary`.

@@ -1,6 +1,7 @@
 # Player-walk viewer and movement checker
 
-`hlclient_world_viewer --camera player-walk` is the visual M4.6.3.2 path. It
+`hlclient_world_viewer --camera player-walk` is the visual M4.6.3.2 path with
+the M4.6.3.2.1 wall-contact stability boundary. It
 parses the selected user-owned BSP once, builds the immutable world render and
 collision packages, selects a collision-valid dry spawn, and runs local fixed
 synthetic commands against world-only collision. It opens no network socket
@@ -19,7 +20,8 @@ cmake --build build --config Debug --target `
   --camera player-walk `
   --visibility pvs-frustum `
   --brush-submodels static `
-  --cull back
+  --cull back `
+  --movement-diagnostics summary
 ```
 
 Controls are click to capture relative mouse, Escape to release, WASD to walk,
@@ -58,7 +60,17 @@ CPU visibility through `ClientWorldState`; renderer input remains only camera
 and scene state. Camera movement does not rebuild the immutable scene or
 re-upload world/brush/entity GPU resources. A bounded OpenGL smoke requires one
 world upload, one scene upload, a visible non-clear framebuffer and no GL
-error on an actual OpenGL 3.3 Core host.
+error on an actual OpenGL 3.3 Core host. Its selected-wall proof counts only
+touches from commands committed by the controller; traces from discarded step
+or direct candidates do not qualify.
+
+`--movement-diagnostics off|summary` defaults to `off`. Summary mode retains a
+bounded metadata-only overwrite history and never prints raw coordinates,
+velocities, traces, BSP data or input recordings. If a typed scheduler,
+movement or collision failure occurs, the viewer keeps the last valid state
+and camera, disables further simulation, clears input, releases relative mouse
+capture, logs once and continues rendering until close. The eventual process
+status remains nonzero so a failure is not hidden.
 
 ## Read-only checker
 
@@ -71,7 +83,9 @@ error on an actual OpenGL 3.3 Core host.
 ```
 
 Supported scenarios are `summary`, `spawn-settle`, `walk-forward`,
-`strafe-wall`, `jump`, `step`, `duck` and `deterministic-route`. Every checker
+`strafe-wall`, `jump`, `step`, `duck`, `deterministic-route`,
+`wall-contact-stress`, `wall-glance-stress`, `corner-contact-stress`,
+`jump-wall-stress` and `duck-wall-stress`. Every checker
 invocation executes its script twice and requires identical final state and
 aggregate counters. Output contains aggregate counts and a SHA-256 digest of
 the deterministic state signature, never raw positions or velocities.
@@ -91,6 +105,12 @@ The wrapper snapshots selected BSP hashes/sizes/timestamps and the complete
 root file inventory, runs each map/scenario twice, requires zero network
 operations and zero solid-start summaries, then reports
 `created-files=0`, `deleted-files=0` and `external-file-drift=none`.
+
+The focused wall campaign is wrapped by
+`scripts/verify_player_wall_contact_stability.ps1`; it runs every wall scenario
+twice per map/campaign, checks deterministic selection/route/final hashes and
+executes the capability-gated scripted OpenGL viewer phase. See
+[player wall-contact stability](PLAYER_WALL_CONTACT_STABILITY.md).
 
 Known limitations are water/slime/lava/current movement, ladders, dynamic or
 stock brush entity collision, conveyors/base velocity, moving platforms,

@@ -39,40 +39,41 @@ namespace {
     movement::PlayerMovementStatistics& destination,
     const movement::PlayerMovementStatistics& source) noexcept
 {
-    return checked_add(destination.command_count, source.command_count) &&
-        checked_add(destination.substep_count, source.substep_count) &&
-        checked_add(
-            destination.grounded_command_count,
-            source.grounded_command_count) &&
-        checked_add(
-            destination.airborne_command_count,
-            source.airborne_command_count) &&
-        checked_add(destination.ground_probe_count, source.ground_probe_count) &&
-        checked_add(destination.trace_count, source.trace_count) &&
-        checked_add(
-            destination.collision_hit_count,
-            source.collision_hit_count) &&
-        checked_add(destination.slide_bump_count, source.slide_bump_count) &&
-        checked_add(destination.clip_plane_count, source.clip_plane_count) &&
-        checked_add(destination.step_attempt_count, source.step_attempt_count) &&
-        checked_add(destination.step_success_count, source.step_success_count) &&
-        checked_add(destination.jump_count, source.jump_count) &&
-        checked_add(destination.duck_enter_count, source.duck_enter_count) &&
-        checked_add(destination.duck_exit_count, source.duck_exit_count) &&
-        checked_add(destination.stand_blocked_count, source.stand_blocked_count) &&
-        checked_add(destination.start_solid_count, source.start_solid_count) &&
-        checked_add(destination.all_solid_count, source.all_solid_count) &&
-        std::isfinite(
-            destination.total_horizontal_distance +
-            source.total_horizontal_distance) &&
-        std::isfinite(
-            destination.total_vertical_distance +
-            source.total_vertical_distance) &&
-        ((destination.total_horizontal_distance +=
-              source.total_horizontal_distance),
-         true) &&
-        ((destination.total_vertical_distance += source.total_vertical_distance),
-         true);
+    auto staged = destination;
+    if (!checked_add(staged.command_count, source.command_count) ||
+        !checked_add(staged.substep_count, source.substep_count) ||
+        !checked_add(
+            staged.grounded_command_count,
+            source.grounded_command_count) ||
+        !checked_add(
+            staged.airborne_command_count,
+            source.airborne_command_count) ||
+        !checked_add(staged.ground_probe_count, source.ground_probe_count) ||
+        !checked_add(staged.trace_count, source.trace_count) ||
+        !checked_add(staged.collision_hit_count, source.collision_hit_count) ||
+        !checked_add(staged.slide_bump_count, source.slide_bump_count) ||
+        !checked_add(staged.clip_plane_count, source.clip_plane_count) ||
+        !checked_add(staged.step_attempt_count, source.step_attempt_count) ||
+        !checked_add(staged.step_success_count, source.step_success_count) ||
+        !checked_add(staged.jump_count, source.jump_count) ||
+        !checked_add(staged.duck_enter_count, source.duck_enter_count) ||
+        !checked_add(staged.duck_exit_count, source.duck_exit_count) ||
+        !checked_add(staged.stand_blocked_count, source.stand_blocked_count) ||
+        !checked_add(staged.start_solid_count, source.start_solid_count) ||
+        !checked_add(staged.all_solid_count, source.all_solid_count)) {
+        return false;
+    }
+    const auto horizontal = staged.total_horizontal_distance +
+        source.total_horizontal_distance;
+    const auto vertical = staged.total_vertical_distance +
+        source.total_vertical_distance;
+    if (!std::isfinite(horizontal) || !std::isfinite(vertical)) {
+        return false;
+    }
+    staged.total_horizontal_distance = horizontal;
+    staged.total_vertical_distance = vertical;
+    destination = staged;
+    return true;
 }
 
 [[nodiscard]] LocalPlayerMovementControllerUpdateResult failure(
@@ -191,6 +192,11 @@ LocalPlayerMovementController::pending_one_shots() const noexcept
     return pending_one_shots_;
 }
 
+void LocalPlayerMovementController::discard_pending_input() noexcept
+{
+    pending_one_shots_ = 0U;
+}
+
 std::optional<gameplay_camera::GameplayCameraState>
 LocalPlayerMovementController::make_player_camera(
     const movement::LocalPlayerMovementState& state,
@@ -250,7 +256,9 @@ LocalPlayerMovementController::update(
     const std::int64_t monotonic_time_nanoseconds,
     const gameplay_input::GameplayInputIntent& intent,
     const goldsrc::movement::ILocalMovementCollision& collision,
-    goldsrc::movement::GoldSrcLocalMovementScratch& scratch)
+    goldsrc::movement::GoldSrcLocalMovementScratch& scratch,
+    const LocalPlayerMovementCommittedTouchFilter* const
+        committed_touch_filter)
 {
     if (!valid_configuration_ || !player_state_ || !environment_ || !camera_) {
         return failure(
@@ -307,6 +315,7 @@ LocalPlayerMovementController::update(
         *player_state_};
     movement::PlayerMovementStatistics aggregate_statistics;
     std::size_t generated_commands = 0U;
+    std::uint64_t committed_touch_match_count = 0U;
     for (std::size_t index = 0U; index < scheduled.requests.size(); ++index) {
         const auto& request = scheduled.requests[index];
         goldsrc::GoldSrcUserCmdBuildContext context;
@@ -347,6 +356,23 @@ LocalPlayerMovementController::update(
                 generated_commands,
                 "movement statistics aggregation overflowed");
         }
+        if (committed_touch_filter != nullptr) {
+            for (const auto& touch : simulated.touches) {
+                if (touch.hit != committed_touch_filter->hit ||
+                    touch.plane != committed_touch_filter->plane) {
+                    continue;
+                }
+                if (committed_touch_match_count == UINT64_MAX) {
+                    return failure(
+                        LocalPlayerMovementControllerErrorCode::
+                            statistics_overflow,
+                        &*player_state_, &*camera_, aggregate_statistics,
+                        generated_commands,
+                        "committed touch match count overflowed");
+                }
+                ++committed_touch_match_count;
+            }
+        }
         staged_state.emplace(std::move(*simulated.state));
         ++generated_commands;
         if (index == 0U) {
@@ -381,6 +407,7 @@ LocalPlayerMovementController::update(
     result.generated_command_count = generated_commands;
     result.final_state_signature =
         movement::local_player_movement_state_signature(*player_state_);
+    result.committed_touch_match_count = committed_touch_match_count;
     result.player_state_changed = player_changed;
     result.camera_revision_changed = final_camera_changed;
     return result;

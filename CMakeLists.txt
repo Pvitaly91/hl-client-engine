@@ -19,8 +19,67 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<CONFIG>")
 
 include(CTest)
+include(CheckCXXCompilerFlag)
 include(cmake/CompilerWarnings.cmake)
 include(cmake/Dependencies.cmake)
+
+option(
+    HLCLIENT_ENABLE_ADDRESS_SANITIZER
+    "Enable MSVC AddressSanitizer for movement/collision diagnostics"
+    OFF
+)
+
+if(HLCLIENT_ENABLE_ADDRESS_SANITIZER)
+    if(NOT MSVC)
+        message(FATAL_ERROR
+            "HLCLIENT_ENABLE_ADDRESS_SANITIZER currently requires MSVC")
+    endif()
+
+    set(_hlclient_saved_try_compile_configuration
+        "${CMAKE_TRY_COMPILE_CONFIGURATION}")
+    set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
+    check_cxx_compiler_flag(
+        "/fsanitize=address"
+        HLCLIENT_MSVC_ADDRESS_SANITIZER_SUPPORTED)
+    set(CMAKE_TRY_COMPILE_CONFIGURATION
+        "${_hlclient_saved_try_compile_configuration}")
+    unset(_hlclient_saved_try_compile_configuration)
+
+    if(NOT HLCLIENT_MSVC_ADDRESS_SANITIZER_SUPPORTED)
+        message(FATAL_ERROR
+            "The selected MSVC toolchain does not support /fsanitize=address")
+    endif()
+
+    # MSVC AddressSanitizer is incompatible with the Debug /RTC family.  This
+    # adjustment is scoped to the opt-in sanitizer build tree only.
+    foreach(_hlclient_debug_flags CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
+        string(REPLACE "/RTC1" ""
+            ${_hlclient_debug_flags} "${${_hlclient_debug_flags}}")
+        string(REPLACE "/RTCsu" ""
+            ${_hlclient_debug_flags} "${${_hlclient_debug_flags}}")
+    endforeach()
+endif()
+
+function(hlclient_enable_address_sanitizer target)
+    if(HLCLIENT_ENABLE_ADDRESS_SANITIZER)
+        target_compile_options(${target} PRIVATE /fsanitize=address)
+        # The focused ASan targets intentionally link ordinary project
+        # libraries from the same opt-in tree.  Disable MSVC STL's separate
+        # container-annotation ABI so annotated and ordinary objects retain a
+        # single link-compatible contract; ASan still instruments the focused
+        # movement/collision code itself.
+        target_compile_definitions(
+            ${target}
+            PRIVATE
+                _DISABLE_STRING_ANNOTATION
+                _DISABLE_VECTOR_ANNOTATION
+        )
+        get_target_property(_hlclient_target_type ${target} TYPE)
+        if(_hlclient_target_type STREQUAL "EXECUTABLE")
+            target_link_options(${target} PRIVATE /INCREMENTAL:NO)
+        endif()
+    endif()
+endfunction()
 
 find_package(OpenGL REQUIRED)
 add_subdirectory(third_party/glad)
@@ -1239,6 +1298,7 @@ hlclient_add_library(
     include/hlclient/goldsrc/movement/goldsrc_movement_environment.hpp
     include/hlclient/goldsrc/movement/goldsrc_movement_math.hpp
     include/hlclient/goldsrc/movement/local_movement_collision.hpp
+    include/hlclient/goldsrc/movement/player_wall_contact_diagnostics.hpp
     src/goldsrc/movement/goldsrc_local_movement.cpp
     src/goldsrc/movement/goldsrc_movement_environment.cpp
     src/goldsrc/movement/goldsrc_movement_math.cpp
@@ -1292,8 +1352,10 @@ hlclient_add_library(
     hlclient_local_player_controller
     include/hlclient/local_player/local_player_movement_controller.hpp
     include/hlclient/local_player/local_player_spawn_selector.hpp
+    include/hlclient/local_player/player_walk_failure_latch.hpp
     src/local_player/local_player_movement_controller.cpp
     src/local_player/local_player_spawn_selector.cpp
+    src/local_player/player_walk_failure_latch.cpp
 )
 add_library(
     hlclient::local_player_controller ALIAS hlclient_local_player_controller)
@@ -1856,6 +1918,21 @@ add_custom_command(
 )
 
 set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT hlclient)
+
+foreach(
+    _hlclient_sanitized_target
+    IN ITEMS
+        hlclient_collision_api
+        hlclient_goldsrc_bsp_collision
+        hlclient_goldsrc_collision_scene
+        hlclient_movement_api
+        hlclient_goldsrc_local_movement
+        hlclient_local_player_controller
+        hlclient_movement_check
+        hlclient_world_viewer
+)
+    hlclient_enable_address_sanitizer(${_hlclient_sanitized_target})
+endforeach()
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

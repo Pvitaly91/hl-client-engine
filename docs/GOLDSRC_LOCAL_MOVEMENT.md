@@ -1,6 +1,7 @@
 # GoldSrc local movement dry-walk subset
 
-M4.6.3.2 adds a pure, fixed-command local movement path:
+M4.6.3.2 adds a pure, fixed-command local movement path; M4.6.3.2.1 hardens
+its sustained wall-contact publication and interactive failure boundary:
 
 ```text
 GameplayInputIntent
@@ -66,6 +67,11 @@ After all substeps, one validated successor state is created. `old_buttons`,
 the exact command sequence, integer command time and revision are advanced
 only in that successor.
 
+Touches are bounded by `maximum_touches_per_command`. Reserve, candidate and
+publication allocation failures are converted to typed simulation errors; the
+previous immutable state remains authoritative. Statistics are staged and
+committed only after checked aggregation succeeds.
+
 ## Wish movement
 
 Pitch never leaks into movement. Yaw zero faces +X and the horizontal right
@@ -82,8 +88,9 @@ values alone set wish speed; no stock Shift/`+speed` semantics are claimed.
 
 Ground categorization traces the selected hull two units downward unless
 upward velocity exceeds 180. A hit is walkable when `normal.z >= 0.7`; the
-origin snaps to its trace endpoint and velocity directed into the plane is
-clipped. Steeper contacts leave the state airborne.
+origin uses a trace endpoint only after the same hull position-tests it free,
+and velocity directed into the plane is clipped. Steeper contacts leave the
+state airborne.
 
 Water, slime, lava and current categories return
 `liquid_movement_unsupported`; no dry-walk successor is published. Ladder

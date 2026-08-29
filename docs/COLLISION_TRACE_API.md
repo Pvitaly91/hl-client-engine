@@ -94,13 +94,15 @@ engine epsilon profile.
 ## Result semantics
 
 `fraction` is finite and within `[0, 1]`. A no-hit result has fraction `1`, the
-requested end position, and no plane or hit. A hit end position is recomputed
+requested end position, and no plane, hit, or blocking-contact metadata. A hit
+end position is recomputed
 from the original segment as `start + fraction * (end - start)`; it is not
 accumulated through recursive float interpolation.
 
-An entry reached exactly at the requested endpoint uses that reserved no-hit
-form. Its exact blocking `end_contents` is still returned, but a fraction-one
-plane or hit is never published.
+An entry reached exactly at the requested endpoint remains a hit with fraction
+`1` and publishes its oriented plane, hit identity and blocking contents.
+Consequently consumers distinguish hit/no-hit by complete contact metadata,
+not by fraction alone. `end_contents` still describes the requested endpoint.
 
 `start_solid` means the requested start point is blocking under the selected
 policy. `all_solid` means the start is blocking and traversal found no
@@ -109,7 +111,7 @@ nonblocking interval over the requested segment. The cases are distinct:
 | Segment state | Fraction | End | Plane |
 | --- | ---: | --- | --- |
 | starts free, never enters solid | 1 | requested end | absent |
-| starts free, enters solid | earliest entry | interpolated impact | present |
+| starts free, enters solid | earliest entry, possibly 1 | interpolated impact | present |
 | starts solid, exits and never re-enters | 1 | requested end | absent |
 | starts solid, exits and re-enters | earliest re-entry | interpolated impact | present |
 | remains solid for the whole interval | 0 | requested start | absent |
@@ -144,6 +146,14 @@ start/end/blocking contents and bounded traversal statistics. The movement
 kernel treats absent required blocking metadata, query failure, `start_solid`
 and `all_solid` as transactional errors; it never continues from a partial
 trace.
+
+A geometrically interpolated contact coordinate is not automatically safe to
+publish as the next binary32 player origin. Movement stages the coordinate and
+runs a full hull position test through the same provider. A blocking rounded
+endpoint is not committed; the previous verified-free origin remains active
+while the collision plane is clipped. Collision traversal itself keeps its
+exact tree-side and fraction semantics and does not introduce a position nudge
+or inflate the trace tolerance profile.
 
 The production `world_only_v1` adapter queries the immutable BSP world package.
 The separate `explicit_synthetic_static_brush_v1` adapter composes only an

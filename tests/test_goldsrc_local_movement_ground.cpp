@@ -23,6 +23,7 @@ enum class MalformedCollisionOutput {
     invalid_trace_contents,
     invalid_trace_hit,
     non_unit_trace_plane,
+    nonblocking_blocking_contents,
 };
 
 class MalformedCollision final : public local::ILocalMovementCollision {
@@ -104,6 +105,7 @@ public:
             break;
         case MalformedCollisionOutput::invalid_trace_hit:
         case MalformedCollisionOutput::non_unit_trace_plane:
+        case MalformedCollisionOutput::nonblocking_blocking_contents:
             result.fraction = 0.5;
             result.end_position = {
                 start.x + (end.x - start.x) * 0.5F,
@@ -125,7 +127,14 @@ public:
                 std::nullopt};
             result.blocking_contents =
                 local::LocalMovementCollisionContents{
-                    player::PlayerMovementContents::solid, -2};
+                    output_ == MalformedCollisionOutput::
+                            nonblocking_blocking_contents
+                        ? player::PlayerMovementContents::empty
+                        : player::PlayerMovementContents::solid,
+                    output_ == MalformedCollisionOutput::
+                            nonblocking_blocking_contents
+                        ? -1
+                        : -2};
             break;
         case MalformedCollisionOutput::invalid_position_status:
         case MalformedCollisionOutput::invalid_point_contents:
@@ -294,14 +303,18 @@ TEST_CASE("Kernel rejects malformed collision-provider results transactionally",
         MalformedCollisionOutput::invalid_trace_contents,
         MalformedCollisionOutput::invalid_trace_hit,
         MalformedCollisionOutput::non_unit_trace_plane,
+        MalformedCollisionOutput::nonblocking_blocking_contents,
     };
     for (const auto output : malformed_outputs) {
         const auto previous = fixture::make_state();
         const auto signature =
             player::local_player_movement_state_signature(previous);
         const MalformedCollision collision{output};
-        const auto result = fixture::simulate(
-            previous, fixture::make_command(1U), collision);
+        auto environment = fixture::make_environment();
+        local::GoldSrcLocalMovementScratch scratch;
+        const auto result = local::GoldSrcLocalMovementKernel::simulate(
+            previous, fixture::make_command(1U), environment, collision,
+            scratch);
 
         CHECK_FALSE(result);
         CHECK_FALSE(result.state);
@@ -310,10 +323,23 @@ TEST_CASE("Kernel rejects malformed collision-provider results transactionally",
             local::LocalMovementSimulationErrorCode::collision_query_failed);
         REQUIRE(result.error->collision_error);
         CHECK(result.error->collision_error->code ==
-            local::LocalMovementCollisionErrorCode::non_finite_result);
+            (output == MalformedCollisionOutput::
+                    nonblocking_blocking_contents
+                ? local::LocalMovementCollisionErrorCode::
+                    invalid_collision_source
+                : local::LocalMovementCollisionErrorCode::
+                    non_finite_result));
         CHECK(result.touches.empty());
         CHECK(player::local_player_movement_state_signature(previous) ==
             signature);
+        REQUIRE(scratch.last_diagnostic);
+        CHECK(scratch.last_diagnostic->command_sequence == 1U);
+        CHECK(scratch.last_diagnostic->state_signature_before == signature);
+        CHECK(scratch.last_diagnostic->state_signature_after == signature);
+        CHECK(scratch.last_diagnostic->result ==
+            local::PlayerMovementDiagnosticResult::collision_failure);
+        CHECK(scratch.last_diagnostic->collision_result ==
+            local::PlayerMovementCollisionResultClass::typed_failure);
     }
 }
 

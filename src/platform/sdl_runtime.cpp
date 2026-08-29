@@ -1,4 +1,5 @@
 #include <hlclient/platform/sdl_runtime.hpp>
+#include <hlclient/platform/sdl_window.hpp>
 
 #include <SDL3/SDL.h>
 
@@ -10,11 +11,6 @@ namespace {
 
 bool runtime_active = false;
 
-[[nodiscard]] std::string sdl_error(const char* operation)
-{
-    return std::string{operation} + ": " + SDL_GetError();
-}
-
 } // namespace
 
 SdlRuntime::SdlRuntime()
@@ -23,8 +19,17 @@ SdlRuntime::SdlRuntime()
         throw std::logic_error{"Only one SDL runtime owner may be active"};
     }
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD)) {
-        const auto error = sdl_error("SDL initialization failed");
+        const std::string diagnostic{SDL_GetError()};
+        const auto error =
+            std::string{"SDL initialization failed: "} + diagnostic;
         SDL_Quit();
+        if (proves_opengl_startup_capability_unavailable(
+                OpenGlStartupCapabilityFailure::video_subsystem_unavailable,
+                diagnostic)) {
+            throw OpenGlStartupCapabilityError{
+                OpenGlStartupCapabilityFailure::video_subsystem_unavailable,
+                error};
+        }
         throw std::runtime_error{error};
     }
     runtime_active = true;

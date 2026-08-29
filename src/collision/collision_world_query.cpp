@@ -10,6 +10,22 @@
 namespace hlclient::collision {
 namespace {
 
+template <typename Function>
+class ScopeExit final {
+public:
+    explicit ScopeExit(Function function) noexcept
+        : function_{std::move(function)}
+    {
+    }
+
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    ~ScopeExit() noexcept { function_(); }
+
+private:
+    Function function_;
+};
+
 constexpr double kMaximumPlaneDistanceEpsilon = 1.0e-2;
 constexpr double kMaximumFractionEpsilon = 1.0e-6;
 constexpr double kMaximumProgressFraction = 1.0e-6;
@@ -598,6 +614,7 @@ CollisionPointContentsQueryResult CollisionWorldQuery::point_contents(
             std::nullopt,
             0U);
     }
+    const ScopeExit reset_scratch{[&scratch]() noexcept { scratch.reset(); }};
 
     auto reference = root_reference(resolved.hull->root);
     std::size_t steps = 0U;
@@ -785,7 +802,14 @@ CollisionPositionTestQueryResult CollisionWorldQuery::test_position(
 {
     auto queried = point_contents(request, scratch);
     if (!queried || !queried.result) {
-        return position_failure(std::move(*queried.error));
+        if (queried.error) {
+            return position_failure(std::move(*queried.error));
+        }
+        return position_failure(CollisionQueryError{
+            CollisionQueryErrorCode::invalid_package,
+            request.source_model_index,
+            std::nullopt,
+            0U});
     }
     const auto& point = *queried.result;
     return {
@@ -940,6 +964,7 @@ CollisionTraceQueryResult CollisionWorldQuery::trace_model_hull(
             std::nullopt,
             0U);
     }
+    const ScopeExit reset_scratch{[&scratch]() noexcept { scratch.reset(); }};
 
     auto push_frame = [&](const detail::CollisionScratchFrame& frame) {
         if (scratch.frames_.size() >= scratch.stack_limit_) {
@@ -1285,14 +1310,9 @@ CollisionTraceQueryResult CollisionWorldQuery::trace_model_hull(
             std::nullopt,
             output.traversal_statistics.traversal_steps);
     }
-    // The public contract reserves fraction == 1 for the exact no-hit form.
-    // A blocking terminal reached only at the requested endpoint is still
-    // observable through end_contents, but does not publish a hit or plane.
-    if (*candidate_fraction == 1.0) {
-        output.fraction = 1.0;
-        output.end_position = request.end;
-        return {std::move(output), std::nullopt};
-    }
+    // A real nonblocking-to-blocking entry at the requested endpoint remains
+    // a collision. Fraction one alone is not a no-hit predicate; absence of
+    // collision metadata is the exact no-hit form.
     const auto hit_plane = make_plane_hit(
         *package_, *candidate_boundary, motion, request.tolerance);
     if (!hit_plane) {

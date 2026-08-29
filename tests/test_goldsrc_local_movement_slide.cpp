@@ -208,7 +208,7 @@ TEST_CASE("Three independent clip planes stop the slide deterministically",
     CHECK(result.touches.size() == 3U);
 }
 
-TEST_CASE("The configured bump bound stops unconsumed slide velocity",
+TEST_CASE("The configured bump bound retains safe tangential velocity",
     "[goldsrc][movement][kernel][slide][bump-limit]")
 {
     fixture::DeterministicLocalMovementCollision collision;
@@ -226,7 +226,7 @@ TEST_CASE("The configured bump bound stops unconsumed slide velocity",
     CHECK(result.state->origin().x == Catch::Approx(4.0F).margin(1.0e-4F));
     CHECK(result.state->origin().y == Catch::Approx(0.4F).margin(1.0e-4F));
     CHECK(result.state->velocity().x == 0.0F);
-    CHECK(result.state->velocity().y == 0.0F);
+    CHECK(result.state->velocity().y == Catch::Approx(100.0F));
     CHECK(result.statistics.slide_bump_count == 1U);
     CHECK(result.statistics.clip_plane_count == 1U);
 }

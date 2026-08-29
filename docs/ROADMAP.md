@@ -901,20 +901,33 @@ hulls. A local controller anchors the player-walk camera without GPU re-upload
 or network transmission. Full stock `PM_Move`, water/ladders, dynamic brushes,
 stuck recovery and stock usercmd semantics remain evidence-pending.
 
+### M4.6.3.2.1 — Player wall-contact stability
+
+**Status: completed at the bounded local-contact boundary.**
+
+Sustained direct, glancing, corner, jump and duck contact now retains only
+position-tested free endpoints, deduplicates same-facing planes before the
+distinct-plane limit, stops opposing/trapped contacts safely, bounds command
+touch storage, and commits only the selected direct/step candidate. A typed
+interactive movement failure freezes the last valid player/camera state,
+releases capture and keeps rendering until the user closes the viewer. The
+CPU checker owns deterministic 10,000-command wall campaigns; no prediction,
+replay, network transmission or stock brush-solidity claim was added.
+
 ### M4.6.3.3 — Replay and reconciliation
 
 **Status: next.** Own prediction history, command replay and server
-reconciliation; none is included in M4.6.3.2.
+reconciliation; none is included in M4.6.3.2.1.
 
 M4.7 retains the stock entity-wire/live runtime compatibility work. M3.3
-retains download/cache. Neither is part of M4.6.3.2.
+retains download/cache. Neither is part of M4.6.3.2.1.
 
 ## Superseded milestone numbering
 
 The former M5–M8 entity/model/input/interpolation buckets were split into the
 active M4.5.1, M4.5.2, M4.5.3 and M4.6 sequence above. They are not additional
 or competing next milestones. The only next movement milestone after completed
-M4.6.3.2 is M4.6.3.3.
+M4.6.3.2.1 is M4.6.3.3.
 
 ## M9 — `client.dll` API and HUD
 
@@ -1000,8 +1013,10 @@ free-flight, and synthetic entity anchoring. M4.6.2 is complete at its bounded
 synthetic `usercmd` codec/transmission boundary while stock exact wire/runtime
 behavior remains evidence-pending at zero accepted runs and zero verified move
 packets. M4.6.3.1 is complete at the project-owned BSP collision/trace
-boundary. M4.6.3.2 is complete at its deterministic local dry-walk kernel,
-world-only player-walk viewer and read-only verification boundary. M4.6.3.3 is
+boundary. M4.6.3.2 is complete at its deterministic local dry-walk kernel and
+M4.6.3.2.1 is complete at its bounded wall-contact/viewer-failure boundary.
+The world-only player-walk viewer and read-only verification boundary remain
+offline. M4.6.3.3 is
 next and retains command replay, prediction history, and reconciliation. M4.7
 may revisit live stock entity-wire/runtime effects evidence.
 

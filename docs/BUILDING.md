@@ -758,7 +758,9 @@ cmake --build build --config Debug --target `
 ```
 
 The checker accepts `summary`, `spawn-settle`, `walk-forward`, `strafe-wall`,
-`jump`, `step`, `duck` and `deterministic-route`. It executes a scenario twice,
+`jump`, `step`, `duck`, `deterministic-route`, `wall-contact-stress`,
+`wall-glance-stress`, `corner-contact-stress`, `jump-wall-stress` and
+`duck-wall-stress`. It executes a scenario twice,
 requires identical state/counter summaries and prints no raw position,
 velocity or asset bytes.
 
@@ -781,4 +783,34 @@ For visual testing use `hlclient_world_viewer` with
 `--camera player-walk`; the complete command and controls are in
 [PLAYER_WALK_VIEWER.md](PLAYER_WALK_VIEWER.md). An actual OpenGL 3.3 Core host
 is required for graphical verification. Unavailable/legacy GL is a capability
-skip, not a reason to skip CPU tests.
+skip, not a reason to skip CPU tests. Generic SDL startup failures and
+allocation/resource exhaustion are not treated as capability skips.
+
+Run the focused wall-contact CPU and scripted-OpenGL campaign with:
+
+```powershell
+.\scripts\verify_player_wall_contact_stability.ps1 `
+  -ToolPath .\build\bin\Debug\hlclient_movement_check.exe `
+  -ViewerPath .\build\bin\Debug\hlclient_world_viewer.exe `
+  -Basedir "D:\Steam\steamapps\common\Half-Life" `
+  -Game valve `
+  -Maps @('maps/boot_camp.bsp','maps/crossfire.bsp','maps/stalkyard.bsp') `
+  -Iterations 20 `
+  -Frames 1000
+```
+
+MSVC AddressSanitizer is opt-in and capability-checked:
+
+```powershell
+cmake -S . -B build-asan -G "Visual Studio 17 2022" -A Win32 `
+  -DHLCLIENT_WARNINGS_AS_ERRORS=ON `
+  -DHLCLIENT_ENABLE_ADDRESS_SANITIZER=ON
+
+cmake --build build-asan --config Debug --target `
+  hlclient_world_viewer hlclient_movement_check hlclient_tests
+```
+
+The option is off by default. It removes incompatible Debug runtime checks
+only inside the sanitizer build tree and has no effect on ordinary Release
+behavior. See
+[player wall-contact stability](PLAYER_WALL_CONTACT_STABILITY.md).

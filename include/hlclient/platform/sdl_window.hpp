@@ -4,10 +4,56 @@
 #include <hlclient/platform/platform_event.hpp>
 
 #include <cstdint>
+#include <exception>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace hlclient::platform {
+
+// Startup capability failures are intentionally separate from ordinary SDL
+// and renderer failures.  Callers may use this narrow classification to skip
+// an OpenGL test on a genuinely headless/legacy host without treating shader,
+// upload, draw, swap, allocation, or programming failures as unavailable
+// hardware.
+enum class OpenGlStartupCapabilityFailure : std::uint8_t {
+    none,
+    video_subsystem_unavailable,
+    window_unavailable,
+    context_attribute_unavailable,
+    context_unavailable,
+    context_activation_unavailable,
+    function_loading_unavailable,
+    legacy_context,
+};
+
+[[nodiscard]] std::string_view to_string(
+    OpenGlStartupCapabilityFailure failure) noexcept;
+
+class OpenGlStartupCapabilityError final : public std::runtime_error {
+public:
+    OpenGlStartupCapabilityError(
+        OpenGlStartupCapabilityFailure failure,
+        std::string context);
+
+    [[nodiscard]] OpenGlStartupCapabilityFailure failure() const noexcept;
+
+private:
+    OpenGlStartupCapabilityFailure failure_;
+};
+
+[[nodiscard]] OpenGlStartupCapabilityFailure
+classify_opengl_startup_capability_failure(
+    const std::exception& error) noexcept;
+
+// SDL reports startup failures as diagnostic strings rather than typed error
+// codes.  Only diagnostics that explicitly establish missing video/OpenGL
+// capability are eligible for a skip.  Generic failures (including possible
+// allocation or driver faults) remain fatal.
+[[nodiscard]] bool proves_opengl_startup_capability_unavailable(
+    OpenGlStartupCapabilityFailure failure,
+    std::string_view diagnostic) noexcept;
 
 struct SdlWindowConfig {
     std::string title{"HL Client Engine"};

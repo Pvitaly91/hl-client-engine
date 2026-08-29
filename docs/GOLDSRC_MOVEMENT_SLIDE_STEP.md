@@ -22,18 +22,25 @@ helper is a thin projection of this validated result.
 
 ## Bounded slide move
 
-The default loop performs at most four bumps and stores at most five clip
-planes. Each bump traces from the current origin to
-`origin + velocity * remaining_time`, moves to the trace endpoint, retains an
-inert touch for a blocking hit, reduces remaining time by the covered fraction,
-and solves velocity against the ordered plane list.
+The default loop performs at most four bumps and stores at most five distinct
+clip planes. Each bump traces from the current origin to
+`origin + velocity * remaining_time`, stages and position-tests a contact
+endpoint, retains a bounded inert touch, reduces remaining time only by the
+committed free fraction, and solves velocity against the ordered plane list.
+An endpoint narrowed onto the blocking side never replaces the verified-free
+origin.
 
 The solver first tries clipping against each plane in encounter order and
 accepts the first result that does not enter another plane beyond the stop
 epsilon. With exactly two incompatible planes it projects velocity onto their
-normalized cross-product crease. Degenerate creases, three-or-more-plane traps
-and exhausted remaining movement stop safely at zero velocity. Exceeding a
-configured clip-plane bound fails transactionally. Start-solid, all-solid,
+normalized cross-product crease. Same-facing near-coplanar planes are
+deduplicated before the capacity check and do not consume another distinct
+slot. Opposing near-coplanar planes, degenerate creases,
+three-or-more-plane traps and exhausted remaining movement stop safely. Only a
+genuinely distinct plane beyond the configured bound fails transactionally. A
+zero/near-zero contact must change origin/fraction, produce a useful finite
+velocity change, or terminate as a successful stable stop, so remaining time
+cannot spin. Start-solid, all-solid,
 missing plane/hit metadata, unsupported liquid and query errors never publish a
 partial move.
 
@@ -56,8 +63,8 @@ The step candidate is valid only if the upward trace is completely clear, the
 down trace lands on a hit with `normal.z >= 0.7`, and a stationary destination
 hull test is free. A blocked rise, too-high obstacle, missing landing, steep
 landing or blocked clearance simply makes that candidate unavailable.
-An actual `startsolid`/`allsolid` returned by the horizontal step slide fails
-the whole command transactionally, just like the direct slide. Any step-up or
+An unavailable optional step does not invalidate an already valid direct
+candidate. Any step-up or
 step-down trace that reports crossing liquid also fails with the typed
 unsupported-liquid result; a dry endpoint cannot hide a vertical liquid cross.
 
@@ -66,6 +73,10 @@ when it is valid and strictly farther than the direct path. Equal progress
 keeps the direct path, making ties deterministic. A selected step retains the
 horizontal slide velocity and increments `step_success_count`; ground
 categorization then performs the ordinary two-unit snap.
+
+Direct and step work use separate origins, velocities, touches and statistics
+deltas. Only the selected candidate commits; discarded counters/touches and
+scratch traversal state cannot leak into the command result.
 
 The step height comes directly from validated MoveVars. The offline fixture
 uses 18 units. No stair animation, moving platform, base velocity, conveyor,

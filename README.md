@@ -7,7 +7,8 @@ simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
 The repository has implemented M4.6.3.2's deterministic local dry-walk
-movement kernel and player-walk viewer on M4.6.3.1's renderer/network-neutral
+movement kernel and player-walk viewer plus M4.6.3.2.1's bounded wall-contact
+stability layer on M4.6.3.1's renderer/network-neutral
 GoldSrc BSP collision world and deterministic project trace profile, alongside
 M4.4.1's explicit Valve BSP-v30 geometry
 compatibility profile on top of M4.4's bounded renderer-neutral spatial,
@@ -73,7 +74,10 @@ brush-model queries. M4.6.3.1 itself does not assign stock brush solidity.
 M4.6.3.2 now adds immutable player state, validated MoveVars adaptation,
 fixed-command walking/air movement, gravity, horizontal ground friction,
 acceleration, wall sliding, steps, jump edges, immediate standing/duck hulls,
-and a player-anchored camera. Only the named public-Valve-informed dry-walk
+and a player-anchored camera. M4.6.3.2.1 makes binary32 contact publication,
+zero-progress clipping, repeated planes/touches, step candidates and
+interactive typed failures bounded and transactional. Only the named
+public-Valve-informed dry-walk
 subset and synthetic command semantics execute; full `PM_Move`, water,
 ladders, dynamic brushes, stuck recovery, prediction, command replay and
 reconciliation remain absent.
@@ -147,12 +151,14 @@ cmake --build build --config Debug --target `
 .\build\bin\Debug\hlclient_world_viewer.exe `
   --basedir "D:\Steam\steamapps\common\Half-Life" --game valve `
   --map maps/crossfire.bsp --camera player-walk `
-  --visibility pvs-frustum --brush-submodels static --cull back
+  --visibility pvs-frustum --brush-submodels static --cull back `
+  --movement-diagnostics summary
 ```
 
 Both tools are offline and read-only. The viewer uses world-only collision and
 a project-owned movement environment; visible stock brush entities are not
-automatically solid. See [player-walk viewer](docs/PLAYER_WALK_VIEWER.md).
+automatically solid. See [player-walk viewer](docs/PLAYER_WALK_VIEWER.md) and
+[player wall-contact stability](docs/PLAYER_WALL_CONTACT_STABILITY.md).
 
 The generated solution is:
 

@@ -371,10 +371,9 @@ TEST_CASE("The movement kernel traverses the parsed literal BSP deterministicall
 
     SECTION("the twenty-eight-unit step blocks a floor approach")
     {
-        // Start less than one 10 ms sweep from contact.  A single command is
-        // intentional: it proves the too-high candidate is rejected without
-        // making a subsequent command depend on binary32 boundary re-entry.
-        const auto commands = literal_commands(1U, 240.0F);
+        // Repeated commands deliberately exercise binary32 boundary re-entry;
+        // retaining forward input at the too-high face is a normal wall event.
+        const auto commands = literal_commands(100U, 240.0F);
         const auto first = run_literal_commands(
             fixture::make_state(
                 {15.0F, 40.0F, 36.0F}, {240.0F, 0.0F, 0.0F}),

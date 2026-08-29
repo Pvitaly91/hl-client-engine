@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -49,14 +50,169 @@ std::atomic_bool sdl_event_pump_claimed{false};
     return std::string{operation} + ": " + SDL_GetError();
 }
 
+[[nodiscard]] bool contains_ascii_case_insensitive(
+    const std::string_view text,
+    const std::string_view pattern) noexcept
+{
+    if (pattern.empty() || pattern.size() > text.size()) {
+        return false;
+    }
+    const auto lower = [](const char value) noexcept {
+        return value >= 'A' && value <= 'Z'
+            ? static_cast<char>(value - 'A' + 'a')
+            : value;
+    };
+    for (std::size_t offset = 0U; offset + pattern.size() <= text.size();
+         ++offset) {
+        bool equal = true;
+        for (std::size_t index = 0U; index < pattern.size(); ++index) {
+            if (lower(text[offset + index]) != lower(pattern[index])) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[noreturn]] void throw_sdl_opengl_startup_failure(
+    const OpenGlStartupCapabilityFailure capability,
+    const char* operation)
+{
+    const std::string diagnostic{SDL_GetError()};
+    auto context = std::string{operation} + ": " + diagnostic;
+    if (proves_opengl_startup_capability_unavailable(
+            capability, diagnostic)) {
+        throw OpenGlStartupCapabilityError{capability, std::move(context)};
+    }
+    throw std::runtime_error{std::move(context)};
+}
+
 void set_gl_attribute(const SDL_GLAttr attribute, const int value, const char* description)
 {
     if (!SDL_GL_SetAttribute(attribute, value)) {
-        throw std::runtime_error{sdl_error(description)};
+        throw_sdl_opengl_startup_failure(
+            OpenGlStartupCapabilityFailure::context_attribute_unavailable,
+            description);
     }
 }
 
 } // namespace
+
+std::string_view to_string(
+    const OpenGlStartupCapabilityFailure failure) noexcept
+{
+    switch (failure) {
+    case OpenGlStartupCapabilityFailure::none:
+        return "none";
+    case OpenGlStartupCapabilityFailure::video_subsystem_unavailable:
+        return "video_subsystem_unavailable";
+    case OpenGlStartupCapabilityFailure::window_unavailable:
+        return "window_unavailable";
+    case OpenGlStartupCapabilityFailure::context_attribute_unavailable:
+        return "context_attribute_unavailable";
+    case OpenGlStartupCapabilityFailure::context_unavailable:
+        return "context_unavailable";
+    case OpenGlStartupCapabilityFailure::context_activation_unavailable:
+        return "context_activation_unavailable";
+    case OpenGlStartupCapabilityFailure::function_loading_unavailable:
+        return "function_loading_unavailable";
+    case OpenGlStartupCapabilityFailure::legacy_context:
+        return "legacy_context";
+    }
+    return "unknown";
+}
+
+OpenGlStartupCapabilityError::OpenGlStartupCapabilityError(
+    const OpenGlStartupCapabilityFailure failure,
+    std::string context)
+    : std::runtime_error{std::move(context)}, failure_{failure}
+{
+}
+
+OpenGlStartupCapabilityFailure OpenGlStartupCapabilityError::failure()
+    const noexcept
+{
+    return failure_;
+}
+
+OpenGlStartupCapabilityFailure
+classify_opengl_startup_capability_failure(
+    const std::exception& error) noexcept
+{
+    if (const auto* capability =
+            dynamic_cast<const OpenGlStartupCapabilityError*>(&error)) {
+        return capability->failure();
+    }
+    // Do not classify logic_error or bad_alloc by their text.  SDL failures
+    // must be converted to the typed form at their startup boundary only after
+    // their diagnostic proves capability unavailability.
+    if (dynamic_cast<const std::logic_error*>(&error) != nullptr ||
+        dynamic_cast<const std::bad_alloc*>(&error) != nullptr) {
+        return OpenGlStartupCapabilityFailure::none;
+    }
+    const auto* runtime = dynamic_cast<const std::runtime_error*>(&error);
+    if (runtime == nullptr) {
+        return OpenGlStartupCapabilityFailure::none;
+    }
+    const std::string_view message{runtime->what()};
+    if (message == "glad2 failed to load OpenGL functions") {
+        return OpenGlStartupCapabilityFailure::function_loading_unavailable;
+    }
+    if (message.starts_with("OpenGL 3.3 Core is required,")) {
+        return OpenGlStartupCapabilityFailure::legacy_context;
+    }
+    return OpenGlStartupCapabilityFailure::none;
+}
+
+bool proves_opengl_startup_capability_unavailable(
+    const OpenGlStartupCapabilityFailure failure,
+    const std::string_view diagnostic) noexcept
+{
+    // Never turn an allocation/resource exhaustion report into a successful
+    // capability skip, even when the same text also mentions OpenGL.
+    if (contains_ascii_case_insensitive(diagnostic, "memory") ||
+        contains_ascii_case_insensitive(diagnostic, "allocation") ||
+        contains_ascii_case_insensitive(diagnostic, "resource exhausted") ||
+        contains_ascii_case_insensitive(diagnostic, "resource limit")) {
+        return false;
+    }
+
+    const bool names_video =
+        contains_ascii_case_insensitive(diagnostic, "video device") ||
+        contains_ascii_case_insensitive(diagnostic, "video driver");
+    const bool names_opengl =
+        contains_ascii_case_insensitive(diagnostic, "opengl") ||
+        contains_ascii_case_insensitive(diagnostic, "gl context");
+    const bool explicitly_limited =
+        contains_ascii_case_insensitive(diagnostic, "no available") ||
+        contains_ascii_case_insensitive(diagnostic, "not available") ||
+        contains_ascii_case_insensitive(diagnostic, "unavailable") ||
+        contains_ascii_case_insensitive(diagnostic, "not supported") ||
+        contains_ascii_case_insensitive(diagnostic, "unsupported") ||
+        contains_ascii_case_insensitive(diagnostic, "not configured");
+    if (!explicitly_limited) {
+        return false;
+    }
+    switch (failure) {
+    case OpenGlStartupCapabilityFailure::video_subsystem_unavailable:
+        return names_video;
+    case OpenGlStartupCapabilityFailure::window_unavailable:
+        return names_video || names_opengl;
+    case OpenGlStartupCapabilityFailure::context_attribute_unavailable:
+    case OpenGlStartupCapabilityFailure::context_unavailable:
+    case OpenGlStartupCapabilityFailure::context_activation_unavailable:
+        return true;
+    case OpenGlStartupCapabilityFailure::function_loading_unavailable:
+    case OpenGlStartupCapabilityFailure::legacy_context:
+    case OpenGlStartupCapabilityFailure::none:
+        return false;
+    }
+    return false;
+}
 
 struct SdlWindow::Impl final {
     static constexpr std::size_t pending_event_capacity = 8U;
@@ -203,7 +359,9 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
         config.height,
         flags);
     if (implementation_->window == nullptr) {
-        throw std::runtime_error{sdl_error("SDL window creation failed")};
+        throw_sdl_opengl_startup_failure(
+            OpenGlStartupCapabilityFailure::window_unavailable,
+            "SDL window creation failed");
     }
     implementation_->window_id = SDL_GetWindowID(implementation_->window);
     if (implementation_->window_id == 0U) {
@@ -216,11 +374,15 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
 
     implementation_->context = SDL_GL_CreateContext(implementation_->window);
     if (implementation_->context == nullptr) {
-        throw std::runtime_error{sdl_error("OpenGL context creation failed")};
+        throw_sdl_opengl_startup_failure(
+            OpenGlStartupCapabilityFailure::context_unavailable,
+            "OpenGL context creation failed");
     }
 
     if (!SDL_GL_MakeCurrent(implementation_->window, implementation_->context)) {
-        throw std::runtime_error{sdl_error("Unable to make the OpenGL context current")};
+        throw_sdl_opengl_startup_failure(
+            OpenGlStartupCapabilityFailure::context_activation_unavailable,
+            "Unable to make the OpenGL context current");
     }
 
     implementation_->vsync = SDL_GL_SetSwapInterval(1);

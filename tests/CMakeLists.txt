@@ -46,6 +46,7 @@ add_executable(hlclient_tests
     test_interactive_preview_controller.cpp
     test_gameplay_input_camera_campaigns.cpp
     test_opengl_interactive_camera.cpp
+    test_opengl_player_wall_contact.cpp
     test_connectionless_packet.cpp
     test_bit_reader.cpp
     test_delta_description.cpp
@@ -175,6 +176,8 @@ add_executable(hlclient_tests
     test_goldsrc_local_movement_step.cpp
     test_local_player_movement_integration.cpp
     test_player_walk_camera.cpp
+    test_player_walk_failure_latch.cpp
+    test_player_wall_contact_stability.cpp
     test_post_movevars_stream.cpp
     test_network_address.cpp
     test_netchan_bootstrap.cpp
@@ -296,6 +299,7 @@ target_link_libraries(hlclient_tests
 
 target_compile_features(hlclient_tests PRIVATE cxx_std_20)
 hlclient_enable_warnings(hlclient_tests)
+hlclient_enable_address_sanitizer(hlclient_tests)
 add_dependencies(hlclient_tests hlclient)
 
 set_target_properties(hlclient_tests PROPERTIES FOLDER "Tests")
@@ -382,6 +386,32 @@ add_test(
         --map maps/test_movement.bsp
         --scenario deterministic-route
 )
+foreach(
+    wall_scenario
+    IN ITEMS
+        wall-contact-stress
+        wall-glance-stress
+        corner-contact-stress
+        jump-wall-stress
+        duck-wall-stress
+)
+    string(REPLACE "-" "_" wall_scenario_name "${wall_scenario}")
+    add_test(
+        NAME hlclient_movement_check_synthetic_${wall_scenario_name}
+        COMMAND
+            $<TARGET_FILE:hlclient_movement_check>
+            --basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+            --game valve
+            --map maps/test_movement.bsp
+            --scenario ${wall_scenario}
+    )
+    set_tests_properties(
+        hlclient_movement_check_synthetic_${wall_scenario_name}
+        PROPERTIES
+            FIXTURES_REQUIRED hlclient_collision_checker_fixture
+            TIMEOUT 180
+    )
+endforeach()
 add_test(
     NAME hlclient_movement_verify_synthetic_deterministic_route
     COMMAND

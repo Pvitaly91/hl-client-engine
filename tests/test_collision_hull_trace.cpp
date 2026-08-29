@@ -91,6 +91,35 @@ single_plane_package(
 }
 
 [[nodiscard]] std::shared_ptr<const collision::CollisionWorldPackage>
+oblique_plane_package()
+{
+    constexpr assets::AssetVector3 normal{
+        0.70710677F, 0.70710677F, 0.0F};
+    return std::make_shared<const collision::CollisionWorldPackage>(
+        std::vector<collision::CollisionPlane>{
+            {normal, 1.0, 77U, 3}},
+        std::vector<collision::CollisionNode>{
+            {0U,
+                {collision::CollisionNodeChild{
+                     collision::CollisionNodeChildKind::leaf, 1U},
+                    collision::CollisionNodeChild{
+                        collision::CollisionNodeChildKind::leaf, 0U}}}},
+        std::vector<collision::CollisionLeaf>{
+            {0U, contents(-2)}, {1U, contents(-1)}},
+        std::vector<collision::CollisionClipnode>{
+            {0U,
+                {collision::CollisionClipnodeChild{
+                     collision::CollisionClipnodeChildKind::terminal,
+                     0U,
+                     contents(-1)},
+                    collision::CollisionClipnodeChild{
+                        collision::CollisionClipnodeChildKind::terminal,
+                        0U,
+                        contents(-2)}}}},
+        std::vector<collision::CollisionModel>{model()});
+}
+
+[[nodiscard]] std::shared_ptr<const collision::CollisionWorldPackage>
 node_package(
     std::vector<collision::CollisionPlane> planes,
     std::vector<collision::CollisionNode> nodes,
@@ -262,6 +291,28 @@ TEST_CASE("Iterative hull trace reports empty to solid impact exactly",
     CHECK(result.blocking_contents->source.raw == -2);
 }
 
+TEST_CASE("Oblique float contact remains explicit even when it narrows solid",
+    "[collision][trace][fraction][binary32]")
+{
+    collision::CollisionWorldQuery query{oblique_plane_package()};
+    collision::CollisionQueryScratch scratch;
+    const auto traced = query.trace_line(
+        trace_request({2.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F}), scratch);
+    REQUIRE(traced);
+    REQUIRE(traced.result->collision_plane);
+    REQUIRE(traced.result->hit);
+    REQUIRE(traced.result->blocking_contents);
+    CHECK(traced.result->fraction > 0.0);
+    CHECK(traced.result->fraction < 1.0);
+
+    collision::CollisionPointContentsRequest request;
+    request.point = traced.result->end_position;
+    const auto position = query.test_position(request, scratch);
+    REQUIRE(position);
+    CHECK(position.result->status ==
+        collision::CollisionPositionStatus::blocking);
+}
+
 TEST_CASE("Trace startsolid and allsolid remain distinct",
     "[collision][trace][flags]")
 {
@@ -356,8 +407,13 @@ TEST_CASE("Exact boundary and independent literal fractions are deterministic",
         *endpoint_only.result, 1.0, {0.0F, 0.0F, 0.0F});
     CHECK(endpoint_only.result->end_contents.category ==
         collision::CollisionContentsCategory::solid);
-    CHECK_FALSE(endpoint_only.result->collision_plane);
-    CHECK_FALSE(endpoint_only.result->hit);
+    REQUIRE(endpoint_only.result->collision_plane);
+    REQUIRE(endpoint_only.result->hit);
+    REQUIRE(endpoint_only.result->blocking_contents);
+    CHECK(endpoint_only.result->collision_plane->orientation ==
+        collision::CollisionPlaneOrientation::inverted_source);
+    CHECK(endpoint_only.result->hit->kind ==
+        collision::CollisionTraceHitKind::world);
 }
 
 TEST_CASE("Reverse crossing inverts source plane against motion",

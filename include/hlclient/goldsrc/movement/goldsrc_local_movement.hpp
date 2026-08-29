@@ -2,6 +2,7 @@
 
 #include <hlclient/goldsrc/movement/goldsrc_movement_environment.hpp>
 #include <hlclient/goldsrc/movement/local_movement_collision.hpp>
+#include <hlclient/goldsrc/movement/player_wall_contact_diagnostics.hpp>
 #include <hlclient/goldsrc/usercmd_state.hpp>
 #include <hlclient/movement/local_player_movement_state.hpp>
 
@@ -20,6 +21,9 @@ inline constexpr std::size_t kGoldSrcMovementMaximumClipPlanes = 5U;
 inline constexpr double kGoldSrcMovementGroundProbeDistance = 2.0;
 inline constexpr double kGoldSrcMovementMinimumWalkableNormalZ = 0.7;
 inline constexpr std::size_t kGoldSrcMovementMaximumSlideBumps = 4U;
+inline constexpr std::size_t kGoldSrcMovementMaximumTouchesPerCommand = 256U;
+inline constexpr std::size_t kGoldSrcMovementHardMaximumTouchesPerCommand =
+    4'096U;
 inline constexpr double kGoldSrcMovementMaximumGroundSnapUpwardVelocity = 180.0;
 inline constexpr double kGoldSrcMovementAirWishSpeedCap = 30.0;
 inline constexpr double kGoldSrcMovementJumpImpulse = 268.32815729997475;
@@ -54,6 +58,8 @@ struct GoldSrcLocalMovementConfig {
         kGoldSrcMovementMaximumGroundSnapUpwardVelocity};
     std::size_t maximum_slide_bumps{kGoldSrcMovementMaximumSlideBumps};
     std::size_t maximum_clip_planes{kGoldSrcMovementMaximumClipPlanes};
+    std::size_t maximum_touches_per_command{
+        kGoldSrcMovementMaximumTouchesPerCommand};
     double stop_epsilon{kGoldSrcMovementStopEpsilon};
     double air_wish_speed_cap{kGoldSrcMovementAirWishSpeedCap};
     double jump_impulse{kGoldSrcMovementJumpImpulse};
@@ -94,6 +100,9 @@ enum class LocalMovementSimulationErrorCode : std::uint8_t {
     velocity_limit_exceeded,
     substep_limit_exceeded,
     clip_plane_limit_exceeded,
+    touch_limit_exceeded,
+    allocation_failed,
+    statistics_overflow,
     movement_stalled,
     liquid_movement_unsupported,
     ladder_movement_unsupported,
@@ -129,7 +138,16 @@ struct LocalMovementSimulationResult {
 };
 
 struct GoldSrcLocalMovementScratch {
+    // General queries and the two speculative walking routes use distinct
+    // bounded scratch arenas. A rejected route cannot leave active traversal
+    // marks in the selected route, and each arena retains its capacity for
+    // reuse by later commands.
     hlclient::collision::CollisionQueryScratch collision;
+    hlclient::collision::CollisionQueryScratch direct_candidate_collision;
+    hlclient::collision::CollisionQueryScratch step_candidate_collision;
+    PlayerMovementDiagnosticRing diagnostics;
+    std::optional<PlayerWallContactDiagnosticFrame> last_diagnostic;
+    std::uint16_t diagnostic_substep_ordinal{0U};
 };
 
 class GoldSrcLocalMovementKernel final {
