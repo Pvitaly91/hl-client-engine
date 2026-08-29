@@ -16,6 +16,11 @@
 #include <hlclient/local_player/local_player_movement_controller.hpp>
 #include <hlclient/local_player/player_walk_failure_latch.hpp>
 #include <hlclient/local_player/local_player_spawn_selector.hpp>
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+#include <hlclient/local_player/local_player_prediction_controller.hpp>
+#include <hlclient/prediction/local_prediction.hpp>
+#include <hlclient/prediction/synthetic_authoritative_player.hpp>
+#endif
 #include <hlclient/local_resources/local_resource_environment.hpp>
 #include <hlclient/local_resources/local_resource_search_roots.hpp>
 #include <hlclient/local_resources/local_virtual_resource_name.hpp>
@@ -64,6 +69,24 @@ enum class SmokeTestInputProfile : std::uint8_t {
     player_wall_contact_v1,
 };
 
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+enum class PredictionViewerScenario : std::uint8_t {
+    exact,
+    small_correction,
+    large_correction,
+    delayed,
+    wall_replay,
+    jump_replay,
+    duck_replay,
+    mixed,
+};
+
+enum class PredictionDiagnosticsMode : std::uint8_t {
+    off,
+    summary,
+};
+#endif
+
 struct Options {
     std::optional<std::filesystem::path> base_directory;
     std::optional<std::string> game_directory;
@@ -81,6 +104,14 @@ struct Options {
     MovementDiagnosticsMode movement_diagnostics{
         MovementDiagnosticsMode::off};
     bool movement_diagnostics_present{false};
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    std::optional<PredictionViewerScenario> prediction_scenario;
+    std::size_t authority_delay_commands{8U};
+    bool authority_delay_present{false};
+    PredictionDiagnosticsMode prediction_diagnostics{
+        PredictionDiagnosticsMode::off};
+    bool prediction_diagnostics_present{false};
+#endif
 };
 
 [[nodiscard]] std::optional<std::string> narrow_printable_ascii(
@@ -105,6 +136,166 @@ struct Options {
     const int argument_count,
     wchar_t* arguments[])
 {
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    Options options;
+    options.camera_mode =
+        hlclient::world_preview::WorldPreviewCameraMode::player_walk;
+    for (int index = 1; index < argument_count; ++index) {
+        const std::wstring_view argument{arguments[index]};
+        if (argument != L"--basedir" && argument != L"--game" &&
+            argument != L"--map" && argument != L"--scenario" &&
+            argument != L"--authority-delay-commands" &&
+            argument != L"--prediction-diagnostics" &&
+            argument != L"--visibility" &&
+            argument != L"--brush-submodels" && argument != L"--cull") {
+            return std::nullopt;
+        }
+        if (index + 1 >= argument_count) {
+            return std::nullopt;
+        }
+        const std::wstring_view value{arguments[++index]};
+        if (value.empty()) {
+            return std::nullopt;
+        }
+        if (argument == L"--basedir") {
+            if (options.base_directory) {
+                return std::nullopt;
+            }
+            options.base_directory = std::filesystem::path{value};
+            continue;
+        }
+        auto narrow = narrow_printable_ascii(value);
+        if (!narrow) {
+            return std::nullopt;
+        }
+        if (argument == L"--game") {
+            if (options.game_directory) {
+                return std::nullopt;
+            }
+            options.game_directory = std::move(*narrow);
+        } else if (argument == L"--map") {
+            if (options.virtual_map) {
+                return std::nullopt;
+            }
+            options.virtual_map = std::move(*narrow);
+        } else if (argument == L"--scenario") {
+            if (options.prediction_scenario) {
+                return std::nullopt;
+            }
+            if (*narrow == "exact") {
+                options.prediction_scenario = PredictionViewerScenario::exact;
+            } else if (*narrow == "small-correction") {
+                options.prediction_scenario =
+                    PredictionViewerScenario::small_correction;
+            } else if (*narrow == "large-correction") {
+                options.prediction_scenario =
+                    PredictionViewerScenario::large_correction;
+            } else if (*narrow == "delayed") {
+                options.prediction_scenario =
+                    PredictionViewerScenario::delayed;
+            } else if (*narrow == "wall-replay") {
+                options.prediction_scenario =
+                    PredictionViewerScenario::wall_replay;
+            } else if (*narrow == "jump-replay") {
+                options.prediction_scenario =
+                    PredictionViewerScenario::jump_replay;
+            } else if (*narrow == "duck-replay") {
+                options.prediction_scenario =
+                    PredictionViewerScenario::duck_replay;
+            } else if (*narrow == "mixed") {
+                options.prediction_scenario = PredictionViewerScenario::mixed;
+            } else {
+                return std::nullopt;
+            }
+        } else if (argument == L"--authority-delay-commands") {
+            if (options.authority_delay_present || narrow->empty()) {
+                return std::nullopt;
+            }
+            std::uint64_t parsed = 0U;
+            const auto conversion = std::from_chars(
+                narrow->data(), narrow->data() + narrow->size(), parsed, 10);
+            if (conversion.ec != std::errc{} ||
+                conversion.ptr != narrow->data() + narrow->size() ||
+                parsed > hlclient::prediction::
+                    kMaximumSyntheticAuthorityDelayCommands) {
+                return std::nullopt;
+            }
+            options.authority_delay_commands =
+                static_cast<std::size_t>(parsed);
+            options.authority_delay_present = true;
+        } else if (argument == L"--prediction-diagnostics") {
+            if (options.prediction_diagnostics_present) {
+                return std::nullopt;
+            }
+            options.prediction_diagnostics_present = true;
+            if (*narrow == "off") {
+                options.prediction_diagnostics = PredictionDiagnosticsMode::off;
+            } else if (*narrow == "summary") {
+                options.prediction_diagnostics =
+                    PredictionDiagnosticsMode::summary;
+            } else {
+                return std::nullopt;
+            }
+        } else if (argument == L"--visibility") {
+            if (options.visibility_mode_present) {
+                return std::nullopt;
+            }
+            options.visibility_mode_present = true;
+            if (*narrow == "all") {
+                options.visibility_mode =
+                    hlclient::world_visibility::WorldVisibilityMode::all;
+            } else if (*narrow == "frustum") {
+                options.visibility_mode = hlclient::world_visibility::
+                    WorldVisibilityMode::frustum_only;
+            } else if (*narrow == "pvs") {
+                options.visibility_mode =
+                    hlclient::world_visibility::WorldVisibilityMode::pvs_only;
+            } else if (*narrow == "pvs-frustum") {
+                options.visibility_mode = hlclient::world_visibility::
+                    WorldVisibilityMode::pvs_and_frustum;
+            } else {
+                return std::nullopt;
+            }
+        } else if (argument == L"--brush-submodels") {
+            if (options.brush_submodels_present) {
+                return std::nullopt;
+            }
+            options.brush_submodels_present = true;
+            if (*narrow == "off") {
+                options.brush_submodels = hlclient::world_preview::
+                    WorldPreviewBrushSubmodelsMode::off;
+            } else if (*narrow == "static") {
+                options.brush_submodels = hlclient::world_preview::
+                    WorldPreviewBrushSubmodelsMode::static_instances;
+            } else {
+                return std::nullopt;
+            }
+        } else {
+            if (options.cull_mode_present) {
+                return std::nullopt;
+            }
+            options.cull_mode_present = true;
+            if (*narrow == "none") {
+                options.cull_mode =
+                    hlclient::client::PreviewWorldCullMode::none;
+            } else if (*narrow == "back") {
+                options.cull_mode =
+                    hlclient::client::PreviewWorldCullMode::back;
+            } else {
+                return std::nullopt;
+            }
+        }
+    }
+    if (!options.base_directory || !options.game_directory ||
+        !options.virtual_map || !options.prediction_scenario) {
+        return std::nullopt;
+    }
+    if (!options.authority_delay_present &&
+        *options.prediction_scenario == PredictionViewerScenario::exact) {
+        options.authority_delay_commands = 0U;
+    }
+    return options;
+#else
     Options options;
     for (int index = 1; index < argument_count; ++index) {
         const std::wstring_view argument{arguments[index]};
@@ -241,10 +432,25 @@ struct Options {
         return std::nullopt;
     }
     return options;
+#endif
 }
 
 void print_usage()
 {
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    std::cerr
+        << "Usage: hlclient_prediction_viewer --basedir <Half-Life root> "
+           "--game <directory> --map <maps/name.bsp> --scenario "
+           "<exact|small-correction|large-correction|delayed|wall-replay|"
+           "jump-replay|duck-replay|mixed> "
+           "[--authority-delay-commands <0..64>] "
+           "[--prediction-diagnostics <off|summary>] "
+           "[--visibility <all|frustum|pvs|pvs-frustum>] "
+           "[--brush-submodels <off|static>] [--cull <none|back>]\n"
+        << "  player-walk: click captures, Escape releases, WASD walks, "
+           "Space jumps, Ctrl ducks, and the mouse looks; synthetic "
+           "authority only, no network commands\n";
+#else
     std::cerr
         << "Usage: hlclient_world_viewer --basedir <Half-Life root> "
            "--game <directory> --map <maps/name.bsp> "
@@ -257,6 +463,7 @@ void print_usage()
         << "  player-walk: click captures, Escape releases, WASD walks, "
            "Space jumps, Ctrl ducks, and the mouse looks; local world-only "
            "collision, no prediction or network commands\n";
+#endif
 }
 
 [[nodiscard]] std::optional<std::uint64_t> smoke_test_frame_limit()
@@ -370,6 +577,36 @@ void print_usage()
 #endif
     return requested;
 }
+
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+[[nodiscard]] bool prediction_smoke_requested() noexcept
+{
+#if defined(_MSC_VER)
+    char* frames = nullptr;
+    std::size_t frames_size = 0U;
+    if (::_dupenv_s(
+            &frames, &frames_size, "HLCLIENT_SMOKE_TEST_FRAMES") != 0) {
+        std::free(frames);
+        return false;
+    }
+#else
+    const char* frames = std::getenv("HLCLIENT_SMOKE_TEST_FRAMES");
+#endif
+    if (frames == nullptr) {
+        return false;
+    }
+    std::uint64_t parsed_frames = 0U;
+    const std::string_view text{frames};
+    const auto parsed = std::from_chars(
+        text.data(), text.data() + text.size(), parsed_frames, 10);
+    const bool requested = parsed.ec == std::errc{} &&
+        parsed.ptr == text.data() + text.size() && parsed_frames > 0U;
+#if defined(_MSC_VER)
+    std::free(frames);
+#endif
+    return requested;
+}
+#endif
 
 [[nodiscard]] bool local_source_terminal(
     const hlclient::local_assets::LocalAssetSourceOpenState state) noexcept
@@ -1137,6 +1374,165 @@ struct SmokeWallCampaign final {
     return campaign;
 }
 
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+[[nodiscard]] hlclient::prediction::SyntheticAuthoritativeScenario
+prediction_authority_scenario(
+    const PredictionViewerScenario scenario) noexcept
+{
+    using Scenario = hlclient::prediction::SyntheticAuthoritativeScenario;
+    switch (scenario) {
+    case PredictionViewerScenario::exact: return Scenario::exact_authority;
+    case PredictionViewerScenario::small_correction:
+        return Scenario::small_position_correction;
+    case PredictionViewerScenario::large_correction:
+        return Scenario::large_position_correction;
+    case PredictionViewerScenario::delayed:
+        return Scenario::delayed_authority;
+    case PredictionViewerScenario::wall_replay: return Scenario::wall_replay;
+    case PredictionViewerScenario::jump_replay: return Scenario::jump_replay;
+    case PredictionViewerScenario::duck_replay: return Scenario::duck_replay;
+    case PredictionViewerScenario::mixed: return Scenario::mixed;
+    }
+    return Scenario::exact_authority;
+}
+
+[[nodiscard]] hlclient::assets::AssetVector3 prediction_add(
+    const hlclient::assets::AssetVector3& left,
+    const hlclient::assets::AssetVector3& right) noexcept
+{
+    return {left.x + right.x, left.y + right.y, left.z + right.z};
+}
+
+[[nodiscard]] bool prediction_vector_finite(
+    const hlclient::assets::AssetVector3& value) noexcept
+{
+    return std::isfinite(value.x) && std::isfinite(value.y) &&
+        std::isfinite(value.z);
+}
+
+[[nodiscard]] bool prediction_state_finite(
+    const hlclient::movement::LocalPlayerMovementState& state) noexcept
+{
+    return prediction_vector_finite(state.origin()) &&
+        prediction_vector_finite(state.velocity()) &&
+        prediction_vector_finite(state.view_angles()) &&
+        prediction_vector_finite(state.view_offset());
+}
+
+[[nodiscard]] bool prediction_camera_content_equal(
+    const hlclient::gameplay_camera::GameplayCameraState& left,
+    const hlclient::gameplay_camera::GameplayCameraState& right) noexcept
+{
+    return left.position().x == right.position().x &&
+        left.position().y == right.position().y &&
+        left.position().z == right.position().z &&
+        left.yaw_degrees() == right.yaw_degrees() &&
+        left.pitch_degrees() == right.pitch_degrees() &&
+        left.vertical_fov_radians() == right.vertical_fov_radians() &&
+        left.near_plane() == right.near_plane() &&
+        left.far_plane() == right.far_plane() &&
+        left.mode() == right.mode() &&
+        left.anchor_metadata() == right.anchor_metadata() &&
+        left.compatibility_profile() == right.compatibility_profile() &&
+        left.evidence_profile() == right.evidence_profile();
+}
+
+[[nodiscard]] hlclient::assets::AssetVector3 prediction_radial_direction(
+    const std::size_t ordinal) noexcept
+{
+    constexpr std::size_t direction_count = 64U;
+    constexpr double to_radians =
+        0.017453292519943295769236907684886;
+    const auto angle = static_cast<double>(ordinal) *
+        (360.0 / static_cast<double>(direction_count)) * to_radians;
+    return {static_cast<float>(std::cos(angle)),
+        static_cast<float>(std::sin(angle)), 0.0F};
+}
+
+[[nodiscard]] bool prediction_position_free(
+    const hlclient::goldsrc::movement::ILocalMovementCollision& collision,
+    const hlclient::movement::LocalPlayerMovementState& initial,
+    const hlclient::assets::AssetVector3& base_offset,
+    const hlclient::assets::AssetVector3& delta,
+    hlclient::collision::CollisionQueryScratch& scratch)
+{
+    const auto target = prediction_add(
+        prediction_add(initial.origin(), base_offset), delta);
+    const auto tested = collision.test_position(target, initial.hull(), scratch);
+    return tested && tested.result && tested.result->status ==
+        hlclient::goldsrc::movement::LocalMovementPositionStatus::free;
+}
+
+[[nodiscard]] std::optional<hlclient::assets::AssetVector3>
+prediction_correction_delta(
+    const hlclient::goldsrc::movement::ILocalMovementCollision& collision,
+    const hlclient::movement::LocalPlayerMovementState& initial,
+    const float magnitude,
+    const hlclient::assets::AssetVector3& base_offset,
+    hlclient::collision::CollisionQueryScratch& scratch)
+{
+    constexpr std::size_t direction_count = 64U;
+    for (std::size_t ordinal = 0U; ordinal < direction_count; ++ordinal) {
+        const auto direction = prediction_radial_direction(ordinal);
+        const hlclient::assets::AssetVector3 delta{
+            direction.x * magnitude, direction.y * magnitude, 0.0F};
+        if (prediction_position_free(
+                collision, initial, base_offset, delta, scratch)) {
+            return delta;
+        }
+    }
+    const std::array vertical{
+        hlclient::assets::AssetVector3{0.0F, 0.0F, magnitude},
+        hlclient::assets::AssetVector3{0.0F, 0.0F, -magnitude},
+    };
+    for (const auto& delta : vertical) {
+        if (prediction_position_free(
+                collision, initial, base_offset, delta, scratch)) {
+            return delta;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<hlclient::input::ScriptedInputSource::Script>
+build_prediction_smoke_campaign(const std::uint64_t frames)
+{
+    constexpr std::uint64_t minimum_frames = 1'000U;
+    if (frames < minimum_frames ||
+        frames > hlclient::input::ScriptedInputSourceLimits::
+            hard_maximum_frames) {
+        return std::nullopt;
+    }
+    hlclient::input::ScriptedInputSource::Script campaign;
+    campaign.resize(static_cast<std::size_t>(frames));
+    campaign.front().push_back(
+        hlclient::input::InputEvent::focus_gained());
+    campaign.front().push_back(
+        hlclient::input::InputEvent::capture_acquired());
+    campaign[2U].push_back(hlclient::input::InputEvent::key_pressed(
+        hlclient::input::PhysicalKey::w));
+    campaign[350U].push_back(hlclient::input::InputEvent::key_pressed(
+        hlclient::input::PhysicalKey::d));
+    campaign[550U].push_back(hlclient::input::InputEvent::key_released(
+        hlclient::input::PhysicalKey::d));
+    campaign[600U].push_back(hlclient::input::InputEvent::key_released(
+        hlclient::input::PhysicalKey::w));
+    campaign[700U].push_back(hlclient::input::InputEvent::key_pressed(
+        hlclient::input::PhysicalKey::w));
+    campaign[700U].push_back(hlclient::input::InputEvent::key_pressed(
+        hlclient::input::PhysicalKey::space));
+    campaign[701U].push_back(hlclient::input::InputEvent::key_released(
+        hlclient::input::PhysicalKey::space));
+    campaign[820U].push_back(hlclient::input::InputEvent::key_pressed(
+        hlclient::input::PhysicalKey::left_control));
+    campaign[920U].push_back(hlclient::input::InputEvent::key_released(
+        hlclient::input::PhysicalKey::left_control));
+    campaign.back().push_back(hlclient::input::InputEvent::key_released(
+        hlclient::input::PhysicalKey::w));
+    return campaign;
+}
+#endif
+
 [[nodiscard]] std::uint64_t movement_origin_hash(
     const hlclient::assets::AssetVector3& origin) noexcept
 {
@@ -1183,17 +1579,53 @@ struct SmokeWallCampaign final {
         player_collision;
     std::optional<hlclient::local_player::LocalPlayerMovementController>
         player_controller;
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    std::unique_ptr<hlclient::local_player::LocalPlayerPredictionController>
+        prediction_controller;
+    std::unique_ptr<
+        hlclient::prediction::SyntheticAuthoritativePlayerStateSource>
+        prediction_authority;
+    std::unique_ptr<hlclient::collision::CollisionWorldQuery>
+        prediction_camera_collision;
+#endif
     std::optional<hlclient::gameplay_input::GameplayInputBindings>
         player_bindings;
     hlclient::goldsrc::movement::GoldSrcLocalMovementScratch movement_scratch;
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    hlclient::goldsrc::movement::GoldSrcLocalMovementScratch
+        prediction_authority_scratch;
+    hlclient::goldsrc::movement::GoldSrcLocalMovementScratch
+        prediction_replay_scratch;
+    hlclient::collision::CollisionQueryScratch prediction_camera_scratch;
+    hlclient::collision::CollisionQueryScratch prediction_validation_scratch;
+    std::uint64_t prediction_failure_count = 0U;
+    std::size_t prediction_last_replay_depth = 0U;
+    hlclient::prediction::PredictionCorrectionClass prediction_last_correction{
+        hlclient::prediction::PredictionCorrectionClass::exact};
+    std::uint64_t prediction_smoothing_samples = 0U;
+    std::uint64_t prediction_smoothing_decay_samples = 0U;
+    std::uint64_t prediction_camera_publications = 0U;
+    std::uint64_t prediction_camera_publication_revision = 0U;
+    std::uint64_t prediction_max_camera_revision = 0U;
+    std::uint64_t prediction_teleport_one_sample_count = 0U;
+    std::optional<std::uint64_t> prediction_teleport_authority_frame;
+    std::optional<double> prediction_previous_residual;
+    bool prediction_failure_latched = false;
+    bool prediction_smoke_wall_found = false;
+    bool prediction_start_solid_observed = false;
+    bool prediction_all_solid_observed = false;
+#else
     ViewerMovementStatistics movement_statistics;
     hlclient::local_player::PlayerWalkFailureLatch movement_failure_latch;
+#endif
     std::optional<hlclient::input::ScriptedInputSource> scripted_input;
+#if !defined(HLCLIENT_PREDICTION_VIEWER)
     std::optional<
         hlclient::local_player::LocalPlayerMovementCommittedTouchFilter>
         smoke_wall_touch_filter;
     std::uint64_t smoke_wall_contact_count = 0U;
     bool smoke_wall_found = false;
+#endif
     if (player_walk_camera) {
         if (!prepared.local_player) {
             std::cerr << "movement-runtime=preparation_unavailable\n";
@@ -1217,6 +1649,150 @@ struct SmokeWallCampaign final {
             std::cerr << "movement-runtime=controller_initialization_failed\n";
             return 1;
         }
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+        const auto synthetic_scenario = prediction_authority_scenario(
+            *options.prediction_scenario);
+        if ((synthetic_scenario == hlclient::prediction::
+                    SyntheticAuthoritativeScenario::exact_authority &&
+                options.authority_delay_commands != 0U) ||
+            (synthetic_scenario == hlclient::prediction::
+                    SyntheticAuthoritativeScenario::delayed_authority &&
+                options.authority_delay_commands == 0U)) {
+            std::cerr << "prediction-runtime=invalid_configuration\n";
+            return 1;
+        }
+        const auto prediction_initial_state = player_controller->player_state();
+        const auto prediction_environment = player_controller->environment();
+        const auto session =
+            hlclient::prediction::create_prediction_session_identity(
+                1U,
+                1U,
+                *player_collision,
+                prediction_environment,
+                player_controller->config().movement,
+                prediction_initial_state);
+        if (!session || !session.session) {
+            std::cerr << "prediction-runtime="
+                      << (session.error
+                              ? hlclient::prediction::to_string(
+                                    session.error->code)
+                              : std::string_view{"invalid_session_identity"})
+                      << '\n';
+            return 1;
+        }
+        hlclient::local_player::LocalPlayerPredictionControllerConfig
+            prediction_config;
+        prediction_config.history.maximum_entries =
+            hlclient::prediction::kHardMaximumPredictionHistoryEntries;
+        prediction_config.history.maximum_authority_delay_commands =
+            hlclient::prediction::kMaximumSyntheticAuthorityDelayCommands +
+            hlclient::goldsrc::kMaximumUserCmdsPerSchedulerUpdate;
+        prediction_config.history.maximum_replay_commands =
+            hlclient::prediction::kHardMaximumPredictionReplayCommands;
+        prediction_config.reconciliation.limits.maximum_replay_commands =
+            hlclient::prediction::kHardMaximumPredictionReplayCommands;
+        auto created_prediction = hlclient::local_player::
+            LocalPlayerPredictionController::create(
+                std::move(*player_controller),
+                *session.session,
+                prediction_config);
+        player_controller.reset();
+        if (!created_prediction || !created_prediction.controller) {
+            std::cerr << "prediction-runtime="
+                      << (created_prediction.error
+                              ? hlclient::prediction::to_string(
+                                    created_prediction.error->code)
+                              : std::string_view{
+                                    "controller_initialization_failed"})
+                      << '\n';
+            return 1;
+        }
+        prediction_controller = std::move(created_prediction.controller);
+
+        hlclient::prediction::SyntheticAuthoritativePlayerConfig
+            authority_config;
+        authority_config.session = *session.session;
+        authority_config.scenario = synthetic_scenario;
+        authority_config.command_delay = options.authority_delay_commands;
+        authority_config.maximum_pending_updates = hlclient::prediction::
+            kMaximumSyntheticAuthorityPendingUpdates;
+        authority_config.correction_command_sequence = 1U;
+        hlclient::collision::CollisionQueryScratch correction_scratch;
+        const bool needs_small = synthetic_scenario == hlclient::prediction::
+                SyntheticAuthoritativeScenario::small_position_correction ||
+            synthetic_scenario ==
+                hlclient::prediction::SyntheticAuthoritativeScenario::mixed;
+        const bool needs_large = synthetic_scenario == hlclient::prediction::
+                SyntheticAuthoritativeScenario::large_position_correction ||
+            synthetic_scenario ==
+                hlclient::prediction::SyntheticAuthoritativeScenario::mixed;
+        if (needs_small) {
+            const auto delta = prediction_correction_delta(
+                *player_collision,
+                prediction_initial_state,
+                0.5F,
+                {},
+                correction_scratch);
+            if (!delta) {
+                std::cerr <<
+                    "prediction-runtime=correction_destination_unavailable\n";
+                return 1;
+            }
+            authority_config.small_position_delta = *delta;
+        }
+        if (needs_large) {
+            std::optional<hlclient::assets::AssetVector3> delta;
+            constexpr std::array magnitudes{32.0F, 24.0F, 48.0F, 64.0F};
+            const auto base_offset = needs_small
+                ? authority_config.small_position_delta
+                : hlclient::assets::AssetVector3{};
+            for (const auto magnitude : magnitudes) {
+                delta = prediction_correction_delta(
+                    *player_collision,
+                    prediction_initial_state,
+                    magnitude,
+                    base_offset,
+                    correction_scratch);
+                if (delta) {
+                    break;
+                }
+            }
+            if (!delta) {
+                std::cerr <<
+                    "prediction-runtime=correction_destination_unavailable\n";
+                return 1;
+            }
+            authority_config.large_position_delta = *delta;
+        }
+        if (synthetic_scenario ==
+            hlclient::prediction::SyntheticAuthoritativeScenario::mixed) {
+            authority_config.teleport_origin = prediction_initial_state.origin();
+        }
+        auto created_authority = hlclient::prediction::
+            SyntheticAuthoritativePlayerStateSource::create(
+                prediction_initial_state,
+                prediction_environment,
+                authority_config,
+                *player_collision,
+                prediction_authority_scratch,
+                prediction_controller->movement_controller().config().movement);
+        if (!created_authority || !created_authority.source) {
+            std::cerr << "prediction-runtime="
+                      << (created_authority.error
+                              ? hlclient::prediction::to_string(
+                                    created_authority.error->code)
+                              : std::string_view{
+                                    "synthetic_authority_initialization_failed"})
+                      << '\n';
+            return 1;
+        }
+        prediction_authority = std::make_unique<hlclient::prediction::
+            SyntheticAuthoritativePlayerStateSource>(
+                std::move(*created_authority.source));
+        prediction_camera_collision =
+            std::make_unique<hlclient::collision::CollisionWorldQuery>(
+                local_player.collision_world);
+#endif
         auto built_bindings = hlclient::gameplay_input::GameplayInputBindings::
             project_default_v1();
         if (!built_bindings || !built_bindings.bindings) {
@@ -1225,8 +1801,13 @@ struct SmokeWallCampaign final {
         }
         player_bindings.emplace(std::move(*built_bindings.bindings));
 
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+        const auto initial_camera = build_client_player_camera(
+            prediction_controller->movement_controller().camera());
+#else
         const auto initial_camera =
             build_client_player_camera(player_controller->camera());
+#endif
         if (!initial_camera) {
             std::cerr << "movement-runtime=initial_camera_failed\n";
             return 1;
@@ -1238,8 +1819,49 @@ struct SmokeWallCampaign final {
             std::cerr << "movement-runtime=initial_visibility_failed\n";
             return 1;
         }
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+        std::cout << "[prediction] profile="
+                  << hlclient::prediction::to_string(
+                         prediction_controller->session().prediction_profile)
+                  << '\n';
+        std::cout << "[prediction] authority=synthetic-in-memory\n";
+#else
         std::cout << "[movement] collision=world-only\n";
         std::cout << "[movement] brush-solidity=stock-evidence-pending\n";
+#endif
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+        if (frame_limit) {
+            if (*options.prediction_scenario ==
+                PredictionViewerScenario::wall_replay) {
+                auto campaign = build_smoke_wall_campaign(
+                    *frame_limit,
+                    prediction_controller->movement_controller(),
+                    *player_collision,
+                    movement_scratch);
+                if (!campaign) {
+                    std::cerr << "prediction-runtime=wall_campaign_unavailable\n";
+                    return 1;
+                }
+                const auto campaign_frame_count = campaign->frames.size();
+                scripted_input.emplace(
+                    std::move(campaign->frames),
+                    hlclient::input::ScriptedInputSourceLimits{
+                        campaign_frame_count, 16U, 64U});
+                prediction_smoke_wall_found = true;
+            } else {
+                auto campaign = build_prediction_smoke_campaign(*frame_limit);
+                if (!campaign) {
+                    std::cerr << "prediction-runtime=invalid_smoke_campaign\n";
+                    return 1;
+                }
+                const auto campaign_frame_count = campaign->size();
+                scripted_input.emplace(
+                    std::move(*campaign),
+                    hlclient::input::ScriptedInputSourceLimits{
+                        campaign_frame_count, 16U, 64U});
+            }
+        }
+#else
         if (smoke_input_profile) {
             auto campaign = build_smoke_wall_campaign(
                 *frame_limit,
@@ -1265,13 +1887,18 @@ struct SmokeWallCampaign final {
                       << campaign->direction_ordinal << " source-plane="
                       << campaign->source_plane_index << '\n';
         }
+#endif
     }
 
     // Every CPU prerequisite and the immutable package are valid before SDL
     // or an OpenGL context exists.
     [[maybe_unused]] hlclient::platform::SdlRuntime sdl_runtime;
     hlclient::platform::SdlWindow window{hlclient::platform::SdlWindowConfig{
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+        "HL Client Prediction Viewer",
+#else
         "HL Client World Viewer",
+#endif
         1280,
         720,
         frame_limit.has_value(),
@@ -1322,6 +1949,47 @@ struct SmokeWallCampaign final {
     std::uint64_t input_frame_count = 0U;
     bool input_focus_seeded = false;
     bool running = true;
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    const auto latch_prediction_failure = [&window,
+                                              &prediction_controller,
+                                              &input_tracker,
+                                              &capture_failure_count,
+                                              &prediction_failure_count,
+                                              &prediction_failure_latched](
+        const std::optional<hlclient::prediction::PredictionError>&
+            prediction_error,
+        const std::optional<hlclient::local_player::
+            LocalPlayerMovementControllerError>& movement_error,
+        const std::string_view phase) {
+        if (prediction_failure_count != UINT64_MAX) {
+            ++prediction_failure_count;
+        }
+        if (prediction_failure_latched) {
+            return;
+        }
+        prediction_failure_latched = true;
+        std::cerr << "[prediction] result=failure_latched phase=" << phase
+                  << " prediction="
+                  << (prediction_error
+                          ? hlclient::prediction::to_string(
+                                prediction_error->code)
+                          : std::string_view{"none"})
+                  << " movement="
+                  << (movement_error
+                          ? hlclient::local_player::to_string(
+                                movement_error->code)
+                          : std::string_view{"none"})
+                  << " action=simulation_disabled rendering=continued\n";
+        if (prediction_controller) {
+            prediction_controller->cancel();
+        }
+        input_tracker.reset();
+        const auto released = window.request_relative_mouse_capture(false);
+        if (!released && capture_failure_count != UINT64_MAX) {
+            ++capture_failure_count;
+        }
+    };
+#endif
     while (running) {
         if (input_tracker) {
             input_tracker->begin_frame();
@@ -1459,6 +2127,377 @@ struct SmokeWallCampaign final {
                 }
             }
         }
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+        if (prediction_controller && prediction_authority &&
+            prediction_camera_collision && player_collision &&
+            player_bindings && input_snapshot &&
+            !prediction_failure_latched) {
+            const auto bounded_input_elapsed = std::min(
+                std::chrono::duration<double>{elapsed}.count(), 0.25);
+            auto built_intent =
+                hlclient::gameplay_input::GameplayInputIntentBuilder{}.build(
+                    *input_snapshot,
+                    *player_bindings,
+                    prediction_controller->movement_controller().config().
+                        camera.mouse_look_config(),
+                    bounded_input_elapsed);
+            if (!built_intent || !built_intent.intent) {
+                latch_prediction_failure(
+                    std::optional<hlclient::prediction::PredictionError>{
+                        hlclient::prediction::PredictionError{
+                            hlclient::prediction::PredictionErrorCode::
+                                invalid_configuration,
+                            std::nullopt,
+                            "prediction input intent build failed"}},
+                    std::nullopt,
+                    "input");
+            } else {
+                std::int64_t movement_time_nanoseconds = 0;
+                if (frame_limit) {
+                    const auto interval = prediction_controller->
+                        movement_controller().config().scheduler.
+                            command_interval_nanoseconds;
+                    if (rendered_frames >
+                        static_cast<std::uint64_t>(
+                            (std::numeric_limits<std::int64_t>::max)()) /
+                            interval) {
+                        latch_prediction_failure(
+                            std::optional<
+                                hlclient::prediction::PredictionError>{
+                                hlclient::prediction::PredictionError{
+                                    hlclient::prediction::PredictionErrorCode::
+                                        revision_exhausted,
+                                    std::nullopt,
+                                    "prediction smoke time overflow"}},
+                            std::nullopt,
+                            "time");
+                    } else {
+                        movement_time_nanoseconds =
+                            static_cast<std::int64_t>(
+                                rendered_frames * interval);
+                    }
+                } else {
+                    movement_time_nanoseconds = std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                            current_time.time_since_epoch()).count();
+                }
+                if (!prediction_failure_latched) {
+                    const auto previous_newest = prediction_controller->
+                        history()->newest_command_sequence();
+                    const auto previous_sequence = previous_newest
+                        ? previous_newest->value()
+                        : prediction_controller->history()->anchor().
+                                  acknowledgement().sequence()
+                            ? prediction_controller->history()->anchor().
+                                  acknowledgement().sequence()->value()
+                            : 0U;
+                    auto prediction_update =
+                        prediction_controller->update_local_input(
+                            movement_time_nanoseconds,
+                            *built_intent.intent,
+                            *player_collision,
+                            movement_scratch);
+                    if (!prediction_update) {
+                        latch_prediction_failure(
+                            prediction_update.prediction_error,
+                            prediction_update.movement_error,
+                            "local_prediction");
+                    } else {
+                        std::size_t submitted_count = 0U;
+                        for (const auto& entry :
+                            prediction_controller->history()->entries()) {
+                            if (entry.command_sequence().value() <=
+                                previous_sequence) {
+                                continue;
+                            }
+                            prediction_start_solid_observed =
+                                prediction_start_solid_observed ||
+                                entry.touch_summary().start_solid;
+                            prediction_all_solid_observed =
+                                prediction_all_solid_observed ||
+                                entry.touch_summary().all_solid;
+                            const auto submitted =
+                                prediction_authority->submit_command(
+                                    *entry.command(),
+                                    *player_collision,
+                                    prediction_authority_scratch);
+                            if (!submitted) {
+                                latch_prediction_failure(
+                                    submitted.error,
+                                    std::nullopt,
+                                    "authority_submit");
+                                break;
+                            }
+                            ++submitted_count;
+                        }
+                        if (!prediction_failure_latched &&
+                            submitted_count != prediction_update.command_count) {
+                            latch_prediction_failure(
+                                std::optional<
+                                    hlclient::prediction::PredictionError>{
+                                    hlclient::prediction::PredictionError{
+                                        hlclient::prediction::
+                                            PredictionErrorCode::
+                                                prediction_command_gap,
+                                        std::nullopt,
+                                        "prepared command publication gap"}},
+                                std::nullopt,
+                                "authority_submit");
+                        }
+
+                        const auto prediction_time_seconds =
+                            static_cast<double>(movement_time_nanoseconds) /
+                            1'000'000'000.0;
+                        while (!prediction_failure_latched) {
+                            auto polled = prediction_authority->poll_next();
+                            if (polled.error) {
+                                latch_prediction_failure(
+                                    polled.error,
+                                    std::nullopt,
+                                    "authority_poll");
+                                break;
+                            }
+                            if (!polled.state) {
+                                break;
+                            }
+                            auto applied = prediction_controller->
+                                apply_authoritative_state(
+                                    *polled.state,
+                                    prediction_time_seconds,
+                                    *player_collision,
+                                    prediction_replay_scratch);
+                            if (!applied) {
+                                latch_prediction_failure(
+                                    applied.prediction_error,
+                                    applied.movement_error,
+                                    "reconciliation");
+                                break;
+                            }
+                            prediction_last_replay_depth =
+                                applied.replay_depth;
+                            if (applied.event) {
+                                prediction_last_correction =
+                                    applied.event->correction_class;
+                                if (applied.event->correction_class ==
+                                    hlclient::prediction::
+                                        PredictionCorrectionClass::
+                                            teleport_snap) {
+                                    const auto& physical_camera =
+                                        prediction_controller->
+                                            movement_controller().camera();
+                                    if (prediction_teleport_authority_frame ||
+                                        !applied.camera ||
+                                        prediction_controller->
+                                            visual_correction().active() ||
+                                        !prediction_camera_content_equal(
+                                            *applied.camera,
+                                            physical_camera)) {
+                                        latch_prediction_failure(
+                                            std::optional<hlclient::prediction::
+                                                PredictionError>{
+                                                hlclient::prediction::
+                                                    PredictionError{
+                                                    hlclient::prediction::
+                                                        PredictionErrorCode::
+                                                            visual_correction_failed,
+                                                    std::nullopt,
+                                                    "teleport did not snap at reconciliation"}},
+                                            std::nullopt,
+                                            "teleport_snap");
+                                    } else {
+                                        prediction_teleport_authority_frame =
+                                            rendered_frames;
+                                    }
+                                }
+                            }
+                            for (const auto& entry :
+                                prediction_controller->history()->entries()) {
+                                prediction_start_solid_observed =
+                                    prediction_start_solid_observed ||
+                                    entry.touch_summary().start_solid;
+                                prediction_all_solid_observed =
+                                    prediction_all_solid_observed ||
+                                    entry.touch_summary().all_solid;
+                            }
+                        }
+
+                        if (!prediction_failure_latched) {
+                            const bool smoothing_was_active =
+                                prediction_controller->visual_correction().
+                                    active();
+                            auto sampled = prediction_controller->sample_camera(
+                                prediction_time_seconds,
+                                prediction_camera_collision.get(),
+                                prediction_camera_scratch);
+                            if (!sampled || !sampled.camera) {
+                                latch_prediction_failure(
+                                    sampled.prediction_error,
+                                    sampled.movement_error,
+                                    "camera_smoothing");
+                            } else {
+                                if (prediction_teleport_authority_frame) {
+                                    const auto& physical_camera =
+                                        prediction_controller->
+                                            movement_controller().camera();
+                                    if (*prediction_teleport_authority_frame !=
+                                            rendered_frames ||
+                                        prediction_controller->
+                                            visual_correction().active() ||
+                                        !prediction_camera_content_equal(
+                                            *sampled.camera,
+                                            physical_camera) ||
+                                        prediction_teleport_one_sample_count ==
+                                            UINT64_MAX) {
+                                        latch_prediction_failure(
+                                            std::optional<hlclient::prediction::
+                                                PredictionError>{
+                                                hlclient::prediction::
+                                                    PredictionError{
+                                                    hlclient::prediction::
+                                                        PredictionErrorCode::
+                                                            visual_correction_failed,
+                                                    std::nullopt,
+                                                    "teleport presentation exceeded one sample"}},
+                                            std::nullopt,
+                                            "teleport_snap");
+                                    } else {
+                                        ++prediction_teleport_one_sample_count;
+                                        prediction_teleport_authority_frame.
+                                            reset();
+                                    }
+                                }
+                                if (smoothing_was_active) {
+                                    const auto& residual =
+                                        prediction_controller->
+                                            visual_correction().
+                                                current_residual_offset();
+                                    const auto magnitude = std::sqrt(
+                                        static_cast<double>(residual.x) *
+                                                residual.x +
+                                            static_cast<double>(residual.y) *
+                                                residual.y +
+                                            static_cast<double>(residual.z) *
+                                                residual.z);
+                                    if (prediction_smoothing_samples !=
+                                        UINT64_MAX) {
+                                        ++prediction_smoothing_samples;
+                                    }
+                                    if (prediction_previous_residual &&
+                                        magnitude + 1.0e-9 <
+                                            *prediction_previous_residual &&
+                                        prediction_smoothing_decay_samples !=
+                                            UINT64_MAX) {
+                                        ++prediction_smoothing_decay_samples;
+                                    }
+                                    prediction_previous_residual = magnitude;
+                                } else {
+                                    prediction_previous_residual.reset();
+                                }
+
+                                const auto& player_state =
+                                    prediction_controller->
+                                        movement_controller().player_state();
+                                const auto tested =
+                                    player_collision->test_position(
+                                        player_state.origin(),
+                                        player_state.hull(),
+                                        prediction_validation_scratch,
+                                        prediction_controller->
+                                            movement_controller().config().
+                                                movement.collision_query);
+                                if (!tested || !tested.result ||
+                                    tested.result->status !=
+                                        hlclient::goldsrc::movement::
+                                            LocalMovementPositionStatus::free) {
+                                    latch_prediction_failure(
+                                        std::optional<hlclient::prediction::
+                                            PredictionError>{
+                                            hlclient::prediction::
+                                                PredictionError{
+                                                hlclient::prediction::
+                                                    PredictionErrorCode::
+                                                        authoritative_state_blocking,
+                                                std::nullopt,
+                                                "predicted player state blocking"}},
+                                        std::nullopt,
+                                        "state_validation");
+                                } else {
+                                    if (built_intent.intent->
+                                            capture_mouse_requested()) {
+                                        const auto capture = window.
+                                            request_relative_mouse_capture(true);
+                                        if (!capture) {
+                                            latch_prediction_failure(
+                                                std::nullopt,
+                                                std::nullopt,
+                                                "input_capture");
+                                        }
+                                    }
+                                    if (!prediction_failure_latched &&
+                                        built_intent.intent->
+                                            release_mouse_requested()) {
+                                        const auto release = window.
+                                            request_relative_mouse_capture(
+                                                false);
+                                        if (!release) {
+                                            latch_prediction_failure(
+                                                std::nullopt,
+                                                std::nullopt,
+                                                "input_release");
+                                        }
+                                    }
+                                    const auto player_camera =
+                                        build_client_player_camera(
+                                            *sampled.camera);
+                                    const auto publication_revision =
+                                        prediction_camera_publication_revision ==
+                                                UINT64_MAX
+                                        ? std::optional<std::uint64_t>{}
+                                        : std::optional<std::uint64_t>{
+                                              prediction_camera_publication_revision +
+                                              1U};
+                                    if (!prediction_failure_latched &&
+                                        (!player_camera ||
+                                            !publication_revision ||
+                                            !scene_source.
+                                                publish_interactive_camera(
+                                                    *player_camera,
+                                                    hlclient::client::
+                                                        InteractiveCameraMetadata{
+                                                        input_snapshot->
+                                                            sequence(),
+                                                        *publication_revision,
+                                                        hlclient::client::
+                                                            InteractiveCameraMode::
+                                                                player_walk,
+                                                        std::nullopt,
+                                                        hlclient::client::
+                                                            ControlledEntityCameraStatus::
+                                                                not_applicable}))) {
+                                        latch_prediction_failure(
+                                            std::nullopt,
+                                            std::nullopt,
+                                            "camera_publication");
+                                    } else if (!prediction_failure_latched) {
+                                        prediction_camera_publication_revision =
+                                            *publication_revision;
+                                        if (prediction_camera_publications !=
+                                            UINT64_MAX) {
+                                            ++prediction_camera_publications;
+                                        }
+                                        prediction_max_camera_revision =
+                                            (std::max)(
+                                                prediction_max_camera_revision,
+                                                sampled.camera->revision());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+#else
         if (player_controller && player_collision && player_bindings &&
             input_snapshot && movement_failure_latch.simulation_enabled()) {
             const auto bounded_input_elapsed = std::min(
@@ -1635,6 +2674,7 @@ struct SmokeWallCampaign final {
                 }
             }
         }
+#endif
         const auto updated = scene_source.update(elapsed);
         if (!updated) {
             std::cerr << "scene-update=failed\n";
@@ -1665,6 +2705,9 @@ struct SmokeWallCampaign final {
     }
 
     const auto& renderer_statistics = renderer.statistics();
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    const auto& renderer_entity_statistics = renderer.entity_statistics();
+#endif
     const auto& package_statistics = package->statistics();
     const auto& texture_statistics =
         package->textured_world().textures.statistics();
@@ -1762,6 +2805,21 @@ struct SmokeWallCampaign final {
               << '\n';
     std::cout << "brush-upload-count=" << renderer_statistics.brush_upload_count
               << '\n';
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    std::cout << "failed-upload-count="
+              << renderer_statistics.failed_upload_count << '\n';
+    std::cout << "world-resource-release-count="
+              << renderer_statistics.world_resource_release_count << '\n';
+    std::cout << "active-world-resources="
+              << (renderer_statistics.active_world_resources ? 1 : 0) << '\n';
+    std::cout << "studio-upload-count="
+              << renderer_entity_statistics.studio_asset_upload_count << '\n';
+    std::cout << "sprite-upload-count="
+              << renderer_entity_statistics.sprite_asset_upload_count << '\n';
+    std::cout << "entity-resource-release-count="
+              << renderer_entity_statistics.entity_resource_release_count
+              << '\n';
+#endif
     std::cout << "visibility-updates="
               << renderer_statistics.visibility_update_count << '\n';
     std::cout << "rendered-frames="
@@ -1793,6 +2851,7 @@ struct SmokeWallCampaign final {
                   << camera_statistics.changed_camera_count << '\n';
         std::cout << "capture-failures=" << capture_failure_count << '\n';
     }
+#if !defined(HLCLIENT_PREDICTION_VIEWER)
     if (player_controller && player_walk_camera) {
         const auto& state = player_controller->player_state();
         std::cout << "input-frames=" << input_frame_count << '\n';
@@ -1844,14 +2903,107 @@ struct SmokeWallCampaign final {
                   << " brush-uploads="
                   << renderer_statistics.brush_upload_count << '\n';
     }
+#else
+    if (prediction_controller) {
+        const auto& prediction_statistics =
+            prediction_controller->statistics();
+        const auto snap_count = prediction_statistics.large_snaps +
+            prediction_statistics.teleports + prediction_statistics.hard_resets;
+        std::cout << "input-frames=" << input_frame_count << '\n';
+        std::cout << "input-events=" << input_event_count << '\n';
+        std::cout << "capture-failures=" << capture_failure_count << '\n';
+        std::cout << "[prediction] commands="
+                  << prediction_statistics.predicted_commands << '\n';
+        std::cout << "[prediction] authority-updates="
+                  << prediction_statistics.authoritative_updates << '\n';
+        std::cout << "[prediction] acknowledgements="
+                  << prediction_statistics.accepted_acknowledgements << '\n';
+        std::cout << "[prediction] replays="
+                  << prediction_statistics.replay_count << '\n';
+        std::cout << "[prediction] replayed-commands="
+                  << prediction_statistics.replayed_command_count << '\n';
+        std::cout << "[prediction] maximum-replay-depth="
+                  << prediction_statistics.maximum_replay_depth << '\n';
+        std::cout << "[prediction] small-corrections="
+                  << prediction_statistics.small_corrections << '\n';
+        std::cout << "[prediction] snaps=" << snap_count << '\n';
+        std::cout << "[prediction] history-high-water="
+                  << prediction_statistics.history_high_water_mark << '\n';
+        std::cout << "[prediction] startsolid="
+                  << (prediction_start_solid_observed ? 1 : 0) << '\n';
+        std::cout << "[prediction] allsolid="
+                  << (prediction_all_solid_observed ? 1 : 0) << '\n';
+        std::cout << "[prediction] teleport-one-sample="
+                  << prediction_teleport_one_sample_count << '\n';
+        if (options.prediction_diagnostics ==
+            PredictionDiagnosticsMode::summary) {
+            const auto newest =
+                prediction_controller->history()->newest_command_sequence();
+            const auto acknowledged = prediction_controller->history()->
+                anchor().acknowledgement().sequence();
+            std::cout << "[prediction] history="
+                      << prediction_controller->history()->size() << '\n';
+            std::cout << "[prediction] latest-command="
+                      << (newest
+                              ? newest->value()
+                              : prediction_controller->movement_controller().
+                                    player_state().source_command_sequence())
+                      << '\n';
+            if (acknowledged) {
+                std::cout << "[prediction] acknowledged="
+                          << acknowledged->value() << '\n';
+            } else {
+                std::cout << "[prediction] acknowledged=none\n";
+            }
+            std::cout << "[prediction] replay-depth="
+                      << prediction_last_replay_depth << '\n';
+            std::cout << "[prediction] correction="
+                      << hlclient::prediction::to_string(
+                             prediction_last_correction)
+                      << '\n';
+            std::cout << "[prediction] smoothing="
+                      << (prediction_controller->visual_correction().active()
+                              ? "active"
+                              : "inactive")
+                      << '\n';
+            std::cout << "[prediction] constrained="
+                      << (prediction_statistics.
+                                      constrained_camera_corrections != 0U
+                              ? "true"
+                              : "false")
+                      << '\n';
+            std::cout << "[prediction] failures="
+                      << prediction_failure_count << '\n';
+        }
+    }
+#endif
 
     if (frame_limit && rendered_frames != *frame_limit) {
         std::cerr << "viewer-runtime=frame_limit_not_reached\n";
         return 1;
     }
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    const std::uint64_t expected_brush_upload_count =
+        options.brush_submodels == hlclient::world_preview::
+                WorldPreviewBrushSubmodelsMode::static_instances
+        ? 1U
+        : 0U;
+#endif
     if (rendered_frames > 0U &&
         (renderer_statistics.upload_count != 1U ||
-            renderer_statistics.scene_upload_count != 1U || !gl_error_none ||
+            renderer_statistics.scene_upload_count != 1U ||
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+            renderer_statistics.brush_upload_count !=
+                expected_brush_upload_count ||
+            renderer_statistics.failed_upload_count != 0U ||
+            renderer_statistics.world_resource_release_count != 0U ||
+            !renderer_statistics.active_world_resources ||
+            renderer_entity_statistics.studio_asset_upload_count != 0U ||
+            renderer_entity_statistics.sprite_asset_upload_count != 0U ||
+            renderer_entity_statistics.entity_resource_release_count != 0U ||
+            renderer_entity_statistics.entity_scene_present ||
+#endif
+            !gl_error_none ||
             renderer_statistics.rendered_frame_count != rendered_frames ||
             !renderer_statistics.scene_present ||
             (frame_limit &&
@@ -1863,6 +3015,7 @@ struct SmokeWallCampaign final {
         std::cerr << "viewer-runtime=world_render_incomplete\n";
         return 1;
     }
+#if !defined(HLCLIENT_PREDICTION_VIEWER)
     if (smoke_input_profile &&
         (!smoke_wall_found || movement_statistics.command_count == 0U ||
             !smoke_wall_touch_filter || smoke_wall_contact_count == 0U ||
@@ -1885,6 +3038,73 @@ struct SmokeWallCampaign final {
         }
         std::cout << "[movement] result=success\n";
     }
+#else
+    if (!prediction_controller || !prediction_authority ||
+        !prediction_camera_collision || !player_collision ||
+        prediction_failure_latched || prediction_failure_count != 0U) {
+        std::cerr << "prediction-runtime=failure_latched\n";
+        return 1;
+    }
+    const auto& prediction_statistics = prediction_controller->statistics();
+    const auto& final_player_state =
+        prediction_controller->movement_controller().player_state();
+    const auto final_position = player_collision->test_position(
+        final_player_state.origin(),
+        final_player_state.hull(),
+        prediction_validation_scratch,
+        prediction_controller->movement_controller().config().movement.
+            collision_query);
+    const bool small_smoothing_required = frame_limit &&
+        *options.prediction_scenario ==
+            PredictionViewerScenario::small_correction;
+    const bool large_snap_required = frame_limit &&
+        (*options.prediction_scenario ==
+                PredictionViewerScenario::large_correction ||
+            *options.prediction_scenario == PredictionViewerScenario::mixed);
+    const bool wall_replay_required = frame_limit &&
+        *options.prediction_scenario == PredictionViewerScenario::wall_replay &&
+        options.authority_delay_commands > 0U;
+    if (!final_position || !final_position.result ||
+        final_position.result->status != hlclient::goldsrc::movement::
+            LocalMovementPositionStatus::free ||
+        !prediction_state_finite(final_player_state) ||
+        prediction_start_solid_observed || prediction_all_solid_observed ||
+        prediction_statistics.predicted_commands !=
+            prediction_authority->simulator().statistics().
+                processed_command_count ||
+        prediction_statistics.history_backpressure_count != 0U ||
+        prediction_statistics.replay_failures != 0U ||
+        prediction_controller->history()->size() >
+            prediction_controller->history()->limits().
+                maximum_authority_delay_commands ||
+        (frame_limit &&
+            (prediction_camera_publications != rendered_frames ||
+                prediction_camera_publication_revision !=
+                    prediction_camera_publications ||
+                prediction_max_camera_revision >
+                    prediction_statistics.predicted_commands +
+                        rendered_frames + 2U)) ||
+        (small_smoothing_required &&
+            (prediction_statistics.small_corrections == 0U ||
+                prediction_smoothing_samples < 3U ||
+                prediction_smoothing_decay_samples < 2U)) ||
+        (large_snap_required && prediction_statistics.large_snaps == 0U) ||
+        (wall_replay_required &&
+            prediction_statistics.replayed_command_count == 0U) ||
+        (frame_limit &&
+            *options.prediction_scenario == PredictionViewerScenario::mixed &&
+            (prediction_statistics.teleports == 0U ||
+                prediction_teleport_authority_frame ||
+                prediction_teleport_one_sample_count !=
+                    prediction_statistics.teleports)) ||
+        (frame_limit && *options.prediction_scenario ==
+                PredictionViewerScenario::wall_replay &&
+            !prediction_smoke_wall_found)) {
+        std::cerr << "prediction-runtime=validation_failed\n";
+        return 1;
+    }
+    std::cout << "[prediction-opengl] result=success\n";
+#endif
     return 0;
 }
 
@@ -1898,7 +3118,14 @@ struct SmokeWallCampaign final {
         return 2;
     }
     const auto frame_limit = smoke_test_frame_limit();
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+    auto smoke_input_profile = smoke_test_input_profile();
+    if (frame_limit && !smoke_input_profile) {
+        smoke_input_profile = SmokeTestInputProfile::player_wall_contact_v1;
+    }
+#else
     const auto smoke_input_profile = smoke_test_input_profile();
+#endif
     if (smoke_input_profile &&
         (!frame_limit || *frame_limit < 1'000U ||
             *frame_limit > hlclient::input::ScriptedInputSourceLimits::
@@ -2060,6 +3287,15 @@ int wmain(const int argument_count, wchar_t* arguments[])
     try {
         return run_viewer(argument_count, arguments);
     } catch (const hlclient::renderer::opengl::OpenGlRendererError& error) {
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+        if (prediction_smoke_requested() &&
+            hlclient::platform::classify_opengl_startup_capability_failure(
+                error) != hlclient::platform::
+                    OpenGlStartupCapabilityFailure::none) {
+            std::cout << "[prediction-opengl] capability=unavailable\n";
+            return 0;
+        }
+#else
         if (scripted_wall_smoke_requested() &&
             hlclient::platform::classify_opengl_startup_capability_failure(
                 error) != hlclient::platform::
@@ -2067,12 +3303,22 @@ int wmain(const int argument_count, wchar_t* arguments[])
             std::cout << "wall-contact-opengl=capability-unavailable\n";
             return 0;
         }
+#endif
         std::cerr << "opengl-render="
                   << hlclient::renderer::opengl::to_string(error.code())
                   << '\n';
     } catch (const std::bad_alloc&) {
         std::cerr << "viewer=allocation_failed\n";
     } catch (const std::runtime_error& error) {
+#if defined(HLCLIENT_PREDICTION_VIEWER)
+        if (prediction_smoke_requested() &&
+            hlclient::platform::classify_opengl_startup_capability_failure(
+                error) != hlclient::platform::
+                    OpenGlStartupCapabilityFailure::none) {
+            std::cout << "[prediction-opengl] capability=unavailable\n";
+            return 0;
+        }
+#else
         if (scripted_wall_smoke_requested() &&
             hlclient::platform::classify_opengl_startup_capability_failure(
                 error) != hlclient::platform::
@@ -2080,6 +3326,7 @@ int wmain(const int argument_count, wchar_t* arguments[])
             std::cout << "wall-contact-opengl=capability-unavailable\n";
             return 0;
         }
+#endif
         // Shader, draw, upload, swap and other runtime failures remain fatal.
         std::cerr << "viewer=failed\n";
     } catch (const std::exception&) {

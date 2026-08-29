@@ -53,7 +53,7 @@ return a typed evidence-pending result until captured independently; the netchan
 Clientdata and weapondata remain unsupported and evidence-pending because their
 initial frame placement and reference-time grammar have not been confirmed; no
 decoder, state type or stage event is published for either one. Snapshot state
-is not connected to `ClientWorldState`, interpolation, prediction, model
+is not connected to `ClientWorldState`, local prediction, model
 loading, asset binding, the renderer or the filesystem.
 
 M4.5.3 consumes this state only through a separate immutable projection layer.
@@ -62,3 +62,10 @@ seconds; it never interprets `synthetic_raw` as seconds or looks up fields by
 name. Production stock projection still returns evidence-pending. See
 [entity visual projection](ENTITY_VISUAL_PROJECTION.md) and
 [entity interpolation](ENTITY_INTERPOLATION.md).
+
+M4.6.3.3 does not change this boundary. Its `AuthoritativePlayerState` comes
+only from the typed in-memory synthetic authority source. It does not infer a
+local player by entity number, look up origin/velocity fields by name, reuse an
+entity snapshot reference as a command acknowledgement, or treat a netchan ACK
+as a usercmd ACK. Stock local-player entity projection and command-reference
+mapping remain explicitly evidence-pending for M4.7.1.

@@ -129,3 +129,18 @@ limits and airborne center-preserving duck are explicit project-owned policies.
 See [friction and acceleration](GOLDSRC_MOVEMENT_FRICTION_ACCELERATION.md),
 [slide and step](GOLDSRC_MOVEMENT_SLIDE_STEP.md), and
 [duck and jump](GOLDSRC_MOVEMENT_DUCK_JUMP.md).
+
+## Prediction replay boundary
+
+M4.6.3.3 reuses this public pure kernel for command replay. Prediction history
+retains the exact immutable `GoldSrcUserCmdState`; replay does not reconstruct
+it from input, consume jump/duck edges again, send it to a transport, or emit
+an effect callback. Authority becomes the replay base immediately, and every
+unacknowledged command is applied in strict order under the same environment,
+movement config, collision identity, and bounded scratch rules. A failure
+publishes neither partial replay history nor partial controller state.
+
+This is synthetic-authority compatibility only. Stock acknowledgement mapping
+and stock authoritative local-player state remain evidence-pending. The
+M4.6.3.2.1 direct/glancing/corner/jump/duck wall-contact guarantees and
+10,000-command regression campaigns remain mandatory under replay.

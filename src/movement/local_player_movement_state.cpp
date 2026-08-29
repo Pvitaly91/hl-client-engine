@@ -413,6 +413,38 @@ std::uint64_t local_player_movement_state_signature(
     return hash;
 }
 
+LocalPlayerMovementStateCreateInfo local_player_movement_state_create_info(
+    const LocalPlayerMovementState& state) noexcept
+{
+    LocalPlayerMovementStateCreateInfo result;
+    result.origin = state.origin();
+    result.velocity = state.velocity();
+    result.view_angles = state.view_angles();
+    result.hull = state.hull();
+    result.mode = state.mode();
+    result.ground = {
+        state.ground_state().grounded(),
+        state.ground_state().walkable(),
+        state.ground_state().hit(),
+        state.ground_state().plane(),
+        state.ground_state().contact_position(),
+        state.ground_state().probe_fraction(),
+        state.ground_state().evidence_profile(),
+    };
+    result.view_offset = state.view_offset();
+    result.old_buttons = state.old_buttons();
+    result.source_command_sequence = state.source_command_sequence();
+    result.simulation_time_nanoseconds = state.simulation_time_nanoseconds();
+    result.last_valid_contents = state.last_valid_contents();
+    result.gravity_multiplier = state.gravity_multiplier();
+    result.friction_multiplier = state.friction_multiplier();
+    result.state_revision = state.state_revision();
+    result.compatibility_profile = state.compatibility_profile();
+    result.evidence_profile = state.evidence_profile();
+    result.command_profile = state.command_profile();
+    return result;
+}
+
 std::string_view to_string(
     const LocalPlayerMovementStateErrorCode code) noexcept
 {

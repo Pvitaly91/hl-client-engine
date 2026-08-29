@@ -167,6 +167,10 @@ struct CollisionWorldStatistics {
 struct CollisionWorldIdentity {
     std::optional<assets::AssetSourceFingerprint> source_fingerprint;
     std::uint64_t source_revision{0U};
+
+    [[nodiscard]] friend bool operator==(
+        const CollisionWorldIdentity&,
+        const CollisionWorldIdentity&) = default;
 };
 
 // Builder-facing owning construction is public. All retained state is exposed

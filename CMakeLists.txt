@@ -741,6 +741,28 @@ set_property(
     PROPERTY FOLDER "Engine/Network/GoldSrc/UserCmd")
 
 hlclient_add_library(
+    hlclient_prediction_api
+    include/hlclient/prediction/authoritative_player_state.hpp
+    include/hlclient/prediction/prediction_history.hpp
+    include/hlclient/prediction/prediction_state_comparison.hpp
+    include/hlclient/prediction/prediction_types.hpp
+    src/prediction/authoritative_player_state.cpp
+    src/prediction/prediction_history.cpp
+    src/prediction/prediction_state_comparison.cpp
+    src/prediction/prediction_types.cpp
+)
+add_library(hlclient::prediction_api ALIAS hlclient_prediction_api)
+target_link_libraries(
+    hlclient_prediction_api
+    PUBLIC
+        hlclient::goldsrc_usercmd_api
+        hlclient::movement_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_prediction_api
+    PROPERTY FOLDER "Engine/Simulation/Prediction")
+
+hlclient_add_library(
     hlclient_goldsrc_usercmd_codec
     include/hlclient/goldsrc/bit_writer.hpp
     include/hlclient/goldsrc/client_move_message.hpp
@@ -1321,6 +1343,44 @@ set_property(
     PROPERTY FOLDER "Engine/Simulation/GoldSrc")
 
 hlclient_add_library(
+    hlclient_local_prediction
+    include/hlclient/prediction/local_prediction.hpp
+    include/hlclient/prediction/prediction_reconciliation.hpp
+    include/hlclient/prediction/synthetic_authoritative_player.hpp
+    src/prediction/local_prediction.cpp
+    src/prediction/prediction_reconciliation.cpp
+    src/prediction/synthetic_authoritative_player.cpp
+)
+add_library(hlclient::local_prediction ALIAS hlclient_local_prediction)
+target_link_libraries(
+    hlclient_local_prediction
+    PUBLIC
+        hlclient::collision_api
+        hlclient::goldsrc_local_movement
+        hlclient::prediction_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_local_prediction
+    PROPERTY FOLDER "Engine/Simulation/Prediction")
+
+hlclient_add_library(
+    hlclient_prediction_visual
+    include/hlclient/prediction/prediction_visual_correction.hpp
+    src/prediction/prediction_visual_correction.cpp
+)
+add_library(hlclient::prediction_visual ALIAS hlclient_prediction_visual)
+target_link_libraries(
+    hlclient_prediction_visual
+    PUBLIC
+        hlclient::collision_api
+        hlclient::gameplay_camera
+        hlclient::prediction_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_prediction_visual
+    PROPERTY FOLDER "Engine/Renderer/Prediction")
+
+hlclient_add_library(
     hlclient_goldsrc_brush_models
     include/hlclient/goldsrc/brush_models/brush_submodel_instances.hpp
     include/hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp
@@ -1351,9 +1411,11 @@ set_property(
 hlclient_add_library(
     hlclient_local_player_controller
     include/hlclient/local_player/local_player_movement_controller.hpp
+    include/hlclient/local_player/local_player_prediction_controller.hpp
     include/hlclient/local_player/local_player_spawn_selector.hpp
     include/hlclient/local_player/player_walk_failure_latch.hpp
     src/local_player/local_player_movement_controller.cpp
+    src/local_player/local_player_prediction_controller.cpp
     src/local_player/local_player_spawn_selector.cpp
     src/local_player/player_walk_failure_latch.cpp
 )
@@ -1366,6 +1428,8 @@ target_link_libraries(
         hlclient::gameplay_input
         hlclient::goldsrc_local_movement
         hlclient::goldsrc_usercmd_sampling
+        hlclient::local_prediction
+        hlclient::prediction_visual
     PRIVATE
         hlclient::core
         hlclient::goldsrc_bsp)
@@ -1679,6 +1743,25 @@ set_property(
     TARGET hlclient_movement_check PROPERTY FOLDER "Tools/Movement")
 
 add_executable(
+    hlclient_prediction_check
+    apps/hlclient_prediction_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_prediction_check)
+target_link_libraries(
+    hlclient_prediction_check
+    PRIVATE
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_bsp_collision
+        hlclient::hash_sha256
+        hlclient::local_asset_source
+        hlclient::local_player_controller
+        hlclient::local_prediction
+        hlclient::local_resources
+)
+set_property(
+    TARGET hlclient_prediction_check PROPERTY FOLDER "Tools/Prediction")
+
+add_executable(
     hlclient_goldsrc_asset_check
     apps/hlclient_goldsrc_asset_check/main.cpp
 )
@@ -1810,6 +1893,37 @@ set_target_properties(
     PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 
 add_executable(
+    hlclient_prediction_viewer
+    apps/hlclient_world_viewer/main.cpp
+)
+target_compile_definitions(
+    hlclient_prediction_viewer PRIVATE HLCLIENT_PREDICTION_VIEWER=1)
+hlclient_enable_warnings(hlclient_prediction_viewer)
+target_link_libraries(
+    hlclient_prediction_viewer
+    PRIVATE
+        hlclient::goldsrc_bsp
+        hlclient::goldsrc_brush_models
+        hlclient::goldsrc_world_texture_import
+        hlclient::goldsrc_lightmaps
+        hlclient::world_render_package
+        hlclient::world_preview
+        hlclient::local_asset_source
+        hlclient::local_resources
+        hlclient::platform
+        hlclient::interactive_preview
+        hlclient::local_player_controller
+        hlclient::local_prediction
+        hlclient::renderer_opengl
+        hlclient::glad
+)
+set_property(
+    TARGET hlclient_prediction_viewer PROPERTY FOLDER "Tools/Prediction")
+set_target_properties(
+    hlclient_prediction_viewer
+    PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_executable(
     hlclient_entity_viewer
     apps/hlclient_entity_viewer/main.cpp
 )
@@ -1908,6 +2022,16 @@ add_custom_command(
 )
 
 add_custom_command(
+    TARGET hlclient_prediction_viewer
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:SDL3::SDL3-shared>"
+            "$<TARGET_FILE_DIR:hlclient_prediction_viewer>"
+    COMMENT "Copying the SDL3 runtime next to hlclient_prediction_viewer"
+    VERBATIM
+)
+
+add_custom_command(
     TARGET hlclient_entity_viewer
     POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
@@ -1926,9 +2050,14 @@ foreach(
         hlclient_goldsrc_bsp_collision
         hlclient_goldsrc_collision_scene
         hlclient_movement_api
+        hlclient_prediction_api
         hlclient_goldsrc_local_movement
+        hlclient_local_prediction
+        hlclient_prediction_visual
         hlclient_local_player_controller
         hlclient_movement_check
+        hlclient_prediction_check
+        hlclient_prediction_viewer
         hlclient_world_viewer
 )
     hlclient_enable_address_sanitizer(${_hlclient_sanitized_target})

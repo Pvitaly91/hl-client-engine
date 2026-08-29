@@ -5,12 +5,38 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <system_error>
 #include <vector>
 
 namespace {
+
+void populate_embedded_palette(std::vector<std::byte>& bsp_bytes)
+{
+    const auto texture_lump = static_cast<std::size_t>(
+        hlclient::tests::synthetic_read_i32le(
+            bsp_bytes,
+            hlclient::tests::synthetic_lump_descriptor_offset(
+                hlclient::tests::SyntheticBspLumpId::textures)));
+    const auto record_relative = static_cast<std::size_t>(
+        hlclient::tests::synthetic_read_i32le(
+            bsp_bytes, texture_lump + 4U));
+    const auto record = texture_lump + record_relative;
+    constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+    const auto count_offset = record + 40U + pixel_byte_count;
+    hlclient::tests::synthetic_write_u16le(
+        bsp_bytes, count_offset, 256U);
+    for (std::size_t index = 0U; index < 256U; ++index) {
+        bsp_bytes[count_offset + 2U + (index * 3U)] =
+            static_cast<std::byte>(index);
+        bsp_bytes[count_offset + 2U + (index * 3U) + 1U] =
+            static_cast<std::byte>(255U - index);
+        bsp_bytes[count_offset + 2U + (index * 3U) + 2U] =
+            static_cast<std::byte>(index ^ 0x5AU);
+    }
+}
 
 [[nodiscard]] std::vector<std::byte> collision_fixture_bytes()
 {
@@ -84,6 +110,14 @@ namespace {
     };
     builder.set_planes(planes);
 
+    constexpr std::array render_wall{
+        hlclient::tests::SyntheticBspVector3{192.0F, -2'048.0F, -512.0F},
+        hlclient::tests::SyntheticBspVector3{192.0F, 2'048.0F, -512.0F},
+        hlclient::tests::SyntheticBspVector3{192.0F, 2'048.0F, 512.0F},
+        hlclient::tests::SyntheticBspVector3{192.0F, -2'048.0F, 512.0F},
+    };
+    builder.set_convex_polygon(render_wall);
+
     std::array<hlclient::tests::SyntheticBspNode, 3U> nodes{};
     nodes[0U].plane_index = 4;
     nodes[0U].children = {-1, 1};
@@ -110,16 +144,46 @@ namespace {
     };
     builder.set_clipnodes(clipnodes);
 
-    hlclient::tests::SyntheticBspModel world_model;
-    world_model.minimum = {-64.0F, -64.0F, 0.0F};
-    world_model.maximum = {192.0F, 192.0F, 128.0F};
-    world_model.headnodes = {0, 0, 3, 6};
-    builder.set_models(std::span{&world_model, 1U});
+    std::array faces{
+        hlclient::tests::SyntheticBspFace{},
+        hlclient::tests::SyntheticBspFace{},
+    };
+    faces[0U].plane_index = 4;
+    faces[1U].plane_index = 4;
+    builder.set_faces(faces);
+
+    std::array models{
+        hlclient::tests::SyntheticBspModel{},
+        hlclient::tests::SyntheticBspModel{},
+    };
+    models[0U].minimum = {-64.0F, -2'048.0F, -512.0F};
+    models[0U].maximum = {192.0F, 2'048.0F, 512.0F};
+    models[0U].headnodes = {0, 0, 3, 6};
+    models[0U].first_face = 0;
+    models[0U].face_count = 1;
+    models[1U].minimum = {191.0F, -2'049.0F, -513.0F};
+    models[1U].maximum = {193.0F, 2'049.0F, 513.0F};
+    models[1U].headnodes = {0, 0, 3, 6};
+    models[1U].visibility_leaf_count = 0;
+    models[1U].first_face = 1;
+    models[1U].face_count = 1;
+    builder.set_models(models);
+
+    auto embedded = hlclient::tests::synthetic_embedded_texture(
+        "PREDICT", 16U, 16U);
+    constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+    embedded.trailing_byte_count =
+        pixel_byte_count + 2U + (256U * 3U);
+    const std::array<std::optional<hlclient::tests::SyntheticBspMipTexture>, 1U>
+        textures{embedded};
+    builder.set_texture_directory(textures);
 
     constexpr std::string_view entities =
         "{\n\"classname\" \"worldspawn\"\n}\n"
+        "{\n\"classname\" \"func_wall\"\n"
+        "\"model\" \"*1\"\n\"origin\" \"-1 0 0\"\n}\n"
         "{\n\"classname\" \"info_player_start\"\n"
-        "\"origin\" \"0 0 36\"\n\"angle\" \"0\"\n}\n";
+        "\"origin\" \"0 0 36\"\n\"angles\" \"-20 0 0\"\n}\n";
     auto& entity_lump =
         builder.lump(hlclient::tests::SyntheticBspLumpId::entities);
     entity_lump.clear();
@@ -129,7 +193,9 @@ namespace {
             static_cast<unsigned char>(character)));
     }
     entity_lump.push_back(std::byte{0U});
-    return builder.build();
+    auto bytes = builder.build();
+    populate_embedded_palette(bytes);
+    return bytes;
 }
 
 [[nodiscard]] bool write_fixture(

@@ -4,6 +4,7 @@ add_executable(hlclient_tests
     test_asset_manager.cpp
     test_asset_importer_dispatch.cpp
     test_asset_registry.cpp
+    test_authoritative_player_state.cpp
     test_approved_asset_source.cpp
     test_byte_io.cpp
     test_challenge_exchange.cpp
@@ -175,9 +176,17 @@ add_executable(hlclient_tests
     test_goldsrc_local_movement_slide.cpp
     test_goldsrc_local_movement_step.cpp
     test_local_player_movement_integration.cpp
+    test_local_player_prediction_controller.cpp
+    test_local_player_prepared_update.cpp
+    test_local_prediction_history.cpp
+    test_local_prediction_reconciliation.cpp
     test_player_walk_camera.cpp
     test_player_walk_failure_latch.cpp
     test_player_wall_contact_stability.cpp
+    test_prediction_session_identity.cpp
+    test_prediction_state_comparison.cpp
+    test_prediction_visual_correction.cpp
+    test_synthetic_authoritative_player.cpp
     test_post_movevars_stream.cpp
     test_network_address.cpp
     test_netchan_bootstrap.cpp
@@ -286,6 +295,9 @@ target_link_libraries(hlclient_tests
         hlclient_gameplay_camera
         hlclient_gameplay_camera_render_adapter
         hlclient_local_player_controller
+        hlclient_local_prediction
+        hlclient_prediction_api
+        hlclient_prediction_visual
         hlclient_interactive_preview
         hlclient_glad
         hlclient_world_render
@@ -447,6 +459,99 @@ set_tests_properties(
     PROPERTIES
         FIXTURES_REQUIRED hlclient_collision_checker_fixture
         PASS_REGULAR_EXPRESSION "\\[movement-verify\\] result=success"
+        TIMEOUT 30
+)
+
+foreach(
+    prediction_scenario
+    IN ITEMS
+        exact-authority
+        delayed-authority
+        small-correction
+        velocity-correction
+        large-correction
+        teleport
+        stale-duplicate
+        wall-replay
+        jump-replay
+        duck-replay
+        history-backpressure
+        hard-reset
+        mixed
+        deterministic-route
+)
+    string(REPLACE "-" "_" prediction_scenario_name
+        "${prediction_scenario}")
+    if(prediction_scenario STREQUAL "exact-authority")
+        set(prediction_authority_delay 0)
+    else()
+        set(prediction_authority_delay 8)
+    endif()
+    add_test(
+        NAME hlclient_prediction_check_synthetic_${prediction_scenario_name}
+        COMMAND
+            $<TARGET_FILE:hlclient_prediction_check>
+            --basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+            --game valve
+            --map maps/test_movement.bsp
+            --scenario ${prediction_scenario}
+            --authority-delay-commands ${prediction_authority_delay}
+            --commands 1000
+    )
+    set_tests_properties(
+        hlclient_prediction_check_synthetic_${prediction_scenario_name}
+        PROPERTIES
+            FIXTURES_REQUIRED hlclient_collision_checker_fixture
+            PASS_REGULAR_EXPRESSION "\\[prediction\\] result=success"
+            TIMEOUT 180
+    )
+endforeach()
+
+add_test(
+    NAME hlclient_prediction_check_rejects_raw_authority
+    COMMAND
+        "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+        -NoLogo
+        -NoProfile
+        -NonInteractive
+        -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/scripts/test_prediction_check_cli.ps1"
+        -ToolPath $<TARGET_FILE:hlclient_prediction_check>
+        -Basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+        -Mode raw-authority
+)
+add_test(
+    NAME hlclient_prediction_check_rejects_zero_commands
+    COMMAND
+        "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+        -NoLogo
+        -NoProfile
+        -NonInteractive
+        -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/scripts/test_prediction_check_cli.ps1"
+        -ToolPath $<TARGET_FILE:hlclient_prediction_check>
+        -Basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+        -Mode zero-commands
+)
+add_test(
+    NAME hlclient_prediction_check_rejects_excessive_delay
+    COMMAND
+        "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+        -NoLogo
+        -NoProfile
+        -NonInteractive
+        -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/scripts/test_prediction_check_cli.ps1"
+        -ToolPath $<TARGET_FILE:hlclient_prediction_check>
+        -Basedir "${HLCLIENT_COLLISION_CHECKER_FIXTURE_ROOT}"
+        -Mode excessive-delay
+)
+set_tests_properties(
+    hlclient_prediction_check_rejects_raw_authority
+    hlclient_prediction_check_rejects_zero_commands
+    hlclient_prediction_check_rejects_excessive_delay
+    PROPERTIES
+        FIXTURES_REQUIRED hlclient_collision_checker_fixture
         TIMEOUT 30
 )
 

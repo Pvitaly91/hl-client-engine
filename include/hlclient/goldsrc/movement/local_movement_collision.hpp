@@ -84,6 +84,31 @@ struct LocalMovementTrace {
         LocalMovementCollisionProfile::world_only_v1};
 };
 
+struct LocalMovementCollisionSessionIdentity {
+    LocalMovementCollisionProfile profile{
+        LocalMovementCollisionProfile::world_only_v1};
+    std::uint64_t collision_world_primary{0U};
+    std::uint64_t collision_world_secondary{0U};
+    std::uint64_t collision_world_revision{0U};
+    std::uint64_t scene_signature{0U};
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        const bool profile_valid =
+            profile == LocalMovementCollisionProfile::world_only_v1 ||
+            profile == LocalMovementCollisionProfile::
+                explicit_synthetic_static_brush_v1;
+        return profile_valid &&
+            (collision_world_primary != 0U ||
+                   collision_world_secondary != 0U) &&
+            collision_world_revision != 0U && scene_signature != 0U;
+    }
+
+    [[nodiscard]] friend bool operator==(
+        const LocalMovementCollisionSessionIdentity&,
+        const LocalMovementCollisionSessionIdentity&) = default;
+};
+
 struct LocalMovementCollisionQueryConfig {
     hlclient::collision::CollisionQueryLimits query_limits{};
     hlclient::collision::CollisionTraceToleranceProfile trace_tolerance{};
@@ -142,6 +167,11 @@ public:
     [[nodiscard]] virtual LocalMovementCollisionProfile profile()
         const noexcept = 0;
     [[nodiscard]] virtual bool valid() const noexcept = 0;
+    // Prediction must fail closed when a collision provider cannot identify
+    // the immutable world/session it queries. Kept non-pure so legacy test
+    // doubles remain source-compatible and explicitly identity-less.
+    [[nodiscard]] virtual std::optional<LocalMovementCollisionSessionIdentity>
+    session_identity() const noexcept;
 
     // Point contents intentionally uses world model zero and point hull zero.
     // Explicit synthetic brushes are solid trace participants, not liquid
@@ -174,6 +204,8 @@ public:
     [[nodiscard]] LocalMovementCollisionProfile profile()
         const noexcept override;
     [[nodiscard]] bool valid() const noexcept override;
+    [[nodiscard]] std::optional<LocalMovementCollisionSessionIdentity>
+    session_identity() const noexcept override;
     [[nodiscard]] const std::shared_ptr<
         const hlclient::collision::CollisionWorldPackage>&
     package() const noexcept;
@@ -208,6 +240,8 @@ public:
     [[nodiscard]] LocalMovementCollisionProfile profile()
         const noexcept override;
     [[nodiscard]] bool valid() const noexcept override;
+    [[nodiscard]] std::optional<LocalMovementCollisionSessionIdentity>
+    session_identity() const noexcept override;
     [[nodiscard]] const std::shared_ptr<
         const hlclient::goldsrc::collision::BrushCollisionScene>&
     scene() const noexcept;

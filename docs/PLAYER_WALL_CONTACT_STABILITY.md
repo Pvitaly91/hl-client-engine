@@ -4,6 +4,19 @@ M4.6.3.2.1 is the stabilization boundary for sustained `player-walk`
 contact. It does not add prediction, replay, reconciliation, network traffic,
 stock `PM_Move`, dynamic brush collision, or stuck recovery.
 
+M4.6.3.3 subsequently reuses this unchanged movement invariant during local
+prediction and replay. Its separate prediction checker/viewer must retain the
+same collision-valid publication, bounded zero-progress handling, and
+wall-contact stress gates; no reconciliation path may bypass them. This is
+synthetic authority only and adds no network traffic. See
+[prediction reconciliation](PREDICTION_RECONCILIATION.md).
+
+The manual prerequisite for M4.6.3.3 is recorded as accepted: after the
+M4.6.3.2.1 fix, the user confirmed that `player-walk` no longer exits on wall
+contact and that both direct and diagonal wall contact remain stable. The
+prediction milestone retains that observation as a regression prerequisite;
+it does not reinterpret it as stock movement or network evidence.
+
 ## Accepted symptom and baseline classification
 
 The accepted report was an abruptly disappearing Debug viewer while W/A/S/D
@@ -156,7 +169,8 @@ Build:
 
 ```powershell
 cmake --build build --config Debug --target `
-  hlclient_world_viewer hlclient_movement_check
+  hlclient_world_viewer hlclient_movement_check `
+  hlclient_prediction_viewer hlclient_prediction_check
 ```
 
 Run the accepted `crossfire` route:

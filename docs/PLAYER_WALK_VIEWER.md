@@ -7,6 +7,13 @@ collision packages, selects a collision-valid dry spawn, and runs local fixed
 synthetic commands against world-only collision. It opens no network socket
 and performs no prediction or reconciliation.
 
+M4.6.3.3 adds a separate `hlclient_prediction_viewer` composition root. It
+reuses this viewer's world-only movement and rendering invariants but owns
+bounded prediction history, an independent in-memory synthetic authority,
+reconciliation, deterministic command replay, and camera-only visual
+correction. The ordinary world viewer remains unchanged. See
+[the prediction viewer](PREDICTION_VIEWER.md).
+
 ## Build and run
 
 ```powershell
@@ -114,5 +121,6 @@ executes the capability-gated scripted OpenGL viewer phase. See
 
 Known limitations are water/slime/lava/current movement, ladders, dynamic or
 stock brush entity collision, conveyors/base velocity, moving platforms,
-moving doors, Studio hitboxes, stuck recovery, fall damage and all multiplayer
-prediction/reconciliation.
+moving doors, Studio hitboxes, stuck recovery, fall damage, and stock/live
+multiplayer prediction authority. The separate M4.6.3.3 synthetic prediction
+tool does not change those stock limitations.

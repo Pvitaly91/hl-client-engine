@@ -807,10 +807,67 @@ cmake -S . -B build-asan -G "Visual Studio 17 2022" -A Win32 `
   -DHLCLIENT_ENABLE_ADDRESS_SANITIZER=ON
 
 cmake --build build-asan --config Debug --target `
-  hlclient_world_viewer hlclient_movement_check hlclient_tests
+  hlclient_world_viewer hlclient_movement_check `
+  hlclient_prediction_check hlclient_prediction_viewer `
+  hlclient_collision_fixture_writer hlclient_tests
+
+.\build-asan\bin\Debug\hlclient_tests.exe `
+  '[prediction]~[.stress]'
+.\build-asan\bin\Debug\hlclient_tests.exe `
+  '[prediction][reconciliation][.stress]'
 ```
 
 The option is off by default. It removes incompatible Debug runtime checks
 only inside the sanitizer build tree and has no effect on ordinary Release
-behavior. See
+behavior. Run sanitizer executables from a Visual Studio 2022 Developer
+PowerShell, or prepend the selected toolset's `bin\Hostx64\x86` directory (the
+directory containing `clang_rt.asan_dynamic-i386.dll`) to that process's
+`PATH`. A missing runtime can otherwise open a Windows loader dialog instead
+of producing sanitizer output. See
 [player wall-contact stability](PLAYER_WALL_CONTACT_STABILITY.md).
+
+## Local prediction and reconciliation tools
+
+M4.6.3.3 adds separate offline synthetic-authority tools. The ordinary
+movement checker and world viewer remain non-prediction regression paths:
+
+```powershell
+cmake --build build --config Debug --target `
+  hlclient_prediction_check hlclient_prediction_viewer hlclient_tests
+
+.\build\bin\Debug\hlclient_prediction_check.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" `
+  --game valve --map maps/crossfire.bsp `
+  --scenario delayed-authority --authority-delay-commands 8 `
+  --commands 1000
+
+.\build\bin\Debug\hlclient_prediction_viewer.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" `
+  --game valve --map maps/crossfire.bsp `
+  --scenario small-correction --authority-delay-commands 8 `
+  --prediction-diagnostics summary --visibility pvs-frustum `
+  --brush-submodels static --cull back
+```
+
+The checker and viewer read one safe virtual BSP through the existing local
+resource sandbox, then use only an in-memory synthetic authority. They open no
+socket, add no protocol message, and write no game file. Stock Protocol 48
+authoritative acknowledgement/state extraction remains fail-closed as
+`stock_protocol_48_authoritative_reconciliation_evidence_pending`.
+
+Run the deterministic CPU and capability-gated OpenGL campaign with:
+
+```powershell
+.\scripts\verify_local_prediction_reconciliation.ps1 `
+  -CheckerPath .\build\bin\Debug\hlclient_prediction_check.exe `
+  -ViewerPath .\build\bin\Debug\hlclient_prediction_viewer.exe `
+  -Basedir "D:\Steam\steamapps\common\Half-Life" -Game valve `
+  -Maps @('maps/boot_camp.bsp','maps/crossfire.bsp','maps/stalkyard.bsp') `
+  -Scenarios @('exact-authority','delayed-authority','small-correction',`
+    'wall-replay','jump-replay','duck-replay','mixed') `
+  -Iterations 20 -Frames 1000
+```
+
+The wrapper requires equal final-state and history/replay hashes, zero solid
+starts, history overflow, network operations, created/deleted files, and
+external-file drift. See [the prediction viewer](PREDICTION_VIEWER.md).

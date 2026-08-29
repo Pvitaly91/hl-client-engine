@@ -916,18 +916,26 @@ replay, network transmission or stock brush-solidity claim was added.
 
 ### M4.6.3.3 — Replay and reconciliation
 
-**Status: next.** Own prediction history, command replay and server
-reconciliation; none is included in M4.6.3.2.1.
+**Status: completed for the synthetic-authority profile.** The project now
+owns immutable bounded prediction history, transactional movement plans,
+strict acknowledged-command rewind, exact retained-command replay, typed
+reconciliation, hard-reset generations, and collision-constrained camera-only
+visual correction. The offline checker/viewer never creates a network message
+or writes game content. Stock Protocol 48 command acknowledgement semantics
+and authoritative local-player entity projection are deliberately not inferred
+and remain evidence-pending.
 
-M4.7 retains the stock entity-wire/live runtime compatibility work. M3.3
-retains download/cache. Neither is part of M4.6.3.2.1.
+M4.7.1 stock authoritative player/entity evidence is next. M4.7.2 retains the
+stock usercmd envelope/checksum and M4.7.3 retains the live connected runtime.
+M3.3 retains download/cache. None is part of M4.6.3.3.
 
 ## Superseded milestone numbering
 
 The former M5–M8 entity/model/input/interpolation buckets were split into the
 active M4.5.1, M4.5.2, M4.5.3 and M4.6 sequence above. They are not additional
-or competing next milestones. The only next movement milestone after completed
-M4.6.3.2.1 is M4.6.3.3.
+or competing next milestones. The completed synthetic M4.6.3.3 boundary does
+not authorize work on the next stock/live milestones without their own
+evidence gates.
 
 ## M9 — `client.dll` API and HUD
 
@@ -1015,10 +1023,11 @@ behavior remains evidence-pending at zero accepted runs and zero verified move
 packets. M4.6.3.1 is complete at the project-owned BSP collision/trace
 boundary. M4.6.3.2 is complete at its deterministic local dry-walk kernel and
 M4.6.3.2.1 is complete at its bounded wall-contact/viewer-failure boundary.
-The world-only player-walk viewer and read-only verification boundary remain
-offline. M4.6.3.3 is
-next and retains command replay, prediction history, and reconciliation. M4.7
-may revisit live stock entity-wire/runtime effects evidence.
+The world-only player-walk and prediction viewers and their read-only
+verification boundaries remain offline. M4.6.3.3 is complete only for typed
+synthetic authority; M4.7.1 is next for stock authoritative player/entity
+evidence, followed by M4.7.2 stock usercmd envelope/checksum and M4.7.3 live
+runtime work.
 
 Every milestone retains these gates:
 

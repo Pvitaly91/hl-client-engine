@@ -157,6 +157,9 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_goldsrc_usercmd_sampling` | network-free synthetic input/camera adaptation and fixed-step command scheduling | history, packet planning/transmission, sockets, stock compatibility claims, prediction/collision/reconciliation |
 | `hlclient_goldsrc_usercmd_session` | bounded history/backup planning and transactional same-driver unreliable transmission through a sequence-bound context, layered on usercmd sampling and codec targets | caller sequence overrides, second sockets/sessions, reliable usercmd workaround, stock compatibility claims, prediction/collision/reconciliation |
 | `hlclient_goldsrc_entity_snapshots` | immutable generic baseline/full/delta/history state, explicit add/remove and exact-base mechanics, strict ordering, bounded retention, and sealed synthetic-neutral builders | stock entity wire/opcode claims, clientdata prediction, model binding, filesystem, renderer |
+| `hlclient_prediction_api` | immutable prediction session, authority, history, and comparison values with bounded publication and typed stock evidence gates | collision execution, input, replay, renderer, filesystem, network |
+| `hlclient_local_prediction` | pure session signatures, independent synthetic authority, strict reconciliation, and bounded replay through the existing movement kernel | input resampling, effects, packet resend, renderer, filesystem |
+| `hlclient_prediction_visual` | time-based collision-constrained camera-only residual correction | movement-state smoothing, authority inference, input/network/GPU ownership |
 | `hlclient_goldsrc_post_resource_signon` | exact unconsumed post-response cursor, bounded metadata transcript, typed request evidence gate, private same-driver/source-payload continuation, and a sealed four-control-fixture synthetic stage that publishes typed baseline/full/delta state for fake-HLDS tests | arbitrary commands/raw injection, stock request invention, stock entity-body decoding without evidence, opcode scanning, stufftext execution, assets, entity rendering |
 | `hlclient_goldsrc_local_resources` | evidence-gated resource-type/name classification and ordered metadata-only `LocalResourceInventoryState` adapter | sign-on transport, readiness/precache decisions, downloads/cache, file contents, asset loading |
 | `hlclient_goldsrc_resource_readiness` | strict list/inventory correlation, per-entry readiness and aggregate impact, exact map selection, immutable ordered manifest, and bounded type-local sparse slots | downloads/cache, file-content parsing, assets, renderer, OpenGL |
@@ -204,6 +207,8 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_world_texture_check` | network-free, read-only BSP/WAD texture composition for one explicit safe virtual map | stock process launch, writes, downloads/cache, renderer/GPU work, native-path or asset-byte output |
 | `hlclient_goldsrc_asset_check` | network-free, read-only canonical Studio/SPR composition for one safe virtual asset with bounded aggregate diagnostics | network/stage libraries, writes, native-path or raw-asset output, rendering/entity behavior |
 | `hlclient_usercmd_check` | deterministic offline construction, encode/decode, and summary of named synthetic usercmd scenarios | stock evidence claims, sockets/server contact, arbitrary raw fields, runtime stage mutation |
+| `hlclient_prediction_check` | read-only real/synthetic-BSP prediction campaigns with metadata-only deterministic hashes | sockets, raw state CLI, game writes, stock compatibility claims |
+| `hlclient_prediction_viewer` | separate offline player-walk renderer composed with synthetic authority and corrected camera samples | production fake server/opcodes, arbitrary authority fields, stock compatibility claims |
 | `hlclient_world_viewer` | network-free, read-only BSP/WAD/lightmap/spatial/scene composition and configurable local diagnostic OpenGL preview, including free-fly input, for one safe virtual map | stock/network process launch, writes, downloads/cache, native map-path input, runtime gameplay simulation |
 | `hlclient_entity_viewer` | network-free, read-only mixed Studio/Sprite playback with historical cameras or a local synthetic entity-first-person camera | live snapshots, stock player semantics, commands, writes, network control |
 | `hlclient` | composition root and frame loop | reusable subsystem implementation |
@@ -952,8 +957,35 @@ existing scheduler/adapter without usercmd network history. The renderer sees
 only the normal camera/scene boundary. Production player-walk collision is
 world-only; explicit synthetic static brushes are opt-in test/scene metadata,
 and dynamic/stock brush solidity is not inferred. Full `PM_Move`, liquids,
-ladders, stuck recovery, prediction, replay and reconciliation remain outside
-this ownership graph.
+ladders and stuck recovery remain outside this ownership graph.
+
+## M4.6.3.3 prediction ownership
+
+```text
+immutable input intent
+    -> transactional LocalPlayerMovementPreparedUpdate
+    -> immutable bounded LocalPredictionHistoryState
+    -> typed in-memory AuthoritativePlayerState
+    -> LocalPlayerPredictionReconciler
+       -> same GoldSrcLocalMovementKernel for exact retained commands
+    -> immediate corrected physical state
+    -> PredictionVisualCorrectionState (camera sample only)
+```
+
+Prepare performs simulation and allocation without controller mutation.
+Preflight plus non-allocating commit publishes movement and history together;
+an abandoned plan retains accepted one-shot input and the previous physical,
+camera, scheduler, and history publications. Reconciliation rejects session,
+environment, movement-config, collision-world, authority-order, and history
+gaps. Replay never samples input, emits effects, resends a packet, or mutates an
+old publication. Small correction residuals decay linearly for 100 ms on the
+camera only; large, discrete, teleport, and hard-reset corrections snap.
+
+`SyntheticAuthoritativePlayerSimulator` owns an independent state/scratch and
+bounded command/update queues. It is a tool/test authority, not evidence for a
+stock server. The stock authority adapter returns `stock_evidence_pending`;
+neither netchan ACKs nor generic entity field names are treated as
+player-command acknowledgement or authoritative player state.
 
 ## Module and plugin policy
 

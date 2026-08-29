@@ -76,8 +76,19 @@ or arithmetic error publishes no successor state; the caller retains the
 unchanged previous state.
 
 `local_player_movement_state_signature` hashes the typed state metadata in a
-stable order. It is a deterministic project summary, not a server checksum or
-prediction acknowledgement.
+stable order. It is a deterministic project summary, not a server checksum.
+M4.6.3.3 may retain it beside an explicit typed synthetic acknowledgement for
+comparison, but the signature itself never acknowledges a command.
+
+`local_player_movement_state_create_info` reconstructs every normalized field
+losslessly for authoritative correction and hard-reset factories. Prediction
+history stores shared immutable pre/post states, and replay publishes new
+states by running the exact retained command through the same kernel. Physical
+authority correction is immediate; visual decay is applied only to a camera
+sample and never changes this state, its hull, ground, contents, buttons, or
+simulation time.
 
 See [GoldSrc local movement](GOLDSRC_LOCAL_MOVEMENT.md) for the simulation
 order and [player-walk viewer](PLAYER_WALK_VIEWER.md) for the local controller.
+See [local player prediction](LOCAL_PLAYER_PREDICTION.md) for the separate
+synthetic-authority ownership boundary.

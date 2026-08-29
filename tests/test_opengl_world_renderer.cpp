@@ -213,13 +213,18 @@ private:
     std::unique_ptr<opengl::OpenGlRenderer> renderer_;
 };
 
-[[nodiscard]] std::unique_ptr<HiddenOpenGlContext> try_create_context() noexcept
+[[nodiscard]] std::unique_ptr<HiddenOpenGlContext> try_create_context()
 {
     try {
         return std::make_unique<HiddenOpenGlContext>();
-    } catch (...) {
+    } catch (const std::exception& error) {
+        if (hlclient::platform::classify_opengl_startup_capability_failure(
+                error) !=
+            hlclient::platform::OpenGlStartupCapabilityFailure::none) {
+            return nullptr;
+        }
+        throw;
     }
-    return nullptr;
 }
 
 [[nodiscard]] assets::WorldAsset make_vertical_world()

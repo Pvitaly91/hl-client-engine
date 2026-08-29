@@ -24,16 +24,19 @@ namespace movement_collision = hlclient::goldsrc::movement;
 namespace scene_collision = hlclient::goldsrc::collision;
 
 [[nodiscard]] brush_models::BrushRigidTransform rigid(
-    const assets::AssetVector3 origin)
+    const assets::AssetVector3 origin,
+    const assets::AssetVector3 angles = {})
 {
-    const auto built = brush_models::make_brush_rigid_transform(origin, {});
+    const auto built = brush_models::make_brush_rigid_transform(origin, angles);
     REQUIRE(built);
     REQUIRE(built.transform);
     return *built.transform;
 }
 
 [[nodiscard]] std::shared_ptr<const scene_collision::BrushCollisionScene>
-single_solid_brush_scene()
+single_solid_brush_scene(
+    const assets::AssetVector3 origin = {10.0F, 0.0F, 0.0F},
+    const assets::AssetVector3 angles = {})
 {
     auto package = fixture::package(false);
     const auto library =
@@ -45,7 +48,7 @@ single_solid_brush_scene()
         7U, 1U, 42U};
     const std::array definitions{
         scene_collision::BrushCollisionInstanceDefinition{
-            identity, rigid({10.0F, 0.0F, 0.0F})},
+            identity, rigid(origin, angles)},
     };
     const scene_collision::ExplicitSyntheticBrushCollisionRoleProvider provider{
         std::vector<scene_collision::SyntheticBrushCollisionRoleBinding>{
@@ -56,6 +59,31 @@ single_solid_brush_scene()
     REQUIRE(built);
     REQUIRE(built.scene);
     return built.scene;
+}
+
+[[nodiscard]] std::shared_ptr<const collision::CollisionWorldPackage>
+repackaged_world(
+    const std::shared_ptr<const collision::CollisionWorldPackage>& source,
+    collision::CollisionWorldIdentity identity,
+    const double first_plane_distance_adjustment = 0.0)
+{
+    REQUIRE(source);
+    std::vector<collision::CollisionPlane> planes{
+        source->planes().begin(), source->planes().end()};
+    REQUIRE_FALSE(planes.empty());
+    planes.front().distance += first_plane_distance_adjustment;
+    return std::make_shared<const collision::CollisionWorldPackage>(
+        std::move(planes),
+        std::vector<collision::CollisionNode>{
+            source->nodes().begin(), source->nodes().end()},
+        std::vector<collision::CollisionLeaf>{
+            source->leaves().begin(), source->leaves().end()},
+        std::vector<collision::CollisionClipnode>{
+            source->clipnodes().begin(), source->clipnodes().end()},
+        std::vector<collision::CollisionModel>{
+            source->models().begin(), source->models().end()},
+        std::move(identity), source->statistics(),
+        source->compatibility_profile(), source->evidence_profile());
 }
 
 [[nodiscard]] movement_collision::LocalMovementCollisionQueryConfig
@@ -206,6 +234,46 @@ TEST_CASE("World-only movement collision preserves world query evidence",
     CHECK(traced.result->traversal_statistics.terminal_interval_count > 0U);
 }
 
+TEST_CASE("World-only collision identity derives a complete package fallback",
+    "[goldsrc][movement][collision][world][identity]")
+{
+    const auto source = fixture::package(true, 0.0);
+    const movement_collision::WorldOnlyMovementCollision sourced{source};
+    const auto sourced_identity = sourced.session_identity();
+    REQUIRE(sourced_identity);
+    CHECK(sourced_identity->collision_world_primary == 0x1234U);
+    CHECK(sourced_identity->collision_world_secondary == 0x5678U);
+
+    const auto without_fingerprint = repackaged_world(
+        source, collision::CollisionWorldIdentity{std::nullopt, 30U});
+    const auto zero_fingerprint = repackaged_world(source,
+        collision::CollisionWorldIdentity{
+            assets::AssetSourceFingerprint{0U, 0U}, 30U});
+    const auto changed_collision = repackaged_world(
+        source, collision::CollisionWorldIdentity{std::nullopt, 30U}, 1.0);
+
+    const movement_collision::WorldOnlyMovementCollision missing{
+        without_fingerprint};
+    const movement_collision::WorldOnlyMovementCollision zero{
+        zero_fingerprint};
+    const movement_collision::WorldOnlyMovementCollision changed{
+        changed_collision};
+    const auto missing_identity = missing.session_identity();
+    const auto zero_identity = zero.session_identity();
+    const auto changed_identity = changed.session_identity();
+    REQUIRE(missing_identity);
+    REQUIRE(zero_identity);
+    REQUIRE(changed_identity);
+    CHECK(missing_identity->valid());
+    CHECK(zero_identity->valid());
+    CHECK(changed_identity->valid());
+    CHECK((missing_identity->collision_world_primary != 0U ||
+        missing_identity->collision_world_secondary != 0U));
+    CHECK((zero_identity->collision_world_primary != 0U ||
+        zero_identity->collision_world_secondary != 0U));
+    CHECK(*missing_identity != *changed_identity);
+}
+
 TEST_CASE("World-only movement collision rejects malformed requests before query",
     "[goldsrc][movement][collision][world][security]")
 {
@@ -306,6 +374,49 @@ TEST_CASE("Synthetic movement collision publishes stable brush identity",
     REQUIRE(contents);
     CHECK(contents.result->contents.category ==
         movement::PlayerMovementContents::empty);
+}
+
+TEST_CASE("Synthetic collision identity covers transforms and query bounds",
+    "[goldsrc][movement][collision][synthetic][identity]")
+{
+    const auto original_scene = single_solid_brush_scene();
+    const auto translated_scene =
+        single_solid_brush_scene({11.0F, 0.0F, 0.0F});
+    const auto rotated_scene = single_solid_brush_scene(
+        {10.0F, 0.0F, 0.0F}, {0.0F, 90.0F, 0.0F});
+
+    std::vector<scene_collision::BrushCollisionSceneInstance> instances{
+        original_scene->instances().begin(), original_scene->instances().end()};
+    REQUIRE_FALSE(instances.empty());
+    instances.front().transformed_bounds.maximum.x += 0.25F;
+    const auto changed_bounds_scene =
+        std::make_shared<const scene_collision::BrushCollisionScene>(
+            original_scene->model_library(), std::move(instances),
+            original_scene->role_provider_profile());
+
+    const movement_collision::SyntheticBrushMovementCollision original{
+        original_scene};
+    const movement_collision::SyntheticBrushMovementCollision translated{
+        translated_scene};
+    const movement_collision::SyntheticBrushMovementCollision rotated{
+        rotated_scene};
+    const movement_collision::SyntheticBrushMovementCollision changed_bounds{
+        changed_bounds_scene};
+    const auto original_identity = original.session_identity();
+    const auto translated_identity = translated.session_identity();
+    const auto rotated_identity = rotated.session_identity();
+    const auto changed_bounds_identity = changed_bounds.session_identity();
+    REQUIRE(original_identity);
+    REQUIRE(translated_identity);
+    REQUIRE(rotated_identity);
+    REQUIRE(changed_bounds_identity);
+    CHECK(original_identity->valid());
+    CHECK(original_identity->scene_signature !=
+        translated_identity->scene_signature);
+    CHECK(original_identity->scene_signature !=
+        rotated_identity->scene_signature);
+    CHECK(original_identity->scene_signature !=
+        changed_bounds_identity->scene_signature);
 }
 
 TEST_CASE("Synthetic movement collision fails closed without explicit roles",

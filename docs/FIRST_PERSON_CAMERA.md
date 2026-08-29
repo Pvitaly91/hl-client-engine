@@ -65,3 +65,19 @@ metadata, while the renderer still receives no movement state, collision
 package, usercmd or MoveVars. Player-walk camera updates can rebuild CPU
 visibility but retain GPU world/scene resource identities. See
 [local movement](GOLDSRC_LOCAL_MOVEMENT.md).
+
+## Prediction visual correction
+
+M4.6.3.3 corrects simulation state immediately. Only the rendered
+player-walk camera may retain a bounded residual for a small correction. The
+residual decays linearly over 100 ms, is sampled against the active collision
+world, and can only be shortened or snapped; it never feeds movement, input,
+history, acknowledgement, replay, or packet state. Large corrections,
+teleports, hard resets, incompatible sessions, and unsafe camera samples snap
+in one sample. Yaw and pitch remain locally controlled and are not inferred
+from authority.
+
+The correction object records only bounded classifications, ordinals,
+revisions, and flags. It exposes no arbitrary correction input and does not
+make the camera target an owner of prediction. See
+[prediction visual correction](PREDICTION_VISUAL_CORRECTION.md).

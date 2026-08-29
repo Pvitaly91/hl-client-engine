@@ -18,6 +18,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -121,12 +122,16 @@ private:
     std::unique_ptr<opengl::OpenGlRenderer> renderer_;
 };
 
-[[nodiscard]] inline std::unique_ptr<HiddenContext> try_context() noexcept
+[[nodiscard]] inline std::unique_ptr<HiddenContext> try_context()
 {
     try {
         return std::make_unique<HiddenContext>();
-    } catch (...) {
-        return {};
+    } catch (const std::exception& error) {
+        if (platform::classify_opengl_startup_capability_failure(error) !=
+            platform::OpenGlStartupCapabilityFailure::none) {
+            return {};
+        }
+        throw;
     }
 }
 

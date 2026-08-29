@@ -307,6 +307,12 @@ struct PlayerMovementStatistics {
 [[nodiscard]] std::uint64_t local_player_movement_state_signature(
     const LocalPlayerMovementState& state) noexcept;
 
+// Lossless project-side reconstruction seam for staged simulation and
+// synthetic-authority fixtures. This is not a wire projection.
+[[nodiscard]] LocalPlayerMovementStateCreateInfo
+local_player_movement_state_create_info(
+    const LocalPlayerMovementState& state) noexcept;
+
 [[nodiscard]] std::string_view to_string(
     GoldSrcMovementCompatibilityProfile profile) noexcept;
 [[nodiscard]] std::string_view to_string(

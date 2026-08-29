@@ -507,6 +507,30 @@ or third-party movement implementation is compiled or linked. Automated tests
 use project-authored fixtures; user-owned maps remain optional read-only
 validation inputs and are not build dependencies.
 
+M4.6.3.3 adds no third-party dependency. Its project-owned target direction is:
+
+```text
+hlclient_prediction_api
+    -> hlclient_movement_api / hlclient_goldsrc_usercmd_api
+hlclient_local_prediction
+    -> hlclient_prediction_api / hlclient_goldsrc_local_movement
+hlclient_prediction_visual
+    -> hlclient_prediction_api / hlclient_collision_api
+    -> hlclient_gameplay_camera
+hlclient_local_player_controller
+    -> hlclient_local_prediction / hlclient_prediction_visual
+hlclient_prediction_check
+    -> read-only local source / BSP collision / local prediction / SHA-256
+hlclient_prediction_viewer
+    -> local prediction controller / existing SDL3+OpenGL viewer stack
+```
+
+Prediction libraries do not depend on netchan, sockets, filesystem paths,
+SDL, or OpenGL. Synthetic authority is an in-memory tool/test source and adds
+no `svc_*`, `clc_*`, packet, checksum, or transmission dependency. The visual
+target changes only a caller-visible camera sample; it cannot mutate movement
+state or GPU resource identity.
+
 ## Updating a dependency
 
 For each update:

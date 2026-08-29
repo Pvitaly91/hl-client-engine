@@ -1,6 +1,8 @@
 #include <hlclient/goldsrc/movement/local_movement_collision.hpp>
 
+#include <bit>
 #include <cmath>
+#include <type_traits>
 #include <utility>
 
 namespace hlclient::goldsrc::movement {
@@ -14,6 +16,204 @@ namespace player_movement = hlclient::movement;
 {
     return std::isfinite(value.x) && std::isfinite(value.y) &&
         std::isfinite(value.z);
+}
+
+class StableIdentityHash final {
+public:
+    template<class Value>
+        requires(std::is_integral_v<Value> || std::is_enum_v<Value>)
+    void mix(const Value value) noexcept
+    {
+        mix_unsigned(static_cast<std::uint64_t>(value));
+    }
+
+    void mix(const float value) noexcept
+    {
+        mix_unsigned(std::bit_cast<std::uint32_t>(value));
+    }
+
+    void mix(const double value) noexcept
+    {
+        mix_unsigned(std::bit_cast<std::uint64_t>(value));
+    }
+
+    void mix(const assets::AssetVector3& value) noexcept
+    {
+        mix(value.x);
+        mix(value.y);
+        mix(value.z);
+    }
+
+    void mix(const assets::WorldBounds& value) noexcept
+    {
+        mix(value.minimum);
+        mix(value.maximum);
+    }
+
+    [[nodiscard]] assets::AssetSourceFingerprint finish() const noexcept
+    {
+        return {
+            primary_ == 0U ? kPrimaryFallback : primary_,
+            secondary_ == 0U ? kSecondaryFallback : secondary_,
+        };
+    }
+
+private:
+    void mix_unsigned(const std::uint64_t value) noexcept
+    {
+        for (std::size_t index = 0U; index < sizeof(value); ++index) {
+            const auto shift = static_cast<unsigned int>(index * 8U);
+            const auto byte = static_cast<std::uint8_t>(value >> shift);
+            primary_ ^= byte;
+            primary_ *= kFnvPrime;
+            secondary_ ^= byte;
+            secondary_ *= kFnvPrime;
+        }
+    }
+    static constexpr std::uint64_t kFnvPrime = 1'099'511'628'211ULL;
+    static constexpr std::uint64_t kPrimaryFallback =
+        14'695'981'039'346'656'037ULL;
+    static constexpr std::uint64_t kSecondaryFallback =
+        10'965'116'821'109'875'189ULL;
+
+    std::uint64_t primary_{14'695'981'039'346'656'037ULL};
+    std::uint64_t secondary_{
+        14'695'981'039'346'656'037ULL ^ 0x9E37'79B9'7F4A'7C15ULL};
+};
+
+void hash_contents(
+    StableIdentityHash& hash,
+    const core_collision::CollisionContents& contents) noexcept
+{
+    hash.mix(static_cast<std::uint64_t>(
+        std::bit_cast<std::uint32_t>(contents.source.raw)));
+    hash.mix(static_cast<std::uint64_t>(contents.category));
+}
+
+[[nodiscard]] assets::AssetSourceFingerprint derived_package_fingerprint(
+    const core_collision::CollisionWorldPackage& package) noexcept
+{
+    StableIdentityHash hash;
+    hash.mix(0x484C'434F'4C4C'5631ULL); // HLCOLLV1
+    hash.mix(static_cast<std::uint64_t>(package.compatibility_profile()));
+    hash.mix(static_cast<std::uint64_t>(package.evidence_profile()));
+
+    const auto& identity = package.identity();
+    hash.mix(identity.source_fingerprint.has_value() ? 1U : 0U);
+    if (identity.source_fingerprint) {
+        hash.mix(identity.source_fingerprint->primary);
+        hash.mix(identity.source_fingerprint->secondary);
+    }
+    hash.mix(identity.source_revision);
+
+    hash.mix(static_cast<std::uint64_t>(package.planes().size()));
+    for (const auto& plane : package.planes()) {
+        hash.mix(plane.normal);
+        hash.mix(plane.distance);
+        hash.mix(plane.source_plane_index);
+        hash.mix(static_cast<std::uint64_t>(
+            std::bit_cast<std::uint32_t>(plane.source_type)));
+    }
+
+    hash.mix(static_cast<std::uint64_t>(package.nodes().size()));
+    for (const auto& node : package.nodes()) {
+        hash.mix(node.plane_index);
+        for (const auto& child : node.children) {
+            hash.mix(static_cast<std::uint64_t>(child.kind));
+            hash.mix(child.index);
+        }
+    }
+
+    hash.mix(static_cast<std::uint64_t>(package.leaves().size()));
+    for (const auto& leaf : package.leaves()) {
+        hash.mix(leaf.source_leaf_index);
+        hash_contents(hash, leaf.contents);
+    }
+
+    hash.mix(static_cast<std::uint64_t>(package.clipnodes().size()));
+    for (const auto& clipnode : package.clipnodes()) {
+        hash.mix(clipnode.plane_index);
+        for (const auto& child : clipnode.children) {
+            hash.mix(static_cast<std::uint64_t>(child.kind));
+            hash.mix(child.index);
+            hash_contents(hash, child.terminal);
+        }
+    }
+
+    hash.mix(static_cast<std::uint64_t>(package.models().size()));
+    for (const auto& model : package.models()) {
+        hash.mix(model.source_model_index);
+        hash.mix(model.source_origin);
+        hash.mix(model.source_bounds);
+        hash.mix(model.first_source_face);
+        hash.mix(model.source_face_count);
+        for (const auto& hull : model.hulls) {
+            hash.mix(static_cast<std::uint64_t>(hull.ordinal));
+            hash.mix(static_cast<std::uint64_t>(hull.domain));
+            hash.mix(static_cast<std::uint64_t>(hull.root.kind));
+            hash.mix(hull.root.index);
+            hash_contents(hash, hull.root.terminal);
+            hash.mix(static_cast<std::uint64_t>(hull.profile.ordinal));
+            hash.mix(hull.profile.clip_mins);
+            hash.mix(hull.profile.clip_maxs);
+        }
+    }
+
+    const auto& statistics = package.statistics();
+    hash.mix(statistics.plane_count);
+    hash.mix(statistics.node_count);
+    hash.mix(statistics.leaf_count);
+    hash.mix(statistics.clipnode_count);
+    hash.mix(statistics.model_count);
+    hash.mix(statistics.reachable_hull0_nodes);
+    hash.mix(statistics.reachable_clipnodes);
+    hash.mix(statistics.unreachable_clipnodes);
+    hash.mix(statistics.model_hull_root_count);
+    hash.mix(statistics.direct_terminal_root_count);
+    hash.mix(statistics.maximum_tree_depth);
+    return hash.finish();
+}
+
+[[nodiscard]] assets::AssetSourceFingerprint collision_world_fingerprint(
+    const core_collision::CollisionWorldPackage& package) noexcept
+{
+    const auto& source = package.identity().source_fingerprint;
+    if (source && (source->primary != 0U || source->secondary != 0U)) {
+        return *source;
+    }
+    return derived_package_fingerprint(package);
+}
+
+[[nodiscard]] std::uint64_t scene_identity_signature(
+    const brush_collision::BrushCollisionScene& scene) noexcept
+{
+    StableIdentityHash hash;
+    hash.mix(0x484C'5343'454E'4531ULL); // HLSCENE1
+    hash.mix(static_cast<std::uint64_t>(scene.role_provider_profile()));
+    hash.mix(static_cast<std::uint64_t>(scene.instances().size()));
+    for (const auto& instance : scene.instances()) {
+        hash.mix(instance.identity.stable_instance_ordinal);
+        hash.mix(instance.identity.source_model_index);
+        hash.mix(instance.identity.source_entity_index.has_value() ? 1U : 0U);
+        if (instance.identity.source_entity_index) {
+            hash.mix(*instance.identity.source_entity_index);
+        }
+        hash.mix(instance.transform.translation);
+        hash.mix(instance.transform.rotation_basis.local_x_in_world);
+        hash.mix(instance.transform.rotation_basis.local_y_in_world);
+        hash.mix(instance.transform.rotation_basis.local_z_in_world);
+        hash.mix(instance.transform.rotation_degrees);
+        hash.mix(instance.transform.source_model_origin);
+        hash.mix(static_cast<std::uint64_t>(
+            instance.transform.coordinate_profile));
+        hash.mix(static_cast<std::uint64_t>(
+            instance.transform.transform_profile));
+        hash.mix(instance.transformed_bounds);
+        hash.mix(static_cast<std::uint64_t>(instance.role));
+        hash.mix(static_cast<std::uint64_t>(
+            instance.role_provider_profile));
+    }
+    return hash.finish().primary;
 }
 
 [[nodiscard]] bool valid_world_package(
@@ -322,6 +522,12 @@ scene_trace_request(
 
 } // namespace
 
+std::optional<LocalMovementCollisionSessionIdentity>
+ILocalMovementCollision::session_identity() const noexcept
+{
+    return std::nullopt;
+}
+
 std::string_view to_string(const LocalMovementCollisionProfile profile) noexcept
 {
     switch (profile) {
@@ -440,6 +646,23 @@ LocalMovementCollisionProfile WorldOnlyMovementCollision::profile()
 bool WorldOnlyMovementCollision::valid() const noexcept
 {
     return valid_world_package(package_);
+}
+
+std::optional<LocalMovementCollisionSessionIdentity>
+WorldOnlyMovementCollision::session_identity() const noexcept
+{
+    if (!valid()) {
+        return std::nullopt;
+    }
+    const auto& source = package_->identity();
+    const auto fingerprint = collision_world_fingerprint(*package_);
+    return LocalMovementCollisionSessionIdentity{
+        profile(),
+        fingerprint.primary,
+        fingerprint.secondary,
+        source.source_revision,
+        1U,
+    };
 }
 
 const std::shared_ptr<const core_collision::CollisionWorldPackage>&
@@ -594,6 +817,24 @@ LocalMovementCollisionProfile SyntheticBrushMovementCollision::profile()
 bool SyntheticBrushMovementCollision::valid() const noexcept
 {
     return !synthetic_scene_error(scene_).has_value();
+}
+
+std::optional<LocalMovementCollisionSessionIdentity>
+SyntheticBrushMovementCollision::session_identity() const noexcept
+{
+    const auto package = world_package();
+    if (!valid() || !package || !scene_) {
+        return std::nullopt;
+    }
+    const auto& source = package->identity();
+    const auto fingerprint = collision_world_fingerprint(*package);
+    return LocalMovementCollisionSessionIdentity{
+        profile(),
+        fingerprint.primary,
+        fingerprint.secondary,
+        source.source_revision,
+        scene_identity_signature(*scene_),
+    };
 }
 
 const std::shared_ptr<const brush_collision::BrushCollisionScene>&

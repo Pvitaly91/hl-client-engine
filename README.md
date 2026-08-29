@@ -7,8 +7,10 @@ simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
 The repository has implemented M4.6.3.2's deterministic local dry-walk
-movement kernel and player-walk viewer plus M4.6.3.2.1's bounded wall-contact
-stability layer on M4.6.3.1's renderer/network-neutral
+movement kernel and player-walk viewer, M4.6.3.2.1's bounded wall-contact
+stability layer, and M4.6.3.3's synthetic-authority local prediction,
+retained-command replay, reconciliation, and camera-only correction layer on
+M4.6.3.1's renderer/network-neutral
 GoldSrc BSP collision world and deterministic project trace profile, alongside
 M4.4.1's explicit Valve BSP-v30 geometry
 compatibility profile on top of M4.4's bounded renderer-neutral spatial,
@@ -79,8 +81,10 @@ zero-progress clipping, repeated planes/touches, step candidates and
 interactive typed failures bounded and transactional. Only the named
 public-Valve-informed dry-walk
 subset and synthetic command semantics execute; full `PM_Move`, water,
-ladders, dynamic brushes, stuck recovery, prediction, command replay and
-reconciliation remain absent.
+ladders, dynamic brushes and stuck recovery remain absent. Prediction is
+executable only for the in-memory synthetic-authority profile. Stock Protocol
+48 command acknowledgement mapping and authoritative local-player entity
+projection remain evidence-pending and fail closed.
 
 The CPU-only production boundary is `--stop-after collision-world`. The
 network-free `hlclient_collision_check` and
@@ -159,6 +163,32 @@ Both tools are offline and read-only. The viewer uses world-only collision and
 a project-owned movement environment; visible stock brush entities are not
 automatically solid. See [player-walk viewer](docs/PLAYER_WALK_VIEWER.md) and
 [player wall-contact stability](docs/PLAYER_WALL_CONTACT_STABILITY.md).
+
+The prediction checker and separate prediction viewer are also offline,
+read-only Win32 targets:
+
+```powershell
+cmake --build build --config Debug --target `
+  hlclient_prediction_check hlclient_prediction_viewer
+
+.\build\bin\Debug\hlclient_prediction_check.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve `
+  --map maps/crossfire.bsp --scenario small-correction `
+  --authority-delay-commands 8 --commands 1000
+
+.\build\bin\Debug\hlclient_prediction_viewer.exe `
+  --basedir "D:\Steam\steamapps\common\Half-Life" --game valve `
+  --map maps/crossfire.bsp --scenario small-correction `
+  --authority-delay-commands 8 --prediction-diagnostics summary `
+  --visibility pvs-frustum --brush-submodels static --cull back
+```
+
+The simulator corrects physical state immediately and smooths only the
+displayed camera. Replay uses the exact immutable commands already retained in
+prediction history: it does not re-read input edges, emit effects again, send
+commands again, or change network packet bytes. See
+[local player prediction](docs/LOCAL_PLAYER_PREDICTION.md) and
+[prediction reconciliation](docs/PREDICTION_RECONCILIATION.md).
 
 The generated solution is:
 

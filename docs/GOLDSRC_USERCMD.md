@@ -238,5 +238,10 @@ kernel; command movement values determine wish speed.
 
 `LocalPlayerMovementController` uses the scheduler and adapter without placing
 local commands in network history or a transport. Pending one-shot edges are
-consumed only by the first successfully simulated command. Stock semantics,
-prediction history, replay and reconciliation remain M4.6.3.3/M4.7 work.
+consumed only after the first successfully simulated command is inserted in
+prediction history and its prepared update commits. M4.6.3.3 keeps a separate
+immutable local prediction history and replays those already-built commands;
+it does not touch transmission history, packet planning, delta bytes,
+checksum, sequence rules, or the retained driver. Replay never resends a
+command and never consumes an input edge twice. Stock command/acknowledgement
+semantics remain M4.7 evidence work.

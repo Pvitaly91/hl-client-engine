@@ -9,10 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  win32-debug:
-    name: Visual Studio 2022 / Win32 / Debug
+  win32-debug-release:
+    name: Visual Studio 2022 / Win32 / Debug + Release
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Check out sources and SDK reference
@@ -26,10 +26,10 @@ jobs:
       - name: Build Debug
         run: cmake --build --preset vs2022-win32-debug
 
-      - name: Run tests
+      - name: Test Debug
         run: ctest --preset vs2022-win32-debug
 
-      - name: Verify command-line and headless startup
+      - name: Verify Debug command-line and headless startup
         shell: pwsh
         run: |
           & .\build\bin\Debug\hlclient.exe --version
@@ -37,4 +37,130 @@ jobs:
           & .\build\bin\Debug\hlclient.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\build\bin\Debug\hlclient.exe --renderer null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Release
+        run: cmake --build --preset vs2022-win32-release
+
+      - name: Test Release
+        run: ctest --preset vs2022-win32-release
+
+      - name: Compare Debug and Release prediction hashes
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $PWD 'build\prediction-cross-config-fixture'
+          & .\build\bin\Release\hlclient_collision_fixture_writer.exe $fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $scenarios = @(
+            'exact-authority', 'delayed-authority', 'small-correction',
+            'velocity-correction', 'large-correction', 'teleport',
+            'stale-duplicate', 'wall-replay', 'jump-replay', 'duck-replay',
+            'history-backpressure', 'hard-reset', 'mixed',
+            'deterministic-route'
+          )
+          foreach ($scenario in $scenarios) {
+            $delay = if ($scenario -ceq 'exact-authority') { '0' } else { '8' }
+            $arguments = @(
+              '--basedir', $fixture,
+              '--game', 'valve',
+              '--map', 'maps/test_movement.bsp',
+              '--scenario', $scenario,
+              '--authority-delay-commands', $delay,
+              '--commands', '1000'
+            )
+            $debugOutput = @(& .\build\bin\Debug\hlclient_prediction_check.exe @arguments)
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $releaseOutput = @(& .\build\bin\Release\hlclient_prediction_check.exe @arguments)
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            foreach ($field in @('final-state-hash', 'history-replay-hash')) {
+              $prefix = "[prediction] $field="
+              $debugValue = @($debugOutput | Where-Object {
+                ([string]$_).StartsWith($prefix)
+              })
+              $releaseValue = @($releaseOutput | Where-Object {
+                ([string]$_).StartsWith($prefix)
+              })
+              if ($debugValue.Count -ne 1 -or $releaseValue.Count -ne 1 -or
+                  $debugValue[0] -cne $releaseValue[0]) {
+                throw "Debug/Release prediction $scenario $field mismatch"
+              }
+            }
+          }
+
+  win32-asan:
+    name: Visual Studio 2022 / Win32 / AddressSanitizer
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out sources and SDK reference
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: recursive
+
+      - name: Configure AddressSanitizer solution
+        run: >-
+          cmake -S . -B build-asan -G "Visual Studio 17 2022" -A Win32
+          -DBUILD_TESTING=ON
+          -DHLCLIENT_WARNINGS_AS_ERRORS=ON
+          -DHLCLIENT_ENABLE_ADDRESS_SANITIZER=ON
+
+      - name: Build focused AddressSanitizer targets
+        run: >-
+          cmake --build build-asan --config Debug --target
+          hlclient_tests
+          hlclient_collision_fixture_writer
+          hlclient_prediction_check
+          hlclient_prediction_viewer
+
+      - name: Expose the matching MSVC AddressSanitizer runtime
+        shell: pwsh
+        run: |
+          $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+          $installation = (& $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath).Trim()
+          if ([string]::IsNullOrWhiteSpace($installation)) {
+            throw 'Visual Studio C++ installation was not found'
+          }
+          $versionFile = Join-Path $installation `
+            'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+          $toolsetVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+          $runtimeDirectory = Join-Path $installation `
+            "VC\Tools\MSVC\$toolsetVersion\bin\Hostx64\x86"
+          $runtime = Join-Path $runtimeDirectory `
+            'clang_rt.asan_dynamic-i386.dll'
+          if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) {
+            throw 'MSVC Win32 AddressSanitizer runtime was not found'
+          }
+          $runtimeDirectory | Out-File -FilePath $env:GITHUB_PATH `
+            -Encoding utf8 -Append
+
+      - name: Run focused AddressSanitizer unit campaigns
+        shell: pwsh
+        run: |
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[prediction][history]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[prediction][reconciliation]~[.stress]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[prediction][reconciliation][wall][.stress]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[goldsrc][movement][wall-contact]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run AddressSanitizer prediction verifier campaign
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $PWD 'build-asan\prediction-fixture'
+          & .\build-asan\bin\Debug\hlclient_collision_fixture_writer.exe $fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\verify_local_prediction_reconciliation.ps1 `
+            -CheckerPath .\build-asan\bin\Debug\hlclient_prediction_check.exe `
+            -ViewerPath .\build-asan\bin\Debug\hlclient_prediction_viewer.exe `
+            -Basedir $fixture `
+            -Game valve `
+            -Maps @('maps/test_movement.bsp') `
+            -Scenarios @('small-correction', 'wall-replay', 'mixed') `
+            -Iterations 2 `
+            -Frames 1000
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
