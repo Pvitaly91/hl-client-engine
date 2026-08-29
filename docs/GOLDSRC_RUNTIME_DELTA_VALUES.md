@@ -84,3 +84,12 @@ loop bound in M4.5.1.
 
 The decoder reports the exact bit cursor and consumed bit count. Failed reads do
 not publish a candidate object or mutate its base.
+
+M4.7.1 retains the same fail-before-read stock behavior. A reserved stock
+runtime delta profile is not enabled by its enum value: exact changed-mask,
+field bit order, scalar/time-window grammar and end padding require accepted
+runtime captures and a future independently authored runtime-message walker;
+neither currently exists. At zero accepted runs the
+runtime delta result remains `evidence_pending`, consumed bits remain zero and
+no clientdata/entity object is published. See
+[stock runtime transcript](GOLDSRC_STOCK_RUNTIME_TRANSCRIPT.md).

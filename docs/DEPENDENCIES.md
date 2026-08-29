@@ -542,3 +542,14 @@ For each update:
 5. repeat build/test in Release and, when relevant, RelWithDebInfo;
 6. update the pin, this document, and any retained third-party notices together;
 7. never replace an immutable pin with `master`, `main`, or another floating ref.
+
+## M4.7.1 stock runtime research tooling
+
+M4.7.1 adds no third-party dependency. The research relay uses the existing
+project UDP/network runtime and SHA-256 implementation; metadata parsing and
+verification use C++20 and Windows PowerShell 5.1-compatible scripts already
+required by the repository. Stock `hl.exe`, `hlds.exe`, Steam, game assets and
+raw captures are never build or CI dependencies. CI uses only independently
+authored fixtures and zero-stock-process, zero-network, zero-write pending
+validation;
+the validation itself performs bounded repository reads.

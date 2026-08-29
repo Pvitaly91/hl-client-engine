@@ -925,9 +925,20 @@ or writes game content. Stock Protocol 48 command acknowledgement semantics
 and authoritative local-player entity projection are deliberately not inferred
 and remain evidence-pending.
 
-M4.7.1 stock authoritative player/entity evidence is next. M4.7.2 retains the
-stock usercmd envelope/checksum and M4.7.3 retains the live connected runtime.
-M3.3 retains download/cache. None is part of M4.6.3.3.
+### M4.7.1 — Stock runtime/entity/authority evidence
+
+**Status: bounded evidence boundary implemented; signed-stock runtime grammar
+remains evidence-pending.** The isolated research/tooling boundary preserves
+the exact post-resource cursor, admits no opcode/body guesses, keeps ACK
+candidate domains separate, represents unresolved local-player identity and
+partial authority explicitly, and cannot activate visual projection or
+prediction. The current checkout has zero accepted runtime sessions; therefore
+runtime-ready, baseline/full/delta/clientdata/time/modelindex and exact usercmd
+ACK profiles remain pending and no tracked runtime evidence JSON is published.
+
+M4.7.2 retains the stock usercmd envelope/checksum, exact acknowledgement
+correlation and project-to-stock command acceptance. M4.7.3 retains the live
+connected runtime/render loop. M3.3 retains download/cache.
 
 ## Superseded milestone numbering
 
@@ -1025,9 +1036,9 @@ boundary. M4.6.3.2 is complete at its deterministic local dry-walk kernel and
 M4.6.3.2.1 is complete at its bounded wall-contact/viewer-failure boundary.
 The world-only player-walk and prediction viewers and their read-only
 verification boundaries remain offline. M4.6.3.3 is complete only for typed
-synthetic authority; M4.7.1 is next for stock authoritative player/entity
-evidence, followed by M4.7.2 stock usercmd envelope/checksum and M4.7.3 live
-runtime work.
+synthetic authority. M4.7.1 supplies the bounded pending stock
+runtime/entity/authority evidence boundary; M4.7.2 stock usercmd
+envelope/checksum is next, followed by M4.7.3 live runtime work.
 
 Every milestone retains these gates:
 

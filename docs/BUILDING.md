@@ -469,10 +469,175 @@ Raw research output is ignored. The verifier never creates the tracked stock
 evidence JSON for a zero-run or incomplete corpus. Capture restoration rejects
 reparse points before and during rollback and preserves its bounded temporary
 backup for manual recovery if exact before/after drift verification cannot
-complete. The current sanitized candidate checks are structural only; because
-the absent capture harness does not publish a per-run typed observation trace,
-tracked validation and projection remain fail-closed instead of accepting
-retry/drop/duplicate/replay claims from labels and counts.
+complete. M4.7.1 now provides a bounded byte-preserving capture harness and an
+independent structural checker, but neither promotes transport metadata to a
+typed stock message observation. Tracked validation and projection therefore
+remain fail-closed instead of accepting retry/drop/duplicate/replay claims from
+labels and counts.
+
+### Stock runtime authority evidence boundary
+
+Build the M4.7.1 capture, checker, and synthetic boundary tests with:
+
+```powershell
+cmake --build build --config Debug --target `
+  hlclient_stock_runtime_capture `
+  hlclient_stock_runtime_check `
+  hlclient_tests
+.\build\bin\Debug\hlclient_tests.exe "[stock-runtime]"
+```
+
+The default verifier is intentionally zero-stock-process and zero-write. With no
+accepted stock corpus it succeeds only by reporting `accepted-runs=0`, stock
+versions as `not-observed`, restoration as `not-run`, and
+`result=evidence_pending`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\verify_stock_runtime_state.ps1 -ValidateEvidencePending
+```
+
+Active stock orchestration is currently disabled. The commands below document
+the intended future campaign, but every active scenario fails before launch,
+network access, output creation, or backup creation until OS-level outbound
+isolation and exact app-build/engine/Protocol/server-build observation exist.
+
+Prepare a separate user-owned research copy without overwriting or deleting any
+existing destination. Inspect both paths before running this example and never
+substitute a regular play installation as `$research`:
+
+```powershell
+$source = "D:\Steam\steamapps\common\Half-Life"
+$research = "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
+
+if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+  throw "Source Half-Life directory is absent."
+}
+if (Test-Path -LiteralPath $research) {
+  throw "Research destination already exists; choose a new empty path."
+}
+
+$researchParent = Split-Path -Parent $research
+New-Item -ItemType Directory -Path $researchParent -Force | Out-Null
+Copy-Item -LiteralPath $source -Destination $research -Recurse
+Set-Content -LiteralPath (Join-Path $research ".hlclient-research-isolated") `
+  -Value "HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1" -Encoding ascii
+```
+
+The read-only preflight is the only stock-installation validation currently
+enabled:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\capture_stock_runtime_state.ps1 -ValidateResearchRoot `
+  -ResearchHalfLifeRoot $research `
+  -ClientPath (Join-Path $research "hl.exe") `
+  -HldsPath (Join-Path $research "hlds.exe")
+```
+
+Preflight accepts only a ready fixed local drive-letter path: UNC/network,
+volume-alias, substituted-drive, and reparse-root forms are rejected. It uses a
+read-only `subst.exe` listing and expands existing DOS/8.3 aliases before
+comparing the research root with the repository and every configured Steam
+library. It then requires the exact marker, canonical unlinked
+`hl.exe`/`hlds.exe` files, no reparse points or alternate data streams anywhere
+in the bounded tree, valid Valve signatures, and launcher `VERSIONINFO`
+1.1.1.1/4.1.1.1. It
+does not observe Steam App build 15961492, engine 1.1.2.2, Protocol 48, or
+server build 10210 and therefore is not a version-complete stock attestation.
+
+Exercise the synthetic hostile-tree restoration guard independently with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\capture_stock_runtime_state.ps1 -ValidateRestorationGuard
+```
+
+This creates and removes only bounded temporary self-test files. It proves the
+implemented hardlink/junction rollback cases, not restoration of a stock run.
+The retained future orchestration takes a complete transactional copy and keeps
+the backup for manual recovery if exact restoration cannot be established.
+
+These baseline, idle, manual movement/view, and loss command templates all
+currently exit 1 with `active-capture=evidence_pending` and zero processes or
+files written:
+
+```powershell
+$active = @{
+  ResearchHalfLifeRoot = $research
+  ClientPath = Join-Path $research "hl.exe"
+  HldsPath = Join-Path $research "hlds.exe"
+  CaptureToolPath = ".\build\bin\Debug\hlclient_stock_runtime_capture.exe"
+  Game = "valve"
+}
+
+& .\scripts\capture_stock_runtime_state.ps1 @active `
+  -Map boot_camp -Scenario baseline
+& .\scripts\capture_stock_runtime_state.ps1 @active `
+  -Map crossfire -Scenario idle-runtime
+& .\scripts\capture_stock_runtime_state.ps1 @active `
+  -Map stalkyard -Scenario forward
+& .\scripts\capture_stock_runtime_state.ps1 @active `
+  -Map boot_camp -Scenario yaw-positive
+& .\scripts\capture_stock_runtime_state.ps1 @active `
+  -Map boot_camp -Scenario drop-server-runtime
+```
+
+The retained labels are `baseline`, `idle-runtime`, `forward`,
+`backward`, `left`, `right`, `forward-right`, `jump`, `duck`, `duck-stand`,
+`yaw-positive`, `yaw-negative`, `pitch-positive`, and `pitch-negative`.
+They do not inject or prove a manual action. Whole-datagram labels are
+`drop-server-runtime`,
+`drop-two-server-runtime`, `duplicate-server-runtime`,
+`reorder-server-runtime`, `drop-client-move`, and `delay-client-move`.
+The relay implementation selects the Nth datagram in a direction (default 20),
+not a decoded runtime or move packet, so none of these names earns semantic
+movement/view/loss credit. Lifecycle/rate labels remain pending too.
+
+The standalone relay code can store bounded raw UDP datagrams and flat
+transport metadata below ignored
+`manual-artifacts/stock-runtime/<32-hex-run-id>`. It does not yet record parsed
+netchan, transformed, fragment, reassembled, decompressed, cursor, or runtime
+message layers; configured limits for those future layers are not evidence that
+they were consumed. If a future valid transport-only run exists, inspect it
+without decoding unconfirmed grammar with:
+
+```powershell
+.\build\bin\Debug\hlclient_stock_runtime_check.exe `
+  --capture-root ".\manual-artifacts\stock-runtime\<32-hex-run-id>" `
+  --scenario transcript
+```
+
+The other accepted CLI labels are `baselines`, `entities`, `clientdata`,
+`authority`, and `ack`; all six currently return the same zero-observation
+`result=evidence_pending` report. The checker binds raw filenames, sizes, and
+file-content hashes, but is not a runtime grammar walker. Corpus verification
+is read-only and always returns nonzero for transport-only records because no
+promotion path or accepted runtime grammar exists:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\verify_stock_runtime_state.ps1 `
+  -CaptureRoot ".\manual-artifacts\stock-runtime" `
+  -CheckerPath ".\build\bin\Debug\hlclient_stock_runtime_check.exe"
+```
+
+| Command | Current exit | Stock processes / persistent writes | Meaning |
+|---|---:|---|---|
+| `verify_stock_runtime_state.ps1 -ValidateEvidencePending` | 0 | 0 / 0 | Honest zero-corpus pending state. |
+| `capture_stock_runtime_state.ps1 -ValidateResearchRoot ...` | 0 for a policy-screened root, otherwise 1 | 0 / 0 | Structural/signature/launcher `VERSIONINFO` preflight; invokes one read-only `subst.exe` helper and retains physical identity as pending. |
+| `capture_stock_runtime_state.ps1 -ValidateRestorationGuard` | 0 on success | 0 / temporary self-test files removed | Synthetic rollback test, not stock attestation. |
+| Any active scenario | 1 | 0 / 0 | Deliberately blocked before launch/output. |
+| Checker on a future structurally valid transport run | 0 | 0 / 0 | Transport/raw integrity with `result=evidence_pending`. |
+| Corpus verifier | 1 | 0 / 0 | Accepted runs and decoded runtime updates remain zero. |
+
+Do not create `docs/evidence/GOLDSRC_STOCK_RUNTIME_STATE.json` while the accepted
+run count is zero. The current decoder retains the exact first unsupported
+runtime cursor and stops; opcode/body grammar, baseline/update/removal semantics,
+local-player identity, clientdata, server time, authoritative movement, and
+command acknowledgement all remain evidence-gated. The catalog decoder is a
+standalone pending API and is not yet composed into production
+`PostResourceSignon`.
 
 ### Manual original-HLDS verification
 

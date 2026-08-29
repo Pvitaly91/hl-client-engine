@@ -143,3 +143,12 @@ See [prediction history](PREDICTION_HISTORY.md),
 [command replay](COMMAND_REPLAY.md),
 [reconciliation](PREDICTION_RECONCILIATION.md), and
 [visual correction](PREDICTION_VISUAL_CORRECTION.md).
+
+## M4.7.1 stock evidence boundary
+
+The stock runtime layer may publish an unresolved identity, domain-tagged ACK
+candidates and a partial movement observation. It cannot manufacture a
+`PredictionSessionIdentity`, `AuthoritativeCommandAcknowledgement` or complete
+`AuthoritativePlayerState`. Consequently the controller remains strictly
+synthetic and no stock frame triggers replay or camera correction. See
+[stock authoritative projection](GOLDSRC_AUTHORITATIVE_STATE_PROJECTION.md).

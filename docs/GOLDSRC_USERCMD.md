@@ -245,3 +245,12 @@ it does not touch transmission history, packet planning, delta bytes,
 checksum, sequence rules, or the retained driver. Replay never resends a
 command and never consumes an input edge twice. Stock command/acknowledgement
 semantics remain M4.7 evidence work.
+
+M4.7.1 adds a tagged `StockCommandAcknowledgementEvidenceState` but does not
+change the command codec, history, planner, checksum, contextual submission or
+packet bytes. Netchan sequence/acknowledgement, move-packet ordinal, runtime
+frame reference and clientdata candidates remain distinct domains. With no
+accepted loss/batching corpus, exact usercmd acknowledgement remains pending
+and no candidate enters prediction. Stock move envelope/checksum and
+project-to-stock acceptance remain M4.7.2. See
+[command-ACK evidence](GOLDSRC_COMMAND_ACK_EVIDENCE.md).

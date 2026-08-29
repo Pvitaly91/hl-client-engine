@@ -55,6 +55,13 @@ add_executable(hlclient_tests
     test_delta_description_stage.cpp
     test_delta_schema_registry.cpp
     test_goldsrc_delta_value_decoder.cpp
+    test_stock_runtime_message_catalog.cpp
+    test_stock_runtime_decoder_boundaries.cpp
+    test_stock_runtime_capture.cpp
+    test_stock_local_player_identity.cpp
+    test_stock_command_ack_evidence.cpp
+    test_stock_authoritative_observation.cpp
+    test_stock_runtime_frame.cpp
     test_entity_baseline_registry.cpp
     test_entity_full_snapshot.cpp
     test_entity_delta_snapshot.cpp
@@ -267,6 +274,9 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_usercmd_session
         hlclient_goldsrc_delta_values
         hlclient_goldsrc_entity_snapshots
+        hlclient_goldsrc_stock_runtime
+        hlclient_goldsrc_stock_runtime_capture
+        hlclient_stock_authoritative_adapter
         hlclient_entity_visual_projection
         hlclient_entity_visual_assets
         hlclient_entity_interpolation

@@ -102,3 +102,11 @@ adds no packet, opcode, socket, file, or production fake-server route.
 
 See [local player prediction](LOCAL_PLAYER_PREDICTION.md) and
 [prediction reconciliation](PREDICTION_RECONCILIATION.md).
+
+M4.7.1 implements that future-facing boundary as a separate partial
+`StockAuthoritativeMovementObservation` and fail-closed adapter. Per-field
+provenance, identity, time, old-buttons and exact ACK gates are explicit. With
+zero accepted stock sessions the adapter publishes no
+`AuthoritativePlayerState`; the existing synthetic constructor and profiles are
+unchanged. See
+[stock authoritative projection](GOLDSRC_AUTHORITATIVE_STATE_PROJECTION.md).

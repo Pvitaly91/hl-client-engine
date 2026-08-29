@@ -999,3 +999,31 @@ future ABI must not pass STL containers, `std::string`, iterators, C++
 exceptions, C++ virtual objects across different toolsets, or memory without an
 explicit allocator and ownership contract. M0.1 does not implement a loader or
 that ABI.
+
+## M4.7.1 stock runtime research boundary
+
+The stock runtime boundary currently has two independent branches; capture
+metadata is not an input to the catalog decoder:
+
+```text
+exact PostResourceResponseBoundary
+    -> standalone pending catalog (neutral category, exact cursor)
+    -> unresolved identity + tagged ACK candidates
+    -> partial authoritative observation + provenance
+    -> optional immutable runtime frame/history
+    -> fail-closed authority/visual adapters
+
+ignored raw UDP + flat transport metadata
+    -> transport metadata/raw-content integrity checker
+    -> evidence_pending (zero decoded messages/frames)
+```
+
+The catalog is not yet composed into production `PostResourceSignon`. The
+production pending path retains one `NetchanDriver` and emits zero extra
+semantic bytes structurally, but no live stock run proves that lifetime in this
+milestone. The relay is byte-forwarding research scaffolding, not a passive
+runtime decoder or replacement production session, and active orchestration is
+disabled until network confinement/version gates exist. No protocol library
+depends on prediction or a renderer; the authority adapter is a higher
+composition layer. Reserved confirmed profiles remain unreachable at zero
+accepted runs.

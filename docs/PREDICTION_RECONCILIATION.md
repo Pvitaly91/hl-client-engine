@@ -124,3 +124,9 @@ failure and eventually return nonzero.
 The reconciler performs no input polling, effect execution, file access,
 packet transmission or rendering. See [command replay](COMMAND_REPLAY.md) and
 [visual correction](PREDICTION_VISUAL_CORRECTION.md).
+
+M4.7.1 does not widen this reconciler. A partial stock observation, unresolved
+identity, netchan ACK candidate or runtime-frame reference is rejected before
+this API. Exact stock usercmd acknowledgement remains pending for M4.7.2, so
+the only executable reconciliation profile remains the synthetic authority
+profile documented above.

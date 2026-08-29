@@ -6,11 +6,16 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.6.3.2's deterministic local dry-walk
-movement kernel and player-walk viewer, M4.6.3.2.1's bounded wall-contact
-stability layer, and M4.6.3.3's synthetic-authority local prediction,
-retained-command replay, reconciliation, and camera-only correction layer on
-M4.6.3.1's renderer/network-neutral
+The repository has implemented M4.7.1's isolated stock-runtime research and
+exact-cursor evidence boundary. M4.7.1 currently has zero accepted signed-stock
+runtime sessions: it provides
+bounded metadata/catalog, identity, ACK-candidate, partial-authority and
+runtime-frame APIs while keeping all unconfirmed wire grammar fail-closed. It
+does not activate stock decoding, visual projection or prediction. The project
+also retains M4.6.3.2's deterministic local dry-walk movement kernel and
+player-walk viewer, M4.6.3.2.1's bounded wall-contact stability layer, and
+M4.6.3.3's synthetic-authority local prediction, retained-command replay,
+reconciliation, and camera-only correction layer on M4.6.3.1's renderer/network-neutral
 GoldSrc BSP collision world and deterministic project trace profile, alongside
 M4.4.1's explicit Valve BSP-v30 geometry
 compatibility profile on top of M4.4's bounded renderer-neutral spatial,
@@ -85,6 +90,17 @@ ladders, dynamic brushes and stuck recovery remain absent. Prediction is
 executable only for the in-memory synthetic-authority profile. Stock Protocol
 48 command acknowledgement mapping and authoritative local-player entity
 projection remain evidence-pending and fail closed.
+
+The M4.7.1 research tools are separate from the production client. Raw output
+is permitted only below ignored `manual-artifacts/stock-runtime/`. Active
+capture is currently blocked before process launch/output creation: a marked
+non-Steam copy alone is insufficient without OS-level outbound isolation and
+complete app/engine/Protocol/server-build observation. The default verifier is
+a zero-stock-process, zero-network, zero-write pending check. See
+[stock runtime transcript](docs/GOLDSRC_STOCK_RUNTIME_TRANSCRIPT.md),
+[local-player identity](docs/GOLDSRC_LOCAL_PLAYER_IDENTITY.md),
+[authoritative projection](docs/GOLDSRC_AUTHORITATIVE_STATE_PROJECTION.md) and
+[command-ACK evidence](docs/GOLDSRC_COMMAND_ACK_EVIDENCE.md).
 
 The CPU-only production boundary is `--stop-after collision-world`. The
 network-free `hlclient_collision_check` and

@@ -69,3 +69,11 @@ local player by entity number, look up origin/velocity fields by name, reuse an
 entity snapshot reference as a command acknowledgement, or treat a netchan ACK
 as a usercmd ACK. Stock local-player entity projection and command-reference
 mapping remain explicitly evidence-pending for M4.7.1.
+
+M4.7.1 now adds the separate stock runtime evidence model without relaxing the
+synthetic builders. The pending catalog retains the exact first unconsumed
+cursor and publishes no `EntitySnapshotState`. Baseline identity, full/delta
+message grammar, removal semantics and snapshot-reference policy remain
+pending at zero accepted runs. See
+[stock baselines](GOLDSRC_STOCK_ENTITY_BASELINES.md) and
+[stock entity updates](GOLDSRC_STOCK_ENTITY_UPDATES.md).

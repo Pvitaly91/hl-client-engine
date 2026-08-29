@@ -277,3 +277,9 @@ See [GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md) for M2.4.4,
 [GoldSrc resource transition](GOLDSRC_RESOURCE_TRANSITION.md) for M3.1.1.
 M3.1.2 resource-list body discovery remains next; none of these continuations
 changes this layer's historical stop.
+
+M4.7.1 reuses this immutable seven-schema registry only as semantic/schema
+context. Public schema names and fields do not establish stock runtime message
+opcodes, masks, bases or value encoding. The stock catalog therefore validates
+that a registry is present but does not read a runtime body until separate
+capture evidence promotes the runtime delta profile.

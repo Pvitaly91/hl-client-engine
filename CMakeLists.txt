@@ -827,6 +827,48 @@ set_property(
     PROPERTY FOLDER "Engine/Network/GoldSrc/Signon")
 
 hlclient_add_library(
+    hlclient_goldsrc_stock_runtime
+    include/hlclient/goldsrc/stock_authoritative_movement.hpp
+    include/hlclient/goldsrc/stock_command_ack_evidence.hpp
+    include/hlclient/goldsrc/stock_local_player_identity.hpp
+    include/hlclient/goldsrc/stock_runtime_frame.hpp
+    include/hlclient/goldsrc/stock_runtime_message_catalog.hpp
+    include/hlclient/goldsrc/stock_server_time.hpp
+    src/goldsrc/stock_authoritative_movement.cpp
+    src/goldsrc/stock_command_ack_evidence.cpp
+    src/goldsrc/stock_local_player_identity.cpp
+    src/goldsrc/stock_runtime_frame.cpp
+    src/goldsrc/stock_runtime_message_catalog.cpp
+    src/goldsrc/stock_server_time.cpp
+)
+add_library(
+    hlclient::goldsrc_stock_runtime ALIAS
+    hlclient_goldsrc_stock_runtime)
+target_link_libraries(
+    hlclient_goldsrc_stock_runtime
+    PUBLIC
+        hlclient::goldsrc_entity_snapshots
+        hlclient::movement_api
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_stock_runtime
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Evidence")
+
+hlclient_add_library(
+    hlclient_goldsrc_stock_runtime_capture
+    include/hlclient/goldsrc/stock_runtime_capture.hpp
+    src/goldsrc/stock_runtime_capture.cpp
+)
+add_library(
+    hlclient::goldsrc_stock_runtime_capture ALIAS
+    hlclient_goldsrc_stock_runtime_capture)
+target_link_libraries(
+    hlclient_goldsrc_stock_runtime_capture PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_stock_runtime_capture
+    PROPERTY FOLDER "Tools/Research/GoldSrc")
+
+hlclient_add_library(
     hlclient_goldsrc_local_resources
     include/hlclient/goldsrc/local_resource_mapping.hpp
     include/hlclient/goldsrc/local_resource_inventory.hpp
@@ -1364,6 +1406,24 @@ set_property(
     PROPERTY FOLDER "Engine/Simulation/Prediction")
 
 hlclient_add_library(
+    hlclient_stock_authoritative_adapter
+    include/hlclient/prediction/stock_authoritative_player_state_adapter.hpp
+    src/prediction/stock_authoritative_player_state_adapter.cpp
+)
+add_library(
+    hlclient::stock_authoritative_adapter ALIAS
+    hlclient_stock_authoritative_adapter)
+target_link_libraries(
+    hlclient_stock_authoritative_adapter
+    PUBLIC
+        hlclient::goldsrc_stock_runtime
+        hlclient::local_prediction
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_stock_authoritative_adapter
+    PROPERTY FOLDER "Engine/Simulation/Prediction")
+
+hlclient_add_library(
     hlclient_prediction_visual
     include/hlclient/prediction/prediction_visual_correction.hpp
     src/prediction/prediction_visual_correction.cpp
@@ -1787,6 +1847,99 @@ target_link_libraries(
 set_property(
     TARGET hlclient_usercmd_check PROPERTY FOLDER "Tools/Network")
 
+add_executable(
+    hlclient_stock_runtime_capture
+    apps/hlclient_stock_runtime_capture/main.cpp
+)
+hlclient_enable_warnings(hlclient_stock_runtime_capture)
+target_link_libraries(
+    hlclient_stock_runtime_capture
+    PRIVATE
+        hlclient::goldsrc_stock_runtime_capture
+        hlclient::network)
+set_property(
+    TARGET hlclient_stock_runtime_capture
+    PROPERTY FOLDER "Tools/Research/GoldSrc")
+
+add_executable(
+    hlclient_stock_runtime_check
+    apps/hlclient_stock_runtime_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_stock_runtime_check)
+target_link_libraries(
+    hlclient_stock_runtime_check
+    PRIVATE
+        hlclient::goldsrc_stock_runtime_capture
+        hlclient::hash_sha256)
+set_property(
+    TARGET hlclient_stock_runtime_check
+    PROPERTY FOLDER "Tools/Research/GoldSrc")
+
+if(BUILD_TESTING)
+    find_program(
+        HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE
+        NAMES pwsh powershell
+        REQUIRED)
+
+    add_test(
+        NAME hlclient_stock_runtime_capture_validate_config
+        COMMAND
+            "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+            -NoLogo
+            -NoProfile
+            -NonInteractive
+            -ExecutionPolicy Bypass
+            -File
+                "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_capture_validate_config.ps1"
+            -CaptureToolPath $<TARGET_FILE:hlclient_stock_runtime_capture>)
+    set_tests_properties(
+        hlclient_stock_runtime_capture_validate_config
+        PROPERTIES TIMEOUT 15)
+
+    add_test(
+        NAME hlclient_stock_runtime_restoration_guard
+        COMMAND
+            "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+            -NoLogo
+            -NoProfile
+            -NonInteractive
+            -ExecutionPolicy Bypass
+            -File
+                "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+            -ValidateRestorationGuard)
+    set_tests_properties(
+        hlclient_stock_runtime_restoration_guard
+        PROPERTIES TIMEOUT 30)
+
+    add_test(
+        NAME hlclient_stock_runtime_active_disabled
+        COMMAND
+            "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+            -NoLogo
+            -NoProfile
+            -NonInteractive
+            -ExecutionPolicy Bypass
+            -File
+                "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_active_disabled.ps1")
+    set_tests_properties(
+        hlclient_stock_runtime_active_disabled
+        PROPERTIES TIMEOUT 15)
+
+    add_test(
+        NAME hlclient_stock_runtime_evidence_pending
+        COMMAND
+            "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+            -NoLogo
+            -NoProfile
+            -NonInteractive
+            -ExecutionPolicy Bypass
+            -File
+                "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_evidence_pending.ps1")
+    set_tests_properties(
+        hlclient_stock_runtime_evidence_pending
+        PROPERTIES TIMEOUT 30)
+endif()
+
 if(BUILD_TESTING)
     foreach(
         usercmd_scenario
@@ -2051,6 +2204,9 @@ foreach(
         hlclient_goldsrc_collision_scene
         hlclient_movement_api
         hlclient_prediction_api
+        hlclient_goldsrc_stock_runtime
+        hlclient_goldsrc_stock_runtime_capture
+        hlclient_stock_authoritative_adapter
         hlclient_goldsrc_local_movement
         hlclient_local_prediction
         hlclient_prediction_visual
@@ -2058,6 +2214,7 @@ foreach(
         hlclient_movement_check
         hlclient_prediction_check
         hlclient_prediction_viewer
+        hlclient_stock_runtime_check
         hlclient_world_viewer
 )
     hlclient_enable_address_sanitizer(${_hlclient_sanitized_target})

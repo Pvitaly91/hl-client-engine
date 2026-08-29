@@ -109,6 +109,7 @@ jobs:
         run: >-
           cmake --build build-asan --config Debug --target
           hlclient_tests
+          hlclient_stock_runtime_check
           hlclient_collision_fixture_writer
           hlclient_prediction_check
           hlclient_prediction_viewer
@@ -139,6 +140,8 @@ jobs:
       - name: Run focused AddressSanitizer unit campaigns
         shell: pwsh
         run: |
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[stock-runtime]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\build-asan\bin\Debug\hlclient_tests.exe '[prediction][history]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\build-asan\bin\Debug\hlclient_tests.exe '[prediction][reconciliation]~[.stress]'
