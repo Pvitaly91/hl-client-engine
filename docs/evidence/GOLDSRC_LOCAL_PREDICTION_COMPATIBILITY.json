@@ -1,0 +1,684 @@
+{
+  "schema_version": "hlclient.goldsrc-local-prediction-compatibility.v1",
+  "project_commit": "e62aec08db4afe1724b87a35a29ce19c1eea98d5",
+  "project_commit_semantics": "verified implementation commit; evidence-only successor commit contains this record",
+  "prediction_profile": "synthetic_authoritative_reconciliation_v1",
+  "prediction_evidence_profile": "project_typed_authoritative_states_and_independent_fixtures",
+  "acknowledgement_profile": "synthetic_uint32_non_wrapping_v1",
+  "stock_protocol_48_authoritative_reconciliation": "evidence_pending",
+  "verification_runs_per_case": 20,
+  "cases": [
+    {
+      "map_ordinal": 0,
+      "scenario_ordinal": 0,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 0,
+        "replayed_commands": 0
+      },
+      "correction_class_counts": {
+        "exact": 1000,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 0,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 0,
+      "history_high_water_mark": 1,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "466494d35cb37492b2863b92035aa37b531ad08176473c2569917c0c78f40d5e",
+      "deterministic_history_replay_sha256": "502d595f4cab6e12ccff69af202532e41a12c573badea52627deebb69c802ee1"
+    },
+    {
+      "map_ordinal": 0,
+      "scenario_ordinal": 1,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 0,
+        "replayed_commands": 0
+      },
+      "correction_class_counts": {
+        "exact": 1000,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 0,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 0,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "466494d35cb37492b2863b92035aa37b531ad08176473c2569917c0c78f40d5e",
+      "deterministic_history_replay_sha256": "3f6a6ca19b07b6a39cb16cd0c3a2c81879a24c2d54fc3b5547ff82a2a68349a9"
+    },
+    {
+      "map_ordinal": 0,
+      "scenario_ordinal": 2,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 1,
+        "replayed_commands": 8
+      },
+      "correction_class_counts": {
+        "exact": 999,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 1,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "5b1b932a031ad68094c54c7b573163d571d05da9fe036f7afffc83f8abc874d9",
+      "deterministic_history_replay_sha256": "6452f9b755c818a2c6b4921e7dfe36e6079c507b341b4c3b4dbfb4aa866c3924"
+    },
+    {
+      "map_ordinal": 0,
+      "scenario_ordinal": 3,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 4,
+        "replayed_commands": 32
+      },
+      "correction_class_counts": {
+        "exact": 996,
+        "replay_without_visual_offset": 2,
+        "small_visual_correction": 2,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 0,
+        "duck_exits": 0
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "e98142c6b091c3e26b676cc7242a10925a3813dc24c5039ee7ebbb5699cc4140",
+      "deterministic_history_replay_sha256": "6f027eef407b0f620a6fa6996a0a59ac57525e229977a7d1807c29d5329c3acc"
+    },
+    {
+      "map_ordinal": 0,
+      "scenario_ordinal": 4,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 10,
+        "replayed_commands": 80
+      },
+      "correction_class_counts": {
+        "exact": 990,
+        "replay_without_visual_offset": 5,
+        "small_visual_correction": 5,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 10,
+        "duck_enters": 0,
+        "duck_exits": 0
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "36ffab7e770d80539b77a7137e475981ca3acb66cb78a068456ee3e4f3c63fac",
+      "deterministic_history_replay_sha256": "2096335a834d4aba0b652338081b400f559bf9a5ae3fc96315369d4bd6c17de2"
+    },
+    {
+      "map_ordinal": 0,
+      "scenario_ordinal": 5,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 20,
+        "replayed_commands": 160
+      },
+      "correction_class_counts": {
+        "exact": 980,
+        "replay_without_visual_offset": 6,
+        "small_visual_correction": 14,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 0,
+        "duck_enters": 11,
+        "duck_exits": 10
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "a8b9aa5603ac92f98693d0e3dcd4af3ce70cf7c6e173018b20ea7acd8840b591",
+      "deterministic_history_replay_sha256": "519eb320e652b459b6ebdc02761e98307b7b3b0b8f6aaf1e92a9fabb89adc257"
+    },
+    {
+      "map_ordinal": 0,
+      "scenario_ordinal": 6,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 4,
+        "replayed_commands": 32
+      },
+      "correction_class_counts": {
+        "exact": 996,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 2,
+        "snap_aggregate": 2
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "fa00f51cf0b3b3f5d2959d53ed8531c6deba06fffac9187fa37fd7910cd94590",
+      "deterministic_history_replay_sha256": "ed3d9243dee1532da2a3a4036dfe88f5acf865ba4861ab3480c080cabddbaf8a"
+    },
+    {
+      "map_ordinal": 1,
+      "scenario_ordinal": 0,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 0,
+        "replayed_commands": 0
+      },
+      "correction_class_counts": {
+        "exact": 1000,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 0,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 0,
+      "history_high_water_mark": 1,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "294778ef890d0d4d2195cc30371f78ff1ff20225c2a0a53b6455d890220e87f7",
+      "deterministic_history_replay_sha256": "38fbdf4a7804f30c932e2c2cafc816861fa2f06fadc573f4d1ec9826cd94f1b8"
+    },
+    {
+      "map_ordinal": 1,
+      "scenario_ordinal": 1,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 0,
+        "replayed_commands": 0
+      },
+      "correction_class_counts": {
+        "exact": 1000,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 0,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 0,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "294778ef890d0d4d2195cc30371f78ff1ff20225c2a0a53b6455d890220e87f7",
+      "deterministic_history_replay_sha256": "ec17bb2f252e93a1d547bf310b3675dea229db835344c8aecd632a3ff8a20eff"
+    },
+    {
+      "map_ordinal": 1,
+      "scenario_ordinal": 2,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 1,
+        "replayed_commands": 8
+      },
+      "correction_class_counts": {
+        "exact": 999,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 1,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "b794695ea0a16e013f7551c2f22759d321ce77691bf4e5d5c8a0d06f17a8632c",
+      "deterministic_history_replay_sha256": "808201b7f2bb2bf8ec19cc4ed91d3df9e6c20612ebb12c4983f65125ce4d69ca"
+    },
+    {
+      "map_ordinal": 1,
+      "scenario_ordinal": 3,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 4,
+        "replayed_commands": 32
+      },
+      "correction_class_counts": {
+        "exact": 996,
+        "replay_without_visual_offset": 4,
+        "small_visual_correction": 0,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 4,
+        "duck_enters": 0,
+        "duck_exits": 0
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "22ba53f59cb3a2d160dc3951886ee65837a6a0ee4811f659c2f9ec31c6a18bd1",
+      "deterministic_history_replay_sha256": "ded270619cddb86fa4a4dd6fa58a0afad5522b064e70bea649a6d7a849486fd3"
+    },
+    {
+      "map_ordinal": 1,
+      "scenario_ordinal": 4,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 10,
+        "replayed_commands": 80
+      },
+      "correction_class_counts": {
+        "exact": 990,
+        "replay_without_visual_offset": 6,
+        "small_visual_correction": 4,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 10,
+        "duck_enters": 0,
+        "duck_exits": 0
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "5eb12d4e413d241a44c5ae21f2d153634c317babd8669a4934c3323759142906",
+      "deterministic_history_replay_sha256": "136f39e4e10a9acd5808fe01860945f106c3e5c098e2a87eda5f1f5a28311569"
+    },
+    {
+      "map_ordinal": 1,
+      "scenario_ordinal": 5,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 20,
+        "replayed_commands": 160
+      },
+      "correction_class_counts": {
+        "exact": 980,
+        "replay_without_visual_offset": 10,
+        "small_visual_correction": 10,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 0,
+        "duck_enters": 11,
+        "duck_exits": 10
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "f94b9b19ac12682f7e5bf8f39ef64323fc7b6e105158fcafbb007a6b8221d080",
+      "deterministic_history_replay_sha256": "2ac404706a0c0b4f84f5a9080ad2348ecb6ec294b06d84a005fe3f428b639095"
+    },
+    {
+      "map_ordinal": 1,
+      "scenario_ordinal": 6,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 4,
+        "replayed_commands": 32
+      },
+      "correction_class_counts": {
+        "exact": 996,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 2,
+        "snap_aggregate": 2
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "ebf26c87a8861895ea76ba33dfc5ef81a6514d3a557144dd3449d157b1c003fe",
+      "deterministic_history_replay_sha256": "bc6b31d45237a810bbdce4c2d1c439b47f6292f234784c7475a3315ec2eca3dc"
+    },
+    {
+      "map_ordinal": 2,
+      "scenario_ordinal": 0,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 0,
+        "replayed_commands": 0
+      },
+      "correction_class_counts": {
+        "exact": 1000,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 0,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 0,
+      "history_high_water_mark": 1,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "eea94edafa5e42c7ca0476b48b928c586b1469e0e3caaf7bec9ba48969dfe585",
+      "deterministic_history_replay_sha256": "49379f573344560b20b312550bcaab78c50bea7ec09101886088949e59e36810"
+    },
+    {
+      "map_ordinal": 2,
+      "scenario_ordinal": 1,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 0,
+        "replayed_commands": 0
+      },
+      "correction_class_counts": {
+        "exact": 1000,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 0,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 0,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "eea94edafa5e42c7ca0476b48b928c586b1469e0e3caaf7bec9ba48969dfe585",
+      "deterministic_history_replay_sha256": "d273a831c26541da222e38f74c95defd77ea7c6416826b545bd192d4635245a0"
+    },
+    {
+      "map_ordinal": 2,
+      "scenario_ordinal": 2,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 1,
+        "replayed_commands": 8
+      },
+      "correction_class_counts": {
+        "exact": 999,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 1,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "2053f384e6256df22b21cee5e4bc8430f0309fcd1679e25da317bc44dbd98b6f",
+      "deterministic_history_replay_sha256": "31628b545b0f641dd572774927389989561586318761b02bc7c7dfb5f6a600bc"
+    },
+    {
+      "map_ordinal": 2,
+      "scenario_ordinal": 3,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 4,
+        "replayed_commands": 32
+      },
+      "correction_class_counts": {
+        "exact": 996,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 4,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 4,
+        "duck_enters": 0,
+        "duck_exits": 0
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "6bd3380b2531e3df534c202e0069518855a4d5eb475f876fe744526b67af580d",
+      "deterministic_history_replay_sha256": "9b8a9e223c4f8862514a11d04f545ca6eccba298c8ee68603f5e53f043145826"
+    },
+    {
+      "map_ordinal": 2,
+      "scenario_ordinal": 4,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 10,
+        "replayed_commands": 80
+      },
+      "correction_class_counts": {
+        "exact": 990,
+        "replay_without_visual_offset": 8,
+        "small_visual_correction": 2,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 10,
+        "duck_enters": 0,
+        "duck_exits": 0
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "b87525ba7cef8b6b14bb0540f8a041f625e6751f7826b7ac6e65a381efe32ce9",
+      "deterministic_history_replay_sha256": "2e9051c3c8fc29ba0de6d19269204f10901873a2a6ef8bf1e1d91ca44e6271c8"
+    },
+    {
+      "map_ordinal": 2,
+      "scenario_ordinal": 5,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 20,
+        "replayed_commands": 160
+      },
+      "correction_class_counts": {
+        "exact": 980,
+        "replay_without_visual_offset": 14,
+        "small_visual_correction": 6,
+        "snap_aggregate": 0
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 0,
+        "duck_enters": 11,
+        "duck_exits": 10
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "68f6c1484fa96d0013d0e4a4ccedddb865b3f44ae0e05021ab1a9687acc7af8d",
+      "deterministic_history_replay_sha256": "f5791851d920447b2732995b0421e7aff714b63a9a580d7798c9dec2e9f9e171"
+    },
+    {
+      "map_ordinal": 2,
+      "scenario_ordinal": 6,
+      "command_ack_replay_counts": {
+        "commands": 1000,
+        "authority_updates": 1000,
+        "acknowledgements": 1000,
+        "reconciliations": 1000,
+        "replay_events": 4,
+        "replayed_commands": 32
+      },
+      "correction_class_counts": {
+        "exact": 996,
+        "replay_without_visual_offset": 0,
+        "small_visual_correction": 2,
+        "snap_aggregate": 2
+      },
+      "maximum_replay_depth": 8,
+      "history_high_water_mark": 9,
+      "one_shot_counts": {
+        "jumps": 3,
+        "duck_enters": 3,
+        "duck_exits": 3
+      },
+      "collision_failure_counts": {
+        "startsolid": 0,
+        "allsolid": 0
+      },
+      "deterministic_state_sha256": "9c1321538d227a8131b52258a5982e6a4532919afc95d459306ef87ecbe1fa5e",
+      "deterministic_history_replay_sha256": "b4b3654ff609afe369f9b3f097c33b72bf9c4f37f620e4683bb880eafa657680"
+    }
+  ],
+  "verification": {
+    "anonymized_map_count": 3,
+    "anonymized_scenario_count_per_map": 7,
+    "case_count": 21,
+    "cpu_checker_runs": 420,
+    "deterministic_state_hashes": true,
+    "deterministic_history_replay_hashes": true,
+    "opengl_scenario_count": 3,
+    "opengl_frames_per_scenario": 1000,
+    "created_files": 0,
+    "deleted_files": 0,
+    "network_operations": 0,
+    "writes_performed": 0,
+    "external_file_drift": "none"
+  },
+  "raw_positions_included": false,
+  "raw_velocities_included": false,
+  "raw_input_recordings_included": false,
+  "bsp_data_included": false,
+  "user_identity_included": false,
+  "network_packets_included": false
+}
