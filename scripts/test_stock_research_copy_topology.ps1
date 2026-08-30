@@ -169,3 +169,8 @@ try {
         [IO.Directory]::Delete($cleanupTarget, $true)
     }
 }
+
+# The rejected unsafe-copy case intentionally leaves the native helper's exit
+# code at one. This script completed successfully, so do not leak that expected
+# child status to a same-process caller such as a GitHub Actions pwsh step.
+$global:LASTEXITCODE = 0

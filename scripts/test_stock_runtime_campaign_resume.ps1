@@ -28,6 +28,7 @@ $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd
 $testPath = [IO.Path]::GetFullPath($TestExecutable)
 $checker = [IO.Path]::GetFullPath($CheckerPath)
 $manualRoot = Join-Path $repositoryRoot 'manual-artifacts\stock-runtime'
+$manualParent = Split-Path -Parent $manualRoot
 $runnerPath = Join-Path $PSScriptRoot 'run_stock_runtime_first_observations.ps1'
 $evidencePath = Join-Path $repositoryRoot `
     'docs\evidence\GOLDSRC_STOCK_RUNTIME_FIRST_OBSERVATIONS.json'
@@ -646,6 +647,7 @@ if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
 }
 
 $beforeManual = Get-PathObservation $manualRoot
+$beforeManualParent = Get-PathObservation $manualParent
 $beforeEvidence = Get-PathObservation $evidencePath
 $saved = $ErrorActionPreference
 try {
@@ -693,6 +695,8 @@ $filesystemClassification = 'not-run'
 $cleanupDriftRejections = 0
 if ($beforeManual -ceq 'absent') {
   $fixtureCreated = $false
+  $fixtureParentCreated = $false
+  $fixtureRepositoryHandle = $null
   $fixtureParentHandle = $null
   $fixtureRootHandle = $null
   $fixtureRunHandles = [Collections.Generic.List[IDisposable]]::new()
@@ -701,10 +705,29 @@ if ($beforeManual -ceq 'absent') {
       '00000000000000000000000000000001',
       '00000000000000000000000000000002')
   try {
-    $fixtureParent = Split-Path -Parent $fixtureRoot
-    $fixtureParentHandle =
-        [HlClient.CampaignFixture.OwnedDirectory]::OpenPinnedOrdinaryDirectory(
-            $fixtureParent)
+    $fixtureParent = [IO.Path]::GetFullPath(
+        (Split-Path -Parent $fixtureRoot)).TrimEnd('\', '/')
+    $requiredFixtureParent = [IO.Path]::GetFullPath(
+        (Join-Path $repositoryRoot 'manual-artifacts')).TrimEnd('\', '/')
+    if ($fixtureParent -ine $requiredFixtureParent) {
+        throw 'Metadata fixture parent is outside the exact ignored root.'
+    }
+    if (Test-Path -LiteralPath $fixtureParent -PathType Container) {
+        $fixtureParentHandle =
+            [HlClient.CampaignFixture.OwnedDirectory]::OpenPinnedOrdinaryDirectory(
+                $fixtureParent)
+    } else {
+        if ((Get-PathObservation $fixtureParent) -cne 'absent') {
+            throw 'Metadata fixture parent is not one ordinary directory.'
+        }
+        $fixtureRepositoryHandle =
+            [HlClient.CampaignFixture.OwnedDirectory]::OpenPinnedOrdinaryDirectory(
+                $repositoryRoot)
+        $fixtureParentHandle =
+            [HlClient.CampaignFixture.OwnedDirectory]::CreateOwnedDirectory(
+                $fixtureRepositoryHandle, 'manual-artifacts')
+        $fixtureParentCreated = $true
+    }
     $fixtureRootHandle =
         [HlClient.CampaignFixture.OwnedDirectory]::CreateOwnedDirectory(
             $fixtureParentHandle, [IO.Path]::GetFileName($fixtureRoot))
@@ -878,7 +901,21 @@ if ($beforeManual -ceq 'absent') {
           }
           [HlClient.CampaignFixture.OwnedDirectory]::MarkExactEntryForDeletion(
               $fixtureRootHandle)
+          $fixtureRootHandle.Dispose()
+          $fixtureRootHandle = $null
         } finally { }
+      }
+      if ($fixtureParentCreated -and $null -ne $fixtureParentHandle -and
+          -not $fixtureParentHandle.IsInvalid) {
+        $parentItem = Get-Item -LiteralPath $fixtureParent -Force
+        if (-not $parentItem.PSIsContainer -or
+            ($parentItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            @(Get-ChildItem -LiteralPath $fixtureParent -Force).Count -ne 0) {
+          throw 'Owned metadata fixture parent drifted; refusing cleanup.'
+        }
+        [HlClient.CampaignFixture.OwnedDirectory]::MarkExactEntryForDeletion(
+            $fixtureParentHandle)
       }
     } finally {
       foreach ($handle in $fixtureRetainedFiles) { $handle.Dispose() }
@@ -889,10 +926,15 @@ if ($beforeManual -ceq 'absent') {
       if ($null -ne $fixtureParentHandle) {
         $fixtureParentHandle.Dispose()
       }
+      if ($null -ne $fixtureRepositoryHandle) {
+        $fixtureRepositoryHandle.Dispose()
+      }
     }
   }
 }
 if ((Get-PathObservation $manualRoot) -cne $beforeManual -or
+    ($beforeManualParent -ceq 'absent' -and
+        (Get-PathObservation $manualParent) -cne 'absent') -or
     (Get-PathObservation $evidencePath) -cne $beforeEvidence) {
     throw 'Fake campaign resume tests changed capture artifacts or evidence.'
 }

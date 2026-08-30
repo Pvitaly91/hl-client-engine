@@ -119,9 +119,13 @@ void write_file(const fs::path& path, const std::string_view bytes)
     } catch (...) {
         return false;
     }
+    std::error_code type_error;
+    const bool directory = fs::is_directory(base, type_error);
+    if (type_error) return false;
     const HANDLE handle = ::CreateFileW(
         stream_path.c_str(), GENERIC_WRITE, share_access, nullptr, CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
+        directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL,
+        nullptr);
     if (handle == INVALID_HANDLE_VALUE) return false;
     DWORD written = 0U;
     const bool valid_size =
@@ -368,6 +372,26 @@ struct StagingReplacementContext final {
     bool replaced{false};
 };
 
+struct TransitionReplacementContext final {
+    fs::path parent;
+    fs::path staging;
+    fs::path displaced;
+    bool attempted{false};
+    bool replaced{false};
+};
+
+struct TransitionSharingContext final {
+    ~TransitionSharingContext()
+    {
+        if (releaser.joinable()) releaser.join();
+    }
+    fs::path parent;
+    bool attempted{false};
+    bool opened{false};
+    std::atomic<bool> released{false};
+    std::thread releaser;
+};
+
 struct PublishedMutationContext final {
     fs::path path;
     bool mutated{false};
@@ -530,6 +554,67 @@ void replace_staging_directory(
     REQUIRE_FALSE(error);
     write_file(context.staging / L"unrelated.txt", "must survive");
     context.replaced = true;
+}
+
+void replace_staging_during_publish_transition(
+    const windows::StockResearchCopyProgressPhase phase,
+    const std::size_t,
+    void* const opaque)
+{
+    auto& context = *static_cast<TransitionReplacementContext*>(opaque);
+    if (phase != windows::StockResearchCopyProgressPhase::
+                     before_destination_publish ||
+        context.attempted) {
+        return;
+    }
+    context.attempted = true;
+    for (const auto& entry : fs::directory_iterator{context.parent}) {
+        const auto name = entry.path().filename().native();
+        if (!name.starts_with(L".hlclient-stock-research-copy-")) continue;
+        if (!context.staging.empty()) return;
+        context.staging = entry.path();
+    }
+    if (context.staging.empty()) return;
+    std::error_code error;
+    fs::rename(context.staging, context.displaced, error);
+    if (error) return;
+    fs::create_directories(context.staging, error);
+    if (error) return;
+    write_file(context.staging / L"unrelated.txt", "must survive");
+    context.replaced = true;
+}
+
+void retain_staging_descendant_during_publish_transition(
+    const windows::StockResearchCopyProgressPhase phase,
+    const std::size_t,
+    void* const opaque)
+{
+    auto& context = *static_cast<TransitionSharingContext*>(opaque);
+    if (phase != windows::StockResearchCopyProgressPhase::
+                     before_destination_publish ||
+        context.attempted) {
+        return;
+    }
+    context.attempted = true;
+    fs::path staging;
+    for (const auto& entry : fs::directory_iterator{context.parent}) {
+        const auto name = entry.path().filename().native();
+        if (!name.starts_with(L".hlclient-stock-research-copy-")) continue;
+        if (!staging.empty()) return;
+        staging = entry.path();
+    }
+    if (staging.empty()) return;
+    const HANDLE blocker = ::CreateFileW(
+        (staging / L"hl.exe").c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (blocker == INVALID_HANDLE_VALUE) return;
+    context.opened = true;
+    context.releaser = std::thread{[&context, blocker] {
+        ::Sleep(150U);
+        static_cast<void>(::CloseHandle(blocker));
+        context.released.store(true);
+    }};
 }
 
 void mutate_published_file(
@@ -1493,6 +1578,58 @@ TEST_CASE(
         CHECK(fs::exists(destination / L"hl.exe"));
         CHECK_FALSE(fs::exists(displaced));
     }
+
+    SECTION("share-delete publish transition rejects staging substitution") {
+        Fixture fixture;
+        const auto source = fixture.root / L"source";
+        const auto destination = fixture.root / L"destination";
+        const auto displaced = fixture.root / L"displaced-transition";
+        populate_stock_root(source);
+        TransitionReplacementContext context{
+            fixture.root, {}, displaced, false, false};
+        windows::StockResearchCopyOptions options;
+        options.progress_hook = &replace_staging_during_publish_transition;
+        options.progress_context = &context;
+
+        const auto copied = windows::materialize_stock_research_copy(
+            source, destination, options);
+
+        CHECK_FALSE(copied);
+        CHECK(context.attempted);
+        CHECK(context.replaced);
+        CHECK(copied.code == windows::StockResearchCopyErrorCode::
+                                  destination_identity_invalid);
+        CHECK_FALSE(fs::exists(destination));
+        CHECK_FALSE(fs::exists(displaced));
+        REQUIRE_FALSE(context.staging.empty());
+        CHECK(read_file(context.staging / L"unrelated.txt") ==
+              "must survive");
+    }
+
+    SECTION("transient descendant share is retried during root publish") {
+        Fixture fixture;
+        const auto source = fixture.root / L"source";
+        const auto destination = fixture.root / L"destination";
+        populate_stock_root(source);
+        TransitionSharingContext context;
+        context.parent = fixture.root;
+        windows::StockResearchCopyOptions options;
+        options.progress_hook =
+            &retain_staging_descendant_during_publish_transition;
+        options.progress_context = &context;
+
+        const auto copied = windows::materialize_stock_research_copy(
+            source, destination, options);
+        if (context.releaser.joinable()) context.releaser.join();
+
+        INFO("copy code=" << windows::to_string(copied.code)
+                            << " native=" << copied.native_error);
+        CHECK(copied);
+        CHECK(context.attempted);
+        CHECK(context.opened);
+        CHECK(context.released.load());
+        CHECK(fs::exists(destination / L"hl.exe"));
+    }
 }
 
 TEST_CASE(
@@ -1533,6 +1670,7 @@ TEST_CASE(
 
         const auto copied = windows::materialize_stock_research_copy(
             source, destination, options);
+        REQUIRE(context.attempted);
         if (!context.created) {
             SKIP("Directory ADS fixture capability is unavailable");
         }
@@ -1557,6 +1695,7 @@ TEST_CASE(
 
         const auto copied = windows::materialize_stock_research_copy(
             source, destination, options);
+        REQUIRE(context.attempted);
         if (!context.created) {
             SKIP("File ADS fixture capability is unavailable");
         }
@@ -1581,6 +1720,7 @@ TEST_CASE(
 
         const auto copied = windows::materialize_stock_research_copy(
             source, destination, options);
+        REQUIRE(context.attempted);
         if (!context.created) {
             SKIP("NTFS hardlink mutation fixture capability is unavailable");
         }
@@ -1745,6 +1885,7 @@ TEST_CASE(
 
         const auto copied = windows::materialize_stock_research_copy(
             source, destination, options);
+        REQUIRE(context.attempted);
         if (!context.created) {
             SKIP("Concurrent directory ADS fixture capability is unavailable");
         }

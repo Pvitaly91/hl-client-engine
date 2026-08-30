@@ -540,6 +540,25 @@ struct MaterializeFailure final {
         native_error);
 }
 
+[[nodiscard]] UniqueHandle open_relative_directory_for_publish(
+    const HANDLE parent,
+    const std::wstring_view leaf,
+    const bool request_delete,
+    const bool share_delete,
+    DWORD& native_error) noexcept
+{
+    ACCESS_MASK access = FILE_TRAVERSE | FILE_READ_ATTRIBUTES |
+                         FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+    if (request_delete) access |= DELETE;
+    return nt_create_relative_entry(
+        parent, leaf, access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE |
+            (share_delete ? FILE_SHARE_DELETE : 0U),
+        FILE_OPEN, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_WRITE_THROUGH,
+        native_error);
+}
+
 [[nodiscard]] UniqueHandle create_relative_file_locked(
     const HANDLE parent,
     const std::wstring_view leaf,
@@ -1802,7 +1821,9 @@ public:
     [[nodiscard]] bool begin(
         const fs::path& root,
         const FileIdentity& expected_identity,
-        DWORD& native_error) noexcept
+        DWORD& native_error,
+        const bool recursive = true,
+        const bool directory_names_only = false) noexcept
     {
         abandon();
         directory_ = UniqueHandle{::CreateFileW(
@@ -1829,16 +1850,19 @@ public:
         }
         overlapped_ = {};
         overlapped_.hEvent = event_.get();
-        constexpr DWORD filters =
+        constexpr DWORD all_filters =
             FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
             FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
             FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
             FILE_NOTIFY_CHANGE_SECURITY | kNotifyChangeStreamName |
             kNotifyChangeStreamSize | kNotifyChangeStreamWrite;
+        const DWORD filters = directory_names_only
+                                  ? FILE_NOTIFY_CHANGE_DIR_NAME
+                                  : all_filters;
         if (::ReadDirectoryChangesW(
                 directory_.get(), buffer_.data(),
-                static_cast<DWORD>(buffer_.size()), TRUE, filters, nullptr,
-                &overlapped_, nullptr) == FALSE) {
+                static_cast<DWORD>(buffer_.size()), recursive ? TRUE : FALSE,
+                filters, nullptr, &overlapped_, nullptr) == FALSE) {
             native_error = ::GetLastError();
             event_.reset();
             directory_.reset();
@@ -1877,8 +1901,8 @@ public:
         const std::wstring_view new_leaf,
         DWORD& native_error) noexcept
     {
-        if (!pending_ || !directory_ || !event_ || root_leaf.empty() ||
-            old_leaf.empty() || new_leaf.empty()) {
+        if (!pending_ || !directory_ || !event_ || old_leaf.empty() ||
+            new_leaf.empty()) {
             native_error = ERROR_INVALID_HANDLE;
             return false;
         }
@@ -1924,6 +1948,9 @@ public:
                     record.FileName,
                     static_cast<std::size_t>(record.FileNameLength) /
                         sizeof(wchar_t)};
+                if (root_leaf.empty()) {
+                    return ordinal_equal(observed, leaf);
+                }
                 return observed.size() ==
                            root_leaf.size() + 1U + leaf.size() &&
                        ordinal_equal(
@@ -2288,7 +2315,9 @@ private:
     const fs::path& absolute_directory,
     const fs::path& relative_directory,
     const std::vector<OwnedEntryWitness>& witnesses,
-    std::vector<bool>& removed) noexcept
+    std::vector<bool>& removed,
+    const fs::path* const delete_last_relative_path,
+    bool* const delete_last_removed) noexcept
 {
     std::vector<WIN32_FIND_DATAW> entries;
     DWORD error = ERROR_SUCCESS;
@@ -2296,47 +2325,57 @@ private:
         ::SetLastError(error);
         return false;
     }
-    for (const auto& entry : entries) {
-        fs::path absolute_child;
-        fs::path relative_child;
-        try {
-            absolute_child = absolute_directory / entry.cFileName;
-            relative_child = relative_directory / entry.cFileName;
-        } catch (...) {
-            ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            return false;
-        }
+    for (const bool delete_last_pass : {false, true}) {
+        for (const auto& entry : entries) {
+            fs::path absolute_child;
+            fs::path relative_child;
+            try {
+                absolute_child = absolute_directory / entry.cFileName;
+                relative_child = relative_directory / entry.cFileName;
+            } catch (...) {
+                ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return false;
+            }
+            const bool delete_last = delete_last_relative_path != nullptr &&
+                path_equal(relative_child, *delete_last_relative_path);
+            if (delete_last != delete_last_pass) continue;
 
-        std::size_t witness_index = 0U;
-        const auto* const witness = find_owned_entry(
-            witnesses, relative_child, removed, witness_index);
-        if (witness == nullptr) {
-            // A descendant which was not created by this transaction may
-            // have been inserted after staging became visible. Preserve it.
-            ::SetLastError(ERROR_FILE_INVALID);
-            return false;
-        }
+            std::size_t witness_index = 0U;
+            const auto* const witness = find_owned_entry(
+                witnesses, relative_child, removed, witness_index);
+            if (witness == nullptr) {
+                // A descendant which was not created by this transaction may
+                // have been inserted after staging became visible. Preserve it.
+                ::SetLastError(ERROR_FILE_INVALID);
+                return false;
+            }
 
-        auto locked = open_entry_for_delete(absolute_child);
-        EntrySnapshot snapshot;
-        if (!locked || !query_snapshot(locked.get(), snapshot) ||
-            snapshot.identity != witness->identity ||
-            snapshot.directory != witness->directory ||
-            (snapshot.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
-            !exact_opened_path(locked.get(), absolute_child)) {
-            // FILE_FLAG_OPEN_REPARSE_POINT makes this check no-follow. A
-            // swapped junction, symlink, file, or directory is never removed
-            // and can never redirect recursive cleanup outside the owned root.
-            ::SetLastError(ERROR_FILE_INVALID);
-            return false;
+            auto locked = open_entry_for_delete(absolute_child);
+            EntrySnapshot snapshot;
+            if (!locked || !query_snapshot(locked.get(), snapshot) ||
+                snapshot.identity != witness->identity ||
+                snapshot.directory != witness->directory ||
+                (snapshot.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
+                !exact_opened_path(locked.get(), absolute_child)) {
+                // FILE_FLAG_OPEN_REPARSE_POINT makes this check no-follow. A
+                // swapped junction, symlink, file, or directory is never
+                // removed and can never redirect recursive cleanup outside the
+                // owned root.
+                ::SetLastError(ERROR_FILE_INVALID);
+                return false;
+            }
+            if (snapshot.directory &&
+                !safe_remove_owned_children(
+                    absolute_child, relative_child, witnesses, removed,
+                    delete_last_relative_path, delete_last_removed)) {
+                return false;
+            }
+            if (!mark_open_entry_for_delete(locked.get())) return false;
+            if (delete_last && delete_last_removed != nullptr) {
+                *delete_last_removed = true;
+            }
+            removed[witness_index] = true;
         }
-        if (snapshot.directory &&
-            !safe_remove_owned_children(
-                absolute_child, relative_child, witnesses, removed)) {
-            return false;
-        }
-        if (!mark_open_entry_for_delete(locked.get())) return false;
-        removed[witness_index] = true;
     }
     return true;
 }
@@ -2350,8 +2389,11 @@ private:
     const fs::path& root,
     const FileIdentity& expected_identity,
     const std::vector<OwnedEntryWitness>& witnesses,
-    const HANDLE locked_root) noexcept
+    const HANDLE locked_root,
+    const fs::path* const delete_last_relative_path = nullptr,
+    bool* const delete_last_removed = nullptr) noexcept
 {
+    if (delete_last_removed != nullptr) *delete_last_removed = false;
     EntrySnapshot snapshot;
     if (locked_root == nullptr || locked_root == INVALID_HANDLE_VALUE ||
         !ordinary_directory_handle(locked_root, &snapshot) ||
@@ -2368,7 +2410,9 @@ private:
         ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return false;
     }
-    if (!safe_remove_owned_children(root, {}, witnesses, removed)) {
+    if (!safe_remove_owned_children(
+            root, {}, witnesses, removed, delete_last_relative_path,
+            delete_last_removed)) {
         return false;
     }
     if (std::ranges::find(removed, false) != removed.end()) {
@@ -3341,6 +3385,80 @@ enum class CommitMarkerRevocation {
     return true;
 }
 
+// A DELETE-capable directory handle is deliberately retained during the
+// publication/quarantine transitions. Older Windows versions can reject a
+// child rename which names such a handle as FILE_RENAME_INFO::RootDirectory,
+// so the failure-only diagnostic needs a no-rename publication path. The
+// marker is non-authorizing: a partially written file remains fail-closed and
+// is deleted by its still-open handle whenever verification does not complete.
+[[nodiscard]] bool write_cleanup_failure_metadata_direct(
+    const HANDLE directory_handle,
+    const fs::path& directory,
+    DWORD& native_error,
+    fs::path* const relative_path = nullptr,
+    std::optional<FileIdentity>* const published_identity = nullptr) noexcept
+{
+    if (relative_path != nullptr) relative_path->clear();
+    if (published_identity != nullptr) published_identity->reset();
+    const auto leaf = random_leaf(L".hlclient-stock-research-failure-");
+    if (!leaf) {
+        native_error = ERROR_NOT_ENOUGH_MEMORY;
+        return false;
+    }
+
+    fs::path relative;
+    fs::path destination;
+    try {
+        relative = fs::path{*leaf};
+        destination = directory / relative;
+    } catch (...) {
+        native_error = ERROR_NOT_ENOUGH_MEMORY;
+        return false;
+    }
+
+    auto output = create_relative_file_locked(
+        directory_handle, *leaf, native_error);
+    const auto discard_output = [&output]() noexcept {
+        if (output) {
+            static_cast<void>(mark_open_entry_for_delete(output.get()));
+            output.reset();
+        }
+    };
+    if (!output) return false;
+
+    const auto bytes = std::as_bytes(std::span{
+        kCleanupFailureMetadata.data(), kCleanupFailureMetadata.size()});
+    std::array<std::byte, 32U> expected_digest{};
+    std::array<std::byte, 32U> observed_digest{};
+    EntrySnapshot before;
+    EntrySnapshot after;
+    if (!ordinary_file_handle(output.get(), 0U) ||
+        !exact_opened_path(output.get(), destination) ||
+        !handle_has_only_default_stream(output.get()) ||
+        !write_all(output.get(), bytes) ||
+        ::FlushFileBuffers(output.get()) == FALSE ||
+        !ordinary_file_handle(output.get(), bytes.size(), &before) ||
+        !exact_opened_path(output.get(), destination) ||
+        !handle_has_only_default_stream(output.get()) ||
+        !hash_bytes(bytes, expected_digest) ||
+        !hash_handle(output.get(), observed_digest) ||
+        observed_digest != expected_digest ||
+        !query_snapshot(output.get(), after) || before != after) {
+        native_error = ::GetLastError();
+        if (native_error == ERROR_SUCCESS) native_error = ERROR_FILE_INVALID;
+        discard_output();
+        return false;
+    }
+
+    if (relative_path != nullptr) *relative_path = std::move(relative);
+    if (published_identity != nullptr) {
+        *published_identity = after.identity;
+    }
+    output.reset();
+    native_error = ERROR_SUCCESS;
+    return true;
+}
+
 [[nodiscard]] bool copy_file_verified(
     const InventoryEntry& source_entry,
     const HANDLE destination_directory_handle,
@@ -3714,7 +3832,7 @@ enum class CommitMarkerRevocation {
     }
     DWORD staging_create_error = ERROR_SUCCESS;
     auto staging_handle = create_relative_directory_locked(
-        destination->parent_handle(), *staging_leaf, true,
+        destination->parent_handle(), *staging_leaf, false,
         staging_create_error);
     if (!staging_handle) {
         return materialization_failure(
@@ -3739,26 +3857,78 @@ enum class CommitMarkerRevocation {
         };
     const auto fail_and_clean =
         [&staging, &staging_handle, &staging_identity, &owned_entries,
-         &release_descendant_pins, &commit_candidate](
+         &release_descendant_pins, &commit_candidate, &destination,
+         &staging_leaf](
             const StockResearchCopyErrorCode code,
             const DWORD native_error) noexcept {
-        // Release descendants so NTFS can remove them, but retain the root
-        // DELETE handle.  Cleanup therefore never has a path reopen window in
-        // which the staging leaf could be renamed and substituted.
+        // While staging is a RootDirectory for child renames, its retained
+        // no-delete-share handle deliberately does not request DELETE. Older
+        // Windows opens the rename target directory with read/write sharing
+        // only, which conflicts with a pre-existing DELETE-capable handle.
+        // Acquire DELETE only through a witnessed, identity-checked transition
+        // immediately before private-tree removal.
         commit_candidate.handle.reset();
         release_descendant_pins();
-        if (!staging_identity ||
-            !safe_remove_owned_tree_with_handle(
-                staging, *staging_identity, owned_entries,
-                staging_handle.get())) {
-            const DWORD cleanup_error = ::GetLastError();
-            DWORD metadata_error = ERROR_SUCCESS;
-            const bool metadata_written = write_cleanup_failure_metadata(
-                staging_handle.get(), staging, metadata_error);
+        EntrySnapshot retained_snapshot;
+        DWORD cleanup_error = ERROR_SUCCESS;
+        PublishedTreeChangeWitness cleanup_witness;
+        if (!staging_identity || !staging_handle ||
+            !ordinary_directory_handle(
+                staging_handle.get(), &retained_snapshot) ||
+            retained_snapshot.identity != *staging_identity ||
+            !exact_opened_path(staging_handle.get(), staging) ||
+            !cleanup_witness.begin(
+                destination->parent,
+                destination->parent_snapshot.identity, cleanup_error, false,
+                true) ||
+            !cleanup_witness.unchanged_now(cleanup_error)) {
+            if (cleanup_error == ERROR_SUCCESS) {
+                cleanup_error = ERROR_FILE_INVALID;
+            }
+            cleanup_witness.abandon();
             staging_handle.reset();
             return materialization_failure(
-                StockResearchCopyErrorCode::cleanup_failed,
-                metadata_written ? cleanup_error : metadata_error);
+                StockResearchCopyErrorCode::cleanup_failed, cleanup_error);
+        }
+
+        staging_handle.reset();
+        constexpr std::size_t cleanup_attempts = 101U;
+        for (std::size_t attempt = 0U;
+             attempt < cleanup_attempts && !staging_handle; ++attempt) {
+            staging_handle = open_relative_directory_for_publish(
+                destination->parent_handle(), *staging_leaf, true, true,
+                cleanup_error);
+            if (staging_handle || cleanup_error != ERROR_SHARING_VIOLATION ||
+                attempt + 1U == cleanup_attempts) {
+                break;
+            }
+            if (!cleanup_witness.unchanged_now(cleanup_error)) break;
+            ::Sleep(10U);
+        }
+        if (!staging_handle ||
+            !ordinary_directory_handle(
+                staging_handle.get(), &retained_snapshot) ||
+            retained_snapshot.identity != *staging_identity ||
+            !exact_opened_path(staging_handle.get(), staging) ||
+            !parent_still_exact(*destination) ||
+            !cleanup_witness.unchanged_now(cleanup_error)) {
+            if (cleanup_error == ERROR_SUCCESS) {
+                cleanup_error = ERROR_FILE_INVALID;
+            }
+            cleanup_witness.abandon();
+            staging_handle.reset();
+            return materialization_failure(
+                StockResearchCopyErrorCode::cleanup_failed, cleanup_error);
+        }
+        cleanup_witness.abandon();
+
+        if (!safe_remove_owned_tree_with_handle(
+                staging, *staging_identity, owned_entries,
+                staging_handle.get())) {
+            cleanup_error = ::GetLastError();
+            staging_handle.reset();
+            return materialization_failure(
+                StockResearchCopyErrorCode::cleanup_failed, cleanup_error);
         }
         staging_handle.reset();
         return materialization_failure(code, native_error);
@@ -3769,25 +3939,18 @@ enum class CommitMarkerRevocation {
             staging_handle.get(), &initial_staging_snapshot) ||
         !exact_opened_path(staging_handle.get(), staging)) {
         const DWORD identity_error = ::GetLastError();
-        // FILE_CREATE plus the retained DELETE handle proves this is the empty
-        // directory created by this transaction even if an identity query
-        // itself fails.  Delete that object by handle; no pathname cleanup is
-        // necessary or safe before a FileId witness exists.
-        const bool deleted = mark_open_entry_for_delete(staging_handle.get());
-        const DWORD cleanup_error = deleted ? ERROR_SUCCESS : ::GetLastError();
+        // Without a usable FileId, closing the no-delete-share construction
+        // handle is safer than reopening and deleting whatever now occupies
+        // the random staging leaf.
         staging_handle.reset();
-        if (!deleted) {
-            return materialization_failure(
-                StockResearchCopyErrorCode::cleanup_failed, cleanup_error);
-        }
         return materialization_failure(
-            StockResearchCopyErrorCode::destination_identity_invalid,
+            StockResearchCopyErrorCode::cleanup_failed,
             identity_error == ERROR_SUCCESS ? ERROR_INVALID_HANDLE
                                             : identity_error);
     }
     staging_identity = initial_staging_snapshot.identity;
     try {
-        owned_entries.reserve(source.entries.size() + 3U);
+        owned_entries.reserve(source.entries.size() + 4U);
         materialized_directories.reserve(source.entries.size());
     } catch (...) {
         return fail_and_clean(
@@ -4147,38 +4310,19 @@ enum class CommitMarkerRevocation {
             StockResearchCopyErrorCode::destination_exists,
             ERROR_ALREADY_EXISTS);
     }
-    // NTFS refuses to rename a directory while no-delete-share handles to its
-    // descendants remain open.  All staging bytes and identities have already
-    // been verified, so release only the descendants for the atomic root
-    // rename; the staging root itself and its complete parent chain remain
-    // pinned.  Descendants are re-pinned and identity-checked immediately
-    // after publication, before any hook or success path is reachable.
-    // The candidate was fully verified while staging was private. Close its
-    // no-delete-share handle for the root rename; it is reopened by relative
-    // FileId and re-hashed immediately after publication, before the final
-    // watcher window begins.
-    commit_candidate.handle.reset();
-    release_descendant_pins();
-    if (!rename_open_file_without_replace(
-            staging_handle.get(), destination->parent_handle(),
-            destination->destination.filename().native())) {
-        const DWORD publish_error = ::GetLastError();
-        return fail_and_clean(
-            publish_error == ERROR_ALREADY_EXISTS ||
-                    publish_error == ERROR_FILE_EXISTS
-                ? StockResearchCopyErrorCode::destination_exists
-                : StockResearchCopyErrorCode::destination_publish_failed,
-            publish_error);
-    }
 
-    const auto quarantine_published =
+    constexpr std::size_t kPublishTransitionAttempts = 101U;
+    constexpr DWORD kPublishTransitionRetryMilliseconds = 10U;
+    bool retained_root_delete_capable = false;
+    fs::path cleanup_failure_relative;
+    bool cleanup_failure_owned = false;
+
+    const auto quarantine_retained_tree =
         [&destination, &staging_handle, &release_descendant_pins, &quarantine,
-         &quarantine_leaf](
-            DWORD& quarantine_error) noexcept {
-        // Remove a rejected tree from its public name first.  This rename is
-        // tied to the retained published-root DELETE handle and the retained
-        // destination-parent handle, so neither an inserted child nor a path
-        // substitution can redirect it outside the owned parent.
+         &quarantine_leaf](DWORD& quarantine_error) noexcept {
+        // Always move the retained object by handle. The leaf which formerly
+        // named it may already contain an unrelated replacement and must never
+        // be traversed or removed by a failure path.
         release_descendant_pins();
         if (!parent_still_exact(*destination) ||
             !rename_open_file_without_replace(
@@ -4196,47 +4340,432 @@ enum class CommitMarkerRevocation {
     };
     const auto finish_quarantined_failure =
         [&staging_handle, &staging_snapshot, &owned_entries,
-         &release_staging_pins, &quarantine](
+         &release_staging_pins, &quarantine, &cleanup_failure_relative,
+         &cleanup_failure_owned](
             const StockResearchCopyErrorCode code,
             const DWORD native_error) noexcept {
+        bool cleanup_marker_removed = false;
         if (!safe_remove_owned_tree_with_handle(
                 quarantine, staging_snapshot.identity, owned_entries,
-                staging_handle.get())) {
+                staging_handle.get(),
+                cleanup_failure_owned ? &cleanup_failure_relative : nullptr,
+                &cleanup_marker_removed)) {
             const DWORD cleanup_error = ::GetLastError();
-            DWORD metadata_error = ERROR_SUCCESS;
-            const bool metadata_written = write_cleanup_failure_metadata(
-                staging_handle.get(), quarantine, metadata_error);
+            DWORD restoration_error = ERROR_SUCCESS;
+            if (cleanup_failure_owned && cleanup_marker_removed) {
+                std::optional<FileIdentity> restored_identity;
+                if (!write_cleanup_failure_metadata_direct(
+                        staging_handle.get(), quarantine, restoration_error,
+                        &cleanup_failure_relative, &restored_identity) ||
+                    !restored_identity) {
+                    if (restoration_error == ERROR_SUCCESS) {
+                        restoration_error = ERROR_FILE_INVALID;
+                    }
+                } else {
+                    restoration_error = ERROR_SUCCESS;
+                }
+            }
             release_staging_pins();
             return materialization_failure(
                 StockResearchCopyErrorCode::cleanup_failed,
-                metadata_written ? cleanup_error : metadata_error);
+                restoration_error == ERROR_SUCCESS ? cleanup_error
+                                                   : restoration_error);
         }
         release_staging_pins();
         return materialization_failure(code, native_error);
     };
-    const auto fail_published =
-        [&quarantine_published, &finish_quarantined_failure,
-         &release_staging_pins, &staging_handle, &destination,
-         &commit_candidate](
+    const auto fail_retained_unpublished =
+        [&quarantine_retained_tree, &finish_quarantined_failure,
+         &release_staging_pins](
             const StockResearchCopyErrorCode code,
             const DWORD native_error) noexcept {
-        commit_candidate.handle.reset();
         DWORD quarantine_error = ERROR_SUCCESS;
-        if (!quarantine_published(quarantine_error)) {
-            // The pending marker is the durable authorization boundary. Add a
-            // typed diagnostic too when an external no-delete-share handle
-            // prevents removal from the public name.
-            DWORD metadata_error = ERROR_SUCCESS;
-            const bool metadata_written = write_cleanup_failure_metadata(
-                staging_handle.get(), destination->destination,
-                metadata_error);
+        if (!quarantine_retained_tree(quarantine_error)) {
+            // The exact retained object could not be moved to our private
+            // quarantine name. Leave every pathname untouched rather than
+            // risk deleting a substituted staging leaf.
             release_staging_pins();
             return materialization_failure(
                 StockResearchCopyErrorCode::cleanup_failed,
-                metadata_written ? quarantine_error : metadata_error);
+                quarantine_error == ERROR_SUCCESS ? native_error
+                                                   : quarantine_error);
         }
         return finish_quarantined_failure(code, native_error);
     };
+    const auto fail_published =
+        [&quarantine_retained_tree, &finish_quarantined_failure,
+         &release_descendant_pins, &release_staging_pins, &staging_handle,
+         &destination,
+         &commit_candidate, &staging_snapshot, &retained_root_delete_capable,
+         &quarantine_leaf, &cleanup_failure_relative,
+         &cleanup_failure_owned, &owned_entries, kPublishTransitionAttempts,
+         kPublishTransitionRetryMilliseconds](
+            const StockResearchCopyErrorCode code,
+            const DWORD native_error) noexcept {
+        commit_candidate.handle.reset();
+        release_descendant_pins();
+
+        // Publish the cleanup diagnostic while an identity-bound root handle
+        // remains available. A non-DELETE root uses atomic child publication;
+        // a DELETE-capable transition root uses the verified failure-only
+        // direct form because older Windows can reject RootDirectory renames
+        // through that handle. If quarantine later fails, the pending tree
+        // retains this record; if cleanup succeeds, its identity is part of
+        // the owned ledger and is removed with the tree.
+        if (!cleanup_failure_owned) {
+            DWORD metadata_error = ERROR_SUCCESS;
+            std::optional<FileIdentity> metadata_identity;
+            const bool metadata_written = retained_root_delete_capable
+                ? write_cleanup_failure_metadata_direct(
+                      staging_handle.get(), destination->destination,
+                      metadata_error, &cleanup_failure_relative,
+                      &metadata_identity)
+                : write_cleanup_failure_metadata(
+                      staging_handle.get(), destination->destination,
+                      metadata_error, &cleanup_failure_relative,
+                      &metadata_identity);
+            if (metadata_written &&
+                metadata_identity) {
+                try {
+                    owned_entries.push_back(OwnedEntryWitness{
+                        &cleanup_failure_relative, *metadata_identity, false});
+                    cleanup_failure_owned = true;
+                } catch (...) {
+                    release_staging_pins();
+                    return materialization_failure(
+                        StockResearchCopyErrorCode::cleanup_failed,
+                        ERROR_NOT_ENOUGH_MEMORY);
+                }
+            }
+        }
+
+        PublishedTreeChangeWitness quarantine_witness;
+        DWORD quarantine_error = ERROR_SUCCESS;
+        EntrySnapshot retained_snapshot;
+        if (!quarantine_witness.begin(
+                destination->parent,
+                destination->parent_snapshot.identity, quarantine_error,
+                false, true) ||
+            !staging_handle ||
+            !ordinary_directory_handle(
+                staging_handle.get(), &retained_snapshot) ||
+            retained_snapshot.identity != staging_snapshot.identity ||
+            !exact_opened_path(
+                staging_handle.get(), destination->destination) ||
+            !parent_still_exact(*destination)) {
+            if (quarantine_error == ERROR_SUCCESS) {
+                quarantine_error = ERROR_FILE_INVALID;
+            }
+            quarantine_witness.abandon();
+            release_staging_pins();
+            return materialization_failure(
+                StockResearchCopyErrorCode::cleanup_failed,
+                quarantine_error);
+        }
+
+        if (!retained_root_delete_capable) {
+            staging_handle.reset();
+            for (std::size_t attempt = 0U;
+                 attempt < kPublishTransitionAttempts && !staging_handle;
+                 ++attempt) {
+                staging_handle = open_relative_directory_for_publish(
+                    destination->parent_handle(),
+                    destination->destination.filename().native(), true, true,
+                    quarantine_error);
+                if (staging_handle ||
+                    quarantine_error != ERROR_SHARING_VIOLATION ||
+                    attempt + 1U == kPublishTransitionAttempts) {
+                    break;
+                }
+                if (!quarantine_witness.unchanged_now(quarantine_error)) break;
+                ::Sleep(kPublishTransitionRetryMilliseconds);
+            }
+            if (!staging_handle ||
+                !ordinary_directory_handle(
+                    staging_handle.get(), &retained_snapshot) ||
+                retained_snapshot.identity != staging_snapshot.identity ||
+                !exact_opened_path(
+                    staging_handle.get(), destination->destination) ||
+                !parent_still_exact(*destination) ||
+                !quarantine_witness.unchanged_now(quarantine_error)) {
+                if (quarantine_error == ERROR_SUCCESS) {
+                    quarantine_error = ERROR_FILE_INVALID;
+                }
+                quarantine_witness.abandon();
+                release_staging_pins();
+                return materialization_failure(
+                    StockResearchCopyErrorCode::cleanup_failed,
+                    quarantine_error);
+            }
+            retained_root_delete_capable = true;
+        }
+
+        if (!quarantine_retained_tree(quarantine_error)) {
+            quarantine_witness.abandon();
+            release_staging_pins();
+            return materialization_failure(
+                StockResearchCopyErrorCode::cleanup_failed,
+                quarantine_error);
+        }
+        const bool exact_quarantine =
+            quarantine_witness.consume_exact_rename(
+                {}, destination->destination.filename().native(),
+                *quarantine_leaf, quarantine_error);
+        quarantine_witness.abandon();
+        return finish_quarantined_failure(
+            exact_quarantine ? code
+                             : StockResearchCopyErrorCode::cleanup_failed,
+            exact_quarantine ? native_error
+                             : (quarantine_error == ERROR_SUCCESS
+                                    ? ERROR_FILE_INVALID
+                                    : quarantine_error));
+    };
+
+    // NTFS refuses to rename a directory while no-delete-share handles to its
+    // descendants remain open.  All staging bytes and identities have already
+    // been verified, so release only the descendants for the atomic root
+    // rename. The no-delete-share staging root stays pinned until a recursive
+    // parent witness is live. A short share-delete transition is then tied to
+    // the original FileId and exact relative leaf; every notification other
+    // than the one expected root rename fails closed.
+    // The candidate was fully verified while staging was private. Close its
+    // no-delete-share handle for the root rename; it is reopened by relative
+    // FileId and re-hashed immediately after publication, before the final
+    // watcher window begins.
+    commit_candidate.handle.reset();
+    release_descendant_pins();
+
+    PublishedTreeChangeWitness publish_transition_witness;
+    DWORD transition_error = ERROR_SUCCESS;
+    if (!publish_transition_witness.begin(
+            destination->parent, destination->parent_snapshot.identity,
+            transition_error, false, true) ||
+        !publish_transition_witness.unchanged_now(transition_error)) {
+        publish_transition_witness.abandon();
+        return fail_and_clean(
+            StockResearchCopyErrorCode::destination_publish_failed,
+            transition_error);
+    }
+
+    staging_handle.reset();
+    for (std::size_t attempt = 0U;
+         attempt < kPublishTransitionAttempts && !staging_handle; ++attempt) {
+        staging_handle = open_relative_directory_for_publish(
+            destination->parent_handle(), *staging_leaf, true, true,
+            transition_error);
+        if (staging_handle || transition_error != ERROR_SHARING_VIOLATION ||
+            attempt + 1U == kPublishTransitionAttempts) {
+            break;
+        }
+        if (!publish_transition_witness.unchanged_now(transition_error)) break;
+        ::Sleep(kPublishTransitionRetryMilliseconds);
+    }
+    EntrySnapshot transition_snapshot;
+    if (!staging_handle ||
+        !ordinary_directory_handle(
+            staging_handle.get(), &transition_snapshot) ||
+        transition_snapshot.identity != staging_snapshot.identity ||
+        !exact_opened_path(staging_handle.get(), staging) ||
+        !parent_still_exact(*destination)) {
+        if (transition_error == ERROR_SUCCESS) {
+            transition_error = ERROR_FILE_INVALID;
+        }
+        publish_transition_witness.abandon();
+        // A failed/mismatched relative reopen no longer proves that the
+        // staging pathname denotes our object. Retain it for diagnosis.
+        release_staging_pins();
+        return materialization_failure(
+            StockResearchCopyErrorCode::cleanup_failed, transition_error);
+    }
+    retained_root_delete_capable = true;
+
+    PublishedTreeChangeWitness staging_content_witness;
+    if (!staging_content_witness.begin(
+            staging, staging_snapshot.identity, transition_error) ||
+        !publish_transition_witness.unchanged_now(transition_error) ||
+        !staging_content_witness.unchanged_now(transition_error)) {
+        staging_content_witness.abandon();
+        publish_transition_witness.abandon();
+        return fail_retained_unpublished(
+            StockResearchCopyErrorCode::destination_identity_invalid,
+            transition_error == ERROR_SUCCESS ? ERROR_FILE_INVALID
+                                               : transition_error);
+    }
+
+    if (options.progress_hook != nullptr) {
+        // Test-only deterministic point inside the share-delete transition.
+        // The parent witness and retained FileId must reject any swap here.
+        options.progress_hook(
+            StockResearchCopyProgressPhase::before_destination_publish,
+            file_ordinal, options.progress_context);
+    }
+    if (!ordinary_directory_handle(
+            staging_handle.get(), &transition_snapshot) ||
+        transition_snapshot.identity != staging_snapshot.identity ||
+        !exact_opened_path(staging_handle.get(), staging) ||
+        !parent_still_exact(*destination) ||
+        !publish_transition_witness.unchanged_now(transition_error) ||
+        !staging_content_witness.unchanged_now(transition_error)) {
+        if (transition_error == ERROR_SUCCESS) {
+            transition_error = ERROR_FILE_INVALID;
+        }
+        staging_content_witness.abandon();
+        publish_transition_witness.abandon();
+        return fail_retained_unpublished(
+            StockResearchCopyErrorCode::destination_identity_invalid,
+            transition_error);
+    }
+
+    bool published = false;
+    DWORD publish_error = ERROR_SUCCESS;
+    for (std::size_t attempt = 0U; attempt < kPublishTransitionAttempts;
+         ++attempt) {
+        if (rename_open_file_without_replace(
+                staging_handle.get(), destination->parent_handle(),
+                destination->destination.filename().native())) {
+            published = true;
+            break;
+        }
+        publish_error = ::GetLastError();
+        if ((publish_error != ERROR_SHARING_VIOLATION &&
+             publish_error != ERROR_ACCESS_DENIED) ||
+            attempt + 1U == kPublishTransitionAttempts) {
+            break;
+        }
+        if (!ordinary_directory_handle(
+                staging_handle.get(), &transition_snapshot) ||
+            transition_snapshot.identity != staging_snapshot.identity ||
+            !exact_opened_path(staging_handle.get(), staging) ||
+            !parent_still_exact(*destination) ||
+            !publish_transition_witness.unchanged_now(transition_error) ||
+            !staging_content_witness.unchanged_now(transition_error)) {
+            publish_error = transition_error == ERROR_SUCCESS
+                                ? ERROR_FILE_INVALID
+                                : transition_error;
+            break;
+        }
+        ::Sleep(kPublishTransitionRetryMilliseconds);
+    }
+    if (!published) {
+        staging_content_witness.abandon();
+        publish_transition_witness.abandon();
+        return fail_retained_unpublished(
+            publish_error == ERROR_ALREADY_EXISTS ||
+                    publish_error == ERROR_FILE_EXISTS
+                ? StockResearchCopyErrorCode::destination_exists
+                : StockResearchCopyErrorCode::destination_publish_failed,
+            publish_error);
+    }
+
+    if (!ordinary_directory_handle(
+            staging_handle.get(), &transition_snapshot) ||
+        transition_snapshot.identity != staging_snapshot.identity ||
+        !exact_opened_path(
+            staging_handle.get(), destination->destination) ||
+        !parent_still_exact(*destination) ||
+        !staging_content_witness.unchanged_now(transition_error) ||
+        !publish_transition_witness.consume_exact_rename(
+            {}, *staging_leaf,
+            destination->destination.filename().native(), transition_error)) {
+        if (transition_error == ERROR_SUCCESS) {
+            transition_error = ERROR_FILE_INVALID;
+        }
+        staging_content_witness.abandon();
+        publish_transition_witness.abandon();
+        return fail_published(
+            StockResearchCopyErrorCode::destination_identity_invalid,
+            transition_error);
+    }
+    publish_transition_witness.abandon();
+
+    // Re-establish the original no-delete-share root pin before any existing
+    // post-publish hook is reachable. A second parent witness and a compatible
+    // no-DELETE/share-delete bridge retain the published FileId across the
+    // interval in which the DELETE-capable transition handle must be closed
+    // before the incompatible locked handle can be opened.
+    PublishedTreeChangeWitness published_repin_witness;
+    if (!published_repin_witness.begin(
+            destination->parent, destination->parent_snapshot.identity,
+            transition_error, false, true) ||
+        !ordinary_directory_handle(
+            staging_handle.get(), &transition_snapshot) ||
+        transition_snapshot.identity != staging_snapshot.identity ||
+        !exact_opened_path(
+            staging_handle.get(), destination->destination) ||
+        !parent_still_exact(*destination)) {
+        if (transition_error == ERROR_SUCCESS) {
+            transition_error = ERROR_FILE_INVALID;
+        }
+        published_repin_witness.abandon();
+        return fail_published(
+            StockResearchCopyErrorCode::destination_identity_invalid,
+            transition_error);
+    }
+
+    auto published_bridge = open_relative_directory_for_publish(
+        destination->parent_handle(),
+        destination->destination.filename().native(), false, true,
+        transition_error);
+    EntrySnapshot bridge_snapshot;
+    if (!published_bridge ||
+        !ordinary_directory_handle(
+            published_bridge.get(), &bridge_snapshot) ||
+        bridge_snapshot.identity != staging_snapshot.identity ||
+        !exact_opened_path(
+            published_bridge.get(), destination->destination) ||
+        !parent_still_exact(*destination) ||
+        !published_repin_witness.unchanged_now(transition_error)) {
+        if (transition_error == ERROR_SUCCESS) {
+            transition_error = ERROR_FILE_INVALID;
+        }
+        published_repin_witness.abandon();
+        return fail_published(
+            StockResearchCopyErrorCode::destination_identity_invalid,
+            transition_error);
+    }
+
+    staging_handle.reset();
+    for (std::size_t attempt = 0U;
+         attempt < kPublishTransitionAttempts && !staging_handle; ++attempt) {
+        staging_handle = open_relative_directory_for_publish(
+            destination->parent_handle(),
+            destination->destination.filename().native(), false, false,
+            transition_error);
+        if (staging_handle ||
+            (transition_error != ERROR_SHARING_VIOLATION &&
+             transition_error != ERROR_ACCESS_DENIED) ||
+            attempt + 1U == kPublishTransitionAttempts) {
+            break;
+        }
+        if (!published_repin_witness.unchanged_now(transition_error)) break;
+        ::Sleep(kPublishTransitionRetryMilliseconds);
+    }
+    if (!staging_handle ||
+        !ordinary_directory_handle(
+            staging_handle.get(), &transition_snapshot) ||
+        transition_snapshot.identity != staging_snapshot.identity ||
+        !exact_opened_path(
+            staging_handle.get(), destination->destination) ||
+        !ordinary_directory_handle(
+            published_bridge.get(), &bridge_snapshot) ||
+        bridge_snapshot.identity != staging_snapshot.identity ||
+        !exact_opened_path(
+            published_bridge.get(), destination->destination) ||
+        !parent_still_exact(*destination) ||
+        !published_repin_witness.unchanged_now(transition_error)) {
+        if (transition_error == ERROR_SUCCESS) {
+            transition_error = ERROR_FILE_INVALID;
+        }
+        staging_handle = std::move(published_bridge);
+        retained_root_delete_capable = false;
+        published_repin_witness.abandon();
+        return fail_published(
+            StockResearchCopyErrorCode::destination_identity_invalid,
+            transition_error);
+    }
+    published_bridge.reset();
+    retained_root_delete_capable = false;
+    published_repin_witness.abandon();
 
     DWORD repin_error = ERROR_SUCCESS;
     if (!repin_materialized_directories(
@@ -4311,10 +4840,18 @@ enum class CommitMarkerRevocation {
     if (!tree_change_witness.begin(
             destination->parent, destination->parent_snapshot.identity,
             tree_change_error)) {
+        staging_content_witness.abandon();
         return fail_published(
             StockResearchCopyErrorCode::destination_inventory_mismatch,
             tree_change_error);
     }
+    if (!staging_content_witness.unchanged_now(tree_change_error)) {
+        staging_content_witness.abandon();
+        return fail_published(
+            StockResearchCopyErrorCode::destination_inventory_mismatch,
+            tree_change_error);
+    }
+    staging_content_witness.abandon();
 
     auto published_inventory_result = build_inventory(
         destination->destination, final_limits, true, true);

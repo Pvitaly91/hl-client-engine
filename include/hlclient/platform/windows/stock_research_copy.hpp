@@ -118,6 +118,7 @@ enum class StockResearchCopyProgressPhase {
     destination_file_flushed,
     before_source_reinventory,
     after_staging_identity_acquired,
+    before_destination_publish,
     after_destination_publish,
     during_published_inventory,
     after_published_file_guards_acquired,
