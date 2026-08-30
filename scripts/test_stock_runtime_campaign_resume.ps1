@@ -50,6 +50,7 @@ namespace HlClient.CampaignFixture
         private const uint FileShareWrite = 0x00000002;
         private const uint FileShareDelete = 0x00000004;
         private const uint FileWriteData = 0x00000002;
+        private const uint FileAddSubdirectory = 0x00000004;
         private const uint FileWriteAttributes = 0x00000100;
         private const uint SynchronizeAccess = 0x00100000;
         private const uint OpenExisting = 3;
@@ -191,7 +192,8 @@ namespace HlClient.CampaignFixture
                 int error = Marshal.GetLastWin32Error();
                 handle.Dispose();
                 throw new Win32Exception(error,
-                    "Unable to retain the metadata fixture directory identity.");
+                    "Unable to retain the metadata fixture directory identity " +
+                    "(native=" + error.ToString() + ").");
             }
 
             if (!IsOrdinary(handle, requireDirectory))
@@ -348,10 +350,16 @@ namespace HlClient.CampaignFixture
             finally { deleter.Dispose(); }
         }
 
-        public static SafeFileHandle OpenPinnedOrdinaryDirectory(string path)
+        public static SafeFileHandle OpenOrdinaryCreateParent(string path)
         {
+            // The repository/manual-artifacts parent is not owned by this
+            // fixture and is never deleted. Hosted runners can retain their
+            // checkout root through a handle which does not share deletion,
+            // so requesting DELETE here would create a needless sharing-mode
+            // conflict. The child itself is still created relative to this
+            // verified ordinary parent and returned with DELETE access.
             return OpenOrdinary(
-                path, true, DeleteAccess | FileReadAttributes,
+                path, true, FileAddSubdirectory | FileReadAttributes,
                 FileShareRead | FileShareWrite);
         }
 
@@ -714,14 +722,14 @@ if ($beforeManual -ceq 'absent') {
     }
     if (Test-Path -LiteralPath $fixtureParent -PathType Container) {
         $fixtureParentHandle =
-            [HlClient.CampaignFixture.OwnedDirectory]::OpenPinnedOrdinaryDirectory(
+            [HlClient.CampaignFixture.OwnedDirectory]::OpenOrdinaryCreateParent(
                 $fixtureParent)
     } else {
         if ((Get-PathObservation $fixtureParent) -cne 'absent') {
             throw 'Metadata fixture parent is not one ordinary directory.'
         }
         $fixtureRepositoryHandle =
-            [HlClient.CampaignFixture.OwnedDirectory]::OpenPinnedOrdinaryDirectory(
+            [HlClient.CampaignFixture.OwnedDirectory]::OpenOrdinaryCreateParent(
                 $repositoryRoot)
         $fixtureParentHandle =
             [HlClient.CampaignFixture.OwnedDirectory]::CreateOwnedDirectory(
