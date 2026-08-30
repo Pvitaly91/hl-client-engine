@@ -470,81 +470,74 @@ evidence JSON for a zero-run or incomplete corpus. Capture restoration rejects
 reparse points before and during rollback and preserves its bounded temporary
 backup for manual recovery if exact before/after drift verification cannot
 complete. M4.7.1 now provides a bounded byte-preserving capture harness and an
-independent structural checker, but neither promotes transport metadata to a
-typed stock message observation. Tracked validation and projection therefore
-remain fail-closed instead of accepting retry/drop/duplicate/replay claims from
-labels and counts.
+independent structural checker. M4.7.1.1 may additionally publish one typed,
+unconsumed neutral first candidate only after offline replay and restoration
+gates; it does not assign runtime grammar. Tracked validation and projection
+therefore remain fail-closed instead of accepting semantic claims from
+transport labels and counts.
 
 ### Stock runtime authority evidence boundary
 
-Build the M4.7.1 capture, checker, and synthetic boundary tests with:
+Build the M4.7.1.1 Windows isolation/orchestration tools, relay, offline checker
+and tests with the Win32 configuration:
 
 ```powershell
 cmake --build build --config Debug --target `
+  hlclient_stock_runtime_isolation_guard `
+  hlclient_network_isolation_probe `
+  hlclient_stock_runtime_orchestrator `
   hlclient_stock_runtime_capture `
   hlclient_stock_runtime_check `
   hlclient_tests
 .\build\bin\Debug\hlclient_tests.exe "[stock-runtime]"
 ```
 
-The default verifier is intentionally zero-stock-process and zero-write. With no
-accepted stock corpus it succeeds only by reporting `accepted-runs=0`, stock
-versions as `not-observed`, restoration as `not-run`, and
-`result=evidence_pending`:
+Active capture is explicit opt-in. A normal or incorrectly tokened invocation
+stops before resolving caller paths or creating a backup/run, opening a socket,
+launching a process or starting WFP. Verify that invariant with:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  .\scripts\verify_stock_runtime_state.ps1 -ValidateEvidencePending
-```
-
-Active stock orchestration is currently disabled. The commands below document
-the intended future campaign, but every active scenario fails before launch,
-network access, output creation, or backup creation until OS-level outbound
-isolation and exact app-build/engine/Protocol/server-build observation exist.
-
-Prepare a separate user-owned research copy without overwriting or deleting any
-existing destination. Inspect both paths before running this example and never
-substitute a regular play installation as `$research`:
-
-```powershell
-$source = "D:\Steam\steamapps\common\Half-Life"
-$research = "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
-
-if (-not (Test-Path -LiteralPath $source -PathType Container)) {
-  throw "Source Half-Life directory is absent."
-}
-if (Test-Path -LiteralPath $research) {
-  throw "Research destination already exists; choose a new empty path."
-}
-
-$researchParent = Split-Path -Parent $research
-New-Item -ItemType Directory -Path $researchParent -Force | Out-Null
-Copy-Item -LiteralPath $source -Destination $research -Recurse
-Set-Content -LiteralPath (Join-Path $research ".hlclient-research-isolated") `
-  -Value "HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1" -Encoding ascii
-```
-
-The read-only preflight is the only stock-installation validation currently
-enabled:
-
-```powershell
+  .\scripts\test_stock_runtime_active_disabled.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  .\scripts\capture_stock_runtime_state.ps1 -ValidateResearchRoot `
-  -ResearchHalfLifeRoot $research `
-  -ClientPath (Join-Path $research "hl.exe") `
-  -HldsPath (Join-Path $research "hlds.exe")
+  .\scripts\test_stock_runtime_active_preflight.ps1
 ```
 
-Preflight accepts only a ready fixed local drive-letter path: UNC/network,
-volume-alias, substituted-drive, and reparse-root forms are rejected. It uses a
-read-only `subst.exe` listing and expands existing DOS/8.3 aliases before
-comparing the research root with the repository and every configured Steam
-library. It then requires the exact marker, canonical unlinked
-`hl.exe`/`hlds.exe` files, no reparse points or alternate data streams anywhere
-in the bounded tree, valid Valve signatures, and launcher `VERSIONINFO`
-1.1.1.1/4.1.1.1. It
-does not observe Steam App build 15961492, engine 1.1.2.2, Protocol 48, or
-server build 10210 and therefore is not a version-complete stock attestation.
+Prepare a new isolated copy with the project helper. The destination must not
+exist. The helper screens fixed-drive/Steam overlap and aliases before mutation,
+copies through a bounded GUID staging sibling, verifies the complete inventory
+and launchers, and atomically publishes the marker. It never changes the source
+tree:
+
+```powershell
+.\scripts\prepare_stock_runtime_research_copy.ps1 `
+  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
+```
+
+From an elevated PowerShell, validate the active environment without launching
+stock processes or creating a capture directory:
+
+```powershell
+.\scripts\capture_stock_runtime_state.ps1 `
+  -ValidateActiveCaptureEnvironment `
+  -ResearchHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life" `
+  -ClientPath "D:\DEV\HLCLIENT-RESEARCH\Half-Life\hl.exe" `
+  -HldsPath "D:\DEV\HLCLIENT-RESEARCH\Half-Life\hlds.exe" `
+  -CaptureToolPath ".\build\bin\Debug\hlclient_stock_runtime_capture.exe" `
+  -NetworkIsolationGuardPath `
+    ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
+  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf"
+```
+
+Success reports exactly `active-environment=valid`,
+`isolation-canary=success`, `binary-profile=valid`,
+`stock-processes-started=0`, `capture-files-written=0` and `result=success`.
+Validation may create one temporary dynamic WFP session for the canary, but no
+stock process, run directory or game-file write. Insufficient privilege,
+missing WFP/canary capability, binary/App mismatch or unsafe root is a typed
+failure with zero stock processes and zero capture files. There is no ordinary
+firewall or persistent-rule fallback.
 
 Exercise the synthetic hostile-tree restoration guard independently with:
 
@@ -554,90 +547,103 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 ```
 
 This creates and removes only bounded temporary self-test files. It proves the
-implemented hardlink/junction rollback cases, not restoration of a stock run.
-The retained future orchestration takes a complete transactional copy and keeps
-the backup for manual recovery if exact restoration cannot be established.
+implemented hardlink, junction and retained directory-identity/swap cases, not
+restoration of a real stock run.
 
-These baseline, idle, manual movement/view, and loss command templates all
-currently exit 1 with `active-capture=evidence_pending` and zero processes or
-files written:
+After the elevated environment preflight succeeds, one baseline transaction is:
 
 ```powershell
-$active = @{
-  ResearchHalfLifeRoot = $research
-  ClientPath = Join-Path $research "hl.exe"
-  HldsPath = Join-Path $research "hlds.exe"
-  CaptureToolPath = ".\build\bin\Debug\hlclient_stock_runtime_capture.exe"
-  Game = "valve"
-}
-
-& .\scripts\capture_stock_runtime_state.ps1 @active `
-  -Map boot_camp -Scenario baseline
-& .\scripts\capture_stock_runtime_state.ps1 @active `
-  -Map crossfire -Scenario idle-runtime
-& .\scripts\capture_stock_runtime_state.ps1 @active `
-  -Map stalkyard -Scenario forward
-& .\scripts\capture_stock_runtime_state.ps1 @active `
-  -Map boot_camp -Scenario yaw-positive
-& .\scripts\capture_stock_runtime_state.ps1 @active `
-  -Map boot_camp -Scenario drop-server-runtime
+.\scripts\capture_stock_runtime_state.ps1 `
+  -EnableActiveCapture `
+  -ConfirmActiveCapture HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1 `
+  -ResearchHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life" `
+  -ClientPath "D:\DEV\HLCLIENT-RESEARCH\Half-Life\hl.exe" `
+  -HldsPath "D:\DEV\HLCLIENT-RESEARCH\Half-Life\hlds.exe" `
+  -CaptureToolPath ".\build\bin\Debug\hlclient_stock_runtime_capture.exe" `
+  -NetworkIsolationGuardPath `
+    ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
+  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf" `
+  -Game valve -Map boot_camp -Scenario baseline `
+  -RelayPort 27140 -ServerPort 27141 -MaximumDurationSeconds 45
 ```
 
-The retained labels are `baseline`, `idle-runtime`, `forward`,
-`backward`, `left`, `right`, `forward-right`, `jump`, `duck`, `duck-stand`,
-`yaw-positive`, `yaw-negative`, `pitch-positive`, and `pitch-negative`.
-They do not inject or prove a manual action. Whole-datagram labels are
-`drop-server-runtime`,
-`drop-two-server-runtime`, `duplicate-server-runtime`,
-`reorder-server-runtime`, `drop-client-move`, and `delay-client-move`.
-The relay implementation selects the Nth datagram in a direction (default 20),
-not a decoded runtime or move packet, so none of these names earns semantic
-movement/view/loss credit. Lifecycle/rate labels remain pending too.
+`baseline`, `idle-runtime`, `drop-server-to-client-transport-ordinal`,
+`duplicate-server-to-client-transport-ordinal` and
+`reorder-server-to-client-transport-ordinal` are accepted active
+scenarios. Baseline and idle publication each require at least 100 delivered
+sequenced S2C packets. No keyboard/mouse/movement input is injected.
+Perturbations select a directional transport ordinal, not a decoded
+runtime/entity/usercmd packet.
 
-The standalone relay code can store bounded raw UDP datagrams and flat
-transport metadata below ignored
-`manual-artifacts/stock-runtime/<32-hex-run-id>`. It does not yet record parsed
-netchan, transformed, fragment, reassembled, decompressed, cursor, or runtime
-message layers; configured limits for those future layers are not evidence that
-they were consumed. If a future valid transport-only run exists, inspect it
-without decoding unconfirmed grammar with:
+`reconnect` is accepted by the parameter grammar only so its required campaign
+slot has a stable typed result. It currently fails before backup/run/stock
+launch as `reconnect_lifecycle_pending`, because the single-session
+orchestrator cannot attest first-session cleanup, a distinct second generation
+and two exact boundaries. The two reconnect slots are last: up to 22 supported
+runs can complete before one pending reconnect stops the campaign and leaves
+the second reconnect unattempted. The evidence threshold remains pending.
+
+On a capable host the orchestrator owns guard, relay, HLDS and stock client via
+retained handles and a kill-on-close Job. It uses no shell. The dynamic WFP
+session permits only loopback for approved executable identities and disappears
+at cleanup; persistent firewall rules stay zero. PowerShell then restores the
+research tree, compares external Steam state, runs the checker twice in
+prepublication mode, runs the independent walker and publishes the final
+manifest once. Transport completion alone is not acceptance.
+
+After the wrapper reports an accepted run ID, normal read-only checks are:
 
 ```powershell
 .\build\bin\Debug\hlclient_stock_runtime_check.exe `
   --capture-root ".\manual-artifacts\stock-runtime\<32-hex-run-id>" `
-  --scenario transcript
+  --scenario first-observation
+
+.\scripts\walk_stock_runtime_transport.ps1 `
+  -CaptureRoot ".\manual-artifacts\stock-runtime\<32-hex-run-id>"
 ```
 
-The other accepted CLI labels are `baselines`, `entities`, `clientdata`,
-`authority`, and `ack`; all six currently return the same zero-observation
-`result=evidence_pending` report. The checker binds raw filenames, sizes, and
-file-content hashes, but is not a runtime grammar walker. Corpus verification
-is read-only and always returns nonzero for transport-only records because no
-promotion path or accepted runtime grammar exists:
+The checker and walker must agree on delivered structural counts. The walker
+does not invoke the checker and prints no packet bytes. The only retained
+candidate name is `first_post_resource_runtime_candidate`; it carries no
+service semantic, and its body is not consumed. A one-run checker reports
+`single_observation`; only the corpus verifier may establish
+`stable_observation` from identical accepted runs under one version profile
+with no contradictory complete run.
+
+Run the 24-case target campaign sequentially from elevated PowerShell. It stops
+on the first non-accepted/restoration/isolation/pending capability and reports
+honest accepted, incomplete/pending and unattempted counts:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  .\scripts\verify_stock_runtime_state.ps1 `
-  -CaptureRoot ".\manual-artifacts\stock-runtime" `
-  -CheckerPath ".\build\bin\Debug\hlclient_stock_runtime_check.exe"
+.\scripts\run_stock_runtime_first_observations.ps1 `
+  -EnableActiveCapture `
+  -ConfirmActiveCapture HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1 `
+  -ResearchHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life" `
+  -ClientPath "D:\DEV\HLCLIENT-RESEARCH\Half-Life\hl.exe" `
+  -HldsPath "D:\DEV\HLCLIENT-RESEARCH\Half-Life\hlds.exe" `
+  -CaptureToolPath ".\build\bin\Debug\hlclient_stock_runtime_capture.exe" `
+  -NetworkIsolationGuardPath `
+    ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
+  -CheckerPath ".\build\bin\Debug\hlclient_stock_runtime_check.exe" `
+  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf" `
+  -OutputRoot ".\manual-artifacts\stock-runtime"
 ```
 
-| Command | Current exit | Stock processes / persistent writes | Meaning |
-|---|---:|---|---|
-| `verify_stock_runtime_state.ps1 -ValidateEvidencePending` | 0 | 0 / 0 | Honest zero-corpus pending state. |
-| `capture_stock_runtime_state.ps1 -ValidateResearchRoot ...` | 0 for a policy-screened root, otherwise 1 | 0 / 0 | Structural/signature/launcher `VERSIONINFO` preflight; invokes one read-only `subst.exe` helper and retains physical identity as pending. |
-| `capture_stock_runtime_state.ps1 -ValidateRestorationGuard` | 0 on success | 0 / temporary self-test files removed | Synthetic rollback test, not stock attestation. |
-| Any active scenario | 1 | 0 / 0 | Deliberately blocked before launch/output. |
-| Checker on a future structurally valid transport run | 0 | 0 / 0 | Transport/raw integrity with `result=evidence_pending`. |
-| Corpus verifier | 1 | 0 / 0 | Accepted runs and decoded runtime updates remain zero. |
+Verify the corpus independently with:
 
-Do not create `docs/evidence/GOLDSRC_STOCK_RUNTIME_STATE.json` while the accepted
-run count is zero. The current decoder retains the exact first unsupported
-runtime cursor and stops; opcode/body grammar, baseline/update/removal semantics,
-local-player identity, clientdata, server time, authoritative movement, and
-command acknowledgement all remain evidence-gated. The catalog decoder is a
-standalone pending API and is not yet composed into production
-`PostResourceSignon`.
+```powershell
+.\scripts\verify_stock_runtime_first_observations.ps1 `
+  -CaptureRoot ".\manual-artifacts\stock-runtime" `
+  -CheckerPath ".\build\bin\Debug\hlclient_stock_runtime_check.exe" `
+  -MinimumAcceptedRuns 24 `
+  -MinimumSequencedServerPackets 1000
+```
+
+Raw runs and logs remain ignored and must not be uploaded. The sanitized
+`docs/evidence/GOLDSRC_STOCK_RUNTIME_FIRST_OBSERVATIONS.json` must remain absent
+until the full threshold and stability gates pass. This checkout currently has
+zero accepted real runs; do not fabricate the evidence file. M4.7.1.2 owns
+runtime message grammar and M4.7.2 owns stock usercmd/ACK behavior.
 
 ### Manual original-HLDS verification
 
@@ -974,12 +980,19 @@ cmake -S . -B build-asan -G "Visual Studio 17 2022" -A Win32 `
 cmake --build build-asan --config Debug --target `
   hlclient_world_viewer hlclient_movement_check `
   hlclient_prediction_check hlclient_prediction_viewer `
-  hlclient_collision_fixture_writer hlclient_tests
+  hlclient_collision_fixture_writer hlclient_stock_runtime_check `
+  hlclient_tests
 
 .\build-asan\bin\Debug\hlclient_tests.exe `
   '[prediction]~[.stress]'
 .\build-asan\bin\Debug\hlclient_tests.exe `
   '[prediction][reconciliation][.stress]'
+.\build-asan\bin\Debug\hlclient_tests.exe `
+  '[stock-runtime][corpus]'
+.\build-asan\bin\Debug\hlclient_tests.exe `
+  '[stock-runtime][replay]'
+.\build-asan\bin\Debug\hlclient_tests.exe `
+  '[stock-runtime][first-observation]'
 ```
 
 The option is off by default. It removes incompatible Debug runtime checks

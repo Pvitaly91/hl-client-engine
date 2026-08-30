@@ -228,10 +228,25 @@ add_executable(hlclient_tests
     test_resource_transition_udp_integration.cpp
     test_server_info.cpp
     test_service_payload_envelope.cpp
+    test_stock_captured_signon_replay.cpp
+    test_stock_runtime_capture_corpus.cpp
+    test_stock_runtime_first_observation.cpp
+    test_stock_runtime_transport_journal.cpp
+    test_stock_runtime_transport_replay.cpp
     test_udp_socket.cpp
     test_user_info_stream.cpp
     test_user_info_update.cpp
 )
+
+if(WIN32)
+    target_sources(
+        hlclient_tests
+        PRIVATE
+            test_windows_binary_identity.cpp
+            test_windows_network_isolation.cpp
+            test_windows_process_orchestrator.cpp
+            test_windows_secure_output.cpp)
+endif()
 
 target_link_libraries(hlclient_tests
     PRIVATE
@@ -276,6 +291,9 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_entity_snapshots
         hlclient_goldsrc_stock_runtime
         hlclient_goldsrc_stock_runtime_capture
+        hlclient_stock_runtime_corpus
+        hlclient_stock_runtime_transport_journal
+        hlclient_stock_runtime_transport_replay
         hlclient_stock_authoritative_adapter
         hlclient_entity_visual_projection
         hlclient_entity_visual_assets
@@ -319,10 +337,31 @@ target_link_libraries(hlclient_tests
         hlclient_resource_consistency_local
 )
 
+if(WIN32)
+    target_link_libraries(
+        hlclient_tests
+        PRIVATE
+            hlclient::windows_binary_identity
+            hlclient::windows_network_isolation
+            hlclient::windows_process_orchestrator
+            hlclient::windows_secure_output
+            ws2_32)
+endif()
+
 target_compile_features(hlclient_tests PRIVATE cxx_std_20)
 hlclient_enable_warnings(hlclient_tests)
 hlclient_enable_address_sanitizer(hlclient_tests)
 add_dependencies(hlclient_tests hlclient)
+if(WIN32)
+    add_dependencies(
+        hlclient_tests
+        hlclient_network_isolation_probe
+        hlclient_stock_runtime_capture
+        hlclient_stock_runtime_fake_client
+        hlclient_stock_runtime_fake_server
+        hlclient_stock_runtime_isolation_guard
+        hlclient_stock_runtime_orchestrator)
+endif()
 
 set_target_properties(hlclient_tests PROPERTIES FOLDER "Tests")
 

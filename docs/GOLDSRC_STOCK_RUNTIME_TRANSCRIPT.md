@@ -35,17 +35,28 @@ record exist. Merely selecting a profile value cannot enable decoding.
 
 ## Research boundary
 
-Current tooling stores raw UDP datagrams and flat transport metadata only below
-ignored `manual-artifacts/stock-runtime/`. Parsed netchan headers, transformed,
-fragment, reassembled, decompressed, cursor-annotation, and runtime-message
-layers are not implemented in the capture path. Their configured bounds are
-validated future limits, not proof that those layers were consumed. The relay
-forwards bytes independently of parsing and whole-datagram perturbation labels
-select only a directional ordinal, not a decoded runtime/move packet.
+M4.7.1.1 adds a separate Windows-only research transaction. It is off by
+default and requires the exact case-sensitive active token. A capable elevated
+host must prove the signed/versioned client and server, App 70 build, HLDS
+engine/Protocol/build banner, a dynamic temporary WFP loopback-only policy and
+an OS-classified non-loopback denial before stock launch. Persistent firewall
+rules are not created, and lack of WFP/canary capability keeps capture
+unavailable.
 
-Active research is disabled before process launch or output creation until
-OS-level outbound isolation and complete stock app/engine/protocol/build
-observation are implemented. The current zero-run verifier opens no socket,
-writes no file, reports versions/restoration as `not_observed`/`not_run`, and
-does not treat absence as successful stock evidence. The standalone catalog
-decoder is not yet composed into production `PostResourceSignon`.
+The relay remains byte preserving and records bounded raw datagrams plus an
+exact JSONL transport journal below ignored
+`manual-artifacts/stock-runtime/`. Observed and delivered streams are separate;
+drop/duplicate/delay/reorder select directional transport ordinals, not decoded
+runtime, entity or usercmd messages. Offline replay follows emitted order and
+reuses the existing connectionless, netchan transform, fragment/reassembly,
+bounded BZip2 and confirmed sign-on/resource codecs. It generates no packet.
+
+Successful replay reconstructs the exact post-resource byte/bit cursor and
+retains one unconsumed `first_post_resource_runtime_candidate`. That candidate
+has no assigned service semantic and its body is never scanned or consumed.
+Only exact restoration, no external Steam-state drift, checker determinism and
+independent walker agreement permit the PowerShell wrapper to publish a final
+accepted run manifest. This checkout has zero accepted M4.7.1.1 real runs and
+no tracked first-observation evidence JSON. M4.7.1.2 owns runtime grammar;
+M4.7.2 owns stock usercmd. The pending catalog decoder remains separate from
+production `PostResourceSignon`.

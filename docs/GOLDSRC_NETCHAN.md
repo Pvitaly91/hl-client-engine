@@ -47,6 +47,14 @@ compatibility claims. M2.4.1 now consumes the first confirmed envelope only in
 the separate sign-on layer; this netchan profile still assigns no semantic
 meaning to opaque payload bytes.
 
+M4.7.1.1 adds no second netchan implementation. Its ignored capture corpus
+records observed datagrams and a distinct globally ordered delivered stream;
+offline replay feeds only that delivered order through the existing pure
+header, offset-8 transform, reliability and fragment codecs. It opens no socket
+and generates no ACK or request. Transport-ordinal perturbation labels do not
+identify runtime/entity/usercmd semantics, and the first reconstructed
+post-resource candidate remains semantically unnamed for M4.7.1.2.
+
 ## Compatibility profile and methodology
 
 **Stock-confirmed:** the reference client was signed Valve

@@ -1000,10 +1000,10 @@ exceptions, C++ virtual objects across different toolsets, or memory without an
 explicit allocator and ownership contract. M0.1 does not implement a loader or
 that ABI.
 
-## M4.7.1 stock runtime research boundary
+## M4.7.1/M4.7.1.1 stock runtime research boundary
 
-The stock runtime boundary currently has two independent branches; capture
-metadata is not an input to the catalog decoder:
+The production pending catalog and the isolated research sidecar remain
+independent. Captured bytes never become production runtime state directly:
 
 ```text
 exact PostResourceResponseBoundary
@@ -1013,17 +1013,24 @@ exact PostResourceResponseBoundary
     -> optional immutable runtime frame/history
     -> fail-closed authority/visual adapters
 
-ignored raw UDP + flat transport metadata
-    -> transport metadata/raw-content integrity checker
-    -> evidence_pending (zero decoded messages/frames)
+explicit token + elevated/capable Windows host
+    -> signed binary/App/build observer
+    -> temporary dynamic-WFP loopback-only guard
+    -> Job-owned relay -> HLDS -> stock client
+    -> ignored raw datagrams + observed/delivered journal
+    -> bounded corpus loader + existing pure protocol codecs
+    -> exact post-resource byte/bit boundary
+    -> neutral unconsumed first candidate
+    -> exact restoration + external drift compare
+    -> checker/walker agreement -> one final run manifest
 ```
 
-The catalog is not yet composed into production `PostResourceSignon`. The
-production pending path retains one `NetchanDriver` and emits zero extra
-semantic bytes structurally, but no live stock run proves that lifetime in this
-milestone. The relay is byte-forwarding research scaffolding, not a passive
-runtime decoder or replacement production session, and active orchestration is
-disabled until network confinement/version gates exist. No protocol library
-depends on prediction or a renderer; the authority adapter is a higher
-composition layer. Reserved confirmed profiles remain unreachable at zero
-accepted runs.
+Active capture is off by default, creates no persistent firewall rule and
+remains unavailable without the isolation/canary capability. PowerShell owns
+snapshots, restoration and final publication; the C++ orchestrator owns every
+stock process/socket/WFP lifetime through retained handles and a kill-on-close
+Job. Offline replay follows peer-delivered transport ordinals and generates no
+packet. The catalog is not yet composed into production `PostResourceSignon`;
+M4.7.1.2 owns runtime grammar and M4.7.2 owns stock usercmd. No protocol library
+depends on prediction or a renderer, and reserved confirmed profiles remain
+unreachable while this checkout has zero accepted real runtime runs.

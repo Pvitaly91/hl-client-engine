@@ -264,46 +264,6 @@ function Get-PowerShellTransportMetadataHash {
     finally { $sha.Dispose() }
 }
 
-function Get-PowerShellRawInventoryHash {
-    param([string]$RunRoot, [object]$Metadata)
-    $rawRoot = Join-Path $RunRoot 'raw'
-    Assert-NoReparsePointInExistingPath $rawRoot 'raw inventory root'
-    if (-not (Test-Path -LiteralPath $rawRoot -PathType Container)) {
-        throw 'Raw inventory root is absent.'
-    }
-    Assert-NoReparsePoint $rawRoot 'raw inventory root'
-    $items = @(Get-ChildItem -LiteralPath $rawRoot -Force | Sort-Object Name)
-    if ($items.Count -ne [Int64]$Metadata.observed_datagrams) {
-        throw 'Raw inventory count differs from transport metadata.'
-    }
-    [Int64]$totalBytes = 0
-    $records = @($items | ForEach-Object {
-        $item = $_
-        if (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
-            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            $item.Name -cnotmatch '^[0-9]{8}-(?:c2s|s2c)\.bin$') {
-            throw 'Raw inventory contains an unexpected entry.'
-        }
-        Assert-OnlyDefaultDataStream $item.FullName 'raw datagram'
-        Assert-NoHardLink $item.FullName 'raw datagram'
-        if ($item.Length -gt [Int64]$Metadata.maximum_payload_bytes -or
-            $totalBytes -gt [Int64]$Metadata.maximum_total_raw_bytes - $item.Length) {
-            throw 'Raw datagram inventory exceeds capture limits.'
-        }
-        $totalBytes += $item.Length
-        '{0}|{1}|{2}' -f $item.Name, $item.Length,
-            (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    })
-    if ($totalBytes -ne [Int64]$Metadata.observed_raw_bytes) {
-        throw 'Raw inventory byte count differs from transport metadata.'
-    }
-    $canonical = $records -join "`n"
-    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonical)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
-    finally { $sha.Dispose() }
-}
-
 if (-not (Test-Path -LiteralPath $gitIgnorePath -PathType Leaf) -or
     (Get-Content -Raw -LiteralPath $gitIgnorePath) -cnotmatch '(?m)^/manual-artifacts/\s*$') {
     throw 'Repository-wide manual-artifacts ignore rule is absent.'
@@ -365,7 +325,6 @@ $rejected = 0
 $incomplete = 0
 $runtimeUpdates = 0
 $metadataHashAgreements = 0
-$rawHashAgreements = 0
 foreach ($directory in $directories) {
     if ($directory.Name -cnotmatch '^[0-9a-f]{32}$') { $rejected++; continue }
     try {
@@ -400,20 +359,6 @@ foreach ($directory in $directories) {
             throw 'Selected transport-metadata hashes disagree.'
         }
         $metadataHashAgreements++
-        $rawHashLines = @($checkerOutput | Where-Object {
-            $_.StartsWith('[stock-runtime] raw-inventory-hash=')
-        })
-        if ($rawHashLines.Count -ne 1) {
-            throw 'Checker raw-inventory hash is absent.'
-        }
-        $checkerRawHash = $rawHashLines[0].Substring(
-            '[stock-runtime] raw-inventory-hash='.Length)
-        if ($checkerRawHash -cne
-            (Get-PowerShellRawInventoryHash $directory.FullName $metadata)) {
-            throw 'Raw-file content hashes disagree.'
-        }
-        $rawHashAgreements++
-
         # Transport-only metadata deliberately has no observed app build,
         # server engine/protocol/build, exact runtime updates, or grammar. It
         # remains incomplete and cannot satisfy an evidence threshold.
@@ -428,7 +373,6 @@ Write-Output "[stock-runtime-verify] rejected-runs=$rejected"
 Write-Output "[stock-runtime-verify] incomplete-runs=$incomplete"
 Write-Output "[stock-runtime-verify] runtime-updates=$runtimeUpdates"
 Write-Output "[stock-runtime-verify] transport-metadata-hash-agreements=$metadataHashAgreements"
-Write-Output "[stock-runtime-verify] raw-content-hash-agreements=$rawHashAgreements"
 Write-Output '[stock-runtime-verify] runtime-decoder-walker-agreements=0-not-implemented'
 Write-Output "[stock-runtime-verify] expected-client-version=${ExpectedClientVersion}-not-observed"
 Write-Output "[stock-runtime-verify] expected-protocol=${ExpectedProtocol}-not-observed"

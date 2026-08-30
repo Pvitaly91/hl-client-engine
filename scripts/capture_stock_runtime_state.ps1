@@ -2,13 +2,15 @@
 
 <#
 .SYNOPSIS
-Validates the stock-runtime research preflight and restoration guard.
+Validates or runs the isolated stock-runtime capture transaction.
 
 .DESCRIPTION
-Active capture is currently evidence-pending and fails before process launch or
-output creation because OS-level outbound isolation and exact app/engine/
-protocol/build observation are not implemented. The retained orchestration and
-loopback relay are research scaffolding only.
+Active capture is disabled by default. It requires an explicit, case-sensitive
+confirmation token and remains fail-closed unless the project-owned Windows
+orchestrator reports a valid binary profile and a successful dynamic-WFP
+isolation canary. PowerShell owns the research/external snapshots, exact
+restoration and one-time final run-manifest publication; C++ owns every stock
+process, socket and WFP lifecycle.
 
 ValidateResearchRoot is read-only with respect to the repository and research
 tree and starts no stock/game process. It invokes the read-only Windows
@@ -22,26 +24,51 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
     [switch]$ValidateResearchRoot,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [switch]$ValidateActiveCaptureEnvironment,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [ValidateNotNullOrEmpty()]
     [string]$ResearchHalfLifeRoot,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [ValidateNotNullOrEmpty()]
     [string]$ClientPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [ValidateNotNullOrEmpty()]
     [string]$HldsPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [ValidateNotNullOrEmpty()]
     [string]$CaptureToolPath,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [switch]$EnableActiveCapture,
+
+    [Parameter(ParameterSetName = 'Capture')]
+    [AllowEmptyString()]
+    [string]$ConfirmActiveCapture,
+
+    [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [ValidateNotNullOrEmpty()]
+    [string]$NetworkIsolationGuardPath,
+
+    [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [ValidateNotNullOrEmpty()]
+    [string]$AppManifestPath,
+
+    [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'ActivePreflight')]
     [ValidatePattern('^[0-9A-Fa-f]{64}$')]
     [string]$ExpectedCaptureToolSha256,
 
@@ -60,16 +87,21 @@ param(
         'yaw-negative', 'pitch-positive', 'pitch-negative', 'second-client',
         'reconnect', 'map-change', 'server-restart', 'respawn',
         'low-updaterate', 'high-updaterate', 'low-cmdrate', 'high-cmdrate',
+        'drop-server-to-client-transport-ordinal',
+        'duplicate-server-to-client-transport-ordinal',
+        'reorder-server-to-client-transport-ordinal',
         'drop-server-runtime', 'drop-two-server-runtime',
         'duplicate-server-runtime', 'reorder-server-runtime',
         'drop-client-move', 'delay-client-move')]
     [string]$Scenario,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'ActivePreflight')]
     [ValidateRange(1024, 65534)]
     [int]$RelayPort = 27140,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'ActivePreflight')]
     [ValidateRange(1024, 65534)]
     [int]$ServerPort = 27141,
 
@@ -134,6 +166,7 @@ $manualRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot 'manual-artifact
 $requiredOutputRoot = [IO.Path]::GetFullPath((Join-Path $manualRoot 'stock-runtime')).TrimEnd('\', '/')
 $markerName = '.hlclient-research-isolated'
 $markerText = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
+$activeCaptureToken = 'HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1'
 $maximumEntries = 199999
 $maximumResearchBytes = [Int64]17179869184
 $maximumSteamManifestBytes = 1048576
@@ -145,6 +178,22 @@ $protectedRoots = @(
     'valve/screenshots', 'valve/save', 'valve/demo', 'valve/demos',
     'valve/config', 'platform/config')
 
+# This is intentionally the first Capture-mode action. It does not resolve or
+# inspect any caller-supplied path and occurs before output, backup, socket,
+# process or WFP mutation. The confirmation value has no environment/config
+# fallback and Ordinal comparison is case-sensitive.
+if ($PSCmdlet.ParameterSetName -eq 'Capture' -and
+    (-not $EnableActiveCapture -or $ConfirmActiveCapture -cne $activeCaptureToken)) {
+    Write-Output '[stock-runtime-capture] active-capture=explicit-opt-in-required'
+    Write-Output '[stock-runtime-capture] processes-started=0'
+    Write-Output '[stock-runtime-capture] files-written=0'
+    Write-Output '[stock-runtime-capture] network-operations=0'
+    Write-Output '[stock-runtime-capture] wfp-sessions-started=0'
+    Write-Output '[stock-runtime-capture] capture-runs-created=0'
+    Write-Output '[stock-runtime-capture] restoration-backups-created=0'
+    throw 'Active stock-runtime capture requires the exact explicit confirmation token; no input path was resolved and no mutation occurred.'
+}
+
 function Test-PathAtOrBelow {
     param([string]$Path, [string]$Root)
     $pathValue = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
@@ -153,6 +202,57 @@ function Test-PathAtOrBelow {
         $pathValue.StartsWith(
             $rootValue + [IO.Path]::DirectorySeparatorChar,
             [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-PhysicalPathIdentity {
+    param([string]$Path, [string]$Label)
+    $canonical = [IO.Path]::GetFullPath(
+        (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName
+    ).TrimEnd('\', '/')
+    if ($canonical -cnotmatch '^(?<drive>[A-Za-z]):\\(?<suffix>.*)$') {
+        throw "$Label physical identity requires a drive-letter path."
+    }
+    $driveName = $Matches.drive.ToUpperInvariant()
+    $relativeSuffix = $Matches.suffix
+    if ($null -eq ('Hlclient.StockRuntimePathIdentity' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace Hlclient
+{
+    public static class StockRuntimePathIdentity
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetVolumeNameForVolumeMountPoint(
+            string volumeMountPoint,
+            StringBuilder volumeName,
+            int bufferLength);
+    }
+}
+'@
+    }
+    $volumeName = [Text.StringBuilder]::new(64)
+    if (-not [Hlclient.StockRuntimePathIdentity]::GetVolumeNameForVolumeMountPoint(
+            ($driveName + ':\'), $volumeName, $volumeName.Capacity)) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "$Label physical volume identity is unavailable (Win32 $errorCode)."
+    }
+    return [pscustomobject]@{
+        Path = $canonical
+        Volume = $volumeName.ToString().ToUpperInvariant()
+        Relative = ([string]$relativeSuffix).TrimEnd('\', '/')
+    }
+}
+
+function Test-PhysicalPathAtOrBelow {
+    param([object]$PathIdentity, [object]$RootIdentity)
+    if ($PathIdentity.Volume -cne $RootIdentity.Volume) { return $false }
+    $path = $PathIdentity.Relative.TrimEnd('\', '/')
+    $root = $RootIdentity.Relative.TrimEnd('\', '/')
+    return $path.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+        $path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Assert-PathBelowRoot {
@@ -330,32 +430,767 @@ function Test-ProtectedPath {
     return $false
 }
 
+function Initialize-RestorationDirectoryCapabilityNative {
+    if ($null -ne ('Hlclient.StockRuntimeDirectoryCapability' -as [type])) {
+        return
+    }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace Hlclient
+{
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct StockRuntimeByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    public sealed class StockRuntimeDirectoryCapability : IDisposable
+    {
+        private const uint GenericRead = 0x80000000;
+        private const uint GenericWrite = 0x40000000;
+        private const uint DeleteAccess = 0x00010000;
+        private const uint FileReadAttributes = 0x80;
+        private const uint FileShareRead = 0x1;
+        private const uint FileShareWrite = 0x2;
+        private const uint CreateNew = 1;
+        private const uint OpenExisting = 3;
+        private const uint FileAttributeTemporary = 0x100;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint FileFlagWriteThrough = 0x80000000;
+        private const uint FileAttributeDirectory = 0x10;
+        private const uint FileAttributeReparsePoint = 0x400;
+        private const uint FileNameNormalized = 0x0;
+        private const uint VolumeNameDos = 0x0;
+        private const int FileRenameInfo = 3;
+        private const int FileDispositionInfo = 4;
+        private const uint FileBegin = 0;
+        private const uint MoveFileReplaceExisting = 0x1;
+        private const int MaximumPublicationBytes = 4 * 1024 * 1024;
+        private static readonly IntPtr InvalidHandle = new IntPtr(-1);
+
+        private readonly List<IntPtr> handles = new List<IntPtr>();
+        private readonly string canonicalPath;
+        private readonly uint volumeSerial;
+        private readonly ulong fileId;
+        private bool disposed;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFile(
+            string fileName, uint desiredAccess, uint shareMode,
+            IntPtr securityAttributes, uint creationDisposition,
+            uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            IntPtr handle, out StockRuntimeByHandleFileInformation information);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            IntPtr handle, StringBuilder path, uint pathLength, uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WriteFile(
+            IntPtr handle, byte[] buffer, uint bytesToWrite,
+            out uint bytesWritten, IntPtr overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ReadFile(
+            IntPtr handle, byte[] buffer, uint bytesToRead,
+            out uint bytesRead, IntPtr overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FlushFileBuffers(IntPtr handle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFilePointerEx(
+            IntPtr handle, long distance, out long newPointer, uint moveMethod);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileInformationByHandle(
+            IntPtr handle, int informationClass,
+            IntPtr information, uint bufferSize);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteFile(string fileName);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool MoveFileEx(
+            string existingFileName, string newFileName, uint flags);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFileAttributes(string fileName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        private StockRuntimeDirectoryCapability(string path, string anchorPath)
+        {
+            canonicalPath = Path.GetFullPath(path).TrimEnd('\\', '/');
+            try
+            {
+                if (String.IsNullOrEmpty(Path.GetPathRoot(canonicalPath)))
+                    throw new InvalidOperationException("Directory capability requires an absolute path.");
+                string canonicalAnchor = Path.GetFullPath(anchorPath).TrimEnd('\\', '/');
+                if (!canonicalAnchor.StartsWith(
+                        canonicalPath + Path.DirectorySeparatorChar,
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        "Directory capability anchor must be a strict descendant.");
+                OpenAndHold(canonicalPath, true);
+                // Holding a descendant without FILE_SHARE_DELETE blocks
+                // rename/replacement of the root and its ancestors on the
+                // supported Windows profile. The self-test exercises both.
+                OpenAndHold(canonicalAnchor, false);
+                StockRuntimeByHandleFileInformation information = Information(RootHandle);
+                volumeSerial = information.VolumeSerialNumber;
+                fileId = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
+                if (!Revalidate())
+                    throw new InvalidOperationException("Directory capability identity changed during acquisition.");
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        public static StockRuntimeDirectoryCapability Open(
+            string path, string anchorPath)
+        {
+            StockRuntimeDirectoryCapability capability = null;
+            try
+            {
+                capability = new StockRuntimeDirectoryCapability(path, anchorPath);
+                return capability;
+            }
+            catch
+            {
+                if (capability != null) capability.Dispose();
+                throw;
+            }
+        }
+
+        public bool Revalidate()
+        {
+            if (disposed || handles.Count == 0) return false;
+            StockRuntimeByHandleFileInformation information = Information(RootHandle);
+            return information.VolumeSerialNumber == volumeSerial &&
+                ((((ulong)information.FileIndexHigh << 32) | information.FileIndexLow) == fileId) &&
+                String.Equals(FinalPath(RootHandle), canonicalPath,
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        public string IdentityCategory
+        {
+            get { return "retained-volume-and-file-id"; }
+        }
+
+        public string CanonicalPath
+        {
+            get { return canonicalPath; }
+        }
+
+        // Reads an existing bounded artifact through a single no-share-write/
+        // no-share-delete handle. The exact ordinary-file identity is checked
+        // before and after the read, so callers can validate and later publish
+        // these same bytes without reopening a mutable path by name.
+        public byte[] ReadExistingFile(string leafName, int maximumBytes)
+        {
+            if (disposed || !Revalidate())
+                throw new InvalidOperationException(
+                    "Read directory capability is no longer valid.");
+            if (!ValidLeafName(leafName) || maximumBytes < 1 ||
+                maximumBytes > MaximumPublicationBytes)
+                throw new InvalidOperationException(
+                    "Bounded retained-handle read parameters are invalid.");
+            string path = Path.Combine(canonicalPath, leafName);
+            IntPtr handle = CreateFile(
+                path, GenericRead | FileReadAttributes,
+                FileShareRead, IntPtr.Zero, OpenExisting,
+                FileFlagOpenReparsePoint, IntPtr.Zero);
+            if (handle == InvalidHandle)
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Bounded retained-handle read open failed.");
+            try
+            {
+                StockRuntimeByHandleFileInformation information =
+                    Information(handle);
+                ulong size = ((ulong)information.FileSizeHigh << 32) |
+                    information.FileSizeLow;
+                if (size == 0 || size > (ulong)maximumBytes)
+                    throw new InvalidOperationException(
+                        "Bounded retained-handle read size is invalid.");
+                RequireOrdinaryExactFile(handle, path, size);
+                byte[] bytes = new byte[(int)size];
+                uint read;
+                if (!ReadFile(handle, bytes, (uint)bytes.Length,
+                        out read, IntPtr.Zero) || read != (uint)bytes.Length)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Bounded retained-handle read failed.");
+                byte[] extra = new byte[1];
+                if (!ReadFile(handle, extra, 1, out read, IntPtr.Zero) ||
+                    read != 0)
+                    throw new InvalidOperationException(
+                        "Bounded retained-handle read length changed.");
+                RequireOrdinaryExactFile(handle, path, size);
+                if (!Revalidate())
+                    throw new InvalidOperationException(
+                        "Read directory identity changed.");
+                return bytes;
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
+        // Publishes a bounded byte string through one retained native handle:
+        // CREATE_NEW random temporary, write/flush/read-back, no-replace
+        // handle rename, then a second same-handle identity/read-back check.
+        // At no point is a closed temporary path trusted or moved by name.
+        public void PublishNewFile(string leafName, byte[] bytes)
+        {
+            PublishNewFiles(
+                new string[] { leafName }, new byte[][] { bytes });
+        }
+
+        // A final evidence set is a single rollback-capable batch. All
+        // temporary handles are prepared first and remain held until every
+        // no-replace rename and same-handle verification succeeds. If any
+        // member fails, every renamed member is deleted by its retained
+        // handle before this method returns and no final leaf remains.
+        public void PublishNewFiles(string[] leafNames, byte[][] payloads)
+        {
+            if (disposed || !Revalidate())
+                throw new InvalidOperationException(
+                    "Publication directory capability is no longer valid.");
+            if (leafNames == null || payloads == null ||
+                leafNames.Length == 0 || leafNames.Length > 16 ||
+                leafNames.Length != payloads.Length)
+                throw new InvalidOperationException(
+                    "Publication batch shape is invalid.");
+
+            HashSet<string> uniqueLeaves = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            for (int index = 0; index < leafNames.Length; ++index)
+            {
+                if (!ValidLeafName(leafNames[index]) ||
+                    !uniqueLeaves.Add(leafNames[index]))
+                    throw new InvalidOperationException(
+                        "Publication requires unique safe bounded leaf names.");
+                if (payloads[index] == null || payloads[index].Length == 0 ||
+                    payloads[index].Length > MaximumPublicationBytes)
+                    throw new InvalidOperationException(
+                        "Publication payload is empty or outside its byte bound.");
+            }
+
+            string[] destinations = new string[leafNames.Length];
+            string[] temporaryPaths = new string[leafNames.Length];
+            IntPtr[] temporaries = new IntPtr[leafNames.Length];
+            bool[] renamed = new bool[leafNames.Length];
+            for (int index = 0; index < temporaries.Length; ++index)
+                temporaries[index] = InvalidHandle;
+            bool complete = false;
+            bool rollbackComplete = true;
+            try
+            {
+                for (int index = 0; index < leafNames.Length; ++index)
+                {
+                    destinations[index] = Path.Combine(
+                        canonicalPath, leafNames[index]);
+                    temporaries[index] = CreateTemporaryFile(
+                        out temporaryPaths[index]);
+                    RequireOrdinaryExactFile(
+                        temporaries[index], temporaryPaths[index], 0);
+
+                    uint written;
+                    byte[] bytes = payloads[index];
+                    if (!WriteFile(
+                            temporaries[index], bytes, (uint)bytes.Length,
+                            out written, IntPtr.Zero) ||
+                        written != (uint)bytes.Length)
+                        throw new Win32Exception(Marshal.GetLastWin32Error(),
+                            "Atomic publication write failed.");
+                    if (!FlushFileBuffers(temporaries[index]))
+                        throw new Win32Exception(Marshal.GetLastWin32Error(),
+                            "Atomic publication flush failed.");
+                    RequireOrdinaryExactFile(
+                        temporaries[index], temporaryPaths[index],
+                        (ulong)bytes.Length);
+                    RequireExactBytes(temporaries[index], bytes);
+                }
+
+                for (int index = 0; index < leafNames.Length; ++index)
+                {
+                    RenameOpenFileWithoutReplace(
+                        temporaries[index], destinations[index]);
+                    renamed[index] = true;
+                    RequireOrdinaryExactFile(
+                        temporaries[index], destinations[index],
+                        (ulong)payloads[index].Length);
+                    RequireExactBytes(temporaries[index], payloads[index]);
+                }
+                if (!Revalidate())
+                    throw new InvalidOperationException(
+                        "Publication directory identity changed after batch rename.");
+                complete = true;
+            }
+            finally
+            {
+                if (!complete)
+                {
+                    for (int index = 0; index < temporaries.Length; ++index)
+                    {
+                        if (renamed[index] &&
+                            temporaries[index] != IntPtr.Zero &&
+                            temporaries[index] != InvalidHandle &&
+                            !MarkDeleteOnClose(temporaries[index]))
+                            rollbackComplete = false;
+                    }
+                }
+                for (int index = 0; index < temporaries.Length; ++index)
+                {
+                    if (temporaries[index] != IntPtr.Zero &&
+                        temporaries[index] != InvalidHandle)
+                        CloseHandle(temporaries[index]);
+                    if (!complete)
+                    {
+                        string cleanupPath = renamed[index]
+                            ? destinations[index] : temporaryPaths[index];
+                        if (!String.IsNullOrEmpty(cleanupPath) &&
+                            GetFileAttributes(cleanupPath) != UInt32.MaxValue &&
+                            !DeleteFile(cleanupPath))
+                            rollbackComplete = false;
+                        if (!String.IsNullOrEmpty(cleanupPath) &&
+                            GetFileAttributes(cleanupPath) != UInt32.MaxValue)
+                            rollbackComplete = false;
+                    }
+                }
+                if (!complete && !rollbackComplete)
+                    throw new IOException(
+                        "Atomic publication batch rollback was incomplete.");
+            }
+        }
+
+        // Exercises the same no-share-delete temporary-handle primitive used
+        // by both final restoration and run-manifest publication. The test
+        // succeeds only when delete and replacement-by-name are both blocked
+        // while the trusted file handle remains open.
+        public bool VerifyTemporarySubstitutionBlocked()
+        {
+            if (disposed || !Revalidate()) return false;
+            string temporaryPath = null;
+            string substitutePath = null;
+            IntPtr temporary = InvalidHandle;
+            try
+            {
+                temporary = CreateTemporaryFile(out temporaryPath);
+                byte[] original = new byte[] { 0x31, 0x32, 0x33, 0x34 };
+                uint written;
+                if (!WriteFile(temporary, original, (uint)original.Length,
+                        out written, IntPtr.Zero) ||
+                    written != (uint)original.Length ||
+                    !FlushFileBuffers(temporary))
+                    return false;
+                RequireOrdinaryExactFile(
+                    temporary, temporaryPath, (ulong)original.Length);
+                RequireExactBytes(temporary, original);
+
+                substitutePath = temporaryPath + ".replacement";
+                File.WriteAllBytes(substitutePath,
+                    new byte[] { 0x61, 0x62, 0x63, 0x64 });
+                bool deleteBlocked = !DeleteFile(temporaryPath);
+                bool replacementBlocked = !MoveFileEx(
+                    substitutePath, temporaryPath, MoveFileReplaceExisting);
+                RequireOrdinaryExactFile(
+                    temporary, temporaryPath, (ulong)original.Length);
+                RequireExactBytes(temporary, original);
+                return deleteBlocked && replacementBlocked && Revalidate();
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (temporary != IntPtr.Zero && temporary != InvalidHandle)
+                {
+                    MarkDeleteOnClose(temporary);
+                    CloseHandle(temporary);
+                }
+                if (!String.IsNullOrEmpty(temporaryPath))
+                    DeleteFile(temporaryPath);
+                if (!String.IsNullOrEmpty(substitutePath))
+                    DeleteFile(substitutePath);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            for (int index = handles.Count - 1; index >= 0; --index)
+            {
+                if (handles[index] != IntPtr.Zero && handles[index] != InvalidHandle)
+                    CloseHandle(handles[index]);
+            }
+            handles.Clear();
+            disposed = true;
+        }
+
+        private IntPtr RootHandle
+        {
+            get { return handles[0]; }
+        }
+
+        private void OpenAndHold(string path, bool requireDirectory)
+        {
+            IntPtr handle = CreateFile(
+                path, FileReadAttributes, FileShareRead | FileShareWrite,
+                IntPtr.Zero, OpenExisting,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                IntPtr.Zero);
+            if (handle == InvalidHandle)
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Could not retain directory identity for " + path + ".");
+            try
+            {
+                StockRuntimeByHandleFileInformation information = Information(handle);
+                if ((requireDirectory &&
+                        (information.FileAttributes & FileAttributeDirectory) == 0) ||
+                    (information.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    !String.Equals(FinalPath(handle),
+                        Path.GetFullPath(path).TrimEnd('\\', '/'),
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        "Directory capability encountered a reparse or path mismatch.");
+                handles.Add(handle);
+                handle = IntPtr.Zero;
+            }
+            finally
+            {
+                if (handle != IntPtr.Zero && handle != InvalidHandle)
+                    CloseHandle(handle);
+            }
+        }
+
+        private IntPtr CreateTemporaryFile(out string temporaryPath)
+        {
+            byte[] random = new byte[16];
+            for (int attempt = 0; attempt < 16; ++attempt)
+            {
+                using (RandomNumberGenerator generator =
+                        RandomNumberGenerator.Create())
+                    generator.GetBytes(random);
+                StringBuilder name = new StringBuilder(
+                    ".hlclient-stock-runtime-");
+                for (int index = 0; index < random.Length; ++index)
+                    name.Append(random[index].ToString("x2"));
+                name.Append(".tmp");
+                temporaryPath = Path.Combine(canonicalPath, name.ToString());
+                IntPtr handle = CreateFile(
+                    temporaryPath,
+                    GenericRead | GenericWrite | DeleteAccess |
+                        FileReadAttributes,
+                    FileShareRead, IntPtr.Zero, CreateNew,
+                    FileAttributeTemporary | FileFlagOpenReparsePoint |
+                        FileFlagWriteThrough,
+                    IntPtr.Zero);
+                if (handle != InvalidHandle) return handle;
+                int error = Marshal.GetLastWin32Error();
+                if (error != 80 && error != 183)
+                    throw new Win32Exception(error,
+                        "Atomic publication temporary creation failed.");
+            }
+            temporaryPath = null;
+            throw new IOException(
+                "Atomic publication exhausted random temporary names.");
+        }
+
+        private static bool ValidLeafName(string leafName)
+        {
+            if (String.IsNullOrEmpty(leafName) || leafName.Length > 160 ||
+                leafName == "." || leafName == ".." ||
+                !String.Equals(Path.GetFileName(leafName), leafName,
+                    StringComparison.Ordinal) ||
+                leafName.EndsWith(" ", StringComparison.Ordinal) ||
+                leafName.EndsWith(".", StringComparison.Ordinal))
+                return false;
+            foreach (char value in leafName)
+            {
+                if (value < 0x20 || value == '/' || value == '\\' ||
+                    value == ':' || value == '*' || value == '?' ||
+                    value == '"' || value == '<' || value == '>' ||
+                    value == '|')
+                    return false;
+            }
+            return true;
+        }
+
+        private static void RequireOrdinaryExactFile(
+            IntPtr handle, string expectedPath, ulong expectedSize)
+        {
+            StockRuntimeByHandleFileInformation information =
+                Information(handle);
+            ulong size = ((ulong)information.FileSizeHigh << 32) |
+                information.FileSizeLow;
+            if ((information.FileAttributes &
+                    (FileAttributeDirectory | FileAttributeReparsePoint)) != 0 ||
+                information.NumberOfLinks != 1 || size != expectedSize ||
+                !String.Equals(FinalPath(handle),
+                    Path.GetFullPath(expectedPath).TrimEnd('\\', '/'),
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "Atomic publication file identity is invalid.");
+        }
+
+        private static void RequireExactBytes(IntPtr handle, byte[] expected)
+        {
+            long position;
+            if (!SetFilePointerEx(handle, 0, out position, FileBegin) ||
+                position != 0)
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Atomic publication seek failed.");
+            byte[] observed = new byte[expected.Length];
+            uint read;
+            if (!ReadFile(handle, observed, (uint)observed.Length,
+                    out read, IntPtr.Zero) ||
+                read != (uint)observed.Length)
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Atomic publication read-back failed.");
+            for (int index = 0; index < expected.Length; ++index)
+            {
+                if (observed[index] != expected[index])
+                    throw new InvalidOperationException(
+                        "Atomic publication read-back bytes differ.");
+            }
+            byte[] extra = new byte[1];
+            if (!ReadFile(handle, extra, 1, out read, IntPtr.Zero) || read != 0)
+                throw new InvalidOperationException(
+                    "Atomic publication read-back length differs.");
+        }
+
+        private static void RenameOpenFileWithoutReplace(
+            IntPtr handle, string destination)
+        {
+            byte[] nameBytes = Encoding.Unicode.GetBytes(destination);
+            int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+            int lengthOffset = rootOffset + IntPtr.Size;
+            int fileNameOffset = lengthOffset + 4;
+            int headerSize = fileNameOffset + 4;
+            IntPtr information = Marshal.AllocHGlobal(
+                headerSize + nameBytes.Length);
+            try
+            {
+                for (int index = 0;
+                    index < headerSize + nameBytes.Length; ++index)
+                    Marshal.WriteByte(information, index, 0);
+                Marshal.WriteIntPtr(information, rootOffset, IntPtr.Zero);
+                Marshal.WriteInt32(
+                    information, lengthOffset, nameBytes.Length);
+                Marshal.Copy(
+                    nameBytes, 0, IntPtr.Add(information, fileNameOffset),
+                    nameBytes.Length);
+                if (!SetFileInformationByHandle(
+                        handle, FileRenameInfo, information,
+                        (uint)(headerSize + nameBytes.Length)))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Atomic no-replace publication rename failed.");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(information);
+            }
+        }
+
+        private static bool MarkDeleteOnClose(IntPtr handle)
+        {
+            IntPtr disposition = Marshal.AllocHGlobal(4);
+            try
+            {
+                Marshal.WriteInt32(disposition, 1);
+                return SetFileInformationByHandle(
+                    handle, FileDispositionInfo, disposition, 4);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(disposition);
+            }
+        }
+
+        private static StockRuntimeByHandleFileInformation Information(IntPtr handle)
+        {
+            StockRuntimeByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Directory identity query failed.");
+            return information;
+        }
+
+        private static string FinalPath(IntPtr handle)
+        {
+            StringBuilder buffer = new StringBuilder(32768);
+            uint length = GetFinalPathNameByHandle(
+                handle, buffer, (uint)buffer.Capacity,
+                FileNameNormalized | VolumeNameDos);
+            if (length == 0 || length >= buffer.Capacity)
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Directory final-path query failed.");
+            string value = buffer.ToString();
+            const string extendedPrefix = @"\\?\";
+            if (value.StartsWith(extendedPrefix, StringComparison.Ordinal))
+                value = value.Substring(extendedPrefix.Length);
+            return value.TrimEnd('\\', '/');
+        }
+    }
+}
+'@
+}
+
+function New-RetainedDirectoryCapability {
+    param([string]$Path, [string]$AnchorPath, [string]$Label)
+    Initialize-RestorationDirectoryCapabilityNative
+    try {
+        return [Hlclient.StockRuntimeDirectoryCapability]::Open(
+            $Path, $AnchorPath)
+    } catch {
+        throw "$Label retained directory identity could not be acquired: $($_.Exception.Message)"
+    }
+}
+
+function Assert-RestorationDirectoryCapabilities {
+    param([object]$Guard)
+    foreach ($entry in @(
+            @{ Capability = $Guard.ResearchDirectoryCapability; Label = 'research root' },
+            @{ Capability = $Guard.BackupRootDirectoryCapability; Label = 'backup root' },
+            @{ Capability = $Guard.BackupDataDirectoryCapability; Label = 'backup data root' })) {
+        if ($null -eq $entry.Capability -or -not $entry.Capability.Revalidate()) {
+            throw "Restoration $($entry.Label) retained identity changed."
+        }
+    }
+}
+
+function Close-RestorationBackupCapabilities {
+    param([object]$Guard)
+    foreach ($name in @('BackupDataDirectoryCapability',
+            'BackupRootDirectoryCapability')) {
+        if ($null -ne $Guard -and $null -ne $Guard.$name) {
+            $Guard.$name.Dispose()
+            $Guard.$name = $null
+        }
+    }
+}
+
+function Close-RestorationGuardCapabilities {
+    param([object]$Guard)
+    if ($null -eq $Guard) { return }
+    Close-RestorationBackupCapabilities $Guard
+    if ($null -ne $Guard.ResearchDirectoryCapability) {
+        $Guard.ResearchDirectoryCapability.Dispose()
+        $Guard.ResearchDirectoryCapability = $null
+    }
+}
+
+function New-RunDirectoryCapability {
+    param([string]$RunRoot)
+    foreach ($leaf in @('raw', 'logs', 'version-observation.staged.json',
+            'isolation-attestation.staged.json')) {
+        $anchor = Join-Path $RunRoot $leaf
+        if (Test-Path -LiteralPath $anchor) {
+            Assert-NoReparsePointInExistingPath $anchor 'capture run identity anchor'
+            return New-RetainedDirectoryCapability `
+                -Path $RunRoot -AnchorPath $anchor -Label 'capture run root'
+        }
+    }
+    throw 'Capture run has no approved identity anchor.'
+}
+
+function Assert-RunDirectoryCapability {
+    param([object]$Capability, [string]$RunRoot)
+    if ($null -eq $Capability -or -not $Capability.Revalidate() -or
+        -not $Capability.CanonicalPath.Equals(
+            [IO.Path]::GetFullPath($RunRoot).TrimEnd('\', '/'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Capture run retained directory identity changed.'
+    }
+}
+
 function New-RestorationGuard {
     param([string]$Root, [object]$Snapshot)
+    $researchCapability = $null
+    $backupRootCapability = $null
+    $backupDataCapability = $null
+    $guard = $null
     $temporary = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) (
         'hlclient-stock-runtime-restore-' + [Guid]::NewGuid().ToString('N'))))
-    if ((Test-PathAtOrBelow $temporary $Root) -or
-        (Test-PathAtOrBelow $temporary $repositoryRoot)) {
-        throw 'Restoration backup root is not disjoint.'
-    }
-    [Int64]$headroom = 67108864
-    if ([Int64]$Snapshot.TotalBytes -gt ([Int64]::MaxValue - $headroom)) {
-        throw 'Restoration backup size overflowed.'
-    }
-    $temporaryDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($temporary))
-    if (-not $temporaryDrive.IsReady -or
-        $temporaryDrive.AvailableFreeSpace -lt ([Int64]$Snapshot.TotalBytes + $headroom)) {
-        throw 'Temporary storage lacks space for a full transactional research backup.'
-    }
-    Assert-NoReparsePointInExistingPath $temporary 'restoration backup path'
-    [IO.Directory]::CreateDirectory($temporary) | Out-Null
-    Assert-NoReparsePointInExistingPath $temporary 'restoration backup path'
-    Assert-NoReparsePoint $temporary 'restoration backup root'
-    $data = Join-Path $temporary 'data'
-    [IO.Directory]::CreateDirectory($data) | Out-Null
-    Assert-NoReparsePoint $data 'restoration backup data root'
-    $backed = [Collections.Generic.List[object]]::new()
     try {
+        if ((Test-PathAtOrBelow $temporary $Root) -or
+            (Test-PathAtOrBelow $temporary $repositoryRoot)) {
+            throw 'Restoration backup root is not disjoint.'
+        }
+        [Int64]$headroom = 67108864
+        if ([Int64]$Snapshot.TotalBytes -gt ([Int64]::MaxValue - $headroom)) {
+            throw 'Restoration backup size overflowed.'
+        }
+        $temporaryDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($temporary))
+        if (-not $temporaryDrive.IsReady -or
+            $temporaryDrive.AvailableFreeSpace -lt ([Int64]$Snapshot.TotalBytes + $headroom)) {
+            throw 'Temporary storage lacks space for a full transactional research backup.'
+        }
+        $researchAnchor = Join-Path $Root $markerName
+        if (-not (Test-Path -LiteralPath $researchAnchor -PathType Leaf)) {
+            throw 'Restoration research identity anchor is absent.'
+        }
+        $researchCapability = New-RetainedDirectoryCapability `
+            -Path $Root -AnchorPath $researchAnchor -Label 'research root'
+        Assert-NoReparsePointInExistingPath $temporary 'restoration backup path'
+        [IO.Directory]::CreateDirectory($temporary) | Out-Null
+        Assert-NoReparsePointInExistingPath $temporary 'restoration backup path'
+        Assert-NoReparsePoint $temporary 'restoration backup root'
+        $data = Join-Path $temporary 'data'
+        [IO.Directory]::CreateDirectory($data) | Out-Null
+        Assert-NoReparsePoint $data 'restoration backup data root'
+        $backupIdentityLock = Join-Path $data '.hlclient-restoration-identity-lock'
+        [IO.Directory]::CreateDirectory($backupIdentityLock) | Out-Null
+        $backupRootCapability = New-RetainedDirectoryCapability `
+            -Path $temporary -AnchorPath $data `
+            -Label 'restoration backup root'
+        $backupDataCapability = New-RetainedDirectoryCapability `
+            -Path $data -AnchorPath $backupIdentityLock `
+            -Label 'restoration backup data root'
+        $backed = [Collections.Generic.List[object]]::new()
+        $guard = [pscustomobject]@{
+            Root = $Root; TemporaryRoot = $temporary; DataRoot = $data
+            Before = $Snapshot; BackedEntries = @()
+            ResearchDirectoryCapability = $researchCapability
+            BackupRootDirectoryCapability = $backupRootCapability
+            BackupDataDirectoryCapability = $backupDataCapability
+        }
         # Back up the complete bounded tree. A whitelist-only backup can detect
         # drift outside known mutable paths but cannot restore it transactionally.
         foreach ($entry in @($Snapshot.Entries | Where-Object {
@@ -363,6 +1198,7 @@ function New-RestorationGuard {
                 } | Sort-Object RelativePath)) {
             $source = Join-Path $Root $entry.RelativePath.Replace('/', '\')
             $destination = Join-Path $data $entry.RelativePath.Replace('/', '\')
+            Assert-RestorationDirectoryCapabilities $guard
             Assert-PathBelowRoot $source $Root 'restoration source'
             Assert-PathBelowRoot $destination $data 'restoration destination'
             if ($entry.Kind -eq 'directory') {
@@ -376,11 +1212,18 @@ function New-RestorationGuard {
             }
             [void]$backed.Add($entry)
         }
-        return [pscustomobject]@{
-            Root = $Root; TemporaryRoot = $temporary; DataRoot = $data
-            Before = $Snapshot; BackedEntries = @($backed)
-        }
+        Assert-RestorationDirectoryCapabilities $guard
+        $guard.BackedEntries = @($backed)
+        return $guard
     } catch {
+        if ($null -ne $guard) {
+            Close-RestorationGuardCapabilities $guard
+        } else {
+            foreach ($capability in @($backupDataCapability,
+                    $backupRootCapability, $researchCapability)) {
+                if ($null -ne $capability) { $capability.Dispose() }
+            }
+        }
         throw "Restoration backup failed; inspect '$temporary': $($_.Exception.Message)"
     }
 }
@@ -455,6 +1298,7 @@ function Get-CurrentItemsNoTraversalThroughLinks {
 
 function Restore-ResearchState {
     param([object]$Guard)
+    Assert-RestorationDirectoryCapabilities $Guard
     $initial = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $initialKinds = [Collections.Generic.Dictionary[string, string]]::new(
         [StringComparer]::OrdinalIgnoreCase)
@@ -479,6 +1323,7 @@ function Restore-ResearchState {
             } -Descending)) {
         $relative = Get-RelativePath $item.FullName $Guard.Root
         if (-not $initial.Contains($relative)) {
+            Assert-RestorationDirectoryCapabilities $Guard
             Remove-SafeEntry $item.FullName $Guard.Root
         }
     }
@@ -496,6 +1341,7 @@ function Restore-ResearchState {
                 'directory'
             } else { 'file' }
             if ($isReparse -or $actualKind -cne $initialKinds[$relative]) {
+                Assert-RestorationDirectoryCapabilities $Guard
                 Remove-SafeTree $item.FullName $Guard.Root
             }
         }
@@ -504,6 +1350,7 @@ function Restore-ResearchState {
             Sort-Object { $_.RelativePath.Split('/').Count })) {
         $target = Join-Path $Guard.Root $entry.RelativePath.Replace('/', '\')
         $parent = Split-Path -Parent $target
+        Assert-RestorationDirectoryCapabilities $Guard
         Assert-NoReparsePointInExistingPath $parent 'restoration directory parent'
         [IO.Directory]::CreateDirectory($target) | Out-Null
         Assert-NoReparsePointInExistingPath $target 'restoration directory'
@@ -520,12 +1367,17 @@ function Restore-ResearchState {
         }
         Assert-PathBelowRoot $target $Guard.Root 'restoration file'
         $parent = Split-Path -Parent $target
+        Assert-RestorationDirectoryCapabilities $Guard
         Assert-NoReparsePointInExistingPath $parent 'restoration file parent'
         [IO.Directory]::CreateDirectory($parent) | Out-Null
         $existing = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-        if ($null -ne $existing) { Remove-SafeTree $target $Guard.Root }
+        if ($null -ne $existing) {
+            Assert-RestorationDirectoryCapabilities $Guard
+            Remove-SafeTree $target $Guard.Root
+        }
         Assert-NoReparsePointInExistingPath $parent 'restoration file parent'
         # Never overwrite: a raced-in link or file makes Copy fail closed.
+        Assert-RestorationDirectoryCapabilities $Guard
         [IO.File]::Copy($source, $target, $false)
         Assert-NoReparsePoint $target 'restored file'
         Assert-NoHardLink $target 'restored file'
@@ -546,6 +1398,7 @@ function Restore-ResearchState {
         $item.Attributes = [IO.FileAttributes]([Int64]$entry.Attributes)
     }
     $after = Get-ResearchSnapshot $Guard.Root
+    Assert-RestorationDirectoryCapabilities $Guard
     if ($after.EntryCount -ne $Guard.Before.EntryCount -or
         $after.TotalBytes -ne $Guard.Before.TotalBytes -or
         $after.ManifestSha256 -cne $Guard.Before.ManifestSha256) {
@@ -633,13 +1486,22 @@ function Resolve-IsolatedResearchRoot {
     $canonicalRepositoryRoot = [IO.Path]::GetFullPath(
         (Get-Item -LiteralPath $repositoryRoot -Force -ErrorAction Stop).FullName
     ).TrimEnd('\', '/')
+    $rootIdentity = Get-PhysicalPathIdentity $root 'research root'
+    $repositoryIdentity =
+        Get-PhysicalPathIdentity $canonicalRepositoryRoot 'repository root'
     if ((Test-PathAtOrBelow $root $canonicalRepositoryRoot) -or
         (Test-PathAtOrBelow $canonicalRepositoryRoot $root) -or
+        (Test-PhysicalPathAtOrBelow $rootIdentity $repositoryIdentity) -or
+        (Test-PhysicalPathAtOrBelow $repositoryIdentity $rootIdentity) -or
         $root -match '(?i)(?:^|[\\/])steamapps(?:[\\/]|$)') {
         throw 'Research root must be disjoint from repository and Steam libraries.'
     }
     foreach ($steamRoot in @(Get-KnownSteamRoots)) {
-        if ((Test-PathAtOrBelow $root $steamRoot) -or (Test-PathAtOrBelow $steamRoot $root)) {
+        $steamIdentity = Get-PhysicalPathIdentity $steamRoot 'Steam library root'
+        if ((Test-PathAtOrBelow $root $steamRoot) -or
+            (Test-PathAtOrBelow $steamRoot $root) -or
+            (Test-PhysicalPathAtOrBelow $rootIdentity $steamIdentity) -or
+            (Test-PhysicalPathAtOrBelow $steamIdentity $rootIdentity)) {
             throw 'Research root overlaps a configured Steam library.'
         }
     }
@@ -683,68 +1545,864 @@ function Resolve-IsolatedResearchRoot {
     return [pscustomobject]@{ Root = $root; Client = $client; Server = $server }
 }
 
-function New-OwnedProcessRecord {
-    param([Diagnostics.Process]$Process, [string]$ExpectedPath, [string]$Role)
-    $Process.Refresh()
-    return [pscustomobject]@{
-        Id = $Process.Id; StartTime = $Process.StartTime.ToUniversalTime()
-        ExpectedPath = [IO.Path]::GetFullPath($ExpectedPath); Role = $Role
-    }
-}
-
-function Test-OwnedProcess {
-    param([object]$Record)
-    $process = Get-Process -Id $Record.Id -ErrorAction SilentlyContinue
-    if ($null -eq $process) { return $false }
+function Test-IsElevatedAdministrator {
+    if ($env:OS -cne 'Windows_NT') { return $false }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try {
-        return ([IO.Path]::GetFullPath($process.Path) -ieq $Record.ExpectedPath) -and
-            [Math]::Abs(($process.StartTime.ToUniversalTime() - $Record.StartTime).TotalMilliseconds) -le 2
-    } catch { return $false }
-}
-
-function Stop-OwnedProcess {
-    param([object]$Record)
-    if ($null -eq $Record) { return }
-    $process = Get-Process -Id $Record.Id -ErrorAction SilentlyContinue
-    if ($null -eq $process) { return }
-    if (-not (Test-OwnedProcess $Record)) {
-        throw "Refusing to terminate unverified $($Record.Role) PID."
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        return $principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    } finally {
+        $identity.Dispose()
     }
-    $process.Kill()
-    if (-not $process.WaitForExit(5000)) { throw "$($Record.Role) did not stop." }
 }
 
-function Wait-ForUdpOwner {
-    param([int]$Port, [object]$Record)
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    do {
-        if (-not (Test-OwnedProcess $Record)) { throw "$($Record.Role) exited during readiness." }
-        $row = Get-NetUDPEndpoint -LocalAddress '127.0.0.1' -LocalPort $Port -ErrorAction SilentlyContinue |
-            Where-Object OwningProcess -eq $Record.Id
-        if ($null -ne $row) { return }
-        Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw "$($Record.Role) did not own its expected loopback port."
+function Resolve-TrustedRepositoryTool {
+    param([string]$Path, [string]$ExpectedName, [string]$Label)
+    if ([string]::IsNullOrWhiteSpace($Path)) { throw "$Label path is required." }
+    $tool = [IO.Path]::GetFullPath($Path)
+    Assert-PathBelowRoot $tool $repositoryRoot $Label
+    Assert-NoReparsePointInExistingPath $tool $Label
+    if (-not (Test-Path -LiteralPath $tool -PathType Leaf) -or
+        [IO.Path]::GetFileName($tool) -cne $ExpectedName) {
+        throw "$Label must name the canonical repository-built $ExpectedName."
+    }
+    Assert-OnlyDefaultDataStream $tool $Label
+    Assert-NoHardLink $tool $Label
+    return $tool
 }
 
-function Write-RestorationAttestation {
-    param([string]$RunRoot, [object]$Before, [object]$After, [int]$ExitCode)
+function Resolve-AppManifest {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw 'AppManifestPath is required for active environment validation.'
+    }
+    $manifest = [IO.Path]::GetFullPath($Path)
+    Assert-NoReparsePointInExistingPath $manifest 'Steam App 70 manifest'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf) -or
+        [IO.Path]::GetFileName($manifest) -cne 'appmanifest_70.acf') {
+        throw 'AppManifestPath must name appmanifest_70.acf.'
+    }
+    Assert-OnlyDefaultDataStream $manifest 'Steam App 70 manifest'
+    Assert-NoHardLink $manifest 'Steam App 70 manifest'
+    $item = Get-Item -LiteralPath $manifest -Force
+    if ($item.Length -lt 1 -or $item.Length -gt $maximumSteamManifestBytes) {
+        throw 'Steam App 70 manifest length is outside its bound.'
+    }
+    return $manifest
+}
+
+function ConvertTo-WindowsCommandLineArgument {
+    param([string]$Value)
+    if ($Value.Length -ne 0 -and $Value -cnotmatch '[\s"]') { return $Value }
+    $builder = [Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $slashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') { $slashes++; continue }
+        if ($character -eq '"') {
+            [void]$builder.Append(('\' * (($slashes * 2) + 1)))
+            [void]$builder.Append('"')
+            $slashes = 0
+            continue
+        }
+        if ($slashes -ne 0) {
+            [void]$builder.Append(('\' * $slashes))
+            $slashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($slashes -ne 0) { [void]$builder.Append(('\' * ($slashes * 2))) }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Initialize-OrchestratorCapabilityNative {
+    if ($null -ne ('Hlclient.StockRuntimeOrchestratorCapability' -as [type])) {
+        return
+    }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Hlclient
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct StockRuntimeSecurityAttributes
+    {
+        public int Length;
+        public IntPtr SecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)] public bool InheritHandle;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct StockRuntimeJobAccounting
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
+    }
+
+    public static class StockRuntimeOrchestratorCapability
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr CreateEvent(
+            ref StockRuntimeSecurityAttributes attributes,
+            [MarshalAs(UnmanagedType.Bool)] bool manualReset,
+            [MarshalAs(UnmanagedType.Bool)] bool initialState,
+            string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetEvent(IntPtr handle);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr CreateJobObject(
+            ref StockRuntimeSecurityAttributes attributes, string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool TerminateJobObject(
+            IntPtr job, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool QueryInformationJobObject(
+            IntPtr job, int informationClass,
+            out StockRuntimeJobAccounting information,
+            uint informationLength, IntPtr returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseHandle(IntPtr handle);
+    }
+}
+'@
+}
+
+function New-OrchestratorTransactionCapability {
+    Initialize-OrchestratorCapabilityNative
+    $security = [Hlclient.StockRuntimeSecurityAttributes]::new()
+    $security.Length = [Runtime.InteropServices.Marshal]::SizeOf(
+        [type][Hlclient.StockRuntimeSecurityAttributes])
+    $security.SecurityDescriptor = [IntPtr]::Zero
+    $security.InheritHandle = $true
+    $handle = [Hlclient.StockRuntimeOrchestratorCapability]::CreateEvent(
+        [ref]$security, $true, $false, $null)
+    if ($handle -eq [IntPtr]::Zero) {
+        $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Wrapper transaction capability creation failed (Win32 $nativeError)."
+    }
+    return $handle
+}
+
+function New-OrchestratorProcessJobCapability {
+    Initialize-OrchestratorCapabilityNative
+    $security = [Hlclient.StockRuntimeSecurityAttributes]::new()
+    $security.Length = [Runtime.InteropServices.Marshal]::SizeOf(
+        [type][Hlclient.StockRuntimeSecurityAttributes])
+    $security.SecurityDescriptor = [IntPtr]::Zero
+    $security.InheritHandle = $true
+    $handle = [Hlclient.StockRuntimeOrchestratorCapability]::CreateJobObject(
+        [ref]$security, $null)
+    if ($handle -eq [IntPtr]::Zero) {
+        $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Wrapper process Job creation failed (Win32 $nativeError)."
+    }
+    return $handle
+}
+
+function Confirm-OrchestratorProcessJobCleanup {
+    param(
+        [IntPtr]$JobHandle,
+        [int]$TimeoutMilliseconds = 10000,
+        [int]$GracePeriodMilliseconds = 0
+    )
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $terminationRequested = $false
+    while ($true) {
+        $accounting = [Hlclient.StockRuntimeJobAccounting]::new()
+        $accountingSize = [Runtime.InteropServices.Marshal]::SizeOf(
+            [type][Hlclient.StockRuntimeJobAccounting])
+        if (-not [Hlclient.StockRuntimeOrchestratorCapability]::QueryInformationJobObject(
+                $JobHandle, 1, [ref]$accounting, [uint32]$accountingSize,
+                [IntPtr]::Zero)) {
+            $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "Wrapper process Job accounting failed (Win32 $nativeError)."
+        }
+        if ($accounting.ActiveProcesses -eq 0) { return $true }
+        if (-not $terminationRequested -and
+            $clock.ElapsedMilliseconds -ge $GracePeriodMilliseconds) {
+            if (-not [Hlclient.StockRuntimeOrchestratorCapability]::TerminateJobObject(
+                    $JobHandle, 120)) {
+                $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw "Wrapper process Job termination failed (Win32 $nativeError)."
+            }
+            $terminationRequested = $true
+        }
+        if ($clock.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+            throw 'Wrapper process Job did not reach exact zero-process accounting.'
+        }
+        Start-Sleep -Milliseconds 10
+    }
+}
+
+function Invoke-BoundedOrchestrator {
+    param(
+        [string]$Path,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds,
+        [IntPtr]$CapabilityHandle = [IntPtr]::Zero,
+        [IntPtr]$CleanupCapabilityHandle = [IntPtr]::Zero,
+        [IntPtr]$JobHandle = [IntPtr]::Zero,
+        [IntPtr]$GuardJobHandle = [IntPtr]::Zero,
+        [IntPtr]$IsolationReleaseHandle = [IntPtr]::Zero,
+        [object]$ExactExitState = $null
+    )
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Path
+    $start.Arguments = (@($Arguments | ForEach-Object {
+                ConvertTo-WindowsCommandLineArgument ([string]$_)
+            }) -join ' ')
+    $start.WorkingDirectory = $repositoryRoot
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    $started = $false
+    $result = $null
+    $invocationError = $null
+    $cleanupFailure = $null
+    try {
+        if (-not $process.Start()) { throw 'Orchestrator process did not start.' }
+        $started = $true
+        if ($null -ne $ExactExitState) { $ExactExitState.Started = $true }
+        if ($CapabilityHandle -ne [IntPtr]::Zero -and
+            [Hlclient.StockRuntimeOrchestratorCapability]::WaitForSingleObject(
+                $CapabilityHandle, 5000) -ne 0) {
+            throw 'Project orchestrator did not attest the inherited wrapper transaction capability.'
+        }
+        # Read both redirected streams concurrently into fixed-size chunks.
+        # ReadToEndAsync would eventually reject oversized output but could
+        # buffer it without a bound first.  These builders never admit more
+        # than 64 KiB per stream; finally kills this exact process on overflow
+        # or timeout, which closes its owned Job boundary in active mode.
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $stdoutBuilder = [Text.StringBuilder]::new()
+        $stderrBuilder = [Text.StringBuilder]::new()
+        $stdoutBuffer = [char[]]::new(2048)
+        $stderrBuffer = [char[]]::new(2048)
+        [Int64]$stdoutBytes = 0
+        [Int64]$stderrBytes = 0
+        $stdoutDone = $false
+        $stderrDone = $false
+        $stdoutTask = $process.StandardOutput.ReadAsync(
+            $stdoutBuffer, 0, $stdoutBuffer.Length)
+        $stderrTask = $process.StandardError.ReadAsync(
+            $stderrBuffer, 0, $stderrBuffer.Length)
+        while (-not ($stdoutDone -and $stderrDone)) {
+            [Int64]$remainingMilliseconds =
+                ([Int64]$TimeoutSeconds * 1000) - $clock.ElapsedMilliseconds
+            if ($remainingMilliseconds -le 0) {
+                throw 'Project orchestrator exceeded its bounded deadline.'
+            }
+            $pendingReads = [Collections.Generic.List[Threading.Tasks.Task]]::new()
+            if (-not $stdoutDone) { [void]$pendingReads.Add($stdoutTask) }
+            if (-not $stderrDone) { [void]$pendingReads.Add($stderrTask) }
+            $waitMilliseconds = [Math]::Min(100, [int]$remainingMilliseconds)
+            [void][Threading.Tasks.Task]::WaitAny(
+                $pendingReads.ToArray(), $waitMilliseconds)
+
+            if (-not $stdoutDone -and $stdoutTask.IsCompleted) {
+                $read = $stdoutTask.GetAwaiter().GetResult()
+                if ($read -eq 0) {
+                    $stdoutDone = $true
+                } else {
+                    $chunk = [string]::new($stdoutBuffer, 0, $read)
+                    $chunkBytes = [Text.Encoding]::UTF8.GetByteCount($chunk)
+                    if ($stdoutBytes -gt (65536 - $chunkBytes)) {
+                        throw 'Project orchestrator stdout exceeded its byte bound.'
+                    }
+                    $stdoutBytes += $chunkBytes
+                    [void]$stdoutBuilder.Append($chunk)
+                    $stdoutTask = $process.StandardOutput.ReadAsync(
+                        $stdoutBuffer, 0, $stdoutBuffer.Length)
+                }
+            }
+            if (-not $stderrDone -and $stderrTask.IsCompleted) {
+                $read = $stderrTask.GetAwaiter().GetResult()
+                if ($read -eq 0) {
+                    $stderrDone = $true
+                } else {
+                    $chunk = [string]::new($stderrBuffer, 0, $read)
+                    $chunkBytes = [Text.Encoding]::UTF8.GetByteCount($chunk)
+                    if ($stderrBytes -gt (65536 - $chunkBytes)) {
+                        throw 'Project orchestrator stderr exceeded its byte bound.'
+                    }
+                    $stderrBytes += $chunkBytes
+                    [void]$stderrBuilder.Append($chunk)
+                    $stderrTask = $process.StandardError.ReadAsync(
+                        $stderrBuffer, 0, $stderrBuffer.Length)
+                }
+            }
+        }
+        [Int64]$remainingForExit =
+            ([Int64]$TimeoutSeconds * 1000) - $clock.ElapsedMilliseconds
+        if ($remainingForExit -le 0 -or
+            -not $process.WaitForExit([int]$remainingForExit)) {
+            throw 'Project orchestrator exceeded its bounded deadline.'
+        }
+        $stdout = $stdoutBuilder.ToString()
+        $stderr = $stderrBuilder.ToString()
+        $stdoutLines = @($stdout -split '\r?\n' | Where-Object { $_.Length -ne 0 })
+        $stderrLines = @($stderr -split '\r?\n' | Where-Object { $_.Length -ne 0 })
+        if ($stdoutLines.Count -gt 128 -or $stderrLines.Count -gt 128 -or
+            @($stdoutLines + $stderrLines | Where-Object { $_.Length -gt 1024 }).Count -ne 0) {
+            throw 'Project orchestrator output exceeded its line bound.'
+        }
+        $allowedKeys = @(
+            'active-environment', 'isolation-canary', 'binary-profile',
+            'stock-processes-started', 'capture-files-written', 'result',
+            'orchestrator', 'failure-category', 'processes-started',
+            'relay-ready', 'server-ready', 'client-ready', 'job-cleanup',
+            'persistent-rules', 'ipv4-loopback', 'ipv6-loopback',
+            'non-loopback-canary', 'isolation-cleanup', 'client-file-version',
+            'client-signature', 'server-launcher-version', 'server-signature',
+            'steam-app-id', 'steam-build-id', 'server-engine-version',
+            'protocol', 'server-build', 'unexpected-children',
+            'bounded-transport-complete', 'run-id', 'journal-entries',
+            'raw-datagrams', 'sequenced-c2s', 'sequenced-s2c', 'duration-ms')
+        $values = [Collections.Generic.Dictionary[string, string]]::new(
+            [StringComparer]::Ordinal)
+        foreach ($line in $stdoutLines) {
+            if ($line -cnotmatch '^\[stock-runtime-orchestrator\] (?<key>[a-z0-9-]+)=(?<value>[A-Za-z0-9_.:/-]{1,128})$') {
+                throw 'Project orchestrator emitted a non-contract stdout line.'
+            }
+            $key = $Matches.key
+            if ($allowedKeys -cnotcontains $key -or $values.ContainsKey($key)) {
+                throw 'Project orchestrator emitted an unknown or duplicate status key.'
+            }
+            $values.Add($key, $Matches.value)
+        }
+        $result = [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Values = $values
+            StderrLineCount = $stderrLines.Count
+        }
+    } catch {
+        $invocationError = $_
+    } finally {
+        # A pipeline stop/Ctrl+C can interrupt WaitForExit before the C++
+        # boundary returns.  Terminating that exact owned orchestrator closes
+        # its kill-on-close Job Object, which in turn stops only its verified
+        # relay/guard/stock children.  Process.Dispose alone does not stop a
+        # still-running child.
+        if ($started) {
+            try {
+                if (-not $process.HasExited) {
+                    try { $process.Kill() }
+                    catch {
+                        if (-not $process.HasExited) { throw }
+                    }
+                }
+                if (-not $process.WaitForExit(5000) -or -not $process.HasExited) {
+                    throw 'Exact orchestrator process exit was not confirmed after termination.'
+                }
+                if ($null -ne $ExactExitState) {
+                    $ExactExitState.ExitConfirmed = $true
+                    $ExactExitState.ExitCode = $process.ExitCode
+                    $ExactExitState.NoOrchestratorProcessCreated = $false
+                }
+                if ($CleanupCapabilityHandle -ne [IntPtr]::Zero) {
+                    $cleanupWait =
+                        [Hlclient.StockRuntimeOrchestratorCapability]::WaitForSingleObject(
+                            $CleanupCapabilityHandle, 0)
+                    if ($cleanupWait -eq 0) {
+                        if ($null -ne $ExactExitState) {
+                            $ExactExitState.CleanupSignaled = $true
+                        }
+                    } elseif ($cleanupWait -ne 258) {
+                        throw "Wrapper cleanup capability query failed (wait result $cleanupWait)."
+                    }
+                }
+                if ($JobHandle -ne [IntPtr]::Zero) {
+                    [void](Confirm-OrchestratorProcessJobCleanup $JobHandle)
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.CampaignJobCleanupConfirmed = $true
+                    }
+                }
+                if ($IsolationReleaseHandle -ne [IntPtr]::Zero) {
+                    if (-not [Hlclient.StockRuntimeOrchestratorCapability]::SetEvent(
+                            $IsolationReleaseHandle)) {
+                        $nativeError =
+                            [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                        throw "Isolation guard release signal failed (Win32 $nativeError)."
+                    }
+                }
+                if ($GuardJobHandle -ne [IntPtr]::Zero) {
+                    [void](Confirm-OrchestratorProcessJobCleanup `
+                        $GuardJobHandle 10000 5000)
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.GuardJobCleanupConfirmed = $true
+                    }
+                }
+                if ($null -ne $ExactExitState -and
+                    $JobHandle -ne [IntPtr]::Zero -and
+                    $GuardJobHandle -ne [IntPtr]::Zero -and
+                    $IsolationReleaseHandle -ne [IntPtr]::Zero) {
+                    $ExactExitState.JobCleanupConfirmed = $true
+                }
+            } catch {
+                $cleanupFailure = $_
+                if ($null -ne $ExactExitState) {
+                    $ExactExitState.Failure = $_.Exception.Message
+                }
+            }
+        } else {
+            # Process.Start failed before returning a process handle. No
+            # orchestrator exists to signal cleanup, but the wrapper still
+            # owns both exact Jobs and must prove them empty before allowing
+            # restoration or releasing the isolation guard capability.
+            try {
+                if ($null -ne $ExactExitState) {
+                    $ExactExitState.ExitConfirmed = $true
+                    $ExactExitState.ExitCode = $null
+                    $ExactExitState.NoOrchestratorProcessCreated = $true
+                    $ExactExitState.Failure =
+                        'orchestrator-process-not-created'
+                }
+                if ($JobHandle -ne [IntPtr]::Zero) {
+                    [void](Confirm-OrchestratorProcessJobCleanup $JobHandle)
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.CampaignJobCleanupConfirmed = $true
+                    }
+                }
+                if ($IsolationReleaseHandle -ne [IntPtr]::Zero -and
+                    -not [Hlclient.StockRuntimeOrchestratorCapability]::SetEvent(
+                        $IsolationReleaseHandle)) {
+                    $nativeError =
+                        [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                    throw "Isolation guard release signal failed (Win32 $nativeError)."
+                }
+                if ($GuardJobHandle -ne [IntPtr]::Zero) {
+                    [void](Confirm-OrchestratorProcessJobCleanup `
+                        $GuardJobHandle 10000 5000)
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.GuardJobCleanupConfirmed = $true
+                    }
+                }
+                if ($null -ne $ExactExitState -and
+                    $JobHandle -ne [IntPtr]::Zero -and
+                    $GuardJobHandle -ne [IntPtr]::Zero -and
+                    $IsolationReleaseHandle -ne [IntPtr]::Zero) {
+                    $ExactExitState.JobCleanupConfirmed = $true
+                }
+            } catch {
+                $cleanupFailure = $_
+                if ($null -ne $ExactExitState) {
+                    $ExactExitState.Failure = $_.Exception.Message
+                }
+            }
+        }
+        $process.Dispose()
+    }
+    if ($null -ne $cleanupFailure) {
+        if ($null -ne $invocationError) {
+            throw ($invocationError.Exception.Message + '; ' +
+                $cleanupFailure.Exception.Message)
+        }
+        throw $cleanupFailure
+    }
+    if ($null -ne $invocationError) { throw $invocationError }
+    return $result
+}
+
+function Assert-OrchestratorValue {
+    param([object]$Result, [string]$Name, [string]$Expected)
+    if (-not $Result.Values.ContainsKey($Name) -or
+        $Result.Values[$Name] -cne $Expected) {
+        throw "Project orchestrator did not attest $Name=$Expected."
+    }
+}
+
+function Get-ExternalSteamStateSnapshot {
+    param([string]$ManifestPath)
+    $records = [Collections.Generic.List[string]]::new()
+    $manifestItem = Get-Item -LiteralPath $ManifestPath -Force
+    [void]$records.Add(('manifest|{0}|{1}|{2}|{3}|{4}' -f $manifestItem.Length,
+            $manifestItem.CreationTimeUtc.Ticks, $manifestItem.LastWriteTimeUtc.Ticks,
+            [Int64]$manifestItem.Attributes, (Get-FileSha256 $ManifestPath)))
+
+    $steamApps = Split-Path -Parent $ManifestPath
+    $steamRoot = Split-Path -Parent $steamApps
+    $targets = [Collections.Generic.List[object]]::new()
+    $primary = Join-Path $steamApps 'common\Half-Life'
+    if (Test-Path -LiteralPath $primary -PathType Container) {
+        [void]$targets.Add([pscustomobject]@{
+                Category = 'primary-half-life-root'; Path = $primary; Recursive = $false })
+    }
+    $userdata = Join-Path $steamRoot 'userdata'
+    if (Test-Path -LiteralPath $userdata -PathType Container) {
+        Assert-NoReparsePointInExistingPath $userdata 'Steam userdata root'
+        foreach ($account in @(Get-ChildItem -LiteralPath $userdata -Force -Directory |
+                Sort-Object Name)) {
+            if ($account.Name -cnotmatch '^[0-9]{1,20}$' -or
+                ($account.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            foreach ($relative in @('70', 'config')) {
+                $candidate = Join-Path $account.FullName $relative
+                if (Test-Path -LiteralPath $candidate -PathType Container) {
+                    [void]$targets.Add([pscustomobject]@{
+                            Category = 'userdata-' + $relative; Path = $candidate; Recursive = $true })
+                }
+            }
+        }
+    }
+
+    $entryCount = 1
+    [Int64]$totalBytes = $manifestItem.Length
+    foreach ($target in @($targets)) {
+        Assert-NoReparsePointInExistingPath $target.Path 'external Steam state'
+        $rootItem = Get-Item -LiteralPath $target.Path -Force
+        [void]$records.Add(('{0}|root|{1}|{2}|{3}' -f $target.Category,
+                $rootItem.CreationTimeUtc.Ticks, $rootItem.LastWriteTimeUtc.Ticks,
+                [Int64]$rootItem.Attributes))
+        $entryCount++
+        if (-not $target.Recursive) { continue }
+        $queue = [Collections.Generic.Queue[IO.DirectoryInfo]]::new()
+        $queue.Enqueue([IO.DirectoryInfo]$rootItem)
+        while ($queue.Count -ne 0) {
+            $directory = $queue.Dequeue()
+            foreach ($item in @($directory.GetFileSystemInfos() | Sort-Object Name)) {
+                if ($entryCount -ge 50000) { throw 'External Steam state exceeds its entry bound.' }
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'External Steam state contains a reparse point.'
+                }
+                $prefix = $target.Path.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+                $relative = $item.FullName.Substring($prefix.Length).Replace('\', '/')
+                if (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                    [void]$records.Add(('{0}|d|{1}|{2}|{3}|{4}' -f $target.Category,
+                            $relative, $item.CreationTimeUtc.Ticks,
+                            $item.LastWriteTimeUtc.Ticks, [Int64]$item.Attributes))
+                    $queue.Enqueue([IO.DirectoryInfo]$item)
+                } else {
+                    Assert-OnlyDefaultDataStream $item.FullName 'external Steam file'
+                    if ($item.Length -lt 0 -or $totalBytes -gt ([Int64]1073741824 - $item.Length)) {
+                        throw 'External Steam state exceeds its byte bound.'
+                    }
+                    $totalBytes += $item.Length
+                    [void]$records.Add(('{0}|f|{1}|{2}|{3}|{4}|{5}|{6}' -f
+                            $target.Category, $relative, $item.Length,
+                            $item.CreationTimeUtc.Ticks, $item.LastWriteTimeUtc.Ticks,
+                            [Int64]$item.Attributes, (Get-FileSha256 $item.FullName)))
+                }
+                $entryCount++
+            }
+        }
+    }
+    $canonical = @($records | Sort-Object) -join "`n"
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonical)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '')
+    } finally {
+        $algorithm.Dispose()
+    }
+    return [pscustomobject]@{
+        EntryCount = $entryCount; TotalBytes = $totalBytes; ManifestSha256 = $digest
+    }
+}
+
+function Write-AtomicJsonNoOverwrite {
+    param(
+        [string]$Path,
+        [object]$Value,
+        [string]$Label,
+        [object]$DirectoryCapability)
+    if (Test-Path -LiteralPath $Path) { throw "$Label already exists." }
+    $parent = Split-Path -Parent $Path
+    Assert-RunDirectoryCapability $DirectoryCapability $parent
+    Assert-NoReparsePointInExistingPath $parent "$Label parent"
+    $json = ($Value | ConvertTo-Json -Depth 8) + "`r`n"
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+    $DirectoryCapability.PublishNewFile(
+        [IO.Path]::GetFileName($Path), $bytes)
+    Assert-RunDirectoryCapability $DirectoryCapability $parent
+    Assert-NoReparsePoint $Path $Label
+    Assert-NoHardLink $Path $Label
+}
+
+function Write-AtomicJsonBatchNoOverwrite {
+    param(
+        [object[]]$Publications,
+        [object]$DirectoryCapability)
+    if ($null -eq $Publications -or $Publications.Count -lt 1 -or
+        $Publications.Count -gt 16) {
+        throw 'Atomic JSON publication batch shape is invalid.'
+    }
+    $parent = $null
+    [string[]]$leaves = [string[]]::new($Publications.Count)
+    [byte[][]]$payloads = [byte[][]]::new($Publications.Count)
+    for ($index = 0; $index -lt $Publications.Count; $index++) {
+        $entry = $Publications[$index]
+        if ($null -eq $entry -or [string]::IsNullOrEmpty([string]$entry.Path) -or
+            [string]::IsNullOrEmpty([string]$entry.Label)) {
+            throw 'Atomic JSON publication batch entry is invalid.'
+        }
+        $entryParent = Split-Path -Parent ([string]$entry.Path)
+        if ($null -eq $parent) { $parent = $entryParent }
+        elseif (-not $parent.Equals(
+                $entryParent, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Atomic JSON publication batch spans multiple directories.'
+        }
+        if (Test-Path -LiteralPath ([string]$entry.Path)) {
+            throw "$($entry.Label) already exists."
+        }
+        $leaves[$index] = [IO.Path]::GetFileName([string]$entry.Path)
+        $bytesProperty = $entry.PSObject.Properties['Bytes']
+        if ($null -ne $bytesProperty) {
+            $payloads[$index] = [byte[]]$bytesProperty.Value
+        } else {
+            $json = ($entry.Value | ConvertTo-Json -Depth 8) + "`r`n"
+            $payloads[$index] = [Text.UTF8Encoding]::new($false).GetBytes($json)
+        }
+    }
+    Assert-RunDirectoryCapability $DirectoryCapability $parent
+    Assert-NoReparsePointInExistingPath $parent 'atomic JSON batch parent'
+    # PublishNewFiles performs every identity, hard-link, size and exact-byte
+    # check while all file handles are retained. Its successful return is the
+    # commit point; do not introduce a fallible name-based check afterward.
+    $DirectoryCapability.PublishNewFiles($leaves, $payloads)
+}
+
+function Publish-AcceptedEvidenceTransaction {
+    param(
+        [string]$RunRoot,
+        [object]$Version,
+        [byte[]]$VersionBytes,
+        [object]$Isolation,
+        [byte[]]$IsolationBytes,
+        [object]$Restoration,
+        [byte[]]$RestorationBytes,
+        [object]$RunManifest,
+        [bool]$OwnedJobsExact,
+        [bool]$RestorationExact,
+        [bool]$ExternalStateExact,
+        [bool]$CheckerWalkerReady,
+        [string]$FailureCategory,
+        [object]$DirectoryCapability)
+    if (-not $OwnedJobsExact -or -not $RestorationExact -or
+        -not $ExternalStateExact -or -not $CheckerWalkerReady -or
+        $FailureCategory -cne 'none') {
+        throw 'Final evidence publication gates are incomplete.'
+    }
+    if ($null -eq $Version -or $null -eq $Isolation -or
+        $null -eq $Restoration -or $null -eq $RunManifest -or
+        $null -eq $VersionBytes -or $VersionBytes.Length -eq 0 -or
+        $null -eq $IsolationBytes -or $IsolationBytes.Length -eq 0 -or
+        $null -eq $RestorationBytes -or $RestorationBytes.Length -eq 0 -or
+        -not [bool]$RunManifest.accepted_transport_run -or
+        -not [bool]$RunManifest.accepted_evidence_run -or
+        [string]$RunManifest.failure_category -cne 'none') {
+        throw 'Accepted evidence publication payload is invalid.'
+    }
+    # The accepted manifest is deliberately the last member. The native held-
+    # handle batch either publishes and verifies all four leaves or rolls every
+    # renamed member back before returning an error.
+    $publications = [object[]]@(
+        [pscustomobject]@{
+            Path = Join-Path $RunRoot 'version-observation.json'
+            Bytes = $VersionBytes
+            Label = 'final version observation'
+        },
+        [pscustomobject]@{
+            Path = Join-Path $RunRoot 'isolation-attestation.json'
+            Bytes = $IsolationBytes
+            Label = 'final isolation attestation'
+        },
+        [pscustomobject]@{
+            Path = Join-Path $RunRoot 'restoration-attestation.json'
+            Bytes = $RestorationBytes
+            Label = 'final restoration attestation'
+        },
+        [pscustomobject]@{
+            Path = Join-Path $RunRoot 'research-run-metadata.json'
+            Value = $RunManifest
+            Label = 'accepted research run manifest'
+        })
+    Write-AtomicJsonBatchNoOverwrite -Publications $publications `
+        -DirectoryCapability $DirectoryCapability
+}
+
+function ConvertTo-RejectedRunManifest {
+    param([object]$RunManifest, [string]$FailureCategory)
+    if ($null -eq $RunManifest -or
+        [string]::IsNullOrEmpty($FailureCategory) -or
+        $FailureCategory -ceq 'none') {
+        throw 'Rejected run manifest requires a typed failure category.'
+    }
+    $rejected = [ordered]@{}
+    foreach ($key in $RunManifest.Keys) {
+        $rejected[$key] = $RunManifest[$key]
+    }
+    foreach ($status in @(
+            'isolation_status', 'process_ownership_status',
+            'version_profile_status', 'relay_status', 'client_ready_status',
+            'restoration_status', 'external_drift_status',
+            'offline_replay_status', 'post_resource_boundary_status',
+            'first_observation_status')) {
+        $rejected[$status] = 'not-accepted'
+    }
+    $rejected['accepted_transport_run'] = $false
+    $rejected['accepted_evidence_run'] = $false
+    $rejected['failure_category'] = $FailureCategory
+    return $rejected
+}
+
+function Write-RejectedManifestAfterEvidencePublicationFailure {
+    param(
+        [string]$RunRoot,
+        [object]$RunManifest,
+        [object]$DirectoryCapability)
+    Assert-RunDirectoryCapability $DirectoryCapability $RunRoot
+    foreach ($finalLeaf in @(
+            'version-observation.json', 'isolation-attestation.json',
+            'restoration-attestation.json', 'research-run-metadata.json')) {
+        if (Test-Path -LiteralPath (Join-Path $RunRoot $finalLeaf)) {
+            throw 'Accepted evidence batch rollback did not leave every final leaf absent.'
+        }
+    }
+    $rejectedManifest = ConvertTo-RejectedRunManifest `
+        $RunManifest 'evidence_publication_failed'
+    Write-AtomicJsonNoOverwrite -Path `
+        (Join-Path $RunRoot 'research-run-metadata.json') `
+        -Value $rejectedManifest `
+        -Label 'publication-failed research run manifest' `
+        -DirectoryCapability $DirectoryCapability
+}
+
+function Write-StagedRestorationAttestation {
+    param(
+        [string]$RunRoot,
+        [object]$Before,
+        [object]$After,
+        [object]$ExternalBefore,
+        [object]$ExternalAfter,
+        [int]$ExitCode,
+        [bool]$OwnedProcessesStopped,
+        [object]$DirectoryCapability
+    )
+    $externalStatus = if ($ExternalBefore.ManifestSha256 -ceq
+        $ExternalAfter.ManifestSha256) { 'none' } else { 'changed' }
     $value = [ordered]@{
         schema = 'hlclient.stock-runtime-restoration.v1'
-        external_file_drift = 'none'
+        external_file_drift = $externalStatus
         snapshot_entry_count = $Before.EntryCount
         pre_manifest_sha256 = $Before.ManifestSha256
         post_manifest_sha256 = $After.ManifestSha256
+        external_snapshot_entry_count = $ExternalBefore.EntryCount
+        external_pre_manifest_sha256 = $ExternalBefore.ManifestSha256
+        external_post_manifest_sha256 = $ExternalAfter.ManifestSha256
         created_files_removed = $true
-        owned_processes_stopped = $true
+        protected_paths_included = $true
+        owned_processes_stopped = $OwnedProcessesStopped
         input_automation_used = $false
         input_events_injected = 0
-        capture_process_exit_code = $ExitCode
+        orchestrator_exit_code = $ExitCode
+        restoration_status = $(if ($Before.ManifestSha256 -ceq $After.ManifestSha256) {
+                'exact'
+            } else { 'mismatch' })
     }
-    $path = Join-Path $RunRoot 'research-restoration-attestation.json'
-    if (Test-Path -LiteralPath $path) { throw 'Restoration attestation already exists.' }
-    $json = $value | ConvertTo-Json -Depth 4
-    [IO.File]::WriteAllText($path, $json + "`r`n", [Text.UTF8Encoding]::new($false))
+    Write-AtomicJsonNoOverwrite -Path `
+        (Join-Path $RunRoot 'restoration-attestation.staged.json') `
+        -Value $value -Label 'staged restoration attestation' `
+        -DirectoryCapability $DirectoryCapability
+    return $value
+}
+
+function Read-BoundedJson {
+    param([string]$Path, [int]$MaximumBytes, [string]$Label)
+    Assert-NoReparsePointInExistingPath $Path $Label
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Label is absent." }
+    Assert-OnlyDefaultDataStream $Path $Label
+    Assert-NoHardLink $Path $Label
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Length -lt 2 -or $item.Length -gt $MaximumBytes) {
+        throw "$Label length is outside its bound."
+    }
+    try { return Get-Content -Raw -LiteralPath $Path -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw "$Label is invalid JSON." }
+}
+
+function Read-BoundedJsonWithRetainedBytes {
+    param(
+        [string]$Path,
+        [int]$MaximumBytes,
+        [string]$Label,
+        [object]$DirectoryCapability)
+    $parent = Split-Path -Parent $Path
+    Assert-RunDirectoryCapability $DirectoryCapability $parent
+    try {
+        [byte[]]$bytes = $DirectoryCapability.ReadExistingFile(
+            [IO.Path]::GetFileName($Path), $MaximumBytes)
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        $value = $text | ConvertFrom-Json
+        return [pscustomobject]@{ Value = $value; Bytes = $bytes }
+    } catch {
+        throw "$Label retained-handle JSON read failed: $($_.Exception.Message)"
+    }
+}
+
+function Convert-PrefixedOutputToValues {
+    param(
+        [string[]]$Lines,
+        [string]$Prefix,
+        [string[]]$AllowedKeys,
+        [string]$Label
+    )
+    if ($Lines.Count -gt 128) { throw "$Label exceeded its line bound." }
+    $values = [Collections.Generic.Dictionary[string, string]]::new(
+        [StringComparer]::Ordinal)
+    foreach ($line in $Lines) {
+        if ($line.Length -gt 1024 -or
+            $line -cnotmatch ('^' + [regex]::Escape($Prefix) +
+                '(?<key>[a-z0-9-]+)=(?<value>[A-Za-z0-9_.:/-]{1,256})$')) {
+            throw "$Label emitted a non-contract line."
+        }
+        $key = $Matches.key
+        if ($AllowedKeys -cnotcontains $key -or $values.ContainsKey($key)) {
+            throw "$Label emitted an unknown or duplicate key."
+        }
+        $values.Add($key, $Matches.value)
+    }
+    return $values
+}
+
+function Invoke-FirstObservationChecker {
+    param([string]$CheckerPath, [string]$RunRoot)
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& $CheckerPath --capture-root $RunRoot --scenario first-observation `
+            --publication-stage prepublication 2>&1 | ForEach-Object { $_.ToString() })
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($lines.Count -gt 128 -or
+        [Text.Encoding]::UTF8.GetByteCount(($lines -join "`n")) -gt 65536) {
+        throw 'First-observation checker output exceeded its bound.'
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Lines = $lines }
 }
 
 function Get-RestorationSelfTestExternalObservation {
@@ -764,6 +2422,7 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
     $selfTestRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
         'hlclient-stock-runtime-selftest-' + [Guid]::NewGuid().ToString('N'))))
     $guard = $null
+    $publicationCapability = $null
     try {
         Assert-PathBelowRoot $selfTestRoot $systemTemporaryRoot 'restoration self-test root'
         Assert-NoReparsePointInExistingPath $selfTestRoot 'restoration self-test path'
@@ -780,6 +2439,9 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
         [IO.Directory]::CreateDirectory($externalDirectory) | Out-Null
         $originalNested = Join-Path $originalDirectory 'nested.bin'
         $externalNested = Join-Path $externalDirectory 'external-nested.bin'
+        [IO.File]::WriteAllText(
+            (Join-Path $testResearch $markerName), $markerText,
+            [Text.Encoding]::ASCII)
         [IO.File]::WriteAllBytes($original, [byte[]](0x10, 0x20, 0x30, 0x40))
         [IO.File]::WriteAllBytes($external, [byte[]](0xA1, 0xB2, 0xC3, 0xD4))
         [IO.File]::WriteAllBytes($originalNested, [byte[]](0x41, 0x42, 0x43))
@@ -792,6 +2454,25 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
 
         $before = Get-ResearchSnapshot $testResearch
         $guard = New-RestorationGuard $testResearch $before
+
+        $researchSwap = Join-Path $selfTestRoot 'research-swapped'
+        $researchSwapBlocked = $false
+        try { [IO.Directory]::Move($testResearch, $researchSwap) }
+        catch { $researchSwapBlocked = $true }
+        if (-not $researchSwapBlocked -or
+            -not (Test-Path -LiteralPath $testResearch -PathType Container) -or
+            (Test-Path -LiteralPath $researchSwap)) {
+            throw 'Restoration self-test research-root swap was not blocked.'
+        }
+        $backupSwap = $guard.TemporaryRoot + '-swapped'
+        $backupSwapBlocked = $false
+        try { [IO.Directory]::Move($guard.TemporaryRoot, $backupSwap) }
+        catch { $backupSwapBlocked = $true }
+        if (-not $backupSwapBlocked -or
+            -not (Test-Path -LiteralPath $guard.TemporaryRoot -PathType Container) -or
+            (Test-Path -LiteralPath $backupSwap)) {
+            throw 'Restoration self-test backup-root swap was not blocked.'
+        }
 
         [IO.File]::Delete($original)
         [void](New-Item -ItemType HardLink -Path $original -Target $external -ErrorAction Stop)
@@ -816,13 +2497,211 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
             $after.TotalBytes -ne $before.TotalBytes) {
             throw 'Restoration self-test did not recover the exact research snapshot.'
         }
+
+        $publicationRun = Join-Path $selfTestRoot 'publication-run'
+        [IO.Directory]::CreateDirectory(
+            (Join-Path $publicationRun 'logs')) | Out-Null
+        $publicationCapability = New-RunDirectoryCapability $publicationRun
+        if (-not $publicationCapability.VerifyTemporarySubstitutionBlocked()) {
+            throw 'Atomic publication temporary substitution was not blocked.'
+        }
+
+        $testVersion = [ordered]@{ schema = 'version-self-test' }
+        $testIsolation = [ordered]@{ schema = 'isolation-self-test' }
+        $testRestoration = [ordered]@{ schema = 'restoration-self-test' }
+        $testVersionBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            (($testVersion | ConvertTo-Json -Depth 8) + "`r`n"))
+        $testIsolationBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            (($testIsolation | ConvertTo-Json -Depth 8) + "`r`n"))
+        $testRestorationBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            (($testRestoration | ConvertTo-Json -Depth 8) + "`r`n"))
+        $testManifest = [ordered]@{
+            accepted_transport_run = $true
+            accepted_evidence_run = $true
+            failure_category = 'none'
+        }
+        $gateCases = @(
+            @{ Owned = $false; Restored = $true; External = $true; Checked = $true },
+            @{ Owned = $true; Restored = $false; External = $true; Checked = $true },
+            @{ Owned = $true; Restored = $true; External = $false; Checked = $true },
+            @{ Owned = $true; Restored = $true; External = $true; Checked = $false })
+        foreach ($gateCase in $gateCases) {
+            $gateRejected = $false
+            try {
+                Publish-AcceptedEvidenceTransaction -RunRoot $publicationRun `
+                    -Version $testVersion -VersionBytes $testVersionBytes `
+                    -Isolation $testIsolation -IsolationBytes $testIsolationBytes `
+                    -Restoration $testRestoration `
+                    -RestorationBytes $testRestorationBytes `
+                    -RunManifest $testManifest `
+                    -OwnedJobsExact ([bool]$gateCase.Owned) `
+                    -RestorationExact ([bool]$gateCase.Restored) `
+                    -ExternalStateExact ([bool]$gateCase.External) `
+                    -CheckerWalkerReady ([bool]$gateCase.Checked) `
+                    -FailureCategory 'none' `
+                    -DirectoryCapability $publicationCapability
+            } catch {
+                $gateRejected = $true
+            }
+            if (-not $gateRejected) {
+                throw 'Final publication accepted an incomplete transaction gate.'
+            }
+            foreach ($finalLeaf in @(
+                    'version-observation.json', 'isolation-attestation.json',
+                    'restoration-attestation.json', 'research-run-metadata.json')) {
+                if (Test-Path -LiteralPath (Join-Path $publicationRun $finalLeaf)) {
+                    throw 'Failed transaction gate left a final evidence leaf.'
+                }
+            }
+        }
+
+        $startCapability = [IntPtr]::Zero
+        $cleanupCapability = [IntPtr]::Zero
+        $emptyCampaignJob = [IntPtr]::Zero
+        $emptyGuardJob = [IntPtr]::Zero
+        $emptyRelease = [IntPtr]::Zero
+        try {
+            $startCapability = New-OrchestratorTransactionCapability
+            $cleanupCapability = New-OrchestratorTransactionCapability
+            $emptyCampaignJob = New-OrchestratorProcessJobCapability
+            $emptyGuardJob = New-OrchestratorProcessJobCapability
+            $emptyRelease = New-OrchestratorTransactionCapability
+            $startFailureState = [pscustomobject]@{
+                Started = $false
+                ExitConfirmed = $false
+                ExitCode = $null
+                NoOrchestratorProcessCreated = $false
+                CleanupSignaled = $false
+                CampaignJobCleanupConfirmed = $false
+                GuardJobCleanupConfirmed = $false
+                JobCleanupConfirmed = $false
+                Failure = $null
+            }
+            $startFailureObserved = $false
+            try {
+                [void](Invoke-BoundedOrchestrator `
+                    (Join-Path $selfTestRoot 'absent-orchestrator.exe') @() 1 `
+                    $startCapability $cleanupCapability $emptyCampaignJob `
+                    $emptyGuardJob $emptyRelease $startFailureState)
+            } catch {
+                $startFailureObserved = $true
+            }
+            if (-not $startFailureObserved -or $startFailureState.Started -or
+                -not $startFailureState.ExitConfirmed -or
+                -not $startFailureState.NoOrchestratorProcessCreated -or
+                -not $startFailureState.CampaignJobCleanupConfirmed -or
+                -not $startFailureState.GuardJobCleanupConfirmed -or
+                -not $startFailureState.JobCleanupConfirmed -or
+                $startFailureState.CleanupSignaled -or
+                [string]$startFailureState.Failure -cne
+                    'orchestrator-process-not-created' -or
+                [Hlclient.StockRuntimeOrchestratorCapability]::WaitForSingleObject(
+                    $emptyRelease, 0) -ne 0) {
+                throw 'Orchestrator launch failure did not attest exact empty-Job cleanup.'
+            }
+        } finally {
+            foreach ($emptyHandle in @(
+                    $startCapability, $cleanupCapability, $emptyCampaignJob,
+                    $emptyGuardJob, $emptyRelease)) {
+                if ($emptyHandle -ne [IntPtr]::Zero) {
+                    [void][Hlclient.StockRuntimeOrchestratorCapability]::CloseHandle(
+                        $emptyHandle)
+                }
+            }
+        }
+
+        $collisionPath = Join-Path $publicationRun 'collision.json'
+        [IO.File]::WriteAllText(
+            $collisionPath, '{"owner":"external"}',
+            [Text.UTF8Encoding]::new($false))
+        [string[]]$rollbackLeaves = @(
+            'partial-restoration.json', 'collision.json')
+        [byte[][]]$rollbackPayloads = [byte[][]]::new(2)
+        $rollbackPayloads[0] = [Text.Encoding]::UTF8.GetBytes(
+            '{"schema":"partial-restoration"}')
+        $rollbackPayloads[1] = [Text.Encoding]::UTF8.GetBytes(
+            '{"owner":"wrapper"}')
+        $rollbackObserved = $false
+        try {
+            $publicationCapability.PublishNewFiles(
+                $rollbackLeaves, $rollbackPayloads)
+        } catch {
+            $rollbackObserved = $true
+        }
+        if (-not $rollbackObserved -or
+            (Test-Path -LiteralPath (Join-Path $publicationRun `
+                    'partial-restoration.json')) -or
+            [IO.File]::ReadAllText($collisionPath) -cne '{"owner":"external"}') {
+            throw 'Atomic publication failure left a partial final evidence set.'
+        }
+        Write-RejectedManifestAfterEvidencePublicationFailure `
+            $publicationRun $testManifest $publicationCapability
+        foreach ($finalLeaf in @(
+                'version-observation.json', 'isolation-attestation.json',
+                'restoration-attestation.json')) {
+            if (Test-Path -LiteralPath (Join-Path $publicationRun $finalLeaf)) {
+                throw 'Failed accepted batch published a final evidence leaf.'
+            }
+        }
+        $rejectedPublication = Read-BoundedJson `
+            (Join-Path $publicationRun 'research-run-metadata.json') `
+            65536 'publication-failed research run manifest'
+        if ([bool]$rejectedPublication.accepted_transport_run -or
+            [bool]$rejectedPublication.accepted_evidence_run -or
+            [string]$rejectedPublication.failure_category -cne
+                'evidence_publication_failed') {
+            throw 'Failed accepted batch did not publish a typed rejected manifest.'
+        }
+        [IO.File]::Delete(
+            (Join-Path $publicationRun 'research-run-metadata.json'))
+        [IO.File]::Delete($collisionPath)
+
+        Publish-AcceptedEvidenceTransaction -RunRoot $publicationRun `
+            -Version $testVersion -VersionBytes $testVersionBytes `
+            -Isolation $testIsolation -IsolationBytes $testIsolationBytes `
+            -Restoration $testRestoration `
+            -RestorationBytes $testRestorationBytes `
+            -RunManifest $testManifest `
+            -OwnedJobsExact $true -RestorationExact $true `
+            -ExternalStateExact $true -CheckerWalkerReady $true `
+            -FailureCategory 'none' `
+            -DirectoryCapability $publicationCapability
+        [byte[]]$retainedVersionBytes =
+            $publicationCapability.ReadExistingFile(
+                'version-observation.json', 65536)
+        if ([Convert]::ToBase64String($retainedVersionBytes) -cne
+            [Convert]::ToBase64String($testVersionBytes)) {
+            throw 'Retained-handle publication read-back changed exact bytes.'
+        }
+        foreach ($finalLeaf in @(
+                'version-observation.json', 'isolation-attestation.json',
+                'restoration-attestation.json', 'research-run-metadata.json')) {
+            if (-not (Test-Path -LiteralPath `
+                    (Join-Path $publicationRun $finalLeaf) -PathType Leaf)) {
+                throw 'Successful transaction omitted a final evidence leaf.'
+            }
+        }
+        $publicationCapability.Dispose()
+        $publicationCapability = $null
         Write-Output '[stock-runtime-capture] hardlink-overwrite=blocked'
         Write-Output '[stock-runtime-capture] junction-traversal=blocked'
+        Write-Output '[stock-runtime-capture] directory-swap=blocked'
+        Write-Output '[stock-runtime-capture] temporary-substitution=blocked'
+        Write-Output '[stock-runtime-capture] orchestrator-start-failure-cleanup=exact'
+        Write-Output '[stock-runtime-capture] failed-publication-rollback=exact'
+        Write-Output '[stock-runtime-capture] final-evidence-batch=exact'
+        Write-Output '[stock-runtime-capture] retained-handle-json-read=exact'
+        Write-Output '[stock-runtime-capture] restoration-directory-identity=retained-volume-and-file-id'
         Write-Output '[stock-runtime-capture] external-sentinel-metadata=unchanged'
         Write-Output '[stock-runtime-capture] junction-target-metadata=unchanged'
         Write-Output '[stock-runtime-capture] restoration=exact'
         Write-Output '[stock-runtime-capture] result=restoration-self-test-success'
     } finally {
+        if ($null -ne $publicationCapability) {
+            $publicationCapability.Dispose()
+            $publicationCapability = $null
+        }
+        Close-RestorationGuardCapabilities $guard
         if ($null -ne $guard -and (Test-Path -LiteralPath $guard.TemporaryRoot)) {
             if ([IO.Path]::GetFileName($guard.TemporaryRoot) -notmatch
                 '^hlclient-stock-runtime-restore-[0-9a-f]{32}$') {
@@ -849,17 +2728,8 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
     return
 }
 
-if ($PSCmdlet.ParameterSetName -eq 'Capture') {
-    Write-Output '[stock-runtime-capture] active-capture=evidence_pending'
-    Write-Output '[stock-runtime-capture] os-outbound-isolation=not-implemented'
-    Write-Output '[stock-runtime-capture] app-engine-protocol-build=not-observed'
-    Write-Output '[stock-runtime-capture] owned-processes-started=0'
-    Write-Output '[stock-runtime-capture] files-written=0'
-    throw 'Active stock-runtime capture is evidence_pending until OS-level outbound isolation and exact app/engine/protocol/build observation are implemented; no run was started.'
-}
-
-$research = Resolve-IsolatedResearchRoot
 if ($PSCmdlet.ParameterSetName -eq 'Preflight') {
+    $research = Resolve-IsolatedResearchRoot
     [void](Get-ResearchSnapshot $research.Root)
     Write-Output '[stock-runtime-capture] research-root=policy-screened-copy-physical-identity-pending'
     Write-Output '[stock-runtime-capture] client-version=1.1.1.1'
@@ -871,6 +2741,106 @@ if ($PSCmdlet.ParameterSetName -eq 'Preflight') {
     return
 }
 
+if ($PSCmdlet.ParameterSetName -eq 'ActivePreflight') {
+    if (-not (Test-IsElevatedAdministrator)) {
+        Write-Output '[stock-runtime-capture] active-environment=invalid'
+        Write-Output '[stock-runtime-capture] failure-category=network_isolation_privilege_required'
+        Write-Output '[stock-runtime-capture] stock-processes-started=0'
+        Write-Output '[stock-runtime-capture] capture-files-written=0'
+        throw 'Active environment validation requires an elevated PowerShell; automatic elevation is forbidden.'
+    }
+    $research = Resolve-IsolatedResearchRoot
+    [void](Get-ResearchSnapshot $research.Root)
+    $tool = Resolve-TrustedRepositoryTool $CaptureToolPath `
+        'hlclient_stock_runtime_capture.exe' 'stock runtime relay'
+    if ($ExpectedCaptureToolSha256 -and
+        (Get-FileSha256 $tool) -cne $ExpectedCaptureToolSha256.ToUpperInvariant()) {
+        throw 'Capture tool SHA-256 does not match the reviewed value.'
+    }
+    $guardPath = Resolve-TrustedRepositoryTool $NetworkIsolationGuardPath `
+        'hlclient_stock_runtime_isolation_guard.exe' 'network isolation guard'
+    $orchestratorPath = Resolve-TrustedRepositoryTool `
+        (Join-Path (Split-Path -Parent $tool) 'hlclient_stock_runtime_orchestrator.exe') `
+        'hlclient_stock_runtime_orchestrator.exe' 'stock runtime orchestrator'
+    $manifestPath = Resolve-AppManifest $AppManifestPath
+    [void](Get-ExternalSteamStateSnapshot $manifestPath)
+    $arguments = @(
+        '--validate-environment', '--research-root', $research.Root,
+        '--client', $research.Client, '--server', $research.Server,
+        '--relay', $tool, '--isolation-guard', $guardPath,
+        '--app-manifest', $manifestPath, '--game', 'valve', '--map', 'boot_camp',
+        '--relay-port', [string]$RelayPort, '--server-port', [string]$ServerPort)
+    $result = Invoke-BoundedOrchestrator $orchestratorPath $arguments 90
+    if ($result.ExitCode -ne 0) {
+        $category = 'active_environment_validation_failed'
+        if ($result.Values.ContainsKey('failure-category')) {
+            $category = $result.Values['failure-category']
+        }
+        Write-Output '[stock-runtime-capture] active-environment=invalid'
+        Write-Output "[stock-runtime-capture] failure-category=$category"
+        Write-Output '[stock-runtime-capture] stock-processes-started=0'
+        Write-Output '[stock-runtime-capture] capture-files-written=0'
+        throw "Active environment validation failed with typed category $category."
+    }
+    Assert-OrchestratorValue $result active-environment valid
+    Assert-OrchestratorValue $result isolation-canary success
+    Assert-OrchestratorValue $result binary-profile valid
+    Assert-OrchestratorValue $result stock-processes-started 0
+    Assert-OrchestratorValue $result capture-files-written 0
+    Assert-OrchestratorValue $result result success
+    Write-Output '[stock-runtime-capture] active-environment=valid'
+    Write-Output '[stock-runtime-capture] isolation-canary=success'
+    Write-Output '[stock-runtime-capture] binary-profile=valid'
+    Write-Output '[stock-runtime-capture] stock-processes-started=0'
+    Write-Output '[stock-runtime-capture] capture-files-written=0'
+    Write-Output '[stock-runtime-capture] result=success'
+    return
+}
+
+$scenarioAliases = @{
+    'drop-server-runtime' = 'drop-server-to-client-transport-ordinal'
+    'duplicate-server-runtime' = 'duplicate-server-to-client-transport-ordinal'
+    'reorder-server-runtime' = 'reorder-server-to-client-transport-ordinal'
+}
+$canonicalScenario = if ($scenarioAliases.ContainsKey($Scenario)) {
+    $scenarioAliases[$Scenario]
+} else { $Scenario }
+$orchestratorScenario = switch ($canonicalScenario) {
+    'drop-server-to-client-transport-ordinal' { 'drop-server-runtime'; break }
+    'duplicate-server-to-client-transport-ordinal' { 'duplicate-server-runtime'; break }
+    'reorder-server-to-client-transport-ordinal' { 'reorder-server-runtime'; break }
+    default { $canonicalScenario }
+}
+
+if (($canonicalScenario -ceq 'baseline' -or
+        $canonicalScenario -ceq 'idle-runtime') -and
+    $MaximumDurationSeconds -lt 30) {
+    Write-Output '[stock-runtime-capture] active-capture=blocked'
+    Write-Output '[stock-runtime-capture] failure-category=minimum_observation_duration_required'
+    Write-Output '[stock-runtime-capture] processes-started=0'
+    Write-Output '[stock-runtime-capture] files-written=0'
+    throw 'Accepted baseline and idle-runtime observations require a requested duration of at least 30 seconds.'
+}
+
+if ($canonicalScenario -ceq 'reconnect') {
+    Write-Output '[stock-runtime-capture] active-capture=blocked'
+    Write-Output '[stock-runtime-capture] failure-category=reconnect_lifecycle_pending'
+    Write-Output '[stock-runtime-capture] processes-started=0'
+    Write-Output '[stock-runtime-capture] files-written=0'
+    Write-Output '[stock-runtime-capture] capture-runs-created=0'
+    Write-Output '[stock-runtime-capture] restoration-backups-created=0'
+    throw 'Reconnect requires two controlled stock sessions, distinct run generations and two reconstructed boundaries; the current single-session orchestrator cannot satisfy that acceptance policy.'
+}
+
+if (-not (Test-IsElevatedAdministrator)) {
+    Write-Output '[stock-runtime-capture] active-capture=blocked'
+    Write-Output '[stock-runtime-capture] failure-category=network_isolation_privilege_required'
+    Write-Output '[stock-runtime-capture] processes-started=0'
+    Write-Output '[stock-runtime-capture] files-written=0'
+    Write-Output '[stock-runtime-capture] network-operations=0'
+    throw 'Active capture requires an elevated PowerShell; automatic elevation is forbidden.'
+}
+
 if ($RelayPort -eq $ServerPort -or $MaximumPayloadBytes -gt $MaximumTotalRawBytes -or
     $MaximumDecompressedBytes -lt $MaximumReassembledBytes -or
     $MaximumRuntimeFrames -gt $MaximumMessageCount -or
@@ -878,65 +2848,133 @@ if ($RelayPort -eq $ServerPort -or $MaximumPayloadBytes -gt $MaximumTotalRawByte
     $MaximumServerPackets -gt $MaximumDatagrams) {
     throw 'Capture limits violate cross-field policy.'
 }
-$pendingOrchestrationScenarios = @(
-    'second-client', 'reconnect', 'map-change', 'server-restart', 'respawn',
-    'low-updaterate', 'high-updaterate', 'low-cmdrate', 'high-cmdrate')
-if ($pendingOrchestrationScenarios -ccontains $Scenario) {
-    throw 'The requested lifecycle/rate scenario orchestration is evidence_pending; no run was started.'
+$activeScenarios = @(
+    'baseline', 'idle-runtime', 'reconnect',
+    'drop-server-to-client-transport-ordinal',
+    'duplicate-server-to-client-transport-ordinal',
+    'reorder-server-to-client-transport-ordinal')
+if ($activeScenarios -cnotcontains $canonicalScenario) {
+    throw 'The requested scenario is outside the M4.7.1.1 active-capture allowlist; no run was started.'
 }
-if (@(Get-Process -Name @('hl', 'hlds') -ErrorAction SilentlyContinue).Count -ne 0) {
-    throw 'Active capture requires no pre-existing hl.exe or hlds.exe process.'
-}
-foreach ($port in @($RelayPort, $ServerPort)) {
-    if (Get-NetUDPEndpoint -LocalPort $port -ErrorAction SilentlyContinue) {
-        throw "Selected UDP port $port is already occupied."
-    }
-}
+$research = Resolve-IsolatedResearchRoot
 $output = [IO.Path]::GetFullPath($OutputRoot).TrimEnd('\', '/')
 if ($output -ine $requiredOutputRoot) {
     throw 'OutputRoot must be the exact repository manual-artifacts/stock-runtime root.'
 }
 Assert-NoReparsePointInExistingPath $output 'stock runtime output root'
-[IO.Directory]::CreateDirectory($output) | Out-Null
-Assert-NoReparsePoint $output 'stock runtime output root'
-
-$tool = [IO.Path]::GetFullPath($CaptureToolPath)
-Assert-PathBelowRoot $tool $repositoryRoot 'capture tool'
-Assert-NoReparsePointInExistingPath $tool 'capture tool'
-if (-not (Test-Path -LiteralPath $tool -PathType Leaf) -or
-    [IO.Path]::GetFileName($tool) -cne 'hlclient_stock_runtime_capture.exe') {
-    throw 'CaptureToolPath must name the canonical repository-built capture executable.'
-}
-Assert-OnlyDefaultDataStream $tool 'capture tool'
-Assert-NoHardLink $tool 'capture tool'
+$tool = Resolve-TrustedRepositoryTool $CaptureToolPath `
+    'hlclient_stock_runtime_capture.exe' 'stock runtime relay'
 if ($ExpectedCaptureToolSha256 -and
     (Get-FileSha256 $tool) -cne $ExpectedCaptureToolSha256.ToUpperInvariant()) {
     throw 'Capture tool SHA-256 does not match the reviewed value.'
 }
+$guardPath = Resolve-TrustedRepositoryTool $NetworkIsolationGuardPath `
+    'hlclient_stock_runtime_isolation_guard.exe' 'network isolation guard'
+$toolDirectory = Split-Path -Parent $tool
+$orchestratorPath = Resolve-TrustedRepositoryTool `
+    (Join-Path $toolDirectory 'hlclient_stock_runtime_orchestrator.exe') `
+    'hlclient_stock_runtime_orchestrator.exe' 'stock runtime orchestrator'
+$checkerPath = Resolve-TrustedRepositoryTool `
+    (Join-Path $toolDirectory 'hlclient_stock_runtime_check.exe') `
+    'hlclient_stock_runtime_check.exe' 'stock runtime checker'
+$manifestPath = Resolve-AppManifest $AppManifestPath
+$walkerPath = Join-Path $PSScriptRoot 'walk_stock_runtime_transport.ps1'
+if (-not (Test-Path -LiteralPath $walkerPath -PathType Leaf)) {
+    throw 'Independent transport walker is absent.'
+}
+
+# Prove the binary profile and dynamic-isolation canary before creating a
+# restoration backup or allowing the orchestrator to create a run directory.
+# The active orchestrator repeats these checks inside the owned transaction;
+# this first pass is the mutation-free-to-game-files environment gate.
+$activeValidationArguments = @(
+    '--validate-environment', '--research-root', $research.Root,
+    '--client', $research.Client, '--server', $research.Server,
+    '--relay', $tool, '--isolation-guard', $guardPath,
+    '--app-manifest', $manifestPath, '--game', 'valve', '--map', $Map,
+    '--relay-port', [string]$RelayPort, '--server-port', [string]$ServerPort)
+$activeValidation = Invoke-BoundedOrchestrator $orchestratorPath `
+    $activeValidationArguments 90
+if ($activeValidation.ExitCode -ne 0) {
+    $category = 'active_environment_validation_failed'
+    if ($activeValidation.Values.ContainsKey('failure-category')) {
+        $category = $activeValidation.Values['failure-category']
+    }
+    Write-Output '[stock-runtime-capture] active-capture=blocked'
+    Write-Output "[stock-runtime-capture] failure-category=$category"
+    Write-Output '[stock-runtime-capture] stock-processes-started=0'
+    Write-Output '[stock-runtime-capture] capture-files-written=0'
+    Write-Output '[stock-runtime-capture] restoration-backups-created=0'
+    throw "Active environment validation failed before backup/run creation: $category."
+}
+Assert-OrchestratorValue $activeValidation active-environment valid
+Assert-OrchestratorValue $activeValidation isolation-canary success
+Assert-OrchestratorValue $activeValidation binary-profile valid
+Assert-OrchestratorValue $activeValidation stock-processes-started 0
+Assert-OrchestratorValue $activeValidation capture-files-written 0
+Assert-OrchestratorValue $activeValidation result success
 
 $before = Get-ResearchSnapshot $research.Root
+$externalBefore = Get-ExternalSteamStateSnapshot $manifestPath
 $guard = New-RestorationGuard $research.Root $before
 $runId = [Guid]::NewGuid().ToString('N')
 $runRoot = Join-Path $output $runId
-$serverRecord = $null
-$relayRecord = $null
-$clientRecord = $null
-$captureExitCode = 255
+$orchestratorResult = $null
+$orchestratorExitCode = 255
+$wrapperCapability = [IntPtr]::Zero
+$wrapperCleanupCapability = [IntPtr]::Zero
+$wrapperJob = [IntPtr]::Zero
+$wrapperGuardJob = [IntPtr]::Zero
+$isolationReleaseCapability = [IntPtr]::Zero
+$orchestratorExitState = [pscustomobject]@{
+    Started = $false
+    ExitConfirmed = $false
+    ExitCode = $null
+    NoOrchestratorProcessCreated = $false
+    CleanupSignaled = $false
+    CampaignJobCleanupConfirmed = $false
+    GuardJobCleanupConfirmed = $false
+    JobCleanupConfirmed = $false
+    Failure = $null
+}
 $primaryError = $null
 $cleanupErrors = [Collections.Generic.List[string]]::new()
 $after = $null
+$externalAfter = $null
+$runDirectoryCapability = $null
 try {
-    $server = Start-Process -FilePath $research.Server -ArgumentList @(
-        '-console', '-game', $Game, '-noipx', '-insecure', '-ip', '127.0.0.1',
-        '-port', [string]$ServerPort, '+sv_lan', '1', '+maxplayers', '2', '+map', $Map
-    ) -WorkingDirectory $research.Root -WindowStyle Hidden -PassThru
-    $serverRecord = New-OwnedProcessRecord $server $research.Server 'stock server'
-    Wait-ForUdpOwner $ServerPort $serverRecord
-
+    # This inheritable, one-use event is created only after the complete
+    # restoration backup exists.  The active C++ orchestrator verifies the
+    # actual parent PID and signals the first event before any environment
+    # mutation or process launch.  A distinct event is signalled only after
+    # typed Job cleanup reaches zero, independently of stdout parsing.
+    $wrapperCapability = New-OrchestratorTransactionCapability
+    $wrapperCleanupCapability = New-OrchestratorTransactionCapability
+    $wrapperJob = New-OrchestratorProcessJobCapability
+    $wrapperGuardJob = New-OrchestratorProcessJobCapability
+    $isolationReleaseCapability = New-OrchestratorTransactionCapability
     $arguments = @(
-        '--listen-port', [string]$RelayPort, '--server-port', [string]$ServerPort,
-        '--output-run-root', ('"' + $runRoot + '"'), '--scenario', $Scenario,
-        '--max-duration-ms', [string]($MaximumDurationSeconds * 1000),
+        '--confirmation-token', $activeCaptureToken,
+        '--wrapper-capability-handle', $wrapperCapability.ToInt64().ToString(
+            [Globalization.CultureInfo]::InvariantCulture),
+        '--wrapper-cleanup-capability-handle',
+        $wrapperCleanupCapability.ToInt64().ToString(
+            [Globalization.CultureInfo]::InvariantCulture),
+        '--wrapper-job-handle', $wrapperJob.ToInt64().ToString(
+            [Globalization.CultureInfo]::InvariantCulture),
+        '--wrapper-guard-job-handle', $wrapperGuardJob.ToInt64().ToString(
+            [Globalization.CultureInfo]::InvariantCulture),
+        '--isolation-release-handle',
+        $isolationReleaseCapability.ToInt64().ToString(
+            [Globalization.CultureInfo]::InvariantCulture),
+        '--wrapper-process-id', [string]$PID,
+        '--run-root', $runRoot, '--research-root', $research.Root,
+        '--client', $research.Client, '--server', $research.Server,
+        '--relay', $tool, '--isolation-guard', $guardPath,
+        '--app-manifest', $manifestPath, '--game', $Game, '--map', $Map,
+        '--scenario', $orchestratorScenario, '--relay-port', [string]$RelayPort,
+        '--server-port', [string]$ServerPort,
+        '--max-duration-seconds', [string]$MaximumDurationSeconds,
         '--max-datagrams', [string]$MaximumDatagrams,
         '--max-total-raw-bytes', [string]$MaximumTotalRawBytes,
         '--max-payload-bytes', [string]$MaximumPayloadBytes,
@@ -947,41 +2985,99 @@ try {
         '--max-client-packets', [string]$MaximumClientPackets,
         '--max-server-packets', [string]$MaximumServerPackets,
         '--mutation-after-client-packets', [string]$MutationAfterClientPackets,
-        '--mutation-after-server-packets', [string]$MutationAfterServerPackets,
-        '--private-ipv4-loopback-only', '--one-upstream-socket',
-        '--byte-preserving', '--no-payload-rewrite')
-    $relay = Start-Process -FilePath $tool -ArgumentList $arguments `
-        -WorkingDirectory $repositoryRoot -WindowStyle Hidden -PassThru
-    $relayRecord = New-OwnedProcessRecord $relay $tool 'stock runtime relay'
-    Wait-ForUdpOwner $RelayPort $relayRecord
-
-    $client = Start-Process -FilePath $research.Client -ArgumentList @(
-        '-game', $Game, '-console', '-novid', '-nojoy', '-windowed', '-w', '640',
-        '-h', '480', '+connect', "127.0.0.1:$RelayPort"
-    ) -WorkingDirectory $research.Root -PassThru
-    $clientRecord = New-OwnedProcessRecord $client $research.Client 'stock client'
-
-    if (-not $relay.WaitForExit(($MaximumDurationSeconds + 10) * 1000)) {
-        throw 'Capture executable exceeded its hard duration plus grace period.'
+        '--mutation-after-server-packets', [string]$MutationAfterServerPackets)
+    $orchestratorResult = Invoke-BoundedOrchestrator $orchestratorPath $arguments `
+        ($MaximumDurationSeconds + 90) $wrapperCapability `
+        $wrapperCleanupCapability $wrapperJob $wrapperGuardJob `
+        $isolationReleaseCapability $orchestratorExitState
+    $orchestratorExitCode = $orchestratorResult.ExitCode
+    if ($orchestratorExitCode -ne 0) {
+        $category = 'orchestrator_failed'
+        if ($orchestratorResult.Values.ContainsKey('failure-category')) {
+            $category = $orchestratorResult.Values['failure-category']
+        }
+        throw "Stock runtime orchestrator failed: $category."
     }
-    $captureExitCode = $relay.ExitCode
-    if ($captureExitCode -ne 0) { throw "Capture executable exited $captureExitCode." }
+    Assert-OrchestratorValue $orchestratorResult orchestrator success
+    Assert-OrchestratorValue $orchestratorResult failure-category none
+    Assert-OrchestratorValue $orchestratorResult result success
+    Assert-OrchestratorValue $orchestratorResult relay-ready true
+    Assert-OrchestratorValue $orchestratorResult server-ready true
+    Assert-OrchestratorValue $orchestratorResult client-ready true
+    Assert-OrchestratorValue $orchestratorResult job-cleanup exact
+    Assert-OrchestratorValue $orchestratorResult bounded-transport-complete true
+    [Int64]$orchestratorDuration = 0
+    if (-not $orchestratorResult.Values.ContainsKey('duration-ms') -or
+        -not [Int64]::TryParse(
+            $orchestratorResult.Values['duration-ms'], [ref]$orchestratorDuration) -or
+        $orchestratorDuration -lt 0 -or
+        $orchestratorDuration -gt (($MaximumDurationSeconds + 90) * 1000)) {
+        throw 'Stock runtime orchestrator duration is absent or outside its bound.'
+    }
+    if (-not $orchestratorResult.Values.ContainsKey('processes-started') -or
+        [Int64]$orchestratorResult.Values['processes-started'] -lt 2) {
+        throw 'Stock runtime orchestrator did not attest its owned process count.'
+    }
 } catch {
     $primaryError = $_
 } finally {
-    foreach ($record in @($clientRecord, $relayRecord, $serverRecord)) {
-        try { Stop-OwnedProcess $record }
+    if ($orchestratorExitState.ExitConfirmed) {
+        $orchestratorExitCode = [int]$orchestratorExitState.ExitCode
+    }
+    if ($wrapperCapability -ne [IntPtr]::Zero) {
+        if (-not [Hlclient.StockRuntimeOrchestratorCapability]::CloseHandle(
+                $wrapperCapability)) {
+            [void]$cleanupErrors.Add('Wrapper transaction capability close failed.')
+        }
+        $wrapperCapability = [IntPtr]::Zero
+    }
+    if ($wrapperCleanupCapability -ne [IntPtr]::Zero) {
+        if (-not [Hlclient.StockRuntimeOrchestratorCapability]::CloseHandle(
+                $wrapperCleanupCapability)) {
+            [void]$cleanupErrors.Add('Wrapper cleanup capability close failed.')
+        }
+        $wrapperCleanupCapability = [IntPtr]::Zero
+    }
+    if ($wrapperJob -ne [IntPtr]::Zero) {
+        if (-not [Hlclient.StockRuntimeOrchestratorCapability]::CloseHandle(
+                $wrapperJob)) {
+            [void]$cleanupErrors.Add('Wrapper process Job close failed.')
+        }
+        $wrapperJob = [IntPtr]::Zero
+    }
+    if ($wrapperGuardJob -ne [IntPtr]::Zero) {
+        if (-not [Hlclient.StockRuntimeOrchestratorCapability]::CloseHandle(
+                $wrapperGuardJob)) {
+            [void]$cleanupErrors.Add('Wrapper isolation guard Job close failed.')
+        }
+        $wrapperGuardJob = [IntPtr]::Zero
+    }
+    if ($isolationReleaseCapability -ne [IntPtr]::Zero) {
+        if (-not [Hlclient.StockRuntimeOrchestratorCapability]::CloseHandle(
+                $isolationReleaseCapability)) {
+            [void]$cleanupErrors.Add('Isolation release capability close failed.')
+        }
+        $isolationReleaseCapability = [IntPtr]::Zero
+    }
+    if (Test-Path -LiteralPath $runRoot -PathType Container) {
+        try { $runDirectoryCapability = New-RunDirectoryCapability $runRoot }
         catch { [void]$cleanupErrors.Add($_.Exception.Message) }
     }
-    if (@(Get-Process -Name @('hl', 'hlds') -ErrorAction SilentlyContinue).Count -ne 0) {
-        [void]$cleanupErrors.Add('A GoldSrc process remains after owned cleanup.')
-    }
-    if ($cleanupErrors.Count -eq 0) {
+    $cleanupAttested = $orchestratorExitState.ExitConfirmed -and
+        $orchestratorExitState.JobCleanupConfirmed
+    if ($cleanupAttested) {
         try { $after = Restore-ResearchState $guard }
         catch { [void]$cleanupErrors.Add($_.Exception.Message) }
+    } else {
+        [void]$cleanupErrors.Add(
+            'Owned process cleanup was not attested; research restoration was not started.')
     }
+    try { $externalAfter = Get-ExternalSteamStateSnapshot $manifestPath }
+    catch { [void]$cleanupErrors.Add($_.Exception.Message) }
     if ($null -ne $after) {
         try {
+            Assert-RestorationDirectoryCapabilities $guard
+            Close-RestorationBackupCapabilities $guard
             if ([IO.Path]::GetFileName($guard.TemporaryRoot) -notmatch
                 '^hlclient-stock-runtime-restore-[0-9a-f]{32}$') {
                 throw 'Restoration backup identity is invalid.'
@@ -994,21 +3090,546 @@ try {
     } else {
         Write-Warning "Restoration backup retained for recovery at '$($guard.TemporaryRoot)'."
     }
+    Close-RestorationGuardCapabilities $guard
+}
+
+$runExists = Test-Path -LiteralPath $runRoot -PathType Container
+if ($runExists) {
+    try { Assert-RunDirectoryCapability $runDirectoryCapability $runRoot }
+    catch {
+        $runExists = $false
+        [void]$cleanupErrors.Add($_.Exception.Message)
+    }
+}
+$ownedStopped = $cleanupAttested
+$restorationExact = $null -ne $after -and
+    $after.ManifestSha256 -ceq $before.ManifestSha256
+$externalExact = $null -ne $externalAfter -and
+    $externalAfter.ManifestSha256 -ceq $externalBefore.ManifestSha256
+$version = $null
+$isolation = $null
+$restoration = $null
+$versionBytes = $null
+$isolationBytes = $null
+$restorationBytes = $null
+
+if ($runExists -and $restorationExact -and $null -ne $externalAfter) {
+    try {
+        $restoration = Write-StagedRestorationAttestation $runRoot $before `
+            $after $externalBefore $externalAfter $orchestratorExitCode `
+            $ownedStopped $runDirectoryCapability
+    } catch {
+        [void]$cleanupErrors.Add($_.Exception.Message)
+    }
+}
+
+$publicationReady = $false
+$walkerValues = $null
+$checkerValues = $null
+$failureCategory = 'none'
+$publicationFailureCategory = 'first_observation_publication_not_ready'
+if ($null -ne $primaryError) {
+    $failureCategory = 'orchestrator_failed'
+    if ($null -ne $orchestratorResult -and
+        $orchestratorResult.Values.ContainsKey('failure-category')) {
+        $failureCategory = $orchestratorResult.Values['failure-category']
+    }
+} elseif (-not $restorationExact) {
+    $failureCategory = 'research_restoration_failed'
+} elseif (-not $externalExact) {
+    $failureCategory = 'external_steam_state_changed'
+} elseif ($cleanupErrors.Count -ne 0) {
+    $failureCategory = 'transaction_cleanup_failed'
+} elseif (-not $runExists) {
+    $failureCategory = 'capture_run_not_created'
+} else {
+    try {
+        Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+        $versionRecord = Read-BoundedJsonWithRetainedBytes `
+            (Join-Path $runRoot 'version-observation.staged.json') `
+            65536 'staged version observation' $runDirectoryCapability
+        $version = $versionRecord.Value
+        [byte[]]$versionBytes = $versionRecord.Bytes
+        $isolationRecord = Read-BoundedJsonWithRetainedBytes `
+            (Join-Path $runRoot 'isolation-attestation.staged.json') `
+            65536 'staged isolation attestation' $runDirectoryCapability
+        $isolation = $isolationRecord.Value
+        [byte[]]$isolationBytes = $isolationRecord.Bytes
+        $restorationRecord = Read-BoundedJsonWithRetainedBytes `
+            (Join-Path $runRoot 'restoration-attestation.staged.json') `
+            65536 'staged restoration attestation' $runDirectoryCapability
+        $restoration = $restorationRecord.Value
+        [byte[]]$restorationBytes = $restorationRecord.Bytes
+        if ([string]$version.schema -cne 'hlclient.stock-runtime-version-observation.v1' -or
+            [string]$version.map_category -cne $Map -or
+            [string]$version.client_file_version -cne '1.1.1.1' -or
+            [string]$version.client_pe_machine -cne 'x86' -or
+            [string]$version.client_signature -cne 'valid' -or
+            [string]$version.server_launcher_version -cne '4.1.1.1' -or
+            [string]$version.server_pe_machine -cne 'x86' -or
+            [string]$version.server_signature -cne 'valid' -or
+            [Int64]$version.steam_app_id -ne 70 -or
+            [Int64]$version.steam_build_id -ne 15961492 -or
+            [string]$version.server_engine_version -cne '1.1.2.2' -or
+            [Int64]$version.protocol -ne 48 -or [Int64]$version.server_build -ne 10210 -or
+            [string]$version.client_profile_fingerprint -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]$version.server_profile_fingerprint -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]$version.evidence_status -cne 'observed') {
+            throw 'Version observation is not accepted.'
+        }
+        if ([string]$isolation.schema -cne 'hlclient.stock-runtime-isolation-attestation.v1' -or
+            [string]$isolation.session_type -cne 'dynamic' -or
+            [Int64]$isolation.persistent_rule_count -ne 0 -or
+            [string]$isolation.ipv4_loopback -cne 'allowed' -or
+            @('allowed', 'capability_unavailable') -cnotcontains
+                [string]$isolation.ipv6_loopback -or
+            [string]$isolation.non_loopback_canary -cne 'denied_os_classified' -or
+            [string]$isolation.cleanup_status -cne 'exact' -or
+            [string]$isolation.evidence_status -cne 'observed') {
+            throw 'Isolation attestation is not accepted.'
+        }
+        if ([string]$restoration.schema -cne 'hlclient.stock-runtime-restoration.v1' -or
+            [string]$restoration.external_file_drift -cne 'none' -or
+            [string]$restoration.restoration_status -cne 'exact' -or
+            -not [bool]$restoration.created_files_removed -or
+            -not [bool]$restoration.protected_paths_included -or
+            -not [bool]$restoration.owned_processes_stopped -or
+            [bool]$restoration.input_automation_used -or
+            [Int64]$restoration.input_events_injected -ne 0 -or
+            [string]$restoration.pre_manifest_sha256 -cne
+                [string]$restoration.post_manifest_sha256 -or
+            [string]$restoration.external_pre_manifest_sha256 -cne
+                [string]$restoration.external_post_manifest_sha256) {
+            throw 'Restoration attestation is not accepted.'
+        }
+        foreach ($finalLeaf in @(
+                'version-observation.json', 'isolation-attestation.json',
+                'restoration-attestation.json', 'research-run-metadata.json')) {
+            if (Test-Path -LiteralPath (Join-Path $runRoot $finalLeaf)) {
+                throw 'Final evidence exists before publication review.'
+            }
+        }
+        $first = Invoke-FirstObservationChecker $checkerPath $runRoot
+        $second = Invoke-FirstObservationChecker $checkerPath $runRoot
+        Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+        if ($first.ExitCode -ne 0 -or $second.ExitCode -ne 0 -or
+            ($first.Lines -join "`n") -cne ($second.Lines -join "`n")) {
+            throw 'Prepublication checker did not produce two identical successful runs.'
+        }
+        $checkerKeys = @(
+            'profile', 'transport-valid', 'sequenced-c2s', 'sequenced-s2c',
+            'fragments', 'duplicate-packets', 'old-packets',
+            'delivered-sequenced-c2s', 'delivered-sequenced-s2c',
+            'delivered-fragment-datagrams', 'reassembled', 'decompressed',
+            'signon-replay',
+            'post-resource-boundary', 'boundary-payload-ordinal',
+            'boundary-observed-ordinal', 'boundary-delivery-ordinal',
+            'boundary-byte-offset', 'boundary-bit-offset',
+            'boundary-source-sequence', 'boundary-source-payload-bytes',
+            'boundary-source-payload-bits', 'boundary-next-unconsumed-bits',
+            'boundary-reassembled', 'boundary-decompressed',
+            'boundary-byte-aligned', 'candidate-bit-width', 'first-candidate',
+            'candidate-recurrence', 'candidate-stability', 'accepted-run',
+            'publication-ready', 'result', 'structural-hash',
+            'replay-structural-hash')
+        $checkerValues = Convert-PrefixedOutputToValues $first.Lines `
+            '[stock-runtime] ' $checkerKeys 'first-observation checker'
+        if ($checkerValues['profile'] -cne
+                'stock_protocol_48_build_10210_evidence_pending' -or
+            $checkerValues['transport-valid'] -cne 'true' -or
+            $checkerValues['signon-replay'] -cne 'complete' -or
+            $checkerValues['post-resource-boundary'] -cne 'observed' -or
+            $checkerValues['boundary-reassembled'] -cnotmatch '^(?:true|false)$' -or
+            $checkerValues['boundary-decompressed'] -cnotmatch '^(?:true|false)$' -or
+            $checkerValues['boundary-byte-aligned'] -cnotmatch '^(?:true|false)$' -or
+            $checkerValues['first-candidate'] -cnotmatch
+                '^(?:[0-9]{1,3}|bit-prefix:[0-9]{1,3})$' -or
+            [int]($checkerValues['first-candidate'] -replace '^bit-prefix:', '') -gt 255 -or
+            $checkerValues['candidate-recurrence'] -cne '1' -or
+            $checkerValues['candidate-stability'] -cne 'single_observation' -or
+            $checkerValues['structural-hash'] -cnotmatch '^[0-9a-f]{64}$' -or
+            $checkerValues['replay-structural-hash'] -cnotmatch '^[0-9a-f]{64}$' -or
+            $checkerValues['publication-ready'] -cne 'true' -or
+            $checkerValues['accepted-run'] -cne 'false' -or
+            $checkerValues['result'] -cne 'first-observation') {
+            throw 'Prepublication checker did not reach publication readiness.'
+        }
+        foreach ($countKey in @('sequenced-c2s', 'sequenced-s2c', 'fragments',
+                'duplicate-packets', 'old-packets',
+                'delivered-sequenced-c2s', 'delivered-sequenced-s2c',
+                'delivered-fragment-datagrams', 'reassembled', 'decompressed',
+                'boundary-payload-ordinal',
+                'boundary-observed-ordinal', 'boundary-delivery-ordinal',
+                'boundary-byte-offset', 'boundary-source-sequence',
+                'boundary-source-payload-bytes', 'boundary-source-payload-bits',
+                'boundary-next-unconsumed-bits', 'candidate-bit-width')) {
+            [Int64]$countValue = 0
+            if (-not [Int64]::TryParse($checkerValues[$countKey], [ref]$countValue) -or
+                $countValue -lt 0 -or $countValue -gt 131072) {
+                throw "Prepublication checker count $countKey is outside its bound."
+            }
+        }
+        [Int64]$boundaryBitOffset = 0
+        if (-not [Int64]::TryParse(
+                $checkerValues['boundary-bit-offset'], [ref]$boundaryBitOffset) -or
+            $boundaryBitOffset -lt 0 -or $boundaryBitOffset -gt 7) {
+            throw 'Prepublication checker boundary bit offset is invalid.'
+        }
+        [Int64]$sourcePayloadBytes = $checkerValues['boundary-source-payload-bytes']
+        [Int64]$sourcePayloadBits = $checkerValues['boundary-source-payload-bits']
+        [Int64]$boundaryByteOffset = $checkerValues['boundary-byte-offset']
+        [Int64]$remainingBits = $checkerValues['boundary-next-unconsumed-bits']
+        [Int64]$candidateBitWidth = $checkerValues['candidate-bit-width']
+        if ($sourcePayloadBits -ne ($sourcePayloadBytes * 8) -or
+            (($boundaryByteOffset * 8) + $boundaryBitOffset + $remainingBits) -ne
+                $sourcePayloadBits -or
+            ($checkerValues['boundary-byte-aligned'] -ceq 'true') -ne
+                ($boundaryBitOffset -eq 0) -or
+            $candidateBitWidth -lt 1 -or $candidateBitWidth -gt 8 -or
+            $candidateBitWidth -gt $remainingBits -or
+            (($checkerValues['boundary-byte-aligned'] -ceq 'true') -and
+                $candidateBitWidth -ne 8) -or
+            ($checkerValues['first-candidate'].StartsWith('bit-prefix:') -and
+                [int]($checkerValues['first-candidate'].Substring(11)) -ge
+                    [Math]::Pow(2, $candidateBitWidth))) {
+            throw 'Prepublication checker cursor/candidate geometry is inconsistent.'
+        }
+        [Int64]$replayAcceptedSequenced =
+            [Int64]$checkerValues['sequenced-c2s'] +
+            [Int64]$checkerValues['sequenced-s2c']
+        [Int64]$replaySuppressedSequenced =
+            [Int64]$checkerValues['duplicate-packets'] +
+            [Int64]$checkerValues['old-packets']
+        [Int64]$deliveredSequenced =
+            [Int64]$checkerValues['delivered-sequenced-c2s'] +
+            [Int64]$checkerValues['delivered-sequenced-s2c']
+        if ([Int64]$checkerValues['sequenced-c2s'] -gt
+                [Int64]$checkerValues['delivered-sequenced-c2s'] -or
+            [Int64]$checkerValues['sequenced-s2c'] -gt
+                [Int64]$checkerValues['delivered-sequenced-s2c'] -or
+            [Int64]$checkerValues['fragments'] -gt
+                [Int64]$checkerValues['delivered-fragment-datagrams'] -or
+            ($replayAcceptedSequenced + $replaySuppressedSequenced) -ne
+                $deliveredSequenced) {
+            throw 'Replay accepted/suppressed accounting disagrees with delivered transport counts.'
+        }
+        [Int64]$sequencedServerPackets =
+            $checkerValues['delivered-sequenced-s2c']
+        if (($canonicalScenario -ceq 'baseline' -or
+                $canonicalScenario -ceq 'idle-runtime') -and
+            $orchestratorDuration -lt 30000) {
+            $publicationFailureCategory = 'minimum_observation_duration_not_met'
+            throw 'Baseline and idle-runtime acceptance require at least 30 seconds of actual owned-session duration.'
+        }
+        if ($canonicalScenario -ceq 'baseline' -and $sequencedServerPackets -lt 100) {
+            $publicationFailureCategory = 'baseline_server_packet_threshold_not_met'
+            throw 'Baseline acceptance requires at least 100 delivered sequenced server-to-client packets in this run.'
+        }
+        if ($canonicalScenario -ceq 'idle-runtime' -and $sequencedServerPackets -lt 100) {
+            $publicationFailureCategory = 'idle_runtime_packet_threshold_not_met'
+            throw 'Idle acceptance requires continuing runtime traffic and at least 100 delivered sequenced server-to-client packets in this run.'
+        }
+        if (($canonicalScenario -ceq 'drop-server-to-client-transport-ordinal' -or
+                $canonicalScenario -ceq 'duplicate-server-to-client-transport-ordinal' -or
+                $canonicalScenario -ceq 'reorder-server-to-client-transport-ordinal') -and
+            $sequencedServerPackets -lt 1) {
+            $publicationFailureCategory = 'perturbation_runtime_traffic_not_observed'
+            throw 'Transport-ordinal perturbation acceptance requires delivered sequenced server runtime traffic.'
+        }
+        $walkerLines = @(& $walkerPath -CaptureRoot $runRoot `
+            -BoundaryPayloadOrdinal ([Int64]$checkerValues['boundary-payload-ordinal']) `
+            -BoundaryObservedOrdinal ([Int64]$checkerValues['boundary-observed-ordinal']) `
+            -BoundaryDeliveryOrdinal ([Int64]$checkerValues['boundary-delivery-ordinal']) `
+            -BoundaryByteOffset ([Int64]$checkerValues['boundary-byte-offset']) `
+            -BoundaryBitOffset ([Int64]$checkerValues['boundary-bit-offset']) `
+            -BoundarySourceSequence ([Int64]$checkerValues['boundary-source-sequence']) `
+            -BoundarySourcePayloadBytes ([Int64]$checkerValues['boundary-source-payload-bytes']) `
+            -BoundarySourcePayloadBits ([Int64]$checkerValues['boundary-source-payload-bits']) `
+            -BoundaryNextUnconsumedBits ([Int64]$checkerValues['boundary-next-unconsumed-bits']) `
+            -BoundaryReassembled $checkerValues['boundary-reassembled'] `
+            -BoundaryDecompressed $checkerValues['boundary-decompressed'] `
+            -CandidateBitWidth ([Int64]$checkerValues['candidate-bit-width']) `
+            -FirstCandidate $checkerValues['first-candidate'] |
+            ForEach-Object { $_.ToString() })
+        Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+        $walkerKeys = @(
+            'run-id', 'journal-entries', 'raw-datagrams', 'raw-bytes',
+            'observed-c2s', 'observed-s2c', 'delivered-c2s', 'delivered-s2c',
+            'observed-connectionless-c2s', 'observed-connectionless-s2c',
+            'observed-sequenced-c2s', 'observed-sequenced-s2c',
+            'observed-fragment-datagrams', 'observed-reliable-datagrams',
+            'delivered-connectionless-c2s', 'delivered-connectionless-s2c',
+            'delivered-sequenced-c2s', 'delivered-sequenced-s2c',
+            'delivered-fragment-datagrams', 'delivered-reliable-datagrams',
+            'wrong-source-datagrams', 'emitted-datagrams', 'transport-complete',
+            'last-observed-timestamp-us', 'last-delivered-sequenced-s2c-timestamp-us',
+            'observed-delivered-policy', 'final-manifest',
+            'post-resource-boundary', 'boundary-payload-ordinal',
+            'boundary-observed-ordinal', 'boundary-delivery-ordinal',
+            'boundary-byte-offset', 'boundary-bit-offset',
+            'boundary-source-sequence', 'boundary-source-payload-bytes',
+            'boundary-source-payload-bits', 'boundary-next-unconsumed-bits',
+            'boundary-reassembled', 'boundary-decompressed',
+            'boundary-byte-aligned', 'candidate-bit-width', 'first-candidate',
+            'replay-structural-hash', 'result')
+        $walkerValues = Convert-PrefixedOutputToValues $walkerLines `
+            '[stock-runtime-walk] ' $walkerKeys 'independent transport walker'
+        if ($walkerValues['result'] -cne 'success' -or
+            $walkerValues['run-id'] -cne $runId -or
+            $walkerValues['final-manifest'] -cne 'absent-prepublication' -or
+            $walkerValues['wrong-source-datagrams'] -cne '0' -or
+            $walkerValues['transport-complete'] -cne 'true' -or
+            $walkerValues['delivered-sequenced-c2s'] -cne $checkerValues['delivered-sequenced-c2s'] -or
+            $walkerValues['delivered-sequenced-s2c'] -cne $checkerValues['delivered-sequenced-s2c'] -or
+            $walkerValues['delivered-fragment-datagrams'] -cne $checkerValues['delivered-fragment-datagrams'] -or
+            $walkerValues['boundary-payload-ordinal'] -cne $checkerValues['boundary-payload-ordinal'] -or
+            $walkerValues['boundary-observed-ordinal'] -cne $checkerValues['boundary-observed-ordinal'] -or
+            $walkerValues['boundary-delivery-ordinal'] -cne $checkerValues['boundary-delivery-ordinal'] -or
+            $walkerValues['boundary-byte-offset'] -cne $checkerValues['boundary-byte-offset'] -or
+            $walkerValues['boundary-bit-offset'] -cne $checkerValues['boundary-bit-offset'] -or
+            $walkerValues['boundary-source-sequence'] -cne $checkerValues['boundary-source-sequence'] -or
+            $walkerValues['boundary-source-payload-bytes'] -cne $checkerValues['boundary-source-payload-bytes'] -or
+            $walkerValues['boundary-source-payload-bits'] -cne $checkerValues['boundary-source-payload-bits'] -or
+            $walkerValues['boundary-next-unconsumed-bits'] -cne $checkerValues['boundary-next-unconsumed-bits'] -or
+            $walkerValues['boundary-reassembled'] -cne $checkerValues['boundary-reassembled'] -or
+            $walkerValues['boundary-decompressed'] -cne $checkerValues['boundary-decompressed'] -or
+            $walkerValues['boundary-byte-aligned'] -cne $checkerValues['boundary-byte-aligned'] -or
+            $walkerValues['candidate-bit-width'] -cne $checkerValues['candidate-bit-width'] -or
+            $walkerValues['first-candidate'] -cne $checkerValues['first-candidate'] -or
+            $walkerValues['replay-structural-hash'] -cne $checkerValues['replay-structural-hash']) {
+            throw 'Independent walker and production structural summaries disagree.'
+        }
+        if ($canonicalScenario -ceq 'baseline' -or
+            $canonicalScenario -ceq 'idle-runtime') {
+            [Int64]$lastObservedTransportUs = 0
+            if (-not [Int64]::TryParse(
+                    $walkerValues['last-observed-timestamp-us'],
+                    [ref]$lastObservedTransportUs) -or
+                $lastObservedTransportUs -lt 30000000) {
+                $publicationFailureCategory = 'minimum_capture_duration_not_met'
+                throw 'Baseline and idle-runtime acceptance require at least 30 seconds on the capture transport clock.'
+            }
+        }
+        if ($canonicalScenario -ceq 'idle-runtime') {
+            [Int64]$lastLiveS2cUs = 0
+            if (-not [Int64]::TryParse(
+                    $walkerValues['last-delivered-sequenced-s2c-timestamp-us'],
+                    [ref]$lastLiveS2cUs)) {
+                throw 'Independent walker did not publish the idle live-through timestamp.'
+            }
+            [Int64]$minimumLiveThroughUs = [Math]::Max(
+                25000000, ([Int64]$orchestratorDuration - 5000) * 1000)
+            if ($lastLiveS2cUs -lt 30000000 -or
+                $lastLiveS2cUs -lt $minimumLiveThroughUs) {
+                $publicationFailureCategory = 'idle_runtime_did_not_remain_live_through_end'
+                throw 'Idle-runtime acceptance requires delivered sequenced server traffic through the final five seconds of a 30-second-or-longer run.'
+            }
+        }
+        $publicationReady = $true
+    } catch {
+        $failureCategory = $publicationFailureCategory
+        $primaryError = $_
+    }
+}
+
+if ($runExists) {
+    $duration = $null
+    if ($null -ne $orchestratorResult -and
+        $orchestratorResult.Values.ContainsKey('duration-ms')) {
+        $duration = [Int64]$orchestratorResult.Values['duration-ms']
+    }
+    $rawCount = $null
+    $journalCount = $null
+    if ($null -ne $walkerValues) {
+        $rawCount = [Int64]$walkerValues['raw-datagrams']
+        $journalCount = [Int64]$walkerValues['journal-entries']
+    }
+    $runManifest = [ordered]@{
+        schema = 'hlclient.stock-runtime-research-run.v1'
+        run_id = $runId
+        scenario = $canonicalScenario
+        map_category = $Map
+        duration_ms = $duration
+        isolation_status = $(if ($publicationReady) { 'verified' } else { 'not-accepted' })
+        process_ownership_status = $(if ($ownedStopped) { 'verified-cleanup' } else { 'not-accepted' })
+        version_profile_status = $(if ($publicationReady) { 'verified' } else { 'not-accepted' })
+        relay_status = $(if ($null -ne $orchestratorResult -and
+                $orchestratorResult.Values.ContainsKey('relay-ready')) {
+                $orchestratorResult.Values['relay-ready']
+            } else { 'not-observed' })
+        client_ready_status = $(if ($null -ne $orchestratorResult -and
+                $orchestratorResult.Values.ContainsKey('client-ready')) {
+                $orchestratorResult.Values['client-ready']
+            } else { 'not-observed' })
+        restoration_status = $(if ($restorationExact) { 'exact' } else { 'not-exact' })
+        external_drift_status = $(if ($externalExact) { 'none' } else { 'changed-or-unavailable' })
+        raw_datagram_count = $rawCount
+        journal_entry_count = $journalCount
+        delivered_sequenced_c2s_count = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['delivered-sequenced-c2s']
+            } else { $null })
+        delivered_sequenced_s2c_count = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['delivered-sequenced-s2c']
+            } else { $null })
+        delivered_fragment_datagram_count = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['delivered-fragment-datagrams']
+            } else { $null })
+        reassembled_payload_count = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['reassembled']
+            } else { $null })
+        decompressed_payload_count = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['decompressed']
+            } else { $null })
+        offline_replay_status = $(if ($publicationReady) { 'success' } else { 'not-accepted' })
+        post_resource_boundary_status = $(if ($publicationReady) { 'observed' } else { 'not-accepted' })
+        post_resource_replay_payload_ordinal = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-payload-ordinal'] } else { $null })
+        post_resource_corpus_observed_ordinal = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-observed-ordinal'] } else { $null })
+        post_resource_delivery_ordinal = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-delivery-ordinal'] } else { $null })
+        post_resource_byte_offset = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-byte-offset'] } else { $null })
+        post_resource_bit_offset = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-bit-offset'] } else { $null })
+        post_resource_source_sequence = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-source-sequence'] } else { $null })
+        post_resource_source_payload_bytes = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-source-payload-bytes'] } else { $null })
+        post_resource_source_payload_bits = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-source-payload-bits'] } else { $null })
+        post_resource_next_unconsumed_bits = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['boundary-next-unconsumed-bits'] } else { $null })
+        post_resource_reassembled = $(if ($null -ne $checkerValues) {
+                $checkerValues['boundary-reassembled'] -ceq 'true' } else { $null })
+        post_resource_decompressed = $(if ($null -ne $checkerValues) {
+                $checkerValues['boundary-decompressed'] -ceq 'true' } else { $null })
+        post_resource_boundary_byte_aligned = $(if ($null -ne $checkerValues) {
+                $checkerValues['boundary-byte-aligned'] -ceq 'true'
+            } else { $null })
+        first_observation_status = $(if ($publicationReady) { 'observed' } else { 'not-accepted' })
+        first_candidate = $(if ($null -ne $checkerValues) {
+                $checkerValues['first-candidate']
+            } else { $null })
+        first_candidate_bit_width = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['candidate-bit-width'] } else { $null })
+        first_candidate_recurrence = $(if ($null -ne $checkerValues) {
+                [Int64]$checkerValues['candidate-recurrence'] } else { $null })
+        transport_structural_sha256 = $(if ($null -ne $checkerValues) {
+                $checkerValues['structural-hash'] } else { $null })
+        replay_structural_sha256 = $(if ($null -ne $checkerValues) {
+                $checkerValues['replay-structural-hash'] } else { $null })
+        last_delivered_sequenced_s2c_timestamp_us = $(if ($null -ne $walkerValues) {
+                [Int64]$walkerValues['last-delivered-sequenced-s2c-timestamp-us']
+            } else { $null })
+        last_observed_transport_timestamp_us = $(if ($null -ne $walkerValues) {
+                [Int64]$walkerValues['last-observed-timestamp-us']
+            } else { $null })
+        candidate_stability = $(if ($null -ne $checkerValues) {
+                $checkerValues['candidate-stability']
+            } else { $null })
+        accepted_transport_run = $publicationReady
+        accepted_evidence_run = $publicationReady
+        failure_category = $(if ($publicationReady) { 'none' } else { $failureCategory })
+    }
+    try {
+        Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+        if ($publicationReady) {
+            Publish-AcceptedEvidenceTransaction -RunRoot $runRoot `
+                -Version $version -VersionBytes $versionBytes `
+                -Isolation $isolation -IsolationBytes $isolationBytes `
+                -Restoration $restoration `
+                -RestorationBytes $restorationBytes `
+                -RunManifest $runManifest `
+                -OwnedJobsExact $ownedStopped `
+                -RestorationExact $restorationExact `
+                -ExternalStateExact $externalExact `
+                -CheckerWalkerReady $publicationReady `
+                -FailureCategory $failureCategory `
+                -DirectoryCapability $runDirectoryCapability
+        } else {
+            # A rejected run may retain its typed accepted=false manifest and
+            # staged candidates, but never any final evidence leaf.
+            foreach ($finalLeaf in @(
+                    'version-observation.json',
+                    'isolation-attestation.json',
+                    'restoration-attestation.json')) {
+                if (Test-Path -LiteralPath (Join-Path $runRoot $finalLeaf)) {
+                    throw 'Rejected run contains a final evidence leaf.'
+                }
+            }
+            Write-AtomicJsonNoOverwrite -Path `
+                (Join-Path $runRoot 'research-run-metadata.json') `
+                -Value $runManifest -Label 'rejected research run manifest' `
+                -DirectoryCapability $runDirectoryCapability
+        }
+    } catch {
+        $publicationError = $_
+        if ($publicationReady) {
+            $failureCategory = 'evidence_publication_failed'
+            $publicationReady = $false
+            try {
+                Write-RejectedManifestAfterEvidencePublicationFailure `
+                    $runRoot $runManifest $runDirectoryCapability
+            } catch {
+                [void]$cleanupErrors.Add(
+                    'Rejected publication manifest failed: ' +
+                    $_.Exception.Message)
+            }
+        }
+        [void]$cleanupErrors.Add($publicationError.Exception.Message)
+    }
 }
 
 if ($cleanupErrors.Count -ne 0) {
+    if ($null -ne $runDirectoryCapability) {
+        $runDirectoryCapability.Dispose()
+        $runDirectoryCapability = $null
+    }
+    if ($failureCategory -ceq 'none') { $failureCategory = 'transaction_cleanup_failed' }
+    Write-Output '[stock-runtime-capture] active-capture=failed'
+    Write-Output "[stock-runtime-capture] failure-category=$failureCategory"
+    Write-Output '[stock-runtime-capture] accepted-evidence-run=false'
+    Write-Output '[stock-runtime-capture] result=failed'
     $prefix = if ($null -ne $primaryError) { $primaryError.Exception.Message + '; ' } else { '' }
     throw ($prefix + ($cleanupErrors -join '; '))
 }
-if ($null -ne $primaryError) { throw $primaryError }
-if ($null -eq $after -or -not (Test-Path -LiteralPath $runRoot -PathType Container)) {
-    throw 'Capture lacks a successful restoration or run directory.'
+if ($null -ne $primaryError) {
+    if ($null -ne $runDirectoryCapability) {
+        $runDirectoryCapability.Dispose()
+        $runDirectoryCapability = $null
+    }
+    Write-Output '[stock-runtime-capture] active-capture=failed'
+    Write-Output "[stock-runtime-capture] failure-category=$failureCategory"
+    Write-Output '[stock-runtime-capture] accepted-evidence-run=false'
+    Write-Output '[stock-runtime-capture] result=failed'
+    throw $primaryError
 }
-Write-RestorationAttestation $runRoot $before $after $captureExitCode
-Write-Output '[stock-runtime-capture] research-root=policy-screened-copy-physical-identity-pending'
-Write-Output '[stock-runtime-capture] stock-app-build=not-observed'
-Write-Output '[stock-runtime-capture] server-engine-protocol-build=not-observed'
-Write-Output '[stock-runtime-capture] accepted-evidence-runs=0'
-Write-Output '[stock-runtime-capture] restoration=attested-external-file-drift-none'
-Write-Output '[stock-runtime-capture] raw-output=manual-artifacts/stock-runtime'
-Write-Output '[stock-runtime-capture] result=transport-captured-evidence-pending'
+if (-not $publicationReady) {
+    if ($null -ne $runDirectoryCapability) {
+        $runDirectoryCapability.Dispose()
+        $runDirectoryCapability = $null
+    }
+    Write-Output '[stock-runtime-capture] active-capture=failed'
+    Write-Output "[stock-runtime-capture] failure-category=$failureCategory"
+    Write-Output '[stock-runtime-capture] accepted-evidence-run=false'
+    Write-Output '[stock-runtime-capture] result=failed'
+    throw "Stock runtime capture did not reach accepted publication: $failureCategory."
+}
+
+Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+$runDirectoryCapability.Dispose()
+$runDirectoryCapability = $null
+Write-Output "[stock-runtime-capture] run-id=$runId"
+Write-Output '[stock-runtime-capture] active-capture=completed'
+Write-Output '[stock-runtime-capture] stock-processes-started=2'
+Write-Output "[stock-runtime-capture] owned-processes-started=$($orchestratorResult.Values['processes-started'])"
+Write-Output '[stock-runtime-capture] relay-started=true'
+Write-Output '[stock-runtime-capture] client-ready=true'
+Write-Output '[stock-runtime-capture] bounded-transport-complete=true'
+Write-Output '[stock-runtime-capture] restoration=exact'
+Write-Output '[stock-runtime-capture] external-file-drift=none'
+Write-Output '[stock-runtime-capture] post-resource-boundary=observed'
+Write-Output '[stock-runtime-capture] first-observation=observed'
+Write-Output '[stock-runtime-capture] accepted-evidence-run=true'
+Write-Output '[stock-runtime-capture] result=success'

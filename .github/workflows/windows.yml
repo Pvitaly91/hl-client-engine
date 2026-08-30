@@ -140,6 +140,10 @@ jobs:
       - name: Run focused AddressSanitizer unit campaigns
         shell: pwsh
         run: |
+          & .\build-asan\bin\Debug\hlclient_stock_runtime_check.exe
+          if ($LASTEXITCODE -ne 2) {
+            throw 'AddressSanitizer stock-runtime checker usage smoke returned an unexpected exit code'
+          }
           & .\build-asan\bin\Debug\hlclient_tests.exe '[stock-runtime]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\build-asan\bin\Debug\hlclient_tests.exe '[prediction][history]'

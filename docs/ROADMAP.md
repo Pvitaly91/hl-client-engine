@@ -936,6 +936,34 @@ prediction. The current checkout has zero accepted runtime sessions; therefore
 runtime-ready, baseline/full/delta/clientdata/time/modelindex and exact usercmd
 ACK profiles remain pending and no tracked runtime evidence JSON is published.
 
+### M4.7.1.1 — Safe active capture and first neutral observations
+
+**Status: implementation complete at the capability-gated research boundary;
+real evidence remains pending.** Active Windows capture is off by default and
+requires one exact case-sensitive token, an elevated host, signed/versioned
+stock binaries, App 70/build verification, a temporary dynamic-WFP
+loopback-only policy with denial canary, and Job-owned no-shell process
+orchestration. Persistent firewall rules and capability bypasses are forbidden.
+
+Ignored raw datagrams are paired with an exact observed/delivered transport
+journal. Offline replay reuses the established connectionless, netchan
+transform, reliable, fragment, bounded BZip2 and confirmed sign-on/resource
+codecs without generating packets. Publication requires exact restoration, no
+external Steam-state drift, deterministic checker results and independent
+walker agreement. It may retain only one unconsumed neutral
+`first_post_resource_runtime_candidate`; no `svc_*` meaning is assigned. The
+current checkout honestly contains zero accepted real M4.7.1.1 runs and no
+threshold evidence JSON.
+
+The current owned orchestrator is single-session. A `reconnect` campaign
+request therefore fails before backup/run/stock launch with
+`reconnect_lifecycle_pending`; it is not counted as either required reconnect
+observation. Baseline/idle acceptance also requires at least 100 delivered
+sequenced S2C packets per run. Until two controlled generations and both exact
+boundaries are implemented, the 24-run threshold remains honestly pending.
+
+M4.7.1.2 retains evidence-backed runtime opcode/body grammar and catalog
+promotion. It cannot be inferred from the first candidate alone.
 M4.7.2 retains the stock usercmd envelope/checksum, exact acknowledgement
 correlation and project-to-stock command acceptance. M4.7.3 retains the live
 connected runtime/render loop. M3.3 retains download/cache.
@@ -1037,8 +1065,10 @@ M4.6.3.2.1 is complete at its bounded wall-contact/viewer-failure boundary.
 The world-only player-walk and prediction viewers and their read-only
 verification boundaries remain offline. M4.6.3.3 is complete only for typed
 synthetic authority. M4.7.1 supplies the bounded pending stock
-runtime/entity/authority evidence boundary; M4.7.2 stock usercmd
-envelope/checksum is next, followed by M4.7.3 live runtime work.
+runtime/entity/authority evidence boundary. M4.7.1.1 supplies the isolated,
+capability-gated capture and neutral first-observation boundary without adding
+runtime semantics. M4.7.1.2 owns that grammar; M4.7.2 stock usercmd
+envelope/checksum follows, then M4.7.3 live runtime work.
 
 Every milestone retains these gates:
 

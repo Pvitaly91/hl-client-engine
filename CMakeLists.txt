@@ -869,6 +869,140 @@ set_property(
     PROPERTY FOLDER "Tools/Research/GoldSrc")
 
 hlclient_add_library(
+    hlclient_stock_runtime_transport_journal
+    include/hlclient/goldsrc/stock_runtime_transport_journal.hpp
+    src/goldsrc/stock_runtime_transport_journal.cpp
+)
+add_library(
+    hlclient::stock_runtime_transport_journal ALIAS
+    hlclient_stock_runtime_transport_journal)
+target_link_libraries(
+    hlclient_stock_runtime_transport_journal
+    PUBLIC hlclient::goldsrc_stock_runtime_capture
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_stock_runtime_transport_journal
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Evidence")
+
+hlclient_add_library(
+    hlclient_stock_runtime_corpus
+    include/hlclient/goldsrc/stock_runtime_capture_corpus.hpp
+    src/goldsrc/stock_runtime_capture_corpus.cpp
+)
+add_library(
+    hlclient::stock_runtime_corpus ALIAS hlclient_stock_runtime_corpus)
+target_link_libraries(
+    hlclient_stock_runtime_corpus
+    PUBLIC
+        hlclient::goldsrc_stock_runtime_capture
+        hlclient::stock_runtime_transport_journal
+    PRIVATE
+        hlclient::core
+        hlclient::goldsrc_netchan
+        hlclient::hash_sha256)
+set_property(
+    TARGET hlclient_stock_runtime_corpus
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Evidence")
+
+hlclient_add_library(
+    hlclient_stock_runtime_transport_replay
+    include/hlclient/goldsrc/stock_runtime_transport_replay.hpp
+    include/hlclient/goldsrc/stock_captured_signon_replay.hpp
+    include/hlclient/goldsrc/stock_runtime_first_observation.hpp
+    src/goldsrc/stock_runtime_transport_replay.cpp
+    src/goldsrc/stock_captured_signon_replay.cpp
+    src/goldsrc/stock_runtime_first_observation.cpp
+)
+add_library(
+    hlclient::stock_runtime_transport_replay ALIAS
+    hlclient_stock_runtime_transport_replay)
+target_link_libraries(
+    hlclient_stock_runtime_transport_replay
+    PUBLIC
+        hlclient::goldsrc_signon
+        hlclient::stock_runtime_corpus
+    PRIVATE
+        hlclient::core)
+set_property(
+    TARGET hlclient_stock_runtime_transport_replay
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Evidence")
+
+if(WIN32)
+    hlclient_add_library(
+        hlclient_windows_secure_output
+        include/hlclient/platform/windows/secure_output.hpp
+        src/platform/windows/secure_output.cpp
+    )
+    add_library(
+        hlclient::windows_secure_output ALIAS
+        hlclient_windows_secure_output)
+    target_compile_definitions(
+        hlclient_windows_secure_output PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_windows_secure_output PRIVATE bcrypt hlclient::core)
+
+    hlclient_add_library(
+        hlclient_windows_binary_identity
+        include/hlclient/platform/windows/binary_identity.hpp
+        src/platform/windows/binary_identity.cpp
+    )
+    add_library(
+        hlclient::windows_binary_identity ALIAS
+        hlclient_windows_binary_identity)
+    target_compile_definitions(
+        hlclient_windows_binary_identity PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_windows_binary_identity
+        PRIVATE bcrypt wintrust crypt32 version hlclient::core)
+
+    hlclient_add_library(
+        hlclient_windows_process_orchestrator
+        include/hlclient/platform/windows/process_orchestrator.hpp
+        src/platform/windows/process_orchestrator.cpp
+    )
+    add_library(
+        hlclient::windows_process_orchestrator ALIAS
+        hlclient_windows_process_orchestrator)
+    target_compile_definitions(
+        hlclient_windows_process_orchestrator
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_windows_process_orchestrator
+        PUBLIC hlclient::windows_binary_identity
+        PRIVATE hlclient::core)
+
+    hlclient_add_library(
+        hlclient_windows_network_isolation
+        include/hlclient/platform/windows/network_isolation.hpp
+        src/platform/windows/network_isolation.cpp
+    )
+    add_library(
+        hlclient::windows_network_isolation ALIAS
+        hlclient_windows_network_isolation)
+    target_compile_definitions(
+        hlclient_windows_network_isolation
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_windows_network_isolation
+        PUBLIC
+            hlclient::windows_binary_identity
+            hlclient::windows_process_orchestrator
+        PRIVATE fwpuclnt rpcrt4 iphlpapi ws2_32 hlclient::core)
+
+    foreach(
+        _hlclient_windows_isolation_target
+        IN ITEMS
+            hlclient_windows_secure_output
+            hlclient_windows_binary_identity
+            hlclient_windows_process_orchestrator
+            hlclient_windows_network_isolation)
+        set_property(
+            TARGET ${_hlclient_windows_isolation_target}
+            PROPERTY FOLDER "Engine/Platform/Windows/Network Isolation")
+    endforeach()
+endif()
+
+hlclient_add_library(
     hlclient_goldsrc_local_resources
     include/hlclient/goldsrc/local_resource_mapping.hpp
     include/hlclient/goldsrc/local_resource_inventory.hpp
@@ -1856,7 +1990,16 @@ target_link_libraries(
     hlclient_stock_runtime_capture
     PRIVATE
         hlclient::goldsrc_stock_runtime_capture
+        hlclient::hash_sha256
+        hlclient::stock_runtime_transport_journal
         hlclient::network)
+if(WIN32)
+    target_link_libraries(
+        hlclient_stock_runtime_capture
+        PRIVATE
+            hlclient::windows_binary_identity
+            hlclient::windows_secure_output)
+endif()
 set_property(
     TARGET hlclient_stock_runtime_capture
     PROPERTY FOLDER "Tools/Research/GoldSrc")
@@ -1870,10 +2013,90 @@ target_link_libraries(
     hlclient_stock_runtime_check
     PRIVATE
         hlclient::goldsrc_stock_runtime_capture
-        hlclient::hash_sha256)
+        hlclient::hash_sha256
+        hlclient::stock_runtime_corpus
+        hlclient::stock_runtime_transport_replay)
 set_property(
     TARGET hlclient_stock_runtime_check
     PROPERTY FOLDER "Tools/Research/GoldSrc")
+
+if(WIN32)
+    add_executable(
+        hlclient_stock_binary_observer
+        apps/hlclient_stock_binary_observer/main.cpp)
+    hlclient_enable_warnings(hlclient_stock_binary_observer)
+    target_compile_definitions(
+        hlclient_stock_binary_observer PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_stock_binary_observer
+        PRIVATE hlclient::windows_binary_identity)
+
+    add_executable(
+        hlclient_stock_runtime_isolation_guard
+        apps/hlclient_stock_runtime_isolation_guard/main.cpp)
+    hlclient_enable_warnings(hlclient_stock_runtime_isolation_guard)
+    target_compile_definitions(
+        hlclient_stock_runtime_isolation_guard
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_stock_runtime_isolation_guard
+        PRIVATE hlclient::windows_network_isolation)
+
+    add_executable(
+        hlclient_network_isolation_probe
+        apps/hlclient_network_isolation_probe/main.cpp)
+    hlclient_enable_warnings(hlclient_network_isolation_probe)
+    target_compile_definitions(
+        hlclient_network_isolation_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_network_isolation_probe PRIVATE ws2_32)
+
+    add_executable(
+        hlclient_stock_runtime_orchestrator
+        apps/hlclient_stock_runtime_orchestrator/main.cpp)
+    hlclient_enable_warnings(hlclient_stock_runtime_orchestrator)
+    target_compile_definitions(
+        hlclient_stock_runtime_orchestrator
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_stock_runtime_orchestrator
+        PRIVATE
+            hlclient::goldsrc_stock_runtime_capture
+            hlclient::windows_binary_identity
+            hlclient::windows_network_isolation
+            hlclient::windows_process_orchestrator
+            hlclient::windows_secure_output)
+
+    add_executable(
+        hlclient_stock_runtime_fake_server
+        apps/hlclient_stock_runtime_fake_server/main.cpp)
+    hlclient_enable_warnings(hlclient_stock_runtime_fake_server)
+    target_compile_definitions(
+        hlclient_stock_runtime_fake_server PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(hlclient_stock_runtime_fake_server PRIVATE ws2_32)
+
+    add_executable(
+        hlclient_stock_runtime_fake_client
+        apps/hlclient_stock_runtime_fake_client/main.cpp)
+    hlclient_enable_warnings(hlclient_stock_runtime_fake_client)
+    target_compile_definitions(
+        hlclient_stock_runtime_fake_client PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(hlclient_stock_runtime_fake_client PRIVATE ws2_32)
+
+    foreach(
+        _hlclient_stock_runtime_tool
+        IN ITEMS
+            hlclient_stock_binary_observer
+            hlclient_stock_runtime_isolation_guard
+            hlclient_network_isolation_probe
+            hlclient_stock_runtime_orchestrator
+            hlclient_stock_runtime_fake_server
+            hlclient_stock_runtime_fake_client)
+        set_property(
+            TARGET ${_hlclient_stock_runtime_tool}
+            PROPERTY FOLDER "Tools/Research/GoldSrc")
+    endforeach()
+endif()
 
 if(BUILD_TESTING)
     find_program(
@@ -1925,6 +2148,24 @@ if(BUILD_TESTING)
         hlclient_stock_runtime_active_disabled
         PROPERTIES TIMEOUT 15)
 
+    if(WIN32)
+        add_test(
+            NAME hlclient_stock_runtime_active_preflight
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_active_preflight.ps1"
+                -OrchestratorPath
+                    $<TARGET_FILE:hlclient_stock_runtime_orchestrator>)
+        set_tests_properties(
+            hlclient_stock_runtime_active_preflight
+            PROPERTIES TIMEOUT 30)
+    endif()
+
     add_test(
         NAME hlclient_stock_runtime_evidence_pending
         COMMAND
@@ -1937,6 +2178,20 @@ if(BUILD_TESTING)
                 "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_evidence_pending.ps1")
     set_tests_properties(
         hlclient_stock_runtime_evidence_pending
+        PROPERTIES TIMEOUT 30)
+
+    add_test(
+        NAME hlclient_stock_runtime_evidence_policy
+        COMMAND
+            "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+            -NoLogo
+            -NoProfile
+            -NonInteractive
+            -ExecutionPolicy Bypass
+            -File
+                "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_evidence_policy.ps1")
+    set_tests_properties(
+        hlclient_stock_runtime_evidence_policy
         PROPERTIES TIMEOUT 30)
 endif()
 
@@ -2206,6 +2461,9 @@ foreach(
         hlclient_prediction_api
         hlclient_goldsrc_stock_runtime
         hlclient_goldsrc_stock_runtime_capture
+        hlclient_stock_runtime_transport_journal
+        hlclient_stock_runtime_corpus
+        hlclient_stock_runtime_transport_replay
         hlclient_stock_authoritative_adapter
         hlclient_goldsrc_local_movement
         hlclient_local_prediction
@@ -2215,6 +2473,7 @@ foreach(
         hlclient_prediction_check
         hlclient_prediction_viewer
         hlclient_stock_runtime_check
+        hlclient_stock_runtime_capture
         hlclient_world_viewer
 )
     hlclient_enable_address_sanitizer(${_hlclient_sanitized_target})

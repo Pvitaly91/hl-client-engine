@@ -6,12 +6,16 @@ to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.7.1's isolated stock-runtime research and
-exact-cursor evidence boundary. M4.7.1 currently has zero accepted signed-stock
-runtime sessions: it provides
-bounded metadata/catalog, identity, ACK-candidate, partial-authority and
-runtime-frame APIs while keeping all unconfirmed wire grammar fail-closed. It
-does not activate stock decoding, visual projection or prediction. The project
+The repository has implemented M4.7.1's exact-cursor evidence boundary and
+M4.7.1.1's Windows-only, explicit-opt-in stock-runtime capture/offline-replay
+boundary. This checkout still has zero accepted signed-stock runtime sessions
+and no tracked first-observation evidence. The code provides bounded
+metadata/catalog, identity, ACK-candidate, partial-authority and runtime-frame
+APIs while keeping all unconfirmed wire grammar fail-closed. A capture can run
+only on an elevated host that proves signed stock binaries, temporary dynamic
+WFP isolation, process ownership and exact restoration; capability absence is
+a typed failure, not a bypass. It does not activate stock runtime decoding,
+visual projection or prediction. The project
 also retains M4.6.3.2's deterministic local dry-walk movement kernel and
 player-walk viewer, M4.6.3.2.1's bounded wall-contact stability layer, and
 M4.6.3.3's synthetic-authority local prediction, retained-command replay,
@@ -92,11 +96,24 @@ executable only for the in-memory synthetic-authority profile. Stock Protocol
 projection remain evidence-pending and fail closed.
 
 The M4.7.1 research tools are separate from the production client. Raw output
-is permitted only below ignored `manual-artifacts/stock-runtime/`. Active
-capture is currently blocked before process launch/output creation: a marked
-non-Steam copy alone is insufficient without OS-level outbound isolation and
-complete app/engine/Protocol/server-build observation. The default verifier is
-a zero-stock-process, zero-network, zero-write pending check. See
+is permitted only below ignored `manual-artifacts/stock-runtime/` and is never
+uploaded by CI. Active capture is off by default and requires an exact,
+case-sensitive token. Even with that token it fails before stock launch unless
+the elevated Windows host proves signed/versioned binaries, App 70 build,
+dynamic temporary WFP loopback-only isolation and its denial canary. Persistent
+firewall rules are never used. Offline replay consumes the journal's delivered
+ordinal stream, reuses existing netchan/fragment/BZip2/sign-on codecs, and
+stops at one unconsumed neutral post-resource candidate without assigning a
+`svc_*` meaning. Baseline/idle runs need at least 100 delivered sequenced S2C
+packets. Reconnect is fail-closed as `reconnect_lifecycle_pending` because the
+current orchestrator cannot prove two controlled generations/boundaries; no
+single-session run is accepted as reconnect. See
+[active capture](docs/STOCK_RUNTIME_ACTIVE_CAPTURE.md),
+[network isolation](docs/STOCK_RUNTIME_NETWORK_ISOLATION.md),
+[process orchestration](docs/STOCK_RUNTIME_PROCESS_ORCHESTRATION.md),
+[capture corpus](docs/STOCK_RUNTIME_CAPTURE_CORPUS.md),
+[offline replay](docs/STOCK_RUNTIME_OFFLINE_REPLAY.md),
+[first observations](docs/STOCK_RUNTIME_FIRST_OBSERVATIONS.md),
 [stock runtime transcript](docs/GOLDSRC_STOCK_RUNTIME_TRANSCRIPT.md),
 [local-player identity](docs/GOLDSRC_LOCAL_PLAYER_IDENTITY.md),
 [authoritative projection](docs/GOLDSRC_AUTHORITATIVE_STATE_PROJECTION.md) and

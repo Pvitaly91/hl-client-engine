@@ -545,11 +545,21 @@ For each update:
 
 ## M4.7.1 stock runtime research tooling
 
-M4.7.1 adds no third-party dependency. The research relay uses the existing
-project UDP/network runtime and SHA-256 implementation; metadata parsing and
+M4.7.1/M4.7.1.1 add no third-party dependency. The research relay uses the
+existing project UDP/network runtime and SHA-256 implementation; offline replay
+reuses the existing netchan, fragment and BZip2 paths. Metadata parsing and
 verification use C++20 and Windows PowerShell 5.1-compatible scripts already
-required by the repository. Stock `hl.exe`, `hlds.exe`, Steam, game assets and
-raw captures are never build or CI dependencies. CI uses only independently
-authored fixtures and zero-stock-process, zero-network, zero-write pending
-validation;
-the validation itself performs bounded repository reads.
+required by the repository.
+
+The active Windows-only boundary uses system APIs from the Windows SDK:
+Windows Filtering Platform (`Fwpm*`), process/thread and Job Object APIs,
+WinTrust/Authenticode, PE/version-resource inspection, file identity and
+Winsock. WFP state is held only in a dynamic session; no persistent firewall
+rule, command-line firewall utility or new service is a dependency. Hosts that
+cannot prove the WFP policy/canary remain capability-unavailable.
+
+Stock `hl.exe`, `hlds.exe`, Steam, game assets and raw captures are never build
+or CI dependencies. CI uses independently authored fixtures plus explicit
+zero-stock-process/default-disabled and pure isolation/orchestration tests. It
+does not upload ignored corpus bytes or convert an unavailable WFP integration
+test into a successful attestation.

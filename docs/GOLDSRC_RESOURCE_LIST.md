@@ -94,6 +94,13 @@ The supplied directory must be a non-reparse, user-owned isolated copy, carry
 no override. Passing preflight still starts zero processes. New stock capture
 work is not accepted from the primary Steam installation.
 
+M4.7.1.1's offline runtime-corpus replay reuses this exact list decoder and the
+confirmed opcode-5 resource-response continuation to reconstruct the first
+post-resource byte/bit cursor. It never scans for a plausible later opcode,
+generates a client packet, or changes this resource-list grammar. The first
+unconsumed candidate is deliberately semantic-neutral; runtime grammar belongs
+to M4.7.1.2 and stock usercmd belongs to M4.7.2.
+
 ## Exact wire grammar
 
 The complete second service payload begins with the M3.1.1 control:

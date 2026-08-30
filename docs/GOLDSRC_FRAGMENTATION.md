@@ -67,6 +67,13 @@ publishes typed movement/environment metadata and leaves opcode 13 wholly
 unconsumed. No mode exposes raw fragment/reliable bytes or claims a live
 stock-HLDS channel.
 
+M4.7.1.1's offline captured-corpus adapter reuses this same transform,
+descriptor and normal slot-0 reassembler after independently validating the
+journal's peer-delivered order. It may then reuse the existing bounded `BZ2\0`
+envelope decoder above reassembly. It does not broaden the confirmed profile:
+slot 1 remains pending, no packet is generated, and a transport-complete run
+is not automatically evidence-complete.
+
 ## Clean-room evidence
 
 The reference client was signed Valve `hl.exe` 1.1.1.1. The reference server

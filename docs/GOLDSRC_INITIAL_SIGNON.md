@@ -54,6 +54,13 @@ produced one metadata document with `raw_packet_bytes_stored=false`. The tracked
 user-supplied bounded relay; raw research artifacts remain below ignored
 `manual-artifacts/signon-captures/`.
 
+M4.7.1.1 adds an offline consumer for a different ignored stock-runtime
+corpus. It replays the journal's delivered datagrams through these existing
+pure sign-on codecs, matches observed client requests rather than synthesizing
+them, and continues through the already-confirmed resource-response boundary.
+It then stops at one exact, unconsumed neutral candidate. No new initial-sign-on
+wire claim or accepted real runtime run is added by the current checkout.
+
 ## Exact initial client request
 
 The stock-confirmed semantic client message is exactly five bytes:
