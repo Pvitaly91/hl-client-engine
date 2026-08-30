@@ -34,7 +34,17 @@ public:
             static_cast<DWORD>(buffer.size()), buffer.data());
         if (length == 0U || length >= buffer.size()) return;
         buffer.resize(length);
-        parent_ = fs::path{std::move(buffer)}.lexically_normal();
+        // Hosted Windows runners may expose their temporary directory through
+        // a runner-owned junction.  Secure output deliberately rejects an
+        // unresolved reparse-backed path, so build the disposable fixture
+        // beneath the resolved target instead of weakening that boundary.
+        std::error_code canonical_error;
+        parent_ = fs::canonical(
+            fs::path{std::move(buffer)}, canonical_error).lexically_normal();
+        if (canonical_error || parent_.empty() || !parent_.is_absolute()) {
+            parent_.clear();
+            return;
+        }
         static std::atomic_uint32_t ordinal{0U};
         for (std::uint32_t attempt = 0U; attempt < 32U; ++attempt) {
             const auto name = L"hlclient-secure-output-test-" +
