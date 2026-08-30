@@ -186,6 +186,9 @@ struct StockRuntimeCaptureMetadata final {
     bool bounded_transport_complete{false};
     bool byte_preserving{true};
     bool private_ipv4_loopback{true};
+    // At most one learned client endpoint may be active at any instant. A
+    // reconnect may retire A before learning B; its bounded two-generation
+    // proof lives in the separate reconnect observation schema.
     bool one_learned_client_endpoint{true};
     bool one_upstream_socket{true};
     bool exact_source_validation{true};

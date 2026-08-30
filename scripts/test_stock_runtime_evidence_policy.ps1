@@ -32,6 +32,15 @@ $required = @(
     '[stock-runtime-evidence-policy] hash-binding-rejections=4',
     '[stock-runtime-evidence-policy] timestamp-binding-rejections=2',
     '[stock-runtime-evidence-policy] candidate-stability-binding-rejections=1',
+    '[stock-runtime-evidence-policy] rejected-overflow-candidate-binding-rejections=1',
+    '[stock-runtime-evidence-policy] canary-mutation-rejections=4',
+    '[stock-runtime-evidence-policy] fatal-resume-category-rejections=5',
+    '[stock-runtime-evidence-policy] fatal-resume-state-rejections=1',
+    '[stock-runtime-evidence-policy] canary-walker-invocations=2',
+    '[stock-runtime-evidence-policy] canary-walker-gate-rejections=3',
+    '[stock-runtime-evidence-policy] implementation-commit-chain=exact-message-and-ancestor',
+    '[stock-runtime-evidence-policy] failure-publication-mutations=3',
+    '[stock-runtime-evidence-policy] campaign-identity-rejections=2',
     '[stock-runtime-evidence-policy] files-written=0',
     '[stock-runtime-evidence-policy] result=success')
 foreach ($line in $required) {

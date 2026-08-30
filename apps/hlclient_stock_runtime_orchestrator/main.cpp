@@ -1,8 +1,10 @@
 #include <hlclient/goldsrc/stock_runtime_capture.hpp>
+#include <hlclient/goldsrc/stock_runtime_reconnect_lifecycle.hpp>
 #include <hlclient/platform/windows/binary_identity.hpp>
 #include <hlclient/platform/windows/network_isolation.hpp>
 #include <hlclient/platform/windows/process_orchestrator.hpp>
 #include <hlclient/platform/windows/secure_output.hpp>
+#include <hlclient/platform/windows/stock_research_copy.hpp>
 
 #include <algorithm>
 #include <array>
@@ -10,7 +12,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -77,6 +78,7 @@ private:
 struct Options final {
     bool validate_config{false};
     bool validate_environment{false};
+    bool pre_campaign_canary{false};
     bool confirmation_seen{false};
     HANDLE wrapper_capability_handle{INVALID_HANDLE_VALUE};
     HANDLE wrapper_cleanup_capability_handle{INVALID_HANDLE_VALUE};
@@ -160,6 +162,11 @@ template<typename Integer>
         if (name == L"--validate-environment") {
             if (!mark(0U)) return std::nullopt;
             options.validate_environment = true;
+            continue;
+        }
+        if (name == L"--pre-campaign-canary") {
+            if (!mark(1U)) return std::nullopt;
+            options.pre_campaign_canary = true;
             continue;
         }
         if (index + 1 >= argc) return std::nullopt;
@@ -318,7 +325,8 @@ template<typename Integer>
         return std::nullopt;
     }
     if (options.validate_environment) {
-        if (options.confirmation_seen || !options.run_root.empty() ||
+        if (options.pre_campaign_canary || options.confirmation_seen ||
+            !options.run_root.empty() ||
             !options.scenario.empty() ||
             options.wrapper_capability_handle != INVALID_HANDLE_VALUE ||
             options.wrapper_cleanup_capability_handle != INVALID_HANDLE_VALUE ||
@@ -335,6 +343,10 @@ template<typename Integer>
                options.relay_port == options.server_port ||
                options.perturbation.client_packet_ordinal == 0U ||
                options.perturbation.server_packet_ordinal == 0U) {
+        return std::nullopt;
+    }
+    if (options.pre_campaign_canary &&
+        (options.map != "boot_camp" || options.scenario != "baseline")) {
         return std::nullopt;
     }
     return options;
@@ -442,18 +454,6 @@ template<typename Integer>
            signal_wrapper_cleanup_capability(options);
 }
 
-[[nodiscard]] bool exact_marker_present(const fs::path& root)
-{
-    const auto marker = root / L".hlclient-research-isolated";
-    std::ifstream input{marker, std::ios::binary};
-    if (!input) return false;
-    std::string content((std::istreambuf_iterator<char>{input}),
-                        std::istreambuf_iterator<char>{});
-    return content == "HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1" ||
-           content == "HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1\r\n" ||
-           content == "HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1\n";
-}
-
 [[nodiscard]] bool path_is_within(
     const fs::path& root,
     const fs::path& candidate)
@@ -524,7 +524,8 @@ struct EnvironmentResult final {
         return {std::nullopt, "network-isolation-privilege-required"};
     }
     if (!options.research_root.is_absolute() ||
-        !exact_marker_present(options.research_root) ||
+        !windows::stock_research_isolation_marker_exact(
+            options.research_root) ||
         !path_is_within(options.research_root, options.client) ||
         !path_is_within(options.research_root, options.server)) {
         return {std::nullopt, "unsafe-research-root"};
@@ -595,7 +596,9 @@ struct EnvironmentResult final {
     return false;
 }
 
-[[nodiscard]] bool validate_new_run_root(const fs::path& run_root)
+[[nodiscard]] bool validate_new_run_root(
+    const fs::path& run_root,
+    const bool pre_campaign_canary)
 {
     std::error_code error;
     const auto repository = fs::weakly_canonical(fs::current_path(), error);
@@ -604,7 +607,9 @@ struct EnvironmentResult final {
         repository / L"manual-artifacts", error);
     if (error || !fs::is_directory(manual_root, error) || error ||
         has_reparse_component(manual_root)) return false;
-    const auto parent = (manual_root / L"stock-runtime").lexically_normal();
+    const auto parent = (manual_root /
+        (pre_campaign_canary ? L"stock-runtime-canary" : L"stock-runtime"))
+                            .lexically_normal();
     return !has_reparse_component(parent) && run_root.is_absolute() &&
            run_root.lexically_normal() == run_root &&
            run_root.parent_path().lexically_normal() == parent &&
@@ -875,6 +880,8 @@ struct ActiveSummary final {
     bool client_ready{false};
     bool bounded_transport_complete{false};
     bool cleanup_exact{false};
+    std::size_t connection_generations{1U};
+    bool generation_distinct{false};
     std::uint64_t duration_ms{0U};
 };
 
@@ -955,7 +962,8 @@ private:
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started_at).count());
     };
-    if (!validate_new_run_root(options.run_root)) {
+    if (!validate_new_run_root(
+            options.run_root, options.pre_campaign_canary)) {
         summary.failure = "unsafe-run-root";
         finalize_duration();
         return summary;
@@ -1212,8 +1220,24 @@ private:
         &relay_stop_security, TRUE, FALSE, nullptr)};
     UniqueHandle relay_capability{::CreateEventW(
         &relay_stop_security, TRUE, FALSE, nullptr)};
+    const bool reconnect = options.scenario == "reconnect";
+    UniqueHandle reconnect_transition;
+    UniqueHandle reconnect_transition_ack;
+    if (reconnect) {
+        reconnect_transition = UniqueHandle{::CreateEventW(
+            &relay_stop_security, FALSE, FALSE, nullptr)};
+        reconnect_transition_ack = UniqueHandle{::CreateEventW(
+            &relay_stop_security, FALSE, FALSE, nullptr)};
+    }
     if (!relay_stop || !relay_capability) {
         summary.failure = "relay-capability-event-failed";
+        campaign_job.terminate(120U);
+        finalize_duration();
+        return summary;
+    }
+    if (reconnect &&
+        (!reconnect_transition || !reconnect_transition_ack)) {
+        summary.failure = "reconnect-capability-event-failed";
         campaign_job.terminate(120U);
         finalize_duration();
         return summary;
@@ -1226,6 +1250,12 @@ private:
     relay_spec.stderr_handle = relay_log->inherited_write_handle();
     relay_spec.additional_inherited_handles = {
         relay_stop.get(), relay_capability.get()};
+    if (reconnect) {
+        relay_spec.additional_inherited_handles.push_back(
+            reconnect_transition.get());
+        relay_spec.additional_inherited_handles.push_back(
+            reconnect_transition_ack.get());
+    }
     relay_spec.arguments = {
         L"--listen-port", std::to_wstring(options.relay_port),
         L"--server-port", std::to_wstring(options.server_port),
@@ -1262,6 +1292,14 @@ private:
         handle_decimal(relay_capability.get()),
         L"--orchestrator-process-id", std::to_wstring(::GetCurrentProcessId()),
     };
+    if (reconnect) {
+        relay_spec.arguments.push_back(L"--reconnect-transition-handle");
+        relay_spec.arguments.push_back(
+            handle_decimal(reconnect_transition.get()));
+        relay_spec.arguments.push_back(L"--reconnect-transition-ack-handle");
+        relay_spec.arguments.push_back(
+            handle_decimal(reconnect_transition_ack.get()));
+    }
     const auto relay_started_at = std::chrono::steady_clock::now();
     auto [relay, relay_result] = campaign_job.launch(relay_spec);
     if (!relay_result) {
@@ -1411,6 +1449,10 @@ private:
         finalize_duration();
         return summary;
     }
+    std::optional<windows::BoundedProcessLogCapture>
+        reconnect_generation_b_log;
+    std::optional<std::uint32_t> generation_a_exit;
+    bool generation_a_tail_emitter_ready_before_shutdown = false;
     windows::OwnedProcessLaunchSpec client_spec;
     client_spec.executable = environment.client.canonical_path;
     client_spec.working_directory = options.research_root;
@@ -1439,7 +1481,7 @@ private:
         return summary;
     }
     ++summary.processes_started;
-    const std::array<std::uint32_t, 1U> expected_client{
+    std::array<std::uint32_t, 1U> expected_client{
         client.process_id()};
     if (!exact_process_snapshot_matches(
             environment.client, expected_client, summary.failure) ||
@@ -1494,6 +1536,224 @@ private:
         campaign_job.terminate(120U);
         finalize_duration();
         return summary;
+    }
+
+    if (reconnect) {
+        // Keep generation A live for a bounded post-ready window so its exact
+        // post-resource boundary and runtime prefix can be reconstructed from
+        // the journal. No candidate body is inspected here.
+        const auto generation_a_runtime_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (std::chrono::steady_clock::now() <
+                   generation_a_runtime_deadline &&
+               client.running() && server.running() && relay.running() &&
+               guard.running()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        }
+        if (!client.running() || !server.running() || !relay.running() ||
+            !guard.running()) {
+            summary.failure = !guard.running()
+                ? "guard-lost-between-generations"
+                : !server.running()
+                    ? "server-exited-between-generations"
+                    : !relay.running()
+                        ? "relay-exited-between-generations"
+                        : "reconnect-generation-a-exited-early";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+
+        // Phase one: while A is provably still alive, require the relay to
+        // create and bind its private send-only tail emitter, switch all later
+        // A-directed server sends onto it, and ACK that readiness capability.
+        if (::SetEvent(reconnect_transition.get()) == FALSE) {
+            summary.failure = "reconnect-tail-emitter-prepare-signal-failed";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        const auto prepare_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        bool prepare_acknowledged = false;
+        while (std::chrono::steady_clock::now() < prepare_deadline &&
+               client.running() && server.running() && relay.running() &&
+               guard.running()) {
+            const DWORD prepare_state = ::WaitForSingleObject(
+                reconnect_transition_ack.get(), 25U);
+            if (prepare_state == WAIT_OBJECT_0) {
+                prepare_acknowledged = true;
+                break;
+            }
+            if (prepare_state == WAIT_FAILED) break;
+        }
+        if (!prepare_acknowledged || !client.running() || !server.running() ||
+            !relay.running() || !guard.running()) {
+            summary.failure = !guard.running()
+                ? "guard-lost-between-generations"
+                : !server.running()
+                    ? "server-exited-between-generations"
+                    : !relay.running()
+                        ? "relay-exited-between-generations"
+                        : !client.running()
+                            ? "reconnect-generation-a-exited-before-tail-ready"
+                            : "reconnect-tail-emitter-not-ready-before-shutdown";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        generation_a_tail_emitter_ready_before_shutdown = true;
+
+        const auto generation_a_process_id = client.process_id();
+        client.terminate(0U);
+        generation_a_exit = client.wait(std::chrono::seconds{5});
+        if (!generation_a_exit || *generation_a_exit != 0U) {
+            summary.failure = "reconnect-generation-a-exit-failed";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        if (!exact_process_snapshot_matches(
+                environment.client, std::span<const std::uint32_t>{},
+                summary.failure) ||
+            !exact_process_snapshot_matches(
+                environment.server, expected_server, summary.failure)) {
+            summary.failure = "reconnect-generation-a-socket-or-process-retained";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        if (!guard.running() || !server.running() || !relay.running()) {
+            summary.failure = !guard.running()
+                ? "guard-lost-between-generations"
+                : !server.running()
+                    ? "server-exited-between-generations"
+                    : "relay-exited-between-generations";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        // Phase two: only after exact A-process absence is proved may the relay
+        // start its source-quiet window. Its second ACK is the sole capability
+        // that permits generation B to launch.
+        if (::SetEvent(reconnect_transition.get()) == FALSE) {
+            summary.failure = "reconnect-post-exit-quiet-signal-failed";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+
+        const auto transition_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{15};
+        bool transition_acknowledged = false;
+        while (std::chrono::steady_clock::now() < transition_deadline &&
+               server.running() && relay.running() && guard.running()) {
+            const DWORD transition_state = ::WaitForSingleObject(
+                reconnect_transition_ack.get(), 25U);
+            if (transition_state == WAIT_OBJECT_0) {
+                transition_acknowledged = true;
+                break;
+            }
+            if (transition_state == WAIT_FAILED) break;
+        }
+        if (!transition_acknowledged || !server.running() || !relay.running() ||
+            !guard.running()) {
+            summary.failure = !guard.running()
+                ? "guard-lost-between-generations"
+                : !server.running()
+                    ? "server-exited-between-generations"
+                    : !relay.running()
+                        ? "relay-exited-between-generations"
+                        : "reconnect-post-exit-quiet-not-proven";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        reconnect_transition.reset();
+        reconnect_transition_ack.reset();
+
+        reconnect_generation_b_log =
+            windows::BoundedProcessLogCapture::create({});
+        if (!reconnect_generation_b_log) {
+            summary.failure = "reconnect-generation-b-log-capture-failed";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        client_spec.stdout_handle =
+            reconnect_generation_b_log->inherited_write_handle();
+        client_spec.stderr_handle =
+            reconnect_generation_b_log->inherited_write_handle();
+        client_spec.arguments[8U] = L"HLCLIENT_B";
+        if (!exact_process_snapshot_matches(
+                environment.client, std::span<const std::uint32_t>{},
+                summary.failure) ||
+            !exact_process_snapshot_matches(
+                environment.server, expected_server, summary.failure)) {
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        auto [generation_b_client, generation_b_result] =
+            campaign_job.launch(client_spec);
+        if (!generation_b_result ||
+            generation_b_client.process_id() == generation_a_process_id) {
+            summary.failure = "reconnect-generation-b-launch-failed";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        ++summary.processes_started;
+        client = std::move(generation_b_client);
+        expected_client[0] = client.process_id();
+        reconnect_generation_b_log->close_parent_write_handle();
+        if (!exact_process_snapshot_matches(
+                environment.client, expected_client, summary.failure) ||
+            !exact_process_snapshot_matches(
+                environment.server, expected_server, summary.failure)) {
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+
+        const auto generation_b_ready_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{20};
+        bool generation_b_ready = false;
+        while (std::chrono::steady_clock::now() <
+                   generation_b_ready_deadline &&
+               client.running() && server.running() && relay.running() &&
+               guard.running()) {
+            const auto server_snapshot = server_log->snapshot();
+            const auto relay_snapshot = relay_log->snapshot();
+            const bool named_client =
+                server_snapshot.bytes.find("HLCLIENT_B") != std::string::npos &&
+                (server_snapshot.bytes.find("entered the game") !=
+                     std::string::npos ||
+                 server_snapshot.bytes.find(" connected") !=
+                     std::string::npos);
+            const bool second_bidirectional = relay_snapshot.bytes.find(
+                "[stock-runtime-capture] reconnect-generation=2;"
+                "bidirectional-traffic=true") != std::string::npos;
+            if (named_client && second_bidirectional) {
+                generation_b_ready = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        }
+        if (!generation_b_ready) {
+            summary.failure = !guard.running()
+                ? "guard-lost-between-generations"
+                : !server.running()
+                    ? "server-exited-between-generations"
+                    : !relay.running()
+                        ? "relay-exited-between-generations"
+                        : "reconnect-generation-b-not-ready";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        summary.connection_generations = 2U;
+        summary.generation_distinct = true;
     }
 
     const auto relay_deadline = relay_started_at +
@@ -1581,6 +1841,11 @@ private:
     const auto relay_snapshot = relay_log->finish();
     const auto server_snapshot = server_log->finish();
     const auto client_snapshot = client_log->finish();
+    std::optional<windows::BoundedProcessLogSnapshot>
+        reconnect_generation_b_snapshot;
+    if (reconnect && reconnect_generation_b_log) {
+        reconnect_generation_b_snapshot = reconnect_generation_b_log->finish();
+    }
     const auto guard_snapshot = guard_log->finish();
     const auto guard_process_count = guard_job.active_process_count();
     const std::optional<std::size_t> total_process_count =
@@ -1590,7 +1855,8 @@ private:
         : std::nullopt;
     summary.cleanup_exact = windows::stock_runtime_graceful_cleanup_is_exact(
         client_exit, server_exit, relay_exit, guard_exit,
-        total_process_count);
+        total_process_count) &&
+        (!reconnect || (generation_a_exit && *generation_a_exit == 0U));
     if (summary.cleanup_exact) {
         summary.cleanup_exact = windows::apply_stock_runtime_startup_event(
             startup, windows::StockRuntimeStartupEvent::cleanup_completed);
@@ -1606,6 +1872,10 @@ private:
     if (!windows::bounded_process_log_snapshot_complete(relay_snapshot) ||
         !windows::bounded_process_log_snapshot_complete(server_snapshot) ||
         !windows::bounded_process_log_snapshot_complete(client_snapshot) ||
+        (reconnect &&
+         (!reconnect_generation_b_snapshot ||
+          !windows::bounded_process_log_snapshot_complete(
+              *reconnect_generation_b_snapshot))) ||
         !windows::bounded_process_log_snapshot_complete(guard_snapshot)) {
         summary.failure = "process-log-limit-exceeded";
         finalize_duration();
@@ -1624,24 +1894,42 @@ private:
     }
     auto run_output = windows::open_secure_output_directory(options.run_root);
     auto logs_output = windows::open_secure_output_directory(logs_root);
-    if (!run_output || !run_output.directory ||
-        !logs_output || !logs_output.directory ||
-        !write_bounded_file(*logs_output.directory, L"relay.log",
-                            relay_snapshot.bytes) ||
-        !write_bounded_file(*logs_output.directory, L"server.log",
-                            server_snapshot.bytes) ||
-        !write_bounded_file(*logs_output.directory, L"client.log",
-                            client_snapshot.bytes) ||
-        !write_bounded_file(*logs_output.directory, L"guard.log",
-                            guard_snapshot.bytes) ||
-        !write_bounded_file(*logs_output.directory, L"relay-metadata.json",
-                            log_metadata_json(relay_snapshot)) ||
-        !write_bounded_file(*logs_output.directory, L"server-metadata.json",
-                            log_metadata_json(server_snapshot)) ||
-        !write_bounded_file(*logs_output.directory, L"client-metadata.json",
-                            log_metadata_json(client_snapshot)) ||
-        !write_bounded_file(*logs_output.directory, L"guard-metadata.json",
-                            log_metadata_json(guard_snapshot))) {
+    bool logs_written = run_output && run_output.directory && logs_output &&
+        logs_output.directory &&
+        write_bounded_file(*logs_output.directory, L"relay.log",
+                           relay_snapshot.bytes) &&
+        write_bounded_file(*logs_output.directory, L"server.log",
+                           server_snapshot.bytes) &&
+        write_bounded_file(*logs_output.directory, L"guard.log",
+                           guard_snapshot.bytes) &&
+        write_bounded_file(*logs_output.directory, L"relay-metadata.json",
+                           log_metadata_json(relay_snapshot)) &&
+        write_bounded_file(*logs_output.directory, L"server-metadata.json",
+                           log_metadata_json(server_snapshot)) &&
+        write_bounded_file(*logs_output.directory, L"guard-metadata.json",
+                           log_metadata_json(guard_snapshot));
+    if (logs_written && reconnect) {
+        logs_written = reconnect_generation_b_snapshot &&
+            write_bounded_file(
+                *logs_output.directory, L"client-generation-a.log",
+                client_snapshot.bytes) &&
+            write_bounded_file(
+                *logs_output.directory, L"client-generation-a-metadata.json",
+                log_metadata_json(client_snapshot)) &&
+            write_bounded_file(
+                *logs_output.directory, L"client-generation-b.log",
+                reconnect_generation_b_snapshot->bytes) &&
+            write_bounded_file(
+                *logs_output.directory, L"client-generation-b-metadata.json",
+                log_metadata_json(*reconnect_generation_b_snapshot));
+    } else if (logs_written) {
+        logs_written =
+            write_bounded_file(*logs_output.directory, L"client.log",
+                               client_snapshot.bytes) &&
+            write_bounded_file(*logs_output.directory, L"client-metadata.json",
+                               log_metadata_json(client_snapshot));
+    }
+    if (!logs_written) {
         summary.failure = "bounded-log-write-failed";
         finalize_duration();
         return summary;
@@ -1689,6 +1977,53 @@ private:
         summary.failure = "attestation-write-failed";
         finalize_duration();
         return summary;
+    }
+    if (reconnect) {
+        std::ostringstream reconnect_attestation;
+        reconnect_attestation
+            << "{\n"
+            << "  \"schema\": \""
+            << goldsrc::kStockRuntimeReconnectOrchestrationAttestationSchema
+            << "\",\n"
+            << "  \"connection_generation_count\": 2,\n"
+            << "  \"generation_distinct\": true,\n"
+            << "  \"generation_a_process_role_identity\": \""
+            << goldsrc::kStockRuntimeGenerationAProcessRole << "\",\n"
+            << "  \"generation_b_process_role_identity\": \""
+            << goldsrc::kStockRuntimeGenerationBProcessRole << "\",\n"
+            << "  \"generation_a_endpoint_role_identity\": \""
+            << goldsrc::kStockRuntimeGenerationAEndpointRole << "\",\n"
+            << "  \"generation_b_endpoint_role_identity\": \""
+            << goldsrc::kStockRuntimeGenerationBEndpointRole << "\",\n"
+            << "  \"generation_a_tail_emitter_ready_before_shutdown\": "
+            << (generation_a_tail_emitter_ready_before_shutdown
+                    ? "true" : "false") << ",\n"
+            << "  \"generation_a_controlled_shutdown\": true,\n"
+            << "  \"generation_a_endpoint_quiet\": true,\n"
+            << "  \"generation_b_fresh_owned_process\": true,\n"
+            << "  \"generation_b_fresh_connection_lifecycle\": "
+               "\"observed_by_relay\",\n"
+            << "  \"guard_continuity\": true,\n"
+            << "  \"server_continuity\": true,\n"
+            << "  \"relay_continuity\": true,\n"
+            << "  \"cleanup_status\": \"exact\",\n"
+            << "  \"restoration_status\": \"wrapper_pending\",\n"
+            << "  \"post_resource_boundary_status\": \"evidence_pending\",\n"
+            << "  \"candidate_status\": \"evidence_pending\",\n"
+            << "  \"candidate_body_consumed\": false,\n"
+            << "  \"candidate_semantic_category_assigned\": false,\n"
+            << "  \"publication_status\": \"staged\"\n"
+            << "}\n";
+        if (!write_bounded_file(
+                *run_output.directory,
+                L"reconnect-orchestration.staged.json",
+                reconnect_attestation.str())) {
+            summary.failure = "reconnect-attestation-write-failed";
+            summary.success = false;
+            summary.bounded_transport_complete = false;
+            finalize_duration();
+            return summary;
+        }
     }
     summary.success = true;
     summary.failure = "none";
@@ -1774,9 +2109,9 @@ int wmain(const int argc, wchar_t** argv)
     const auto options = parse_options(argc, argv);
     if (!options) {
         std::cerr << "Usage: hlclient_stock_runtime_orchestrator "
-                     "--validate-environment <static paths> OR "
-                     "--confirmation-token HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1 "
-                     "<active options>\n";
+                      "--validate-environment <static paths> OR "
+                      "--confirmation-token HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1 "
+                      "[--pre-campaign-canary] <active options>\n";
         return 2;
     }
     if (options->validate_config) {
@@ -1813,9 +2148,47 @@ int wmain(const int argc, wchar_t** argv)
         return 1;
     }
     if (options->validate_environment) {
+        goldsrc::StockActiveCapturePreflightAttestation attestation;
+        attestation.elevated = true;
+        attestation.binary_profile_valid = true;
+        attestation.app_manifest_valid = true;
+        attestation.dynamic_wfp_session = true;
+        attestation.ipv4_loopback_allowed =
+            environment.environment->canary.ipv4_loopback_allowed;
+        attestation.ipv6_loopback_allowed =
+            environment.environment->canary.ipv6_loopback_allowed;
+        attestation.ipv6_capability_available =
+            environment.environment->canary.ipv6_loopback_allowed;
+        attestation.non_loopback_denied_by_os =
+            environment.environment->canary.non_loopback_os_denied;
+        attestation.isolation_cleanup_exact = true;
+        attestation.timestamp_category = "current-session";
+        attestation.success = true;
+        if (!goldsrc::validate_stock_active_capture_preflight_attestation(
+                attestation)) {
+            print_key_value("active-environment", "invalid");
+            print_key_value("failure-category", "preflight-attestation-invalid");
+            print_key_value("stock-processes-started", "0");
+            print_key_value("capture-files-written", "0");
+            print_key_value("result", "failed");
+            return 1;
+        }
         print_key_value("active-environment", "valid");
+        print_key_value("preflight-schema", std::string{
+            goldsrc::kStockActiveCapturePreflightAttestationSchema});
+        print_key_value("elevation-status", "verified");
         print_key_value("isolation-canary", "success");
         print_key_value("binary-profile", "valid");
+        print_key_value("app-manifest", "valid");
+        print_key_value("wfp-session", "dynamic");
+        print_key_value("ipv4-loopback", "allowed");
+        print_key_value(
+            "ipv6-loopback",
+            environment.environment->canary.ipv6_loopback_allowed
+                ? "allowed" : "capability-unavailable");
+        print_key_value("non-loopback-canary", "denied-os-classified");
+        print_key_value("isolation-cleanup", "exact");
+        print_key_value("timestamp-category", "current-session");
         print_key_value("stock-processes-started", "0");
         print_key_value("capture-files-written", "0");
         print_key_value("result", "success");
@@ -1837,6 +2210,13 @@ int wmain(const int argc, wchar_t** argv)
     print_key_value("client-ready", summary.client_ready ? "true" : "false");
     print_key_value("bounded-transport-complete",
                     summary.bounded_transport_complete ? "true" : "false");
+    print_key_value("connection-generations",
+                    std::to_string(summary.connection_generations));
+    print_key_value("generation-distinct",
+                    summary.generation_distinct ? "true" : "false");
+    print_key_value("candidate-conflict",
+                    options->scenario == "reconnect"
+                        ? "evidence-pending" : "not-applicable");
     print_key_value("job-cleanup", summary.cleanup_exact ? "exact" : "incomplete");
     print_key_value("result", summary.success ? "success" : "failed");
     return summary.success ? 0 : 1;

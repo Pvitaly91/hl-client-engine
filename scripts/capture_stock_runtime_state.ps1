@@ -18,6 +18,9 @@ tree and starts no stock/game process. It invokes the read-only Windows
 #>
 [CmdletBinding(DefaultParameterSetName = 'Capture')]
 param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'DirectoryCapabilityBootstrap')]
+    [switch]$InitializeDirectoryCapability,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'RestorationSelfTest')]
     [switch]$ValidateRestorationGuard,
 
@@ -110,6 +113,9 @@ param(
     [string]$OutputRoot = '.\manual-artifacts\stock-runtime',
 
     [Parameter(ParameterSetName = 'Capture')]
+    [switch]$PreCampaignCanary,
+
+    [Parameter(ParameterSetName = 'Capture')]
     [ValidateRange(5, 300)]
     [int]$MaximumDurationSeconds = 45,
 
@@ -164,8 +170,12 @@ Set-StrictMode -Version Latest
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\', '/')
 $manualRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot 'manual-artifacts')).TrimEnd('\', '/')
 $requiredOutputRoot = [IO.Path]::GetFullPath((Join-Path $manualRoot 'stock-runtime')).TrimEnd('\', '/')
+$requiredCanaryOutputRoot = [IO.Path]::GetFullPath(
+    (Join-Path $manualRoot 'stock-runtime-canary')).TrimEnd('\', '/')
 $markerName = '.hlclient-research-isolated'
 $markerText = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
+$pendingMarkerName = '.hlclient-research-pending'
+$preparationManifestName = '.hlclient-research-preparation.json'
 $activeCaptureToken = 'HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1'
 $maximumEntries = 199999
 $maximumResearchBytes = [Int64]17179869184
@@ -290,8 +300,11 @@ function Assert-NoReparsePointInExistingPath {
 
 function Assert-OnlyDefaultDataStream {
     param([string]$Path, [string]$Label)
-    $streams = @(Get-Item -LiteralPath $Path -Stream * -ErrorAction Stop)
-    if (@($streams | Where-Object { $_.Stream -cne ':$DATA' }).Count -ne 0) {
+    Initialize-RestorationDirectoryCapabilityNative
+    try {
+        [Hlclient.StockRuntimeDirectoryCapability]::ValidateOnlyDefaultDataStream(
+            [IO.Path]::GetFullPath($Path))
+    } catch {
         throw "$Label must contain only its default data stream."
     }
 }
@@ -374,6 +387,10 @@ function Get-RelativePath {
 
 function Get-ResearchSnapshot {
     param([string]$Root)
+    # The root directory is not returned by Get-BoundedItems. Reject a named
+    # stream here independently so a stream added after preparation (or after
+    # the structural preflight) cannot be omitted from restoration evidence.
+    Assert-OnlyDefaultDataStream -Path $Root -Label 'research snapshot root'
     $entries = [Collections.Generic.List[object]]::new()
     $rootItem = Get-Item -LiteralPath $Root -Force
     [void]$entries.Add([pscustomobject]@{
@@ -460,6 +477,13 @@ namespace Hlclient
         public uint FileIndexLow;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct StockRuntimeIoStatusBlock
+    {
+        public IntPtr Status;
+        public UIntPtr Information;
+    }
+
     public sealed class StockRuntimeDirectoryCapability : IDisposable
     {
         private const uint GenericRead = 0x80000000;
@@ -480,9 +504,13 @@ namespace Hlclient
         private const uint VolumeNameDos = 0x0;
         private const int FileRenameInfo = 3;
         private const int FileDispositionInfo = 4;
+        private const int FileStreamInfo = 7;
+        private const int NtFileStreamInformation = 22;
+        private const int StatusNoMoreFiles = unchecked((int)0x80000006);
         private const uint FileBegin = 0;
         private const uint MoveFileReplaceExisting = 0x1;
         private const int MaximumPublicationBytes = 4 * 1024 * 1024;
+        private const int MaximumStreamInformationBytes = 64 * 1024;
         private static readonly IntPtr InvalidHandle = new IntPtr(-1);
 
         private readonly List<IntPtr> handles = new List<IntPtr>();
@@ -501,6 +529,18 @@ namespace Hlclient
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetFileInformationByHandle(
             IntPtr handle, out StockRuntimeByHandleFileInformation information);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandleEx(
+            IntPtr handle, int informationClass, IntPtr information,
+            uint bufferSize);
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtQueryInformationFile(
+            IntPtr handle, out StockRuntimeIoStatusBlock ioStatus,
+            IntPtr information, uint informationBytes,
+            int informationClass);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetFinalPathNameByHandle(
@@ -596,6 +636,71 @@ namespace Hlclient
             }
         }
 
+        // Windows PowerShell 5.1 does not reliably enumerate directory ADS
+        // through Get-Item -Stream. Query FILE_STREAM_INFO through one exact,
+        // retained no-follow handle so files and directories share the same
+        // fail-closed stream gate on every supported PowerShell host.
+        public static void ValidateOnlyDefaultDataStream(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+                throw new InvalidOperationException(
+                    "Default-stream validation path is invalid.");
+            string canonical = Path.GetFullPath(path).TrimEnd('\\', '/');
+            IntPtr handle = CreateFile(
+                canonical, GenericRead | FileReadAttributes, FileShareRead,
+                IntPtr.Zero, OpenExisting,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                IntPtr.Zero);
+            if (handle == InvalidHandle)
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Default-stream validation open failed.");
+            try
+            {
+                StockRuntimeByHandleFileInformation before =
+                    Information(handle);
+                ulong size = ((ulong)before.FileSizeHigh << 32) |
+                    before.FileSizeLow;
+                if ((before.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    !String.Equals(FinalPath(handle), canonical,
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        "Default-stream validation identity is invalid.");
+                if ((before.FileAttributes & FileAttributeDirectory) != 0)
+                    RequireOnlyDirectoryDataStreams(handle);
+                else
+                    RequireOnlyDefaultDataStream(handle, size);
+                StockRuntimeByHandleFileInformation after =
+                    Information(handle);
+                if (before.FileAttributes != after.FileAttributes ||
+                    before.VolumeSerialNumber != after.VolumeSerialNumber ||
+                    before.FileSizeHigh != after.FileSizeHigh ||
+                    before.FileSizeLow != after.FileSizeLow ||
+                    before.NumberOfLinks != after.NumberOfLinks ||
+                    before.FileIndexHigh != after.FileIndexHigh ||
+                    before.FileIndexLow != after.FileIndexLow ||
+                    before.CreationTime.dwHighDateTime !=
+                        after.CreationTime.dwHighDateTime ||
+                    before.CreationTime.dwLowDateTime !=
+                        after.CreationTime.dwLowDateTime ||
+                    before.LastWriteTime.dwHighDateTime !=
+                        after.LastWriteTime.dwHighDateTime ||
+                    before.LastWriteTime.dwLowDateTime !=
+                        after.LastWriteTime.dwLowDateTime ||
+                    !String.Equals(FinalPath(handle), canonical,
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        "Default-stream validation identity changed.");
+                if ((after.FileAttributes & FileAttributeDirectory) != 0)
+                    RequireOnlyDirectoryDataStreams(handle);
+                else
+                    RequireOnlyDefaultDataStream(handle, size);
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
         public bool Revalidate()
         {
             if (disposed || handles.Count == 0) return false;
@@ -604,6 +709,22 @@ namespace Hlclient
                 ((((ulong)information.FileIndexHigh << 32) | information.FileIndexLow) == fileId) &&
                 String.Equals(FinalPath(RootHandle), canonicalPath,
                     StringComparison.OrdinalIgnoreCase);
+        }
+
+        public bool VerifyRootSubstitutionBlocked()
+        {
+            if (disposed || !Revalidate()) return false;
+            string moved = canonicalPath + ".hlclient-root-swap-probe";
+            if (GetFileAttributes(moved) != UInt32.MaxValue) return false;
+            bool moveBlocked = !MoveFileEx(canonicalPath, moved, 0);
+            if (!moveBlocked)
+            {
+                // Best-effort self-test recovery; production publication never
+                // attempts a path rename of its retained root.
+                MoveFileEx(moved, canonicalPath, 0);
+            }
+            return moveBlocked && Revalidate() &&
+                GetFileAttributes(moved) == UInt32.MaxValue;
         }
 
         public string IdentityCategory
@@ -647,6 +768,7 @@ namespace Hlclient
                     throw new InvalidOperationException(
                         "Bounded retained-handle read size is invalid.");
                 RequireOrdinaryExactFile(handle, path, size);
+                RequireOnlyDefaultDataStream(handle, size);
                 byte[] bytes = new byte[(int)size];
                 uint read;
                 if (!ReadFile(handle, bytes, (uint)bytes.Length,
@@ -659,6 +781,7 @@ namespace Hlclient
                     throw new InvalidOperationException(
                         "Bounded retained-handle read length changed.");
                 RequireOrdinaryExactFile(handle, path, size);
+                RequireOnlyDefaultDataStream(handle, size);
                 if (!Revalidate())
                     throw new InvalidOperationException(
                         "Read directory identity changed.");
@@ -687,6 +810,180 @@ namespace Hlclient
         // handle before this method returns and no final leaf remains.
         public void PublishNewFiles(string[] leafNames, byte[][] payloads)
         {
+            PublishNewFilesCore(leafNames, payloads, false, false, false);
+        }
+
+        // Replaces one fixed metadata leaf only when the exact previously
+        // validated bytes are still present. The old file is held without
+        // share-write/delete, renamed by handle to a private backup, and the
+        // prepared replacement is then renamed no-replace. A substitution at
+        // either name fails closed; no mutable pathname is overwritten.
+        public void PublishReplacingFile(
+            string leafName, byte[] expectedPrevious, byte[] bytes)
+        {
+            PublishReplacingFileIfExact(
+                leafName, expectedPrevious, bytes, false, false);
+        }
+
+        public bool VerifyReplacingRollbackPreserved()
+        {
+            if (disposed || !Revalidate()) return false;
+            string leaf = ".hlclient-replacing-rollback-" +
+                Guid.NewGuid().ToString("N") + ".json";
+            byte[] original = Encoding.ASCII.GetBytes("{\"generation\":1}");
+            byte[] replacement = Encoding.ASCII.GetBytes("{\"generation\":2}");
+            bool failed = false;
+            try
+            {
+                PublishNewFile(leaf, original);
+                try
+                {
+                    PublishReplacingFileIfExact(
+                        leaf, original, replacement, false, true);
+                }
+                catch
+                {
+                    failed = true;
+                }
+                byte[] observed = ReadExistingFile(leaf, 1024);
+                bool exact = observed.Length == original.Length;
+                for (int index = 0;
+                     exact && index < original.Length; ++index)
+                    exact = observed[index] == original[index];
+                return failed && exact && Revalidate();
+            }
+            finally
+            {
+                DeleteFile(Path.Combine(canonicalPath, leaf));
+            }
+        }
+
+        public bool VerifyReplacingExpectedPriorMismatchBlocked()
+        {
+            if (disposed || !Revalidate()) return false;
+            string leaf = ".hlclient-replacing-mismatch-" +
+                Guid.NewGuid().ToString("N") + ".json";
+            byte[] original = Encoding.ASCII.GetBytes("{\"generation\":1}");
+            byte[] wrong = Encoding.ASCII.GetBytes("{\"generation\":0}");
+            byte[] replacement = Encoding.ASCII.GetBytes("{\"generation\":2}");
+            bool failed = false;
+            try
+            {
+                PublishNewFile(leaf, original);
+                try
+                {
+                    PublishReplacingFile(leaf, wrong, replacement);
+                }
+                catch
+                {
+                    failed = true;
+                }
+                byte[] observed = ReadExistingFile(leaf, 1024);
+                return failed && ExactBytes(observed, original) && Revalidate();
+            }
+            finally
+            {
+                DeleteFile(Path.Combine(canonicalPath, leaf));
+            }
+        }
+
+        public bool VerifyReplacingSubstitutionBlocked()
+        {
+            if (disposed || !Revalidate()) return false;
+            string leaf = ".hlclient-replacing-substitution-" +
+                Guid.NewGuid().ToString("N") + ".json";
+            byte[] original = Encoding.ASCII.GetBytes("{\"generation\":1}");
+            byte[] replacement = Encoding.ASCII.GetBytes("{\"generation\":2}");
+            byte[] substitute = Encoding.ASCII.GetBytes("substitute");
+            HashSet<string> priorBackups = new HashSet<string>(
+                Directory.GetFiles(
+                    canonicalPath, ".hlclient-stock-runtime-prior-*.tmp"),
+                StringComparer.OrdinalIgnoreCase);
+            bool failed = false;
+            try
+            {
+                PublishNewFile(leaf, original);
+                try
+                {
+                    PublishReplacingFileIfExact(
+                        leaf, original, replacement, true, false);
+                }
+                catch
+                {
+                    failed = true;
+                }
+                byte[] observed = File.ReadAllBytes(
+                    Path.Combine(canonicalPath, leaf));
+                return failed && ExactBytes(observed, substitute) &&
+                    Revalidate();
+            }
+            finally
+            {
+                DeleteFile(Path.Combine(canonicalPath, leaf));
+                foreach (string backup in Directory.GetFiles(
+                    canonicalPath, ".hlclient-stock-runtime-prior-*.tmp"))
+                    if (!priorBackups.Contains(backup)) DeleteFile(backup);
+            }
+        }
+
+        // Deterministically forces a rollback after the first retained-handle
+        // rename, substitutes a new file only after every trusted handle was
+        // closed, and proves rollback never path-deletes that replacement.
+        // Four and five members exercise the baseline and reconnect shapes.
+        public bool VerifyRollbackReplacementPreserved(int memberCount)
+        {
+            if (disposed || (memberCount != 4 && memberCount != 5))
+                return false;
+            string nonce = Guid.NewGuid().ToString("N");
+            string[] leaves = new string[memberCount];
+            byte[][] payloads = new byte[memberCount][];
+            for (int index = 0; index < memberCount; ++index)
+            {
+                leaves[index] = ".hlclient-rollback-selftest-" + nonce +
+                    "-" + index.ToString() + ".json";
+                payloads[index] = Encoding.UTF8.GetBytes(
+                    "{\"member\":" + index.ToString() + "}");
+            }
+            bool failed = false;
+            try
+            {
+                PublishNewFilesCore(leaves, payloads, true, false, false);
+            }
+            catch
+            {
+                failed = true;
+            }
+            string replacement = Path.Combine(canonicalPath, leaves[0]);
+            byte[] expected = RollbackReplacementBytes();
+            bool preserved = false;
+            try
+            {
+                byte[] observed = File.ReadAllBytes(replacement);
+                preserved = observed.Length == expected.Length;
+                for (int index = 0;
+                    preserved && index < expected.Length; ++index)
+                    preserved = observed[index] == expected[index];
+                return failed && preserved && Revalidate();
+            }
+            finally
+            {
+                // These names exist only inside the private self-test root.
+                // Production rollback never performs this path deletion.
+                for (int index = 0; index < leaves.Length; ++index)
+                    DeleteFile(Path.Combine(canonicalPath, leaves[index]));
+            }
+        }
+
+        private static byte[] RollbackReplacementBytes()
+        {
+            return new byte[] { 0x72, 0x65, 0x70, 0x6c, 0x61, 0x63, 0x65 };
+        }
+
+        private void PublishNewFilesCore(
+            string[] leafNames, byte[][] payloads,
+            bool injectReplacementAfterClose, bool replaceExisting,
+            bool injectFailureAfterReplace)
+        {
             if (disposed || !Revalidate())
                 throw new InvalidOperationException(
                     "Publication directory capability is no longer valid.");
@@ -714,6 +1011,7 @@ namespace Hlclient
             string[] temporaryPaths = new string[leafNames.Length];
             IntPtr[] temporaries = new IntPtr[leafNames.Length];
             bool[] renamed = new bool[leafNames.Length];
+            bool[] deleteMarked = new bool[leafNames.Length];
             for (int index = 0; index < temporaries.Length; ++index)
                 temporaries[index] = InvalidHandle;
             bool complete = false;
@@ -748,13 +1046,20 @@ namespace Hlclient
 
                 for (int index = 0; index < leafNames.Length; ++index)
                 {
-                    RenameOpenFileWithoutReplace(
-                        temporaries[index], destinations[index]);
+                    RenameOpenFile(
+                        temporaries[index], destinations[index],
+                        replaceExisting);
                     renamed[index] = true;
                     RequireOrdinaryExactFile(
                         temporaries[index], destinations[index],
                         (ulong)payloads[index].Length);
                     RequireExactBytes(temporaries[index], payloads[index]);
+                    if (injectReplacementAfterClose && index == 0)
+                        throw new IOException(
+                            "Forced retained-handle rollback self-test.");
+                    if (injectFailureAfterReplace && index == 0)
+                        throw new IOException(
+                            "Forced replacing-publication rollback self-test.");
                 }
                 if (!Revalidate())
                     throw new InvalidOperationException(
@@ -767,11 +1072,13 @@ namespace Hlclient
                 {
                     for (int index = 0; index < temporaries.Length; ++index)
                     {
-                        if (renamed[index] &&
-                            temporaries[index] != IntPtr.Zero &&
-                            temporaries[index] != InvalidHandle &&
-                            !MarkDeleteOnClose(temporaries[index]))
-                            rollbackComplete = false;
+                        if (temporaries[index] != IntPtr.Zero &&
+                            temporaries[index] != InvalidHandle)
+                        {
+                            deleteMarked[index] =
+                                MarkDeleteOnClose(temporaries[index]);
+                            if (!deleteMarked[index]) rollbackComplete = false;
+                        }
                     }
                 }
                 for (int index = 0; index < temporaries.Length; ++index)
@@ -779,14 +1086,25 @@ namespace Hlclient
                     if (temporaries[index] != IntPtr.Zero &&
                         temporaries[index] != InvalidHandle)
                         CloseHandle(temporaries[index]);
-                    if (!complete)
+                }
+                if (!complete && injectReplacementAfterClose &&
+                    renamed.Length != 0 && renamed[0])
+                {
+                    // The trusted file was already dispositioned and its
+                    // handle closed. This new object deliberately reuses only
+                    // the pathname and must never be deleted by rollback.
+                    File.WriteAllBytes(
+                        destinations[0], RollbackReplacementBytes());
+                }
+                if (!complete)
+                {
+                    for (int index = 0; index < temporaries.Length; ++index)
                     {
                         string cleanupPath = renamed[index]
                             ? destinations[index] : temporaryPaths[index];
-                        if (!String.IsNullOrEmpty(cleanupPath) &&
-                            GetFileAttributes(cleanupPath) != UInt32.MaxValue &&
-                            !DeleteFile(cleanupPath))
-                            rollbackComplete = false;
+                        // Absence is only an observation. Never delete by path
+                        // after the retained handle closes: that name may now
+                        // denote an unrelated replacement object.
                         if (!String.IsNullOrEmpty(cleanupPath) &&
                             GetFileAttributes(cleanupPath) != UInt32.MaxValue)
                             rollbackComplete = false;
@@ -795,6 +1113,143 @@ namespace Hlclient
                 if (!complete && !rollbackComplete)
                     throw new IOException(
                         "Atomic publication batch rollback was incomplete.");
+            }
+        }
+
+        private void PublishReplacingFileIfExact(
+            string leafName, byte[] expectedPrevious, byte[] bytes,
+            bool injectSubstitutionBeforeReplace,
+            bool injectFailureAfterReplace)
+        {
+            if (disposed || !Revalidate())
+                throw new InvalidOperationException(
+                    "Replacing publication directory capability is invalid.");
+            if (!ValidLeafName(leafName) || expectedPrevious == null ||
+                expectedPrevious.Length == 0 ||
+                expectedPrevious.Length > MaximumPublicationBytes ||
+                bytes == null || bytes.Length == 0 ||
+                bytes.Length > MaximumPublicationBytes)
+                throw new InvalidOperationException(
+                    "Replacing publication parameters are invalid.");
+
+            string destination = Path.Combine(canonicalPath, leafName);
+            string temporaryPath = null;
+            string backupPath = null;
+            IntPtr previous = InvalidHandle;
+            IntPtr replacement = InvalidHandle;
+            bool previousMoved = false;
+            bool complete = false;
+            bool rollbackComplete = true;
+            Exception failure = null;
+            try
+            {
+                previous = CreateFile(
+                    destination, GenericRead | DeleteAccess | FileReadAttributes,
+                    FileShareRead, IntPtr.Zero, OpenExisting,
+                    FileFlagOpenReparsePoint, IntPtr.Zero);
+                if (previous == InvalidHandle)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Expected prior publication is absent or busy.");
+                RequireOrdinaryExactFile(
+                    previous, destination, (ulong)expectedPrevious.Length);
+                RequireExactBytes(previous, expectedPrevious);
+                RequireOrdinaryExactFile(
+                    previous, destination, (ulong)expectedPrevious.Length);
+
+                replacement = CreateTemporaryFile(out temporaryPath);
+                RequireOrdinaryExactFile(replacement, temporaryPath, 0);
+                uint written;
+                if (!WriteFile(replacement, bytes, (uint)bytes.Length,
+                        out written, IntPtr.Zero) ||
+                    written != (uint)bytes.Length)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Replacing publication write failed.");
+                if (!FlushFileBuffers(replacement))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Replacing publication flush failed.");
+                RequireOrdinaryExactFile(
+                    replacement, temporaryPath, (ulong)bytes.Length);
+                RequireExactBytes(replacement, bytes);
+
+                backupPath = Path.Combine(
+                    canonicalPath, ".hlclient-stock-runtime-prior-" +
+                    Guid.NewGuid().ToString("N") + ".tmp");
+                RenameOpenFile(previous, backupPath, false);
+                previousMoved = true;
+                RequireOrdinaryExactFile(
+                    previous, backupPath, (ulong)expectedPrevious.Length);
+                RequireExactBytes(previous, expectedPrevious);
+
+                if (injectSubstitutionBeforeReplace)
+                    File.WriteAllBytes(destination,
+                        Encoding.ASCII.GetBytes("substitute"));
+                RenameOpenFile(replacement, destination, false);
+                RequireOrdinaryExactFile(
+                    replacement, destination, (ulong)bytes.Length);
+                RequireExactBytes(replacement, bytes);
+                if (injectFailureAfterReplace)
+                    throw new IOException(
+                        "Forced exact-prior replacement rollback self-test.");
+                if (!Revalidate())
+                    throw new InvalidOperationException(
+                        "Replacing publication directory identity changed.");
+
+                if (!MarkDeleteOnClose(previous))
+                    throw new IOException(
+                        "Prior publication could not be dispositioned.");
+                if (!CloseHandle(previous))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Prior publication handle close failed.");
+                previous = InvalidHandle;
+                complete = true;
+            }
+            catch (Exception error)
+            {
+                failure = error;
+            }
+            finally
+            {
+                if (!complete)
+                {
+                    if (replacement != IntPtr.Zero &&
+                        replacement != InvalidHandle)
+                    {
+                        if (!MarkDeleteOnClose(replacement))
+                            rollbackComplete = false;
+                        if (!CloseHandle(replacement))
+                            rollbackComplete = false;
+                        replacement = InvalidHandle;
+                    }
+                    if (previousMoved && previous != IntPtr.Zero &&
+                        previous != InvalidHandle)
+                    {
+                        try
+                        {
+                            RenameOpenFile(previous, destination, false);
+                            RequireOrdinaryExactFile(
+                                previous, destination,
+                                (ulong)expectedPrevious.Length);
+                            RequireExactBytes(previous, expectedPrevious);
+                        }
+                        catch
+                        {
+                            rollbackComplete = false;
+                        }
+                    }
+                }
+                if (replacement != IntPtr.Zero &&
+                    replacement != InvalidHandle)
+                    CloseHandle(replacement);
+                if (previous != IntPtr.Zero && previous != InvalidHandle)
+                    CloseHandle(previous);
+            }
+            if (failure != null)
+            {
+                if (!rollbackComplete)
+                    throw new IOException(
+                        "Exact-prior replacing publication rollback was incomplete.",
+                        failure);
+                throw failure;
             }
         }
 
@@ -969,6 +1424,136 @@ namespace Hlclient
                     "Atomic publication file identity is invalid.");
         }
 
+        // FILE_STREAM_INFO is queried through the same retained file handle as
+        // the byte read. A fixed upper bound makes an adversarial stream list a
+        // typed failure instead of an allocation request. The only accepted
+        // entry is the unnamed NTFS data stream for the exact primary length.
+        private static void RequireOnlyDefaultDataStream(
+            IntPtr handle, ulong expectedSize)
+        {
+            IntPtr buffer = Marshal.AllocHGlobal(MaximumStreamInformationBytes);
+            try
+            {
+                if (!GetFileInformationByHandleEx(
+                        handle, FileStreamInfo, buffer,
+                        MaximumStreamInformationBytes))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Bounded retained-handle stream inventory failed.");
+
+                int offset = 0;
+                int count = 0;
+                while (true)
+                {
+                    if (offset < 0 ||
+                        offset > MaximumStreamInformationBytes - 24)
+                        throw new InvalidOperationException(
+                            "Bounded retained-handle stream inventory is invalid.");
+                    uint next = unchecked((uint)Marshal.ReadInt32(buffer, offset));
+                    uint nameBytes = unchecked((uint)Marshal.ReadInt32(
+                        buffer, offset + 4));
+                    long streamSize = Marshal.ReadInt64(buffer, offset + 8);
+                    if (nameBytes == 0 || (nameBytes & 1U) != 0U ||
+                        nameBytes > (uint)(MaximumStreamInformationBytes -
+                            offset - 24))
+                        throw new InvalidOperationException(
+                            "Bounded retained-handle stream inventory is invalid.");
+                    string name = Marshal.PtrToStringUni(
+                        IntPtr.Add(buffer, offset + 24),
+                        checked((int)(nameBytes / 2U)));
+                    ++count;
+                    if (count != 1 ||
+                        !String.Equals(name, "::$DATA",
+                            StringComparison.Ordinal) ||
+                        streamSize < 0 || (ulong)streamSize != expectedSize)
+                        throw new InvalidOperationException(
+                            "Bounded retained-handle read requires only the default data stream.");
+                    if (next == 0U) break;
+                    if (next < 24U + nameBytes ||
+                        next > (uint)(MaximumStreamInformationBytes - offset))
+                        throw new InvalidOperationException(
+                            "Bounded retained-handle stream inventory is invalid.");
+                    offset = checked(offset + (int)next);
+                }
+                if (count != 1)
+                    throw new InvalidOperationException(
+                        "Bounded retained-handle read requires only the default data stream.");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static void RequireOnlyDirectoryDataStreams(IntPtr handle)
+        {
+            IntPtr buffer = Marshal.AllocHGlobal(MaximumStreamInformationBytes);
+            try
+            {
+                StockRuntimeIoStatusBlock ioStatus;
+                int status = NtQueryInformationFile(
+                    handle, out ioStatus, buffer,
+                    MaximumStreamInformationBytes,
+                    NtFileStreamInformation);
+                if (status == StatusNoMoreFiles) return;
+                if (status != 0)
+                    throw new InvalidOperationException(
+                        "Bounded retained-directory stream inventory failed.");
+                ulong used = ioStatus.Information.ToUInt64();
+                if (used > MaximumStreamInformationBytes)
+                    throw new InvalidOperationException(
+                        "Bounded retained-directory stream inventory is invalid.");
+                int offset = 0;
+                int count = 0;
+                while ((ulong)offset < used)
+                {
+                    if (offset < 0 ||
+                        offset > MaximumStreamInformationBytes - 24)
+                        throw new InvalidOperationException(
+                            "Bounded retained-directory stream inventory is invalid.");
+                    uint next = unchecked((uint)Marshal.ReadInt32(
+                        buffer, offset));
+                    uint nameBytes = unchecked((uint)Marshal.ReadInt32(
+                        buffer, offset + 4));
+                    if (nameBytes == 0 || (nameBytes & 1U) != 0U ||
+                        nameBytes > (uint)(MaximumStreamInformationBytes -
+                            offset - 24) ||
+                        (ulong)offset + 24U + nameBytes > used)
+                        throw new InvalidOperationException(
+                            "Bounded retained-directory stream inventory is invalid.");
+                    string name = Marshal.PtrToStringUni(
+                        IntPtr.Add(buffer, offset + 24),
+                        checked((int)(nameBytes / 2U)));
+                    ++count;
+                    if (count > 128 ||
+                        (!String.Equals(name, "::$DATA",
+                             StringComparison.Ordinal) &&
+                         !String.Equals(name, "::$INDEX_ALLOCATION",
+                             StringComparison.Ordinal)))
+                        throw new InvalidOperationException(
+                            "Bounded retained-handle read requires only the default data stream.");
+                    if (next == 0U) break;
+                    if (next < 24U + nameBytes || (next & 7U) != 0U ||
+                        (ulong)offset + next >= used)
+                        throw new InvalidOperationException(
+                            "Bounded retained-directory stream inventory is invalid.");
+                    offset = checked(offset + (int)next);
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static bool ExactBytes(byte[] observed, byte[] expected)
+        {
+            if (observed == null || expected == null ||
+                observed.Length != expected.Length) return false;
+            for (int index = 0; index < expected.Length; ++index)
+                if (observed[index] != expected[index]) return false;
+            return true;
+        }
+
         private static void RequireExactBytes(IntPtr handle, byte[] expected)
         {
             long position;
@@ -995,8 +1580,8 @@ namespace Hlclient
                     "Atomic publication read-back length differs.");
         }
 
-        private static void RenameOpenFileWithoutReplace(
-            IntPtr handle, string destination)
+        private static void RenameOpenFile(
+            IntPtr handle, string destination, bool replaceExisting)
         {
             byte[] nameBytes = Encoding.Unicode.GetBytes(destination);
             int rootOffset = IntPtr.Size == 8 ? 8 : 4;
@@ -1008,8 +1593,10 @@ namespace Hlclient
             try
             {
                 for (int index = 0;
-                    index < headerSize + nameBytes.Length; ++index)
+                     index < headerSize + nameBytes.Length; ++index)
                     Marshal.WriteByte(information, index, 0);
+                Marshal.WriteByte(
+                    information, 0, replaceExisting ? (byte)1 : (byte)0);
                 Marshal.WriteIntPtr(information, rootOffset, IntPtr.Zero);
                 Marshal.WriteInt32(
                     information, lengthOffset, nameBytes.Length);
@@ -1445,6 +2032,284 @@ function Get-KnownSteamRoots {
     return @($canonicalRoots)
 }
 
+function Assert-ExactJsonProperties {
+    param(
+        [object]$Value,
+        [string[]]$Expected,
+        [string]$Label
+    )
+    if ($null -eq $Value -or $Value -is [Array] -or $Value -is [string]) {
+        throw "$Label must be one JSON object."
+    }
+    $actual = @($Value.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($actual.Count -ne $Expected.Count) {
+        throw "$Label property set is not exact."
+    }
+    foreach ($name in $Expected) {
+        if ($actual -cnotcontains $name) {
+            throw "$Label property set is not exact."
+        }
+    }
+    foreach ($name in $actual) {
+        if ($Expected -cnotcontains $name) {
+            throw "$Label property set is not exact."
+        }
+    }
+}
+
+function Get-BoundedJsonInteger {
+    param(
+        [object]$Value,
+        [Int64]$Minimum,
+        [Int64]$Maximum,
+        [string]$Label
+    )
+    if (-not ($Value -is [byte] -or $Value -is [sbyte] -or
+            $Value -is [Int16] -or $Value -is [UInt16] -or
+            $Value -is [Int32] -or $Value -is [UInt32] -or
+            $Value -is [Int64])) {
+        throw "$Label must be an integer."
+    }
+    [Int64]$number = $Value
+    if ($number -lt $Minimum -or $number -gt $Maximum) {
+        throw "$Label is outside its bound."
+    }
+    return $number
+}
+
+function Assert-LowerSha256Reference {
+    param([object]$Value, [string]$Label)
+    if (-not ($Value -is [string]) -or
+        [string]$Value -cnotmatch '^[0-9a-f]{64}$') {
+        throw "$Label is not a private SHA-256 reference."
+    }
+}
+
+function Get-ResearchPreparationInventory {
+    param([string]$Root, [object[]]$Items)
+    $v1Records = [Collections.Generic.List[string]]::new()
+    $v2Records = [Collections.Generic.List[string]]::new()
+    [Int64]$totalBytes = 0
+    $clientSha256 = $null
+    $serverSha256 = $null
+    foreach ($item in $Items) {
+        $relative = Get-RelativePath $item.FullName $Root
+        if ($relative -ceq $markerName -or
+            $relative -ceq $pendingMarkerName -or
+            $relative -ceq $preparationManifestName) {
+            continue
+        }
+        $isDirectory =
+            ($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0
+        if ($isDirectory) {
+            [void]$v1Records.Add('d|' + $relative)
+            [void]$v2Records.Add('d|' + $relative)
+            continue
+        }
+        if ($item.Length -lt 0 -or
+            $totalBytes -gt ($maximumResearchBytes - $item.Length)) {
+            throw 'Research preparation inventory exceeds its byte bound.'
+        }
+        $totalBytes += $item.Length
+        $sha256 = Get-FileSha256 $item.FullName
+        [void]$v1Records.Add(
+            ('f|{0}|{1}|{2}' -f $relative, $item.Length, $sha256))
+        [void]$v2Records.Add(
+            ('f|{0}|{1}|{2}' -f $relative, $item.Length,
+                $sha256.ToLowerInvariant()))
+        if ($relative -ceq 'hl.exe') { $clientSha256 = $sha256 }
+        if ($relative -ceq 'hlds.exe') { $serverSha256 = $sha256 }
+    }
+    if ($v1Records.Count -lt 2 -or $null -eq $clientSha256 -or
+        $null -eq $serverSha256) {
+        throw 'Research preparation inventory lacks required launchers.'
+    }
+    $v1Canonical = @($v1Records | Sort-Object) -join "`n"
+    $v2Ordered = $v2Records.ToArray()
+    [Array]::Sort($v2Ordered, [StringComparer]::Ordinal)
+    $v2Canonical = if ($v2Ordered.Count -eq 0) { '' } else {
+        (@($v2Ordered) -join "`n") + "`n"
+    }
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $utf8 = [Text.UTF8Encoding]::new($false, $true)
+        $v1Sha256 = ([BitConverter]::ToString(
+                $algorithm.ComputeHash($utf8.GetBytes($v1Canonical)))).Replace('-', '')
+        $algorithm.Initialize()
+        $v2Sha256 = ([BitConverter]::ToString(
+                $algorithm.ComputeHash($utf8.GetBytes($v2Canonical)))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+    return [pscustomobject]@{
+        EntryCount = $v1Records.Count
+        ByteCount = $totalBytes
+        V1Sha256 = $v1Sha256
+        V2Sha256 = $v2Sha256
+        ClientSha256 = $clientSha256
+        ServerSha256 = $serverSha256
+    }
+}
+
+function Assert-ResearchPendingMarker {
+    param([string]$Root)
+    $path = [IO.Path]::GetFullPath((Join-Path $Root $pendingMarkerName))
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'Research preparation v2 lacks its pending/commit state marker.'
+    }
+    $pending = Read-BoundedJson $path 4096 `
+        'research preparation pending marker'
+    Assert-ExactJsonProperties $pending @(
+        'schema', 'category', 'paths_recorded') `
+        'research preparation pending marker'
+    if ($pending.schema -cne 'hlclient.stock-research-copy-pending.v1' -or
+        $pending.category -cne 'awaiting_commit_marker' -or
+        -not ($pending.paths_recorded -is [bool]) -or
+        $pending.paths_recorded -ne $false) {
+        throw 'Research preparation pending marker policy is invalid.'
+    }
+}
+
+function Assert-ResearchPreparationManifest {
+    param([string]$Root, [object[]]$Items)
+    $path = [IO.Path]::GetFullPath(
+        (Join-Path $Root $preparationManifestName))
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'Research root lacks a preparation manifest.'
+    }
+    $manifest = Read-BoundedJson $path 32768 'research preparation manifest'
+    if ($null -eq $manifest.PSObject.Properties['schema'] -or
+        -not ($manifest.schema -is [string])) {
+        throw 'Research preparation manifest schema is absent.'
+    }
+    $inventory = Get-ResearchPreparationInventory $Root $Items
+
+    if ([string]$manifest.schema -ceq
+        'hlclient.stock-runtime-research-preparation.v1') {
+        $expected = @(
+            'schema', 'marker', 'source_inventory_entries',
+            'source_inventory_bytes', 'source_inventory_sha256',
+            'client_sha256', 'server_launcher_sha256', 'paths_recorded',
+            'preparation_status')
+        Assert-ExactJsonProperties $manifest $expected `
+            'research preparation manifest v1'
+        if ($manifest.marker -cne $markerText -or
+            -not ($manifest.paths_recorded -is [bool]) -or
+            $manifest.paths_recorded -ne $false -or
+            $manifest.preparation_status -cne 'exact-copy-verified') {
+            throw 'Research preparation manifest v1 policy is invalid.'
+        }
+        [Int64]$entryCount = Get-BoundedJsonInteger `
+            $manifest.source_inventory_entries 2 $maximumEntries `
+            'v1 source entry count'
+        [Int64]$byteCount = Get-BoundedJsonInteger `
+            $manifest.source_inventory_bytes 1 $maximumResearchBytes `
+            'v1 source byte count'
+        foreach ($property in @(
+                'source_inventory_sha256', 'client_sha256',
+                'server_launcher_sha256')) {
+            if (-not ($manifest.$property -is [string]) -or
+                [string]$manifest.$property -cnotmatch '^[0-9A-F]{64}$') {
+                throw "Research preparation manifest v1 $property is invalid."
+            }
+        }
+        if ($entryCount -ne $inventory.EntryCount -or
+            $byteCount -ne $inventory.ByteCount -or
+            $manifest.source_inventory_sha256 -cne $inventory.V1Sha256 -or
+            $manifest.client_sha256 -cne $inventory.ClientSha256 -or
+            $manifest.server_launcher_sha256 -cne $inventory.ServerSha256) {
+            throw 'Research preparation manifest v1 inventory disagrees with the tree.'
+        }
+        return [string]$manifest.schema
+    }
+
+    if ([string]$manifest.schema -cne
+        'hlclient.stock-runtime-research-preparation.v2') {
+        throw 'Research preparation manifest schema is unsupported.'
+    }
+    $expected = @(
+        'schema', 'marker', 'topology_profile',
+        'source_root_identity_fingerprint', 'entry_count', 'byte_count',
+        'materialized_link_count', 'materialized_hardlink_count',
+        'rejected_link_count', 'inventory_sha256',
+        'client_binary_private_identity_reference',
+        'server_binary_private_identity_reference',
+        'destination_unlinked_status', 'source_unchanged_status',
+        'paths_recorded', 'preparation_status')
+    Assert-ExactJsonProperties $manifest $expected `
+        'research preparation manifest v2'
+    if ($manifest.marker -cne $markerText -or
+        -not ($manifest.paths_recorded -is [bool]) -or
+        $manifest.paths_recorded -ne $false -or
+        $manifest.destination_unlinked_status -cne 'verified' -or
+        $manifest.source_unchanged_status -cne 'verified' -or
+        $manifest.preparation_status -cne
+            'exact-materialized-copy-verified') {
+        throw 'Research preparation manifest v2 policy is invalid.'
+    }
+    if (-not ($manifest.topology_profile -is [Array])) {
+        throw 'Research preparation topology profile must be a JSON array.'
+    }
+    $topology = @($manifest.topology_profile)
+    $allowedTopology = @(
+        'ordinary_tree', 'source_path_ancestor_reparse',
+        'source_root_reparse', 'source_internal_directory_junction',
+        'source_internal_directory_symlink', 'source_file_hardlink')
+    if ($topology.Count -lt 1 -or $topology.Count -gt $allowedTopology.Count) {
+        throw 'Research preparation topology profile count is invalid.'
+    }
+    $seenTopology = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal)
+    foreach ($category in $topology) {
+        if (-not ($category -is [string]) -or
+            $allowedTopology -cnotcontains [string]$category -or
+            -not $seenTopology.Add([string]$category)) {
+            throw 'Research preparation topology profile is invalid.'
+        }
+    }
+    if ($seenTopology.Contains('ordinary_tree') -and $topology.Count -ne 1) {
+        throw 'ordinary_tree cannot be combined with linked topology.'
+    }
+
+    [Int64]$entryCount = Get-BoundedJsonInteger $manifest.entry_count 2 `
+        $maximumEntries 'v2 source entry count'
+    [void](Get-BoundedJsonInteger $manifest.byte_count 1 `
+        $maximumResearchBytes 'v2 source byte count')
+    [Int64]$linkCount = Get-BoundedJsonInteger `
+        $manifest.materialized_link_count 0 $entryCount `
+        'v2 materialized link count'
+    [Int64]$hardlinkCount = Get-BoundedJsonInteger `
+        $manifest.materialized_hardlink_count 0 $entryCount `
+        'v2 materialized hardlink count'
+    [void](Get-BoundedJsonInteger $manifest.rejected_link_count 0 0 `
+        'v2 rejected link count')
+    if ($seenTopology.Contains('source_file_hardlink') -ne
+        ($hardlinkCount -gt 0)) {
+        throw 'Research preparation hardlink topology/count disagrees.'
+    }
+    $linkTopologyPresent =
+        $seenTopology.Contains('source_root_reparse') -or
+        $seenTopology.Contains('source_internal_directory_junction') -or
+        $seenTopology.Contains('source_internal_directory_symlink')
+    if ($linkTopologyPresent -ne ($linkCount -gt 0)) {
+        throw 'Research preparation link topology/count disagrees.'
+    }
+    foreach ($property in @(
+            'source_root_identity_fingerprint', 'inventory_sha256',
+            'client_binary_private_identity_reference',
+            'server_binary_private_identity_reference')) {
+        Assert-LowerSha256Reference $manifest.$property `
+            "research preparation manifest v2 $property"
+    }
+    if ($entryCount -ne $inventory.EntryCount -or
+        [Int64]$manifest.byte_count -ne $inventory.ByteCount -or
+        $manifest.inventory_sha256 -cne $inventory.V2Sha256) {
+        throw 'Research preparation manifest v2 inventory disagrees with the tree.'
+    }
+    Assert-ResearchPendingMarker $Root
+    return [string]$manifest.schema
+}
+
 function Assert-ApprovedLocalDriveRoot {
     param([string]$Path, [string]$Label)
     if ($Path -cnotmatch '^(?<drive>[A-Za-z]):\\') {
@@ -1483,6 +2348,10 @@ function Resolve-IsolatedResearchRoot {
         (Get-Item -LiteralPath $requestedRoot -Force -ErrorAction Stop).FullName
     ).TrimEnd('\', '/')
     Assert-NoReparsePointInExistingPath $root 'research root'
+    # Directory ADS are not members of the recursive file-system inventory.
+    # Screen the exact root before accepting either preparation-manifest
+    # schema; Get-ResearchSnapshot repeats this at every restoration boundary.
+    Assert-OnlyDefaultDataStream $root 'research root'
     $canonicalRepositoryRoot = [IO.Path]::GetFullPath(
         (Get-Item -LiteralPath $repositoryRoot -Force -ErrorAction Stop).FullName
     ).TrimEnd('\', '/')
@@ -1505,7 +2374,7 @@ function Resolve-IsolatedResearchRoot {
             throw 'Research root overlaps a configured Steam library.'
         }
     }
-    [void](Get-BoundedItems $root)
+    $boundedResearchItems = @(Get-BoundedItems $root)
     $marker = [IO.Path]::GetFullPath((Join-Path $root $markerName))
     if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
         throw 'Research root lacks the exact isolation marker.'
@@ -1519,6 +2388,8 @@ function Resolve-IsolatedResearchRoot {
         $markerValue -cne ($markerText + "`r`n")) {
         throw 'Research root lacks the exact isolation marker.'
     }
+    $preparationManifestSchema = Assert-ResearchPreparationManifest `
+        $root $boundedResearchItems
     $client = [IO.Path]::GetFullPath($ClientPath)
     $server = [IO.Path]::GetFullPath($HldsPath)
     if ($client -ine (Join-Path $root 'hl.exe') -or $server -ine (Join-Path $root 'hlds.exe')) {
@@ -1542,7 +2413,12 @@ function Resolve-IsolatedResearchRoot {
     if (-not (Test-Path -LiteralPath (Join-Path $root 'valve') -PathType Container)) {
         throw 'Research root lacks the valve directory.'
     }
-    return [pscustomobject]@{ Root = $root; Client = $client; Server = $server }
+    return [pscustomobject]@{
+        Root = $root
+        Client = $client
+        Server = $server
+        PreparationManifestSchema = $preparationManifestSchema
+    }
 }
 
 function Test-IsElevatedAdministrator {
@@ -1881,7 +2757,10 @@ function Invoke-BoundedOrchestrator {
             'steam-app-id', 'steam-build-id', 'server-engine-version',
             'protocol', 'server-build', 'unexpected-children',
             'bounded-transport-complete', 'run-id', 'journal-entries',
-            'raw-datagrams', 'sequenced-c2s', 'sequenced-s2c', 'duration-ms')
+            'raw-datagrams', 'sequenced-c2s', 'sequenced-s2c', 'duration-ms',
+            'preflight-schema', 'elevation-status', 'app-manifest',
+            'wfp-session', 'timestamp-category', 'connection-generations',
+            'generation-distinct', 'candidate-conflict')
         $values = [Collections.Generic.Dictionary[string, string]]::new(
             [StringComparer]::Ordinal)
         foreach ($line in $stdoutLines) {
@@ -2193,6 +3072,7 @@ function Publish-AcceptedEvidenceTransaction {
         [byte[]]$IsolationBytes,
         [object]$Restoration,
         [byte[]]$RestorationBytes,
+        [object]$ReconnectObservation,
         [object]$RunManifest,
         [bool]$OwnedJobsExact,
         [bool]$RestorationExact,
@@ -2215,31 +3095,49 @@ function Publish-AcceptedEvidenceTransaction {
         [string]$RunManifest.failure_category -cne 'none') {
         throw 'Accepted evidence publication payload is invalid.'
     }
+    $reconnectRun = [string]$RunManifest.scenario -ceq 'reconnect'
+    if ($reconnectRun -ne ($null -ne $ReconnectObservation)) {
+        throw 'Reconnect evidence payload does not match the accepted scenario.'
+    }
     # The accepted manifest is deliberately the last member. The native held-
-    # handle batch either publishes and verifies all four leaves or rolls every
-    # renamed member back before returning an error.
-    $publications = [object[]]@(
+    # handle batch publishes the scenario-specific set or rolls every renamed
+    # member back before returning an error.
+    $publications = [Collections.Generic.List[object]]::new()
+    [void]$publications.Add(
         [pscustomobject]@{
             Path = Join-Path $RunRoot 'version-observation.json'
             Bytes = $VersionBytes
             Label = 'final version observation'
-        },
+        })
+    [void]$publications.Add(
         [pscustomobject]@{
             Path = Join-Path $RunRoot 'isolation-attestation.json'
             Bytes = $IsolationBytes
             Label = 'final isolation attestation'
-        },
+        })
+    [void]$publications.Add(
         [pscustomobject]@{
             Path = Join-Path $RunRoot 'restoration-attestation.json'
             Bytes = $RestorationBytes
             Label = 'final restoration attestation'
-        },
+        })
+    if ($reconnectRun) {
+        [void]$publications.Add(
+            [pscustomobject]@{
+                Path = Join-Path $RunRoot 'reconnect-observation.json'
+                Value = $ReconnectObservation
+                Label = 'final reconnect observation'
+            })
+    }
+    # The accepted run manifest is always the final member and therefore the
+    # externally visible transaction commit point for both scenario shapes.
+    [void]$publications.Add(
         [pscustomobject]@{
             Path = Join-Path $RunRoot 'research-run-metadata.json'
             Value = $RunManifest
             Label = 'accepted research run manifest'
         })
-    Write-AtomicJsonBatchNoOverwrite -Publications $publications `
+    Write-AtomicJsonBatchNoOverwrite -Publications $publications.ToArray() `
         -DirectoryCapability $DirectoryCapability
 }
 
@@ -2265,6 +3163,14 @@ function ConvertTo-RejectedRunManifest {
     $rejected['accepted_transport_run'] = $false
     $rejected['accepted_evidence_run'] = $false
     $rejected['failure_category'] = $FailureCategory
+    foreach ($reconnectOnly in @(
+            'connection_generation_count', 'exact_boundary_count',
+            'runtime_candidate_count', 'generation_distinct',
+            'candidate_conflict')) {
+        if ($rejected.Contains($reconnectOnly)) {
+            $rejected.Remove($reconnectOnly)
+        }
+    }
     return $rejected
 }
 
@@ -2276,7 +3182,8 @@ function Write-RejectedManifestAfterEvidencePublicationFailure {
     Assert-RunDirectoryCapability $DirectoryCapability $RunRoot
     foreach ($finalLeaf in @(
             'version-observation.json', 'isolation-attestation.json',
-            'restoration-attestation.json', 'research-run-metadata.json')) {
+            'restoration-attestation.json', 'reconnect-observation.json',
+            'research-run-metadata.json')) {
         if (Test-Path -LiteralPath (Join-Path $RunRoot $finalLeaf)) {
             throw 'Accepted evidence batch rollback did not leave every final leaf absent.'
         }
@@ -2331,16 +3238,34 @@ function Write-StagedRestorationAttestation {
 
 function Read-BoundedJson {
     param([string]$Path, [int]$MaximumBytes, [string]$Label)
-    Assert-NoReparsePointInExistingPath $Path $Label
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Label is absent." }
-    Assert-OnlyDefaultDataStream $Path $Label
-    Assert-NoHardLink $Path $Label
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Length -lt 2 -or $item.Length -gt $MaximumBytes) {
-        throw "$Label length is outside its bound."
+    $full = [IO.Path]::GetFullPath($Path)
+    $parent = [IO.Path]::GetFullPath((Split-Path -Parent $full)).TrimEnd('\', '/')
+    $capability = $null
+    try {
+        # The file itself is the strict descendant anchor. Root and leaf stay
+        # retained without share-delete while one native handle validates and
+        # reads the exact bounded ordinary-file bytes.
+        $capability = New-RetainedDirectoryCapability `
+            -Path $parent -AnchorPath $full -Label $Label
+        [byte[]]$bytes = $capability.ReadExistingFile(
+            [IO.Path]::GetFileName($full), $MaximumBytes)
+        if ($bytes.Length -lt 2) {
+            throw "$Label length is outside its bound."
+        }
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        return $text | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        if ($_.Exception.Message -ceq "$Label length is outside its bound.") {
+            throw
+        }
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) {
+            $failure = $failure.InnerException
+        }
+        throw "$Label retained-handle JSON read failed: $($failure.Message)"
+    } finally {
+        if ($null -ne $capability) { $capability.Dispose() }
     }
-    try { return Get-Content -Raw -LiteralPath $Path -Encoding UTF8 | ConvertFrom-Json }
-    catch { throw "$Label is invalid JSON." }
 }
 
 function Read-BoundedJsonWithRetainedBytes {
@@ -2358,7 +3283,11 @@ function Read-BoundedJsonWithRetainedBytes {
         $value = $text | ConvertFrom-Json
         return [pscustomobject]@{ Value = $value; Bytes = $bytes }
     } catch {
-        throw "$Label retained-handle JSON read failed: $($_.Exception.Message)"
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) {
+            $failure = $failure.InnerException
+        }
+        throw "$Label retained-handle JSON read failed: $($failure.Message)"
     }
 }
 
@@ -2405,6 +3334,169 @@ function Invoke-FirstObservationChecker {
     return [pscustomobject]@{ ExitCode = $exitCode; Lines = $lines }
 }
 
+function Invoke-IndependentTransportWalker {
+    param(
+        [string]$WalkerPath,
+        [string]$RunRoot,
+        [Collections.Generic.Dictionary[string, string]]$CheckerValues,
+        [bool]$Reconnect)
+    $arguments = @(
+        '-CaptureRoot', $RunRoot,
+        '-BoundaryPayloadOrdinal', $CheckerValues['boundary-payload-ordinal'],
+        '-BoundaryObservedOrdinal', $CheckerValues['boundary-observed-ordinal'],
+        '-BoundaryDeliveryOrdinal', $CheckerValues['boundary-delivery-ordinal'],
+        '-BoundaryByteOffset', $CheckerValues['boundary-byte-offset'],
+        '-BoundaryBitOffset', $CheckerValues['boundary-bit-offset'],
+        '-BoundarySourceSequence', $CheckerValues['boundary-source-sequence'],
+        '-BoundarySourcePayloadBytes',
+            $CheckerValues['boundary-source-payload-bytes'],
+        '-BoundarySourcePayloadBits',
+            $CheckerValues['boundary-source-payload-bits'],
+        '-BoundaryNextUnconsumedBits',
+            $CheckerValues['boundary-next-unconsumed-bits'],
+        '-BoundaryReassembled', $CheckerValues['boundary-reassembled'],
+        '-BoundaryDecompressed', $CheckerValues['boundary-decompressed'],
+        '-CandidateBitWidth', $CheckerValues['candidate-bit-width'],
+        '-FirstCandidate', $CheckerValues['first-candidate'])
+    if ($Reconnect) {
+        $arguments += @(
+            '-GenerationBBoundaryPayloadOrdinal',
+                $CheckerValues['generation-b-boundary-payload-ordinal'],
+            '-GenerationBBoundaryObservedOrdinal',
+                $CheckerValues['generation-b-boundary-observed-ordinal'],
+            '-GenerationBBoundaryDeliveryOrdinal',
+                $CheckerValues['generation-b-boundary-delivery-ordinal'],
+            '-GenerationBBoundaryByteOffset',
+                $CheckerValues['generation-b-boundary-byte-offset'],
+            '-GenerationBBoundaryBitOffset',
+                $CheckerValues['generation-b-boundary-bit-offset'],
+            '-GenerationBBoundarySourceSequence',
+                $CheckerValues['generation-b-boundary-source-sequence'],
+            '-GenerationBBoundarySourcePayloadBytes',
+                $CheckerValues['generation-b-boundary-source-payload-bytes'],
+            '-GenerationBBoundarySourcePayloadBits',
+                $CheckerValues['generation-b-boundary-source-payload-bits'],
+            '-GenerationBBoundaryNextUnconsumedBits',
+                $CheckerValues['generation-b-boundary-next-unconsumed-bits'],
+            '-GenerationBBoundaryReassembled',
+                $CheckerValues['generation-b-boundary-reassembled'],
+            '-GenerationBBoundaryDecompressed',
+                $CheckerValues['generation-b-boundary-decompressed'],
+            '-GenerationBCandidateBitWidth',
+                $CheckerValues['generation-b-candidate-bit-width'],
+            '-GenerationBFirstCandidate',
+                $CheckerValues['generation-b-first-candidate'])
+    }
+    $lines = @(& $WalkerPath @arguments 2>&1 |
+        ForEach-Object { $_.ToString() })
+    if ($lines.Count -gt 128 -or
+        [Text.Encoding]::UTF8.GetByteCount(($lines -join "`n")) -gt 65536) {
+        throw 'Independent transport walker output exceeded its bound.'
+    }
+    return ,$lines
+}
+
+function New-ReconnectCandidateObservation {
+    param(
+        [Collections.Generic.Dictionary[string, string]]$Values,
+        [string]$Prefix)
+    $candidate = $Values[$Prefix + 'first-candidate']
+    $isPrefix = $candidate.StartsWith('bit-prefix:')
+    [Int64]$numeric = [Int64]($candidate -replace '^bit-prefix:', '')
+    return [ordered]@{
+        observed = $true
+        candidate_bit_width = [Int64]$Values[$Prefix + 'candidate-bit-width']
+        numeric_candidate = $(if ($isPrefix) { $null } else { $numeric })
+        bounded_bit_prefix = $(if ($isPrefix) { $numeric } else { $null })
+        byte_aligned = $Values[$Prefix + 'boundary-byte-aligned'] -ceq 'true'
+        body_consumed = $false
+        semantic_category_assigned = $false
+    }
+}
+
+function New-ReconnectFinalObservation {
+    param([Collections.Generic.Dictionary[string, string]]$Values)
+    $generations = [Collections.Generic.List[object]]::new()
+    foreach ($identity in @(
+            [pscustomobject]@{
+                Label = 'a'; Ordinal = 1
+                Process = 'owned_client_generation_a'
+                Endpoint = 'research_client_generation_a'
+                EndpointDistinct = $false; Shutdown = $true; Quiet = $true
+            },
+            [pscustomobject]@{
+                Label = 'b'; Ordinal = 2
+                Process = 'owned_client_generation_b'
+                Endpoint = 'research_client_generation_b'
+                EndpointDistinct = $true; Shutdown = $false; Quiet = $false
+            })) {
+        $prefix = 'generation-' + $identity.Label + '-'
+        [void]$generations.Add([ordered]@{
+            generation_ordinal = $identity.Ordinal
+            profile_identity = $Values['profile']
+            owned_client_process_role_identity = $identity.Process
+            learned_client_endpoint_role_identity = $identity.Endpoint
+            fresh_owned_client_process = $true
+            learned_client_endpoint_observed = $true
+            learned_client_endpoint_distinct_from_previous =
+                $identity.EndpointDistinct
+            first_observed_ordinal = [Int64]$Values[$prefix + 'first-observed-ordinal']
+            last_observed_ordinal = [Int64]$Values[$prefix + 'last-observed-ordinal']
+            connectionless_exchange_count =
+                [Int64]$Values[$prefix + 'connectionless-exchanges']
+            connect_observed = $true
+            accept_observed = $true
+            first_sequenced_packet_ordinal =
+                [Int64]$Values[$prefix + 'first-sequenced-packet-ordinal']
+            client_to_server_packet_count =
+                [Int64]$Values[$prefix + 'client-to-server-packets']
+            server_to_client_packet_count =
+                [Int64]$Values[$prefix + 'server-to-client-packets']
+            controlled_client_shutdown_observed = $identity.Shutdown
+            retired_client_endpoint_quiet = $identity.Quiet
+            exact_post_resource_boundary = [ordered]@{
+                observed = $true
+                replay_payload_ordinal =
+                    [Int64]$Values[$prefix + 'boundary-payload-ordinal']
+                corpus_observed_ordinal =
+                    [Int64]$Values[$prefix + 'boundary-observed-ordinal']
+                delivery_ordinal =
+                    [Int64]$Values[$prefix + 'boundary-delivery-ordinal']
+                byte_offset = [Int64]$Values[$prefix + 'boundary-byte-offset']
+                bit_offset = [Int64]$Values[$prefix + 'boundary-bit-offset']
+                source_payload_byte_count =
+                    [Int64]$Values[$prefix + 'boundary-source-payload-bytes']
+                source_payload_bit_count =
+                    [Int64]$Values[$prefix + 'boundary-source-payload-bits']
+                next_unconsumed_bit_count =
+                    [Int64]$Values[$prefix + 'boundary-next-unconsumed-bits']
+            }
+            candidate_observation = New-ReconnectCandidateObservation `
+                -Values $Values -Prefix $prefix
+        })
+    }
+    return [ordered]@{
+        schema = 'hlclient.stock-runtime-reconnect-observation.v1'
+        connection_generation_count = 2
+        exact_boundary_count = 2
+        runtime_candidate_count = 2
+        generation_distinct = $true
+        candidate_conflict = $false
+        guard_continuity = $true
+        server_continuity = $true
+        relay_continuity = $true
+        cleanup_exact = $true
+        restoration_exact = $true
+        candidate_body_consumed = $false
+        candidate_semantic_category_assigned = $false
+        retired_generation_a_tail_sink = 'routing_only'
+        retired_generation_a_server_tail_packet_count =
+            [Int64]$Values['retired-generation-a-server-tail-packets']
+        generation_b_sequenced_after_fresh_accept = $true
+        generations = $generations.ToArray()
+    }
+}
+
 function Get-RestorationSelfTestExternalObservation {
     param([string]$Path)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -2417,12 +3509,22 @@ function Get-RestorationSelfTestExternalObservation {
         [Int64]$item.Attributes, (Get-FileSha256 $Path)
 }
 
+if ($PSCmdlet.ParameterSetName -eq 'DirectoryCapabilityBootstrap') {
+    Initialize-RestorationDirectoryCapabilityNative
+    Write-Output '[stock-runtime-capture] directory-capability=initialized'
+    Write-Output '[stock-runtime-capture] files-written=0'
+    Write-Output '[stock-runtime-capture] processes-started=0'
+    Write-Output '[stock-runtime-capture] result=success'
+    return
+}
+
 if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
     $systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
     $selfTestRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
         'hlclient-stock-runtime-selftest-' + [Guid]::NewGuid().ToString('N'))))
     $guard = $null
     $publicationCapability = $null
+    $reconnectPublicationCapability = $null
     try {
         Assert-PathBelowRoot $selfTestRoot $systemTemporaryRoot 'restoration self-test root'
         Assert-NoReparsePointInExistingPath $selfTestRoot 'restoration self-test path'
@@ -2454,6 +3556,29 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
 
         $before = Get-ResearchSnapshot $testResearch
         $guard = New-RestorationGuard $testResearch $before
+
+        # A root-directory ADS is invisible to child enumeration. Prove that a
+        # post-snapshot mutation is rejected by the independent restoration
+        # snapshot gate, then remove only this self-test-owned stream.
+        $rootAdsName = 'hlclient-restoration-root-ads-probe'
+        $rootAdsRejected = $false
+        try {
+            [IO.File]::WriteAllText(
+                ($testResearch + ':' + $rootAdsName), 'mutation',
+                [Text.Encoding]::ASCII)
+            try { [void](Get-ResearchSnapshot $testResearch) }
+            catch {
+                if ($_.Exception.Message -cmatch
+                    '^research snapshot root must contain only its default data stream\.$') {
+                    $rootAdsRejected = $true
+                } else { throw }
+            }
+        } finally {
+            [IO.File]::Delete($testResearch + ':' + $rootAdsName)
+        }
+        if (-not $rootAdsRejected) {
+            throw 'Restoration self-test did not reject a research-root ADS mutation.'
+        }
 
         $researchSwap = Join-Path $selfTestRoot 'research-swapped'
         $researchSwapBlocked = $false
@@ -2502,8 +3627,36 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
         [IO.Directory]::CreateDirectory(
             (Join-Path $publicationRun 'logs')) | Out-Null
         $publicationCapability = New-RunDirectoryCapability $publicationRun
+        if (-not $publicationCapability.VerifyRootSubstitutionBlocked()) {
+            throw 'Retained publication root substitution was not blocked.'
+        }
         if (-not $publicationCapability.VerifyTemporarySubstitutionBlocked()) {
             throw 'Atomic publication temporary substitution was not blocked.'
+        }
+        if (-not $publicationCapability.VerifyRollbackReplacementPreserved(4) -or
+            -not $publicationCapability.VerifyRollbackReplacementPreserved(5)) {
+            throw 'Atomic publication rollback deleted a substituted pathname.'
+        }
+        $replaceLeaf = '.hlclient-replacing-publication-selftest.json'
+        $replaceInitial = [Text.Encoding]::ASCII.GetBytes('{"generation":1}')
+        $replaceFinal = [Text.Encoding]::ASCII.GetBytes('{"generation":2}')
+        $publicationCapability.PublishNewFile($replaceLeaf, $replaceInitial)
+        $publicationCapability.PublishReplacingFile(
+            $replaceLeaf, $replaceInitial, $replaceFinal)
+        $replaceObserved = $publicationCapability.ReadExistingFile(
+            $replaceLeaf, 1024)
+        if ([BitConverter]::ToString($replaceObserved) -cne
+            [BitConverter]::ToString($replaceFinal)) {
+            throw 'Retained-handle replacing publication changed its exact bytes.'
+        }
+        if (-not $publicationCapability.VerifyReplacingRollbackPreserved()) {
+            throw 'Replacing publication did not preserve the prior manifest on rollback.'
+        }
+        if (-not $publicationCapability.VerifyReplacingExpectedPriorMismatchBlocked()) {
+            throw 'Replacing publication accepted mismatched prior bytes.'
+        }
+        if (-not $publicationCapability.VerifyReplacingSubstitutionBlocked()) {
+            throw 'Replacing publication overwrote a concurrent substituted leaf.'
         }
 
         $testVersion = [ordered]@{ schema = 'version-self-test' }
@@ -2516,6 +3669,7 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
         $testRestorationBytes = [Text.UTF8Encoding]::new($false).GetBytes(
             (($testRestoration | ConvertTo-Json -Depth 8) + "`r`n"))
         $testManifest = [ordered]@{
+            scenario = 'baseline'
             accepted_transport_run = $true
             accepted_evidence_run = $true
             failure_category = 'none'
@@ -2678,17 +3832,149 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
                 'restoration-attestation.json', 'research-run-metadata.json')) {
             if (-not (Test-Path -LiteralPath `
                     (Join-Path $publicationRun $finalLeaf) -PathType Leaf)) {
-                throw 'Successful transaction omitted a final evidence leaf.'
+                throw 'Successful baseline transaction omitted a final evidence leaf.'
             }
+        }
+        if (Test-Path -LiteralPath (
+                Join-Path $publicationRun 'reconnect-observation.json')) {
+            throw 'Successful baseline transaction published a reconnect-only leaf.'
         }
         $publicationCapability.Dispose()
         $publicationCapability = $null
+
+        # Exercise the scenario-dependent five-member commit independently.
+        # These values satisfy the exact reconnect-observation v1 shape while
+        # remaining synthetic, path-free and body-unconsumed.
+        $reconnectValues = [Collections.Generic.Dictionary[string, string]]::new(
+            [StringComparer]::Ordinal)
+        $reconnectValues.Add(
+            'profile', 'stock_protocol_48_build_10210_evidence_pending')
+        $reconnectValues.Add(
+            'retired-generation-a-server-tail-packets', '0')
+        foreach ($generation in @(
+                [pscustomobject]@{ Label = 'a'; First = 0; Last = 9 },
+                [pscustomobject]@{ Label = 'b'; First = 10; Last = 19 })) {
+            $prefix = 'generation-' + $generation.Label + '-'
+            $values = [ordered]@{
+                'first-observed-ordinal' = [string]$generation.First
+                'last-observed-ordinal' = [string]$generation.Last
+                'connectionless-exchanges' = '2'
+                'first-sequenced-packet-ordinal' =
+                    [string]($generation.First + 2)
+                'client-to-server-packets' = '3'
+                'server-to-client-packets' = '5'
+                'boundary-payload-ordinal' = '0'
+                'boundary-observed-ordinal' =
+                    [string]($generation.First + 4)
+                'boundary-delivery-ordinal' = '3'
+                'boundary-byte-offset' = '0'
+                'boundary-bit-offset' = '0'
+                'boundary-source-payload-bytes' = '1'
+                'boundary-source-payload-bits' = '8'
+                'boundary-next-unconsumed-bits' = '8'
+                'boundary-byte-aligned' = 'true'
+                'candidate-bit-width' = '8'
+                'first-candidate' = '5'
+            }
+            foreach ($key in $values.Keys) {
+                $reconnectValues.Add($prefix + $key, $values[$key])
+            }
+        }
+        $testReconnectObservation =
+            New-ReconnectFinalObservation -Values $reconnectValues
+        $testReconnectManifest = [ordered]@{
+            scenario = 'reconnect'
+            accepted_transport_run = $true
+            accepted_evidence_run = $true
+            failure_category = 'none'
+            connection_generation_count = 2
+            exact_boundary_count = 2
+            runtime_candidate_count = 2
+            generation_distinct = $true
+            candidate_conflict = $false
+        }
+        $reconnectPublicationRun = Join-Path $selfTestRoot `
+            'reconnect-publication-run'
+        [IO.Directory]::CreateDirectory(
+            (Join-Path $reconnectPublicationRun 'logs')) | Out-Null
+        $reconnectPublicationCapability =
+            New-RunDirectoryCapability $reconnectPublicationRun
+
+        $reconnectGateRejected = $false
+        try {
+            Publish-AcceptedEvidenceTransaction `
+                -RunRoot $reconnectPublicationRun `
+                -Version $testVersion -VersionBytes $testVersionBytes `
+                -Isolation $testIsolation -IsolationBytes $testIsolationBytes `
+                -Restoration $testRestoration `
+                -RestorationBytes $testRestorationBytes `
+                -ReconnectObservation $testReconnectObservation `
+                -RunManifest $testReconnectManifest `
+                -OwnedJobsExact $true -RestorationExact $true `
+                -ExternalStateExact $true -CheckerWalkerReady $false `
+                -FailureCategory 'none' `
+                -DirectoryCapability $reconnectPublicationCapability
+        } catch {
+            $reconnectGateRejected = $true
+        }
+        if (-not $reconnectGateRejected) {
+            throw 'Reconnect publication accepted an incomplete transaction gate.'
+        }
+        foreach ($finalLeaf in @(
+                'version-observation.json', 'isolation-attestation.json',
+                'restoration-attestation.json', 'reconnect-observation.json',
+                'research-run-metadata.json')) {
+            if (Test-Path -LiteralPath (
+                    Join-Path $reconnectPublicationRun $finalLeaf)) {
+                throw 'Rejected reconnect gate left a final evidence leaf.'
+            }
+        }
+
+        Publish-AcceptedEvidenceTransaction `
+            -RunRoot $reconnectPublicationRun `
+            -Version $testVersion -VersionBytes $testVersionBytes `
+            -Isolation $testIsolation -IsolationBytes $testIsolationBytes `
+            -Restoration $testRestoration `
+            -RestorationBytes $testRestorationBytes `
+            -ReconnectObservation $testReconnectObservation `
+            -RunManifest $testReconnectManifest `
+            -OwnedJobsExact $true -RestorationExact $true `
+            -ExternalStateExact $true -CheckerWalkerReady $true `
+            -FailureCategory 'none' `
+            -DirectoryCapability $reconnectPublicationCapability
+        foreach ($finalLeaf in @(
+                'version-observation.json', 'isolation-attestation.json',
+                'restoration-attestation.json', 'reconnect-observation.json',
+                'research-run-metadata.json')) {
+            if (-not (Test-Path -LiteralPath (
+                        Join-Path $reconnectPublicationRun $finalLeaf) `
+                    -PathType Leaf)) {
+                throw 'Successful reconnect transaction omitted a final evidence leaf.'
+            }
+        }
+        $publishedReconnect = Read-BoundedJson `
+            (Join-Path $reconnectPublicationRun 'reconnect-observation.json') `
+            65536 'self-test reconnect observation'
+        if ([string]$publishedReconnect.schema -cne
+                'hlclient.stock-runtime-reconnect-observation.v1' -or
+            [Int64]$publishedReconnect.connection_generation_count -ne 2 -or
+            @($publishedReconnect.generations).Count -ne 2) {
+            throw 'Published reconnect observation does not retain its exact schema.'
+        }
+        $reconnectPublicationCapability.Dispose()
+        $reconnectPublicationCapability = $null
         Write-Output '[stock-runtime-capture] hardlink-overwrite=blocked'
         Write-Output '[stock-runtime-capture] junction-traversal=blocked'
         Write-Output '[stock-runtime-capture] directory-swap=blocked'
+        Write-Output '[stock-runtime-capture] publication-root-swap=blocked'
         Write-Output '[stock-runtime-capture] temporary-substitution=blocked'
         Write-Output '[stock-runtime-capture] orchestrator-start-failure-cleanup=exact'
         Write-Output '[stock-runtime-capture] failed-publication-rollback=exact'
+        Write-Output '[stock-runtime-capture] rollback-replacement=preserved'
+        Write-Output '[stock-runtime-capture] replacing-publication=retained-handle-exact'
+        Write-Output '[stock-runtime-capture] replacing-rollback=prior-manifest-preserved'
+        Write-Output '[stock-runtime-capture] replacing-prior-mismatch=blocked'
+        Write-Output '[stock-runtime-capture] replacing-substitution=blocked'
         Write-Output '[stock-runtime-capture] final-evidence-batch=exact'
         Write-Output '[stock-runtime-capture] retained-handle-json-read=exact'
         Write-Output '[stock-runtime-capture] restoration-directory-identity=retained-volume-and-file-id'
@@ -2697,6 +3983,10 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
         Write-Output '[stock-runtime-capture] restoration=exact'
         Write-Output '[stock-runtime-capture] result=restoration-self-test-success'
     } finally {
+        if ($null -ne $reconnectPublicationCapability) {
+            $reconnectPublicationCapability.Dispose()
+            $reconnectPublicationCapability = $null
+        }
         if ($null -ne $publicationCapability) {
             $publicationCapability.Dispose()
             $publicationCapability = $null
@@ -2731,6 +4021,8 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
 if ($PSCmdlet.ParameterSetName -eq 'Preflight') {
     $research = Resolve-IsolatedResearchRoot
     [void](Get-ResearchSnapshot $research.Root)
+    Write-Output ("[stock-runtime-capture] preparation-manifest={0}" -f
+        $research.PreparationManifestSchema)
     Write-Output '[stock-runtime-capture] research-root=policy-screened-copy-physical-identity-pending'
     Write-Output '[stock-runtime-capture] client-version=1.1.1.1'
     Write-Output '[stock-runtime-capture] server-launcher-version=4.1.1.1'
@@ -2751,6 +4043,8 @@ if ($PSCmdlet.ParameterSetName -eq 'ActivePreflight') {
     }
     $research = Resolve-IsolatedResearchRoot
     [void](Get-ResearchSnapshot $research.Root)
+    Write-Output ("[stock-runtime-capture] preparation-manifest={0}" -f
+        $research.PreparationManifestSchema)
     $tool = Resolve-TrustedRepositoryTool $CaptureToolPath `
         'hlclient_stock_runtime_capture.exe' 'stock runtime relay'
     if ($ExpectedCaptureToolSha256 -and
@@ -2783,14 +4077,38 @@ if ($PSCmdlet.ParameterSetName -eq 'ActivePreflight') {
         throw "Active environment validation failed with typed category $category."
     }
     Assert-OrchestratorValue $result active-environment valid
+    Assert-OrchestratorValue $result preflight-schema `
+        hlclient.stock-active-capture-preflight-attestation.v1
+    Assert-OrchestratorValue $result elevation-status verified
     Assert-OrchestratorValue $result isolation-canary success
     Assert-OrchestratorValue $result binary-profile valid
+    Assert-OrchestratorValue $result app-manifest valid
+    Assert-OrchestratorValue $result wfp-session dynamic
+    Assert-OrchestratorValue $result ipv4-loopback allowed
+    if (-not $result.Values.ContainsKey('ipv6-loopback') -or
+        @('allowed', 'capability-unavailable') -cnotcontains
+            $result.Values['ipv6-loopback']) {
+        throw 'Project orchestrator emitted an invalid IPv6 canary status.'
+    }
+    Assert-OrchestratorValue $result non-loopback-canary denied-os-classified
+    Assert-OrchestratorValue $result isolation-cleanup exact
+    Assert-OrchestratorValue $result timestamp-category current-session
     Assert-OrchestratorValue $result stock-processes-started 0
     Assert-OrchestratorValue $result capture-files-written 0
     Assert-OrchestratorValue $result result success
     Write-Output '[stock-runtime-capture] active-environment=valid'
+    Write-Output '[stock-runtime-capture] preflight-schema=hlclient.stock-active-capture-preflight-attestation.v1'
+    Write-Output '[stock-runtime-capture] elevation-status=verified'
     Write-Output '[stock-runtime-capture] isolation-canary=success'
     Write-Output '[stock-runtime-capture] binary-profile=valid'
+    Write-Output '[stock-runtime-capture] app-manifest=valid'
+    Write-Output '[stock-runtime-capture] wfp-session=dynamic'
+    Write-Output '[stock-runtime-capture] ipv4-loopback=allowed'
+    Write-Output ("[stock-runtime-capture] ipv6-loopback={0}" -f
+        $result.Values['ipv6-loopback'])
+    Write-Output '[stock-runtime-capture] non-loopback-canary=denied-os-classified'
+    Write-Output '[stock-runtime-capture] isolation-cleanup=exact'
+    Write-Output '[stock-runtime-capture] timestamp-category=current-session'
     Write-Output '[stock-runtime-capture] stock-processes-started=0'
     Write-Output '[stock-runtime-capture] capture-files-written=0'
     Write-Output '[stock-runtime-capture] result=success'
@@ -2822,14 +4140,13 @@ if (($canonicalScenario -ceq 'baseline' -or
     throw 'Accepted baseline and idle-runtime observations require a requested duration of at least 30 seconds.'
 }
 
-if ($canonicalScenario -ceq 'reconnect') {
+if ($canonicalScenario -ceq 'reconnect' -and
+    $MaximumDurationSeconds -lt 60) {
     Write-Output '[stock-runtime-capture] active-capture=blocked'
-    Write-Output '[stock-runtime-capture] failure-category=reconnect_lifecycle_pending'
+    Write-Output '[stock-runtime-capture] failure-category=minimum_reconnect_duration_required'
     Write-Output '[stock-runtime-capture] processes-started=0'
     Write-Output '[stock-runtime-capture] files-written=0'
-    Write-Output '[stock-runtime-capture] capture-runs-created=0'
-    Write-Output '[stock-runtime-capture] restoration-backups-created=0'
-    throw 'Reconnect requires two controlled stock sessions, distinct run generations and two reconstructed boundaries; the current single-session orchestrator cannot satisfy that acceptance policy.'
+    throw 'A two-generation reconnect observation requires at least 60 seconds.'
 }
 
 if (-not (Test-IsElevatedAdministrator)) {
@@ -2857,8 +4174,15 @@ if ($activeScenarios -cnotcontains $canonicalScenario) {
     throw 'The requested scenario is outside the M4.7.1.1 active-capture allowlist; no run was started.'
 }
 $research = Resolve-IsolatedResearchRoot
+Write-Output ("[stock-runtime-capture] preparation-manifest={0}" -f
+    $research.PreparationManifestSchema)
 $output = [IO.Path]::GetFullPath($OutputRoot).TrimEnd('\', '/')
-if ($output -ine $requiredOutputRoot) {
+if ($PreCampaignCanary) {
+    if ($canonicalScenario -cne 'baseline' -or $Map -cne 'boot_camp' -or
+        $output -ine $requiredCanaryOutputRoot) {
+        throw 'PreCampaignCanary requires exact boot_camp/baseline and the repository manual-artifacts/stock-runtime-canary root.'
+    }
+} elseif ($output -ine $requiredOutputRoot) {
     throw 'OutputRoot must be the exact repository manual-artifacts/stock-runtime root.'
 }
 Assert-NoReparsePointInExistingPath $output 'stock runtime output root'
@@ -2908,8 +4232,22 @@ if ($activeValidation.ExitCode -ne 0) {
     throw "Active environment validation failed before backup/run creation: $category."
 }
 Assert-OrchestratorValue $activeValidation active-environment valid
+Assert-OrchestratorValue $activeValidation preflight-schema `
+    hlclient.stock-active-capture-preflight-attestation.v1
+Assert-OrchestratorValue $activeValidation elevation-status verified
 Assert-OrchestratorValue $activeValidation isolation-canary success
 Assert-OrchestratorValue $activeValidation binary-profile valid
+Assert-OrchestratorValue $activeValidation app-manifest valid
+Assert-OrchestratorValue $activeValidation wfp-session dynamic
+Assert-OrchestratorValue $activeValidation ipv4-loopback allowed
+if (-not $activeValidation.Values.ContainsKey('ipv6-loopback') -or
+    @('allowed', 'capability-unavailable') -cnotcontains
+        $activeValidation.Values['ipv6-loopback']) {
+    throw 'Active preflight emitted an invalid IPv6 canary status.'
+}
+Assert-OrchestratorValue $activeValidation non-loopback-canary denied-os-classified
+Assert-OrchestratorValue $activeValidation isolation-cleanup exact
+Assert-OrchestratorValue $activeValidation timestamp-category current-session
 Assert-OrchestratorValue $activeValidation stock-processes-started 0
 Assert-OrchestratorValue $activeValidation capture-files-written 0
 Assert-OrchestratorValue $activeValidation result success
@@ -2986,6 +4324,9 @@ try {
         '--max-server-packets', [string]$MaximumServerPackets,
         '--mutation-after-client-packets', [string]$MutationAfterClientPackets,
         '--mutation-after-server-packets', [string]$MutationAfterServerPackets)
+    if ($PreCampaignCanary) {
+        $arguments += '--pre-campaign-canary'
+    }
     $orchestratorResult = Invoke-BoundedOrchestrator $orchestratorPath $arguments `
         ($MaximumDurationSeconds + 90) $wrapperCapability `
         $wrapperCleanupCapability $wrapperJob $wrapperGuardJob `
@@ -3006,6 +4347,15 @@ try {
     Assert-OrchestratorValue $orchestratorResult client-ready true
     Assert-OrchestratorValue $orchestratorResult job-cleanup exact
     Assert-OrchestratorValue $orchestratorResult bounded-transport-complete true
+    if ($canonicalScenario -ceq 'reconnect') {
+        Assert-OrchestratorValue $orchestratorResult connection-generations 2
+        Assert-OrchestratorValue $orchestratorResult generation-distinct true
+        Assert-OrchestratorValue $orchestratorResult candidate-conflict evidence-pending
+    } else {
+        Assert-OrchestratorValue $orchestratorResult connection-generations 1
+        Assert-OrchestratorValue $orchestratorResult generation-distinct false
+        Assert-OrchestratorValue $orchestratorResult candidate-conflict not-applicable
+    }
     [Int64]$orchestratorDuration = 0
     if (-not $orchestratorResult.Values.ContainsKey('duration-ms') -or
         -not [Int64]::TryParse(
@@ -3126,6 +4476,7 @@ if ($runExists -and $restorationExact -and $null -ne $externalAfter) {
 $publicationReady = $false
 $walkerValues = $null
 $checkerValues = $null
+$reconnectObservation = $null
 $failureCategory = 'none'
 $publicationFailureCategory = 'first_observation_publication_not_ready'
 if ($null -ne $primaryError) {
@@ -3232,8 +4583,41 @@ if ($null -ne $primaryError) {
             'candidate-recurrence', 'candidate-stability', 'accepted-run',
             'publication-ready', 'result', 'structural-hash',
             'replay-structural-hash')
+        $reconnectGenerationSuffixes = @(
+            'first-observed-ordinal', 'last-observed-ordinal',
+            'connectionless-exchanges', 'first-sequenced-packet-ordinal',
+            'client-to-server-packets', 'server-to-client-packets',
+            'boundary-payload-ordinal', 'boundary-observed-ordinal',
+            'boundary-delivery-ordinal', 'boundary-byte-offset',
+            'boundary-bit-offset', 'boundary-source-sequence',
+            'boundary-source-payload-bytes', 'boundary-source-payload-bits',
+            'boundary-next-unconsumed-bits', 'boundary-reassembled',
+            'boundary-decompressed', 'boundary-byte-aligned',
+            'candidate-bit-width', 'first-candidate',
+            'candidate-body-consumed',
+            'candidate-semantic-category-assigned',
+            'replay-structural-hash')
+        if ($canonicalScenario -ceq 'reconnect') {
+            $checkerKeys += @(
+                'connection-generation-count', 'exact-boundary-count',
+                'runtime-candidate-count', 'generation-distinct',
+                'candidate-conflict', 'retired-generation-a-tail-sink',
+                'retired-generation-a-server-tail-packets',
+                'generation-b-sequenced-after-fresh-accept')
+            foreach ($label in @('a', 'b')) {
+                foreach ($suffix in $reconnectGenerationSuffixes) {
+                    $checkerKeys += 'generation-' + $label + '-' + $suffix
+                }
+            }
+        }
         $checkerValues = Convert-PrefixedOutputToValues $first.Lines `
             '[stock-runtime] ' $checkerKeys 'first-observation checker'
+        $expectedCandidateRecurrence = if ($canonicalScenario -ceq 'reconnect') {
+            '2'
+        } else { '1' }
+        $expectedCandidateStability = if ($canonicalScenario -ceq 'reconnect') {
+            'stable_observation'
+        } else { 'single_observation' }
         if ($checkerValues['profile'] -cne
                 'stock_protocol_48_build_10210_evidence_pending' -or
             $checkerValues['transport-valid'] -cne 'true' -or
@@ -3245,14 +4629,28 @@ if ($null -ne $primaryError) {
             $checkerValues['first-candidate'] -cnotmatch
                 '^(?:[0-9]{1,3}|bit-prefix:[0-9]{1,3})$' -or
             [int]($checkerValues['first-candidate'] -replace '^bit-prefix:', '') -gt 255 -or
-            $checkerValues['candidate-recurrence'] -cne '1' -or
-            $checkerValues['candidate-stability'] -cne 'single_observation' -or
+            $checkerValues['candidate-recurrence'] -cne
+                $expectedCandidateRecurrence -or
+            $checkerValues['candidate-stability'] -cne
+                $expectedCandidateStability -or
             $checkerValues['structural-hash'] -cnotmatch '^[0-9a-f]{64}$' -or
             $checkerValues['replay-structural-hash'] -cnotmatch '^[0-9a-f]{64}$' -or
             $checkerValues['publication-ready'] -cne 'true' -or
             $checkerValues['accepted-run'] -cne 'false' -or
             $checkerValues['result'] -cne 'first-observation') {
             throw 'Prepublication checker did not reach publication readiness.'
+        }
+        if ($canonicalScenario -ceq 'reconnect' -and
+            ($checkerValues['connection-generation-count'] -cne '2' -or
+             $checkerValues['exact-boundary-count'] -cne '2' -or
+             $checkerValues['runtime-candidate-count'] -cne '2' -or
+             $checkerValues['generation-distinct'] -cne 'true' -or
+             $checkerValues['candidate-conflict'] -cne 'false' -or
+             $checkerValues['retired-generation-a-tail-sink'] -cne
+                'routing_only' -or
+             $checkerValues['generation-b-sequenced-after-fresh-accept'] -cne
+                'true')) {
+            throw 'Reconnect checker did not prove the exact A/B lifecycle.'
         }
         foreach ($countKey in @('sequenced-c2s', 'sequenced-s2c', 'fragments',
                 'duplicate-packets', 'old-packets',
@@ -3265,7 +4663,7 @@ if ($null -ne $primaryError) {
                 'boundary-next-unconsumed-bits', 'candidate-bit-width')) {
             [Int64]$countValue = 0
             if (-not [Int64]::TryParse($checkerValues[$countKey], [ref]$countValue) -or
-                $countValue -lt 0 -or $countValue -gt 131072) {
+                $countValue -lt 0 -or $countValue -gt 268435456) {
                 throw "Prepublication checker count $countKey is outside its bound."
             }
         }
@@ -3294,6 +4692,129 @@ if ($null -ne $primaryError) {
                     [Math]::Pow(2, $candidateBitWidth))) {
             throw 'Prepublication checker cursor/candidate geometry is inconsistent.'
         }
+        if ($canonicalScenario -ceq 'reconnect') {
+            $generationNumbers = @{}
+            foreach ($label in @('a', 'b')) {
+                $prefix = 'generation-' + $label + '-'
+                $numbers = @{}
+                foreach ($suffix in @(
+                        'first-observed-ordinal', 'last-observed-ordinal',
+                        'connectionless-exchanges',
+                        'first-sequenced-packet-ordinal',
+                        'client-to-server-packets', 'server-to-client-packets',
+                        'boundary-payload-ordinal', 'boundary-observed-ordinal',
+                        'boundary-delivery-ordinal', 'boundary-byte-offset',
+                        'boundary-bit-offset', 'boundary-source-sequence',
+                        'boundary-source-payload-bytes',
+                        'boundary-source-payload-bits',
+                        'boundary-next-unconsumed-bits',
+                        'candidate-bit-width')) {
+                    [Int64]$number = 0
+                    if (-not [Int64]::TryParse(
+                            $checkerValues[$prefix + $suffix], [ref]$number) -or
+                        $number -lt 0 -or $number -gt 268435456) {
+                        throw "Reconnect checker $prefix$suffix is outside its bound."
+                    }
+                    $numbers[$suffix] = $number
+                }
+                $candidate = $checkerValues[$prefix + 'first-candidate']
+                if ($checkerValues[$prefix + 'boundary-reassembled'] -cnotmatch
+                        '^(?:true|false)$' -or
+                    $checkerValues[$prefix + 'boundary-decompressed'] -cnotmatch
+                        '^(?:true|false)$' -or
+                    $checkerValues[$prefix + 'boundary-byte-aligned'] -cnotmatch
+                        '^(?:true|false)$' -or
+                    $checkerValues[$prefix + 'candidate-body-consumed'] -cne
+                        'false' -or
+                    $checkerValues[$prefix +
+                        'candidate-semantic-category-assigned'] -cne 'false' -or
+                    $checkerValues[$prefix + 'replay-structural-hash'] -cnotmatch
+                        '^[0-9a-f]{64}$' -or
+                    $candidate -cnotmatch
+                        '^(?:[0-9]{1,3}|bit-prefix:[0-9]{1,3})$' -or
+                    [int]($candidate -replace '^bit-prefix:', '') -gt 255) {
+                    throw "Reconnect checker generation $label metadata is invalid."
+                }
+                $firstOrdinal = [Int64]$numbers['first-observed-ordinal']
+                $lastOrdinal = [Int64]$numbers['last-observed-ordinal']
+                $firstSequence =
+                    [Int64]$numbers['first-sequenced-packet-ordinal']
+                $observedBoundary =
+                    [Int64]$numbers['boundary-observed-ordinal']
+                $generationBytes =
+                    [Int64]$numbers['boundary-source-payload-bytes']
+                $generationBits =
+                    [Int64]$numbers['boundary-source-payload-bits']
+                $generationByteOffset =
+                    [Int64]$numbers['boundary-byte-offset']
+                $generationBitOffset =
+                    [Int64]$numbers['boundary-bit-offset']
+                $generationRemaining =
+                    [Int64]$numbers['boundary-next-unconsumed-bits']
+                $generationCandidateWidth =
+                    [Int64]$numbers['candidate-bit-width']
+                $generationAligned =
+                    $checkerValues[$prefix + 'boundary-byte-aligned'] -ceq 'true'
+                $candidateIsPrefix = $candidate.StartsWith('bit-prefix:')
+                if ($firstOrdinal -gt $lastOrdinal -or
+                    $firstSequence -lt $firstOrdinal -or
+                    $firstSequence -gt $lastOrdinal -or
+                    $observedBoundary -lt $firstOrdinal -or
+                    $observedBoundary -gt $lastOrdinal -or
+                    $numbers['connectionless-exchanges'] -lt 1 -or
+                    $numbers['client-to-server-packets'] -lt 1 -or
+                    $numbers['server-to-client-packets'] -lt 1 -or
+                    $generationBitOffset -gt 7 -or $generationBytes -lt 1 -or
+                    $generationBits -ne ($generationBytes * 8) -or
+                    (($generationByteOffset * 8) + $generationBitOffset +
+                        $generationRemaining) -ne $generationBits -or
+                    $generationRemaining -lt 1 -or
+                    $generationCandidateWidth -lt 1 -or
+                    $generationCandidateWidth -gt 8 -or
+                    $generationCandidateWidth -gt $generationRemaining -or
+                    $generationAligned -ne ($generationBitOffset -eq 0) -or
+                    $candidateIsPrefix -eq $generationAligned -or
+                    ($generationAligned -and $generationCandidateWidth -ne 8) -or
+                    ($candidateIsPrefix -and
+                        [int]$candidate.Substring(11) -ge
+                            [Math]::Pow(2, $generationCandidateWidth))) {
+                    throw "Reconnect checker generation $label geometry is inconsistent."
+                }
+                $generationNumbers[$label] = $numbers
+            }
+            if ([Int64]$generationNumbers['a']['last-observed-ordinal'] -ge
+                    [Int64]$generationNumbers['b']['first-observed-ordinal'] -or
+                $checkerValues['generation-a-first-candidate'] -cne
+                    $checkerValues['generation-b-first-candidate'] -or
+                $checkerValues['generation-a-candidate-bit-width'] -cne
+                    $checkerValues['generation-b-candidate-bit-width'] -or
+                $checkerValues['generation-a-boundary-bit-offset'] -cne
+                    $checkerValues['generation-b-boundary-bit-offset']) {
+                throw 'Reconnect checker generations overlap or expose conflicting candidates.'
+            }
+            foreach ($suffix in @(
+                    'boundary-payload-ordinal', 'boundary-observed-ordinal',
+                    'boundary-delivery-ordinal', 'boundary-byte-offset',
+                    'boundary-bit-offset', 'boundary-source-sequence',
+                    'boundary-source-payload-bytes',
+                    'boundary-source-payload-bits',
+                    'boundary-next-unconsumed-bits', 'boundary-reassembled',
+                    'boundary-decompressed', 'boundary-byte-aligned',
+                    'candidate-bit-width', 'first-candidate')) {
+                if ($checkerValues[$suffix] -cne
+                    $checkerValues['generation-a-' + $suffix]) {
+                    throw 'Reconnect checker aggregate representative is not generation A.'
+                }
+            }
+            [Int64]$retiredTailPackets = 0
+            if (-not [Int64]::TryParse(
+                    $checkerValues['retired-generation-a-server-tail-packets'],
+                    [ref]$retiredTailPackets) -or
+                $retiredTailPackets -lt 0 -or
+                $retiredTailPackets -gt $MaximumDatagrams) {
+                throw 'Reconnect retired-generation A tail count is outside its bound.'
+            }
+        }
         [Int64]$replayAcceptedSequenced =
             [Int64]$checkerValues['sequenced-c2s'] +
             [Int64]$checkerValues['sequenced-s2c']
@@ -3303,55 +4824,50 @@ if ($null -ne $primaryError) {
         [Int64]$deliveredSequenced =
             [Int64]$checkerValues['delivered-sequenced-c2s'] +
             [Int64]$checkerValues['delivered-sequenced-s2c']
+        [Int64]$routingOnlyTail = if ($canonicalScenario -ceq 'reconnect') {
+            [Int64]$checkerValues['retired-generation-a-server-tail-packets']
+        } else { 0 }
         if ([Int64]$checkerValues['sequenced-c2s'] -gt
                 [Int64]$checkerValues['delivered-sequenced-c2s'] -or
             [Int64]$checkerValues['sequenced-s2c'] -gt
                 [Int64]$checkerValues['delivered-sequenced-s2c'] -or
             [Int64]$checkerValues['fragments'] -gt
                 [Int64]$checkerValues['delivered-fragment-datagrams'] -or
-            ($replayAcceptedSequenced + $replaySuppressedSequenced) -ne
+            ($replayAcceptedSequenced + $replaySuppressedSequenced +
+                $routingOnlyTail) -ne
                 $deliveredSequenced) {
             throw 'Replay accepted/suppressed accounting disagrees with delivered transport counts.'
         }
         [Int64]$sequencedServerPackets =
-            $checkerValues['delivered-sequenced-s2c']
+            $(if ($canonicalScenario -ceq 'reconnect') {
+                $checkerValues['sequenced-s2c']
+            } else {
+                $checkerValues['delivered-sequenced-s2c']
+            })
         if (($canonicalScenario -ceq 'baseline' -or
                 $canonicalScenario -ceq 'idle-runtime') -and
             $orchestratorDuration -lt 30000) {
             $publicationFailureCategory = 'minimum_observation_duration_not_met'
             throw 'Baseline and idle-runtime acceptance require at least 30 seconds of actual owned-session duration.'
         }
-        if ($canonicalScenario -ceq 'baseline' -and $sequencedServerPackets -lt 100) {
-            $publicationFailureCategory = 'baseline_server_packet_threshold_not_met'
-            throw 'Baseline acceptance requires at least 100 delivered sequenced server-to-client packets in this run.'
+        if ($sequencedServerPackets -lt 100) {
+            $publicationFailureCategory =
+                'per_run_server_packet_threshold_not_met'
+            throw 'Every accepted scenario requires at least 100 generation-attributed sequenced server-to-client packets.'
         }
-        if ($canonicalScenario -ceq 'idle-runtime' -and $sequencedServerPackets -lt 100) {
-            $publicationFailureCategory = 'idle_runtime_packet_threshold_not_met'
-            throw 'Idle acceptance requires continuing runtime traffic and at least 100 delivered sequenced server-to-client packets in this run.'
-        }
-        if (($canonicalScenario -ceq 'drop-server-to-client-transport-ordinal' -or
-                $canonicalScenario -ceq 'duplicate-server-to-client-transport-ordinal' -or
-                $canonicalScenario -ceq 'reorder-server-to-client-transport-ordinal') -and
-            $sequencedServerPackets -lt 1) {
-            $publicationFailureCategory = 'perturbation_runtime_traffic_not_observed'
-            throw 'Transport-ordinal perturbation acceptance requires delivered sequenced server runtime traffic.'
-        }
-        $walkerLines = @(& $walkerPath -CaptureRoot $runRoot `
-            -BoundaryPayloadOrdinal ([Int64]$checkerValues['boundary-payload-ordinal']) `
-            -BoundaryObservedOrdinal ([Int64]$checkerValues['boundary-observed-ordinal']) `
-            -BoundaryDeliveryOrdinal ([Int64]$checkerValues['boundary-delivery-ordinal']) `
-            -BoundaryByteOffset ([Int64]$checkerValues['boundary-byte-offset']) `
-            -BoundaryBitOffset ([Int64]$checkerValues['boundary-bit-offset']) `
-            -BoundarySourceSequence ([Int64]$checkerValues['boundary-source-sequence']) `
-            -BoundarySourcePayloadBytes ([Int64]$checkerValues['boundary-source-payload-bytes']) `
-            -BoundarySourcePayloadBits ([Int64]$checkerValues['boundary-source-payload-bits']) `
-            -BoundaryNextUnconsumedBits ([Int64]$checkerValues['boundary-next-unconsumed-bits']) `
-            -BoundaryReassembled $checkerValues['boundary-reassembled'] `
-            -BoundaryDecompressed $checkerValues['boundary-decompressed'] `
-            -CandidateBitWidth ([Int64]$checkerValues['candidate-bit-width']) `
-            -FirstCandidate $checkerValues['first-candidate'] |
-            ForEach-Object { $_.ToString() })
+        $walkerFirst = Invoke-IndependentTransportWalker `
+            -WalkerPath $walkerPath -RunRoot $runRoot `
+            -CheckerValues $checkerValues `
+            -Reconnect ($canonicalScenario -ceq 'reconnect')
+        $walkerSecond = Invoke-IndependentTransportWalker `
+            -WalkerPath $walkerPath -RunRoot $runRoot `
+            -CheckerValues $checkerValues `
+            -Reconnect ($canonicalScenario -ceq 'reconnect')
         Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+        if (($walkerFirst -join "`n") -cne ($walkerSecond -join "`n")) {
+            throw 'Independent transport walker did not produce two identical runs.'
+        }
+        $walkerLines = $walkerFirst
         $walkerKeys = @(
             'run-id', 'journal-entries', 'raw-datagrams', 'raw-bytes',
             'observed-c2s', 'observed-s2c', 'delivered-c2s', 'delivered-s2c',
@@ -3372,6 +4888,20 @@ if ($null -ne $primaryError) {
             'boundary-reassembled', 'boundary-decompressed',
             'boundary-byte-aligned', 'candidate-bit-width', 'first-candidate',
             'replay-structural-hash', 'result')
+        if ($canonicalScenario -ceq 'reconnect') {
+            $walkerKeys += @(
+                'connection-generation-count', 'exact-boundary-count',
+                'runtime-candidate-count', 'generation-distinct',
+                'candidate-conflict', 'candidate-recurrence',
+                'candidate-stability', 'retired-generation-a-tail-sink',
+                'retired-generation-a-server-tail-packets',
+                'generation-b-sequenced-after-fresh-accept')
+            foreach ($label in @('a', 'b')) {
+                foreach ($suffix in $reconnectGenerationSuffixes) {
+                    $walkerKeys += 'generation-' + $label + '-' + $suffix
+                }
+            }
+        }
         $walkerValues = Convert-PrefixedOutputToValues $walkerLines `
             '[stock-runtime-walk] ' $walkerKeys 'independent transport walker'
         if ($walkerValues['result'] -cne 'success' -or
@@ -3398,6 +4928,29 @@ if ($null -ne $primaryError) {
             $walkerValues['first-candidate'] -cne $checkerValues['first-candidate'] -or
             $walkerValues['replay-structural-hash'] -cne $checkerValues['replay-structural-hash']) {
             throw 'Independent walker and production structural summaries disagree.'
+        }
+        if ($canonicalScenario -ceq 'reconnect') {
+            foreach ($key in @(
+                    'connection-generation-count', 'exact-boundary-count',
+                    'runtime-candidate-count', 'generation-distinct',
+                    'candidate-conflict', 'candidate-recurrence',
+                    'candidate-stability', 'retired-generation-a-tail-sink',
+                    'retired-generation-a-server-tail-packets',
+                    'generation-b-sequenced-after-fresh-accept')) {
+                if ($walkerValues[$key] -cne $checkerValues[$key]) {
+                    throw "Reconnect checker/walker aggregate $key disagrees."
+                }
+            }
+            foreach ($label in @('a', 'b')) {
+                foreach ($suffix in $reconnectGenerationSuffixes) {
+                    $key = 'generation-' + $label + '-' + $suffix
+                    if ($walkerValues[$key] -cne $checkerValues[$key]) {
+                        throw "Reconnect checker/walker generation $key disagrees."
+                    }
+                }
+            }
+            $reconnectObservation =
+                New-ReconnectFinalObservation -Values $checkerValues
         }
         if ($canonicalScenario -ceq 'baseline' -or
             $canonicalScenario -ceq 'idle-runtime') {
@@ -3532,6 +5085,13 @@ if ($runExists) {
         accepted_evidence_run = $publicationReady
         failure_category = $(if ($publicationReady) { 'none' } else { $failureCategory })
     }
+    if ($publicationReady -and $canonicalScenario -ceq 'reconnect') {
+        $runManifest['connection_generation_count'] = 2
+        $runManifest['exact_boundary_count'] = 2
+        $runManifest['runtime_candidate_count'] = 2
+        $runManifest['generation_distinct'] = $true
+        $runManifest['candidate_conflict'] = $false
+    }
     try {
         Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
         if ($publicationReady) {
@@ -3540,6 +5100,7 @@ if ($runExists) {
                 -Isolation $isolation -IsolationBytes $isolationBytes `
                 -Restoration $restoration `
                 -RestorationBytes $restorationBytes `
+                -ReconnectObservation $reconnectObservation `
                 -RunManifest $runManifest `
                 -OwnedJobsExact $ownedStopped `
                 -RestorationExact $restorationExact `
@@ -3553,7 +5114,8 @@ if ($runExists) {
             foreach ($finalLeaf in @(
                     'version-observation.json',
                     'isolation-attestation.json',
-                    'restoration-attestation.json')) {
+                    'restoration-attestation.json',
+                    'reconnect-observation.json')) {
                 if (Test-Path -LiteralPath (Join-Path $runRoot $finalLeaf)) {
                     throw 'Rejected run contains a final evidence leaf.'
                 }
@@ -3622,7 +5184,7 @@ $runDirectoryCapability.Dispose()
 $runDirectoryCapability = $null
 Write-Output "[stock-runtime-capture] run-id=$runId"
 Write-Output '[stock-runtime-capture] active-capture=completed'
-Write-Output '[stock-runtime-capture] stock-processes-started=2'
+Write-Output "[stock-runtime-capture] stock-processes-started=$($orchestratorResult.Values['processes-started'])"
 Write-Output "[stock-runtime-capture] owned-processes-started=$($orchestratorResult.Values['processes-started'])"
 Write-Output '[stock-runtime-capture] relay-started=true'
 Write-Output '[stock-runtime-capture] client-ready=true'
@@ -3631,5 +5193,12 @@ Write-Output '[stock-runtime-capture] restoration=exact'
 Write-Output '[stock-runtime-capture] external-file-drift=none'
 Write-Output '[stock-runtime-capture] post-resource-boundary=observed'
 Write-Output '[stock-runtime-capture] first-observation=observed'
+if ($canonicalScenario -ceq 'reconnect') {
+    Write-Output '[stock-runtime-capture] connection-generations=2'
+    Write-Output '[stock-runtime-capture] post-resource-boundaries=2'
+    Write-Output '[stock-runtime-capture] runtime-candidates=2'
+    Write-Output '[stock-runtime-capture] generation-distinct=true'
+    Write-Output '[stock-runtime-capture] candidate-conflict=false'
+}
 Write-Output '[stock-runtime-capture] accepted-evidence-run=true'
 Write-Output '[stock-runtime-capture] result=success'

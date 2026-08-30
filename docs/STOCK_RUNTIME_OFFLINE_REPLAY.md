@@ -20,6 +20,16 @@ replayed payload bytes (including BZip2 expansion), in addition to per-item and
 count limits. Limit-plus-one fails with a typed result before partial replay
 publication.
 
+Reconnect uses the same pure replay through a bounded delivered-datagram span
+overload. The strict staged transport observation supplies two nonempty,
+ordered, non-overlapping observed-ordinal ranges. Each range is copied into an
+independent view and replayed from a fresh netchan/signon state; no state or
+candidate is duplicated from generation A into B. Before B's fresh ACCEPT,
+sequenced S2C datagrams belonging to the retired-A routing tail are excluded
+from B's view and counters while remaining intact in the full local journal.
+The checker and PowerShell walker reconstruct both boundaries independently and
+must agree on each exact geometry and the combined structural hash.
+
 ## Sequenced, fragment and compressed data
 
 The replay adapter reuses the established low-30-bit sequence/header policy,

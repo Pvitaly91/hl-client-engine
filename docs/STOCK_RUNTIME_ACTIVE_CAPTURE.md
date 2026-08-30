@@ -18,10 +18,27 @@ defence-in-depth active-only argument.
 
 ## Preparation and elevated preflight
 
-Create a new isolated copy. The helper rejects an existing destination,
-Steam-library overlap, reparse points, ADS and hard links; it copies through a
-GUID staging sibling and atomically renames the verified tree. It never changes
-the source Steam tree.
+Inspect the source first, then create a new isolated copy. The v2 helper uses
+Windows handles and stable volume/file identities; it does not treat a path
+string, `Get-Item.Attributes`, or `LinkType` as an identity. Root/ancestor
+junctions and physically-contained directory junctions/symlinks are
+materialized as ordinary directories. External targets, cycles, file symlinks,
+mount points, unsupported reparse tags and ADS remain fail-closed. Source hard
+links are copied from verified handles into independent single-link files. The
+destination is a new local fixed-volume tree with zero reparse points, hard
+links and ADS. See [research-copy topology and materialization](STOCK_RUNTIME_RESEARCH_COPY.md).
+
+The diagnostic is read-only even when the supplied destination does not exist:
+
+```powershell
+.\scripts\prepare_stock_runtime_research_copy.ps1 `
+  -InspectSourceTopology `
+  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
+```
+
+Unsafe topology is a successfully completed diagnostic (`exit 0` with
+`result=unsafe`); it is not permission to materialize that topology.
 
 ```powershell
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
@@ -61,7 +78,7 @@ Active capture repeats this exact stock-free validation before it creates the
 restoration backup; the owned active transaction then establishes and verifies
 its own dynamic guard/canary before run-directory publication.
 
-## One baseline transaction
+## Mandatory pre-campaign canary transaction
 
 Run active capture only after the elevated preflight succeeds:
 
@@ -76,9 +93,18 @@ Run active capture only after the elevated preflight succeeds:
   -NetworkIsolationGuardPath `
     ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
   -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf" `
+  -PreCampaignCanary `
+  -OutputRoot ".\manual-artifacts\stock-runtime-canary" `
   -Game valve -Map boot_camp -Scenario baseline `
   -RelayPort 27140 -ServerPort 27141 -MaximumDurationSeconds 45
 ```
+
+This switch is valid only for the exact `boot_camp`/`baseline` canary root.
+This direct diagnostic run is intentionally unbound and the campaign runner
+will never recover or relabel it. After inspection, preserve it elsewhere if
+needed and remove only the exact ignored `stock-runtime-canary` sibling before
+running the campaign command; the runner captures and binds its own fresh
+canary, which is not one of the 24 matrix slots.
 
 PowerShell owns full research/external snapshots, a private restoration backup,
 post-run exact restoration, external Steam-state comparison, independent
@@ -96,10 +122,49 @@ spellings are accepted only as wrapper aliases and are never published.
 Perturbations select directional transport ordinals;
 they are not runtime/entity/move packet labels.
 
-`reconnect` remains in the requested campaign matrix but is fail-closed as
-`reconnect_lifecycle_pending`: the current orchestrator cannot yet prove two
-controlled sessions, distinct generations and two exact post-resource
-boundaries. It returns before backup, run creation or stock launch.
+`reconnect` uses one uninterrupted guard/relay/HLDS lifetime and two separately
+owned stock-client processes. The A-to-B transition is a bounded two-phase
+capability handshake. While generation A is still alive, the relay first creates
+and binds a private send-only loopback tail emitter, switches subsequent
+A-directed server sends onto it, and acknowledges readiness. Only then does the
+orchestrator stop A and prove that its owned process is absent. A second signal
+starts the relay's bounded quiet interval from A's exact source; the second
+acknowledgement is required before generation B can launch. The retained A
+address is routing state only, and any exact-HLDS sequenced tail before B's fresh
+ACCEPT is forwarded only to that retired sink. The emitter is never read from,
+never learns an endpoint and never exposes its ephemeral port. Generation B
+must start from a distinct loopback endpoint and prove a new connectionless
+connect, ACCEPT, first sequenced packet and offline post-resource boundary. Thus
+`one_learned_client_endpoint=true` continues to mean at most one active learned
+endpoint at an instant; the separate reconnect observation proves the two
+sequential endpoints.
+
+The relay and orchestrator first write sanitized staged reconnect attestations.
+Both independently require
+`generation_a_tail_emitter_ready_before_shutdown=true`; a missing or false
+claim fails the strict checker, corpus loader and independent walker.
+Those files alone cannot publish accepted evidence. The wrapper/checker/walker
+must independently replay both generation ranges, find two exact boundaries and
+two identical neutral candidates, and prove exact cleanup/restoration before the
+run manifest can report `connection_generation_count=2`,
+`generation_distinct=true` and `candidate_conflict=false`. Candidate bodies are
+never consumed or assigned a semantic message name.
+
+The campaign runner first requires a distinct accepted `boot_camp`/`baseline`
+canary under the exact ignored `stock-runtime-canary` sibling. It binds the
+implementation/profile/checker hashes, is independently verified, and never
+counts toward a campaign slot; failure starts zero campaign runs. The campaign
+runner then resumes only missing slots after proving that retained history has
+no rejected/fatal run; only `bounded-session-incomplete` is resumable. The
+runner and verifier each check the canary with two deterministic checker passes
+and two deterministic independent-walker passes. Normal slots aggregate
+peer-delivered checker counts; reconnect aggregates only the independently
+replayed A+B `sequenced-*` counters. It never uses the reconnect flat journal
+count to satisfy the 100-S2C per-run floor or 1,000-S2C global gate, so a
+retired-A tail cannot inflate acceptance. Evidence remains
+absent until the exact 24-slot matrix also proves four reconnect generations,
+26 boundaries and 26 matching candidates. The fake resume/threshold scripts
+exercise these gates without launching stock binaries or writing artifacts.
 
 ## Observable result
 

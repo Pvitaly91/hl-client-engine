@@ -550,7 +550,8 @@ This creates and removes only bounded temporary self-test files. It proves the
 implemented hardlink, junction and retained directory-identity/swap cases, not
 restoration of a real stock run.
 
-After the elevated environment preflight succeeds, one baseline transaction is:
+After the elevated environment preflight succeeds, the mandatory
+pre-campaign canary transaction is:
 
 ```powershell
 .\scripts\capture_stock_runtime_state.ps1 `
@@ -563,56 +564,90 @@ After the elevated environment preflight succeeds, one baseline transaction is:
   -NetworkIsolationGuardPath `
     ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
   -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf" `
+  -PreCampaignCanary `
+  -OutputRoot ".\manual-artifacts\stock-runtime-canary" `
   -Game valve -Map boot_camp -Scenario baseline `
   -RelayPort 27140 -ServerPort 27141 -MaximumDurationSeconds 45
 ```
 
+`-PreCampaignCanary` is accepted only with that exact sibling root and the
+exact `boot_camp`/`baseline` scenario. This direct diagnostic capture is
+intentionally unbound: the campaign runner never relabels or binds a standalone
+run after the fact. After inspecting it, preserve it elsewhere if needed and
+remove only the exact ignored `manual-artifacts\stock-runtime-canary` root
+before running the campaign command; the runner then captures and binds a fresh
+canary before starting any of its 24 slots.
+
 `baseline`, `idle-runtime`, `drop-server-to-client-transport-ordinal`,
 `duplicate-server-to-client-transport-ordinal` and
-`reorder-server-to-client-transport-ordinal` are accepted active
-scenarios. Baseline and idle publication each require at least 100 delivered
-sequenced S2C packets. No keyboard/mouse/movement input is injected.
+`reorder-server-to-client-transport-ordinal`, plus the two-generation
+`reconnect` lifecycle, are accepted active scenarios. Every accepted run
+requires at least 100 threshold-eligible sequenced S2C packets; reconnect uses
+only its independently replayed A+B population. No
+keyboard/mouse/movement input is injected.
 Perturbations select a directional transport ordinal, not a decoded
 runtime/entity/usercmd packet.
 
-`reconnect` is accepted by the parameter grammar only so its required campaign
-slot has a stable typed result. It currently fails before backup/run/stock
-launch as `reconnect_lifecycle_pending`, because the single-session
-orchestrator cannot attest first-session cleanup, a distinct second generation
-and two exact boundaries. The two reconnect slots are last: up to 22 supported
-runs can complete before one pending reconnect stops the campaign and leaves
-the second reconnect unattempted. The evidence threshold remains pending.
+`reconnect` requires a duration of at least 60 seconds (90 seconds is the manual
+canary profile) and runs two separately owned stock clients under one continuous
+guard, relay and HLDS. The relay retires A only after the exact A source is
+quiet, then accepts B only from a distinct loopback endpoint with a fresh
+connectionless connect/ACCEPT lifecycle. Exact-HLDS sequenced tail received
+before B's ACCEPT is routed only to the retired A sink and cannot become B's
+first sequence. Acceptance still remains transactional: two independently
+replayed boundaries and neutral candidates, candidate agreement, checker/walker
+agreement, cleanup and restoration are all required before publication.
 
 On a capable host the orchestrator owns guard, relay, HLDS and stock client via
 retained handles and a kill-on-close Job. It uses no shell. The dynamic WFP
 session permits only loopback for approved executable identities and disappears
 at cleanup; persistent firewall rules stay zero. PowerShell then restores the
 research tree, compares external Steam state, runs the checker twice in
-prepublication mode, runs the independent walker and publishes the final
+prepublication mode, runs the independent walker twice and publishes the final
 manifest once. Transport completion alone is not acceptance.
 
-After the wrapper reports an accepted run ID, normal read-only checks are:
+After this wrapper reports an accepted canary run ID, normal read-only checks
+use the canary sibling:
 
 ```powershell
 .\build\bin\Debug\hlclient_stock_runtime_check.exe `
-  --capture-root ".\manual-artifacts\stock-runtime\<32-hex-run-id>" `
+  --capture-root ".\manual-artifacts\stock-runtime-canary\<32-hex-run-id>" `
   --scenario first-observation
 
 .\scripts\walk_stock_runtime_transport.ps1 `
-  -CaptureRoot ".\manual-artifacts\stock-runtime\<32-hex-run-id>"
+  -CaptureRoot ".\manual-artifacts\stock-runtime-canary\<32-hex-run-id>"
 ```
 
-The checker and walker must agree on delivered structural counts. The walker
+The checker and walker must agree on delivered structural counts and exact
+post-resource geometry. The walker
 does not invoke the checker and prints no packet bytes. The only retained
 candidate name is `first_post_resource_runtime_candidate`; it carries no
-service semantic, and its body is not consumed. A one-run checker reports
-`single_observation`; only the corpus verifier may establish
-`stable_observation` from identical accepted runs under one version profile
-with no contradictory complete run.
+service semantic, and its body is not consumed. A normal one-run checker reports
+`single_observation`. A reconnect checker may report `stable_observation` only
+after independent A/B replay agrees; campaign stability still requires all
+accepted observations under one version profile with no contradiction.
 
-Run the 24-case target campaign sequentially from elevated PowerShell. It stops
-on the first non-accepted/restoration/isolation/pending capability and reports
+Run the target campaign sequentially from elevated PowerShell. Before creating
+or resuming any of its 24 slots, the runner requires one distinct accepted
+`boot_camp`/`baseline` canary with at least 100 delivered sequenced S2C packets.
+The canary is stored under the exact ignored sibling
+`manual-artifacts\stock-runtime-canary`, is bound by
+`hlclient.stock-runtime-pre-campaign-canary.v1`, and is never counted in the
+matrix. A failed canary starts zero campaign runs. A crash between its accepted
+run and tiny binding manifest leaves an unbound ignored run which is quarantined
+and is never recovered or rebound. Preserve it for diagnosis, remove only that
+exact ignored sibling, and rerun the same campaign command for a fresh canary;
+ambiguous, incomplete or mutated state fails closed. The runner then stops on the first
+non-accepted/restoration/isolation/pending campaign capability and reports
 honest accepted, incomplete/pending and unattempted counts:
+
+If a process/power loss occurs after a run directory is finalized but before
+the exact-prior progress-manifest publication completes, automatic resume is
+intentionally blocked as `campaign_progress_manifest_missing_or_unsafe` and no
+new stock process starts. That absence cannot be distinguished safely from a
+manifest deletion/mutation, so the runner never reconstructs or silently
+repairs it. Run directories remain ignored and authoritative, and capture has
+already completed its owned Job, guard, restoration and external-drift checks.
 
 ```powershell
 .\scripts\run_stock_runtime_first_observations.ps1 `
@@ -639,9 +674,29 @@ Verify the corpus independently with:
   -MinimumSequencedServerPackets 1000
 ```
 
+The CI-safe fake corpus/policy checks launch no stock process and write neither
+raw artifacts nor evidence. The resume test temporarily creates a metadata-only
+campaign fixture below the otherwise-absent ignored campaign root, exercises
+refresh/persist/reload, exact-prior replacement, concurrent leaf substitution
+and typed mutations, then removes that exact owned root:
+
+```powershell
+.\scripts\test_stock_runtime_campaign_resume.ps1 `
+  -TestExecutable .\build\bin\Debug\hlclient_tests.exe `
+  -CheckerPath .\build\bin\Debug\hlclient_stock_runtime_check.exe
+.\scripts\test_stock_runtime_evidence_threshold.ps1 `
+  -TestExecutable .\build\bin\Debug\hlclient_tests.exe
+```
+
 Raw runs and logs remain ignored and must not be uploaded. The sanitized
 `docs/evidence/GOLDSRC_STOCK_RUNTIME_FIRST_OBSERVATIONS.json` must remain absent
-until the full threshold and stability gates pass. This checkout currently has
+until the separate canary and exact 24-run matrix (25 accepted observations in
+total), four reconnect generations, 1,000 replay S2C packets, 26 boundaries,
+26 candidates, per-run 100-S2C floor and stability gates pass. The independent
+verifier rechecks the canary identity, profile and checker hashes before the
+evidence threshold. Its implementation commit must have the exact subject
+`Complete stock runtime capture campaign lifecycle` and be an ancestor of the
+verified checkout. This checkout currently has
 zero accepted real runs; do not fabricate the evidence file. M4.7.1.2 owns
 runtime message grammar and M4.7.2 owns stock usercmd/ACK behavior.
 

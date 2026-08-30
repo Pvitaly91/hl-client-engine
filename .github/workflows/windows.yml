@@ -29,6 +29,17 @@ jobs:
       - name: Test Debug
         run: ctest --preset vs2022-win32-debug
 
+      - name: Verify fake stock-runtime campaign resume and evidence gates
+        shell: pwsh
+        run: |
+          & .\scripts\test_stock_runtime_campaign_resume.ps1 `
+            -TestExecutable .\build\bin\Debug\hlclient_tests.exe `
+            -CheckerPath .\build\bin\Debug\hlclient_stock_runtime_check.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test_stock_runtime_evidence_threshold.ps1 `
+            -TestExecutable .\build\bin\Debug\hlclient_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify Debug command-line and headless startup
         shell: pwsh
         run: |
@@ -109,6 +120,7 @@ jobs:
         run: >-
           cmake --build build-asan --config Debug --target
           hlclient_tests
+          hlclient_stock_research_copy
           hlclient_stock_runtime_check
           hlclient_collision_fixture_writer
           hlclient_prediction_check
@@ -145,6 +157,15 @@ jobs:
             throw 'AddressSanitizer stock-runtime checker usage smoke returned an unexpected exit code'
           }
           & .\build-asan\bin\Debug\hlclient_tests.exe '[stock-runtime]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test_stock_research_copy_topology.ps1 `
+            -ResearchCopyToolPath `
+              .\build-asan\bin\Debug\hlclient_stock_research_copy.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test_stock_runtime_campaign_resume.ps1 `
+            -TestExecutable .\build-asan\bin\Debug\hlclient_tests.exe `
+            -CheckerPath `
+              .\build-asan\bin\Debug\hlclient_stock_runtime_check.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\build-asan\bin\Debug\hlclient_tests.exe '[prediction][history]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

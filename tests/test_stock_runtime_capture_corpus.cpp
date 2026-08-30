@@ -278,6 +278,45 @@ void publish_manifest(const fs::path& run)
         "\"failure_category\":\"none\"}");
 }
 
+void populate_reconnect_documents(const fs::path& run)
+{
+    replace_text_once(
+        run / "capture-metadata.json", "\"scenario\": \"baseline\"",
+        "\"scenario\": \"reconnect\"");
+    write_text(
+        run / "reconnect-transport-observation.staged.json",
+        R"json({"schema":"hlclient.stock-runtime-reconnect-transport-observation.v1","connection_generation_count":2,"generation_distinct":true,"generation_a_tail_emitter_ready_before_shutdown":true,"generation_a_controlled_shutdown":"observed_by_orchestrator","generation_a_endpoint_quiet":true,"guard_continuity":"observed_by_orchestrator","server_continuity":"observed_by_orchestrator","relay_continuity":"observed","post_resource_boundary_status":"evidence_pending","candidate_status":"evidence_pending","candidate_body_consumed":false,"candidate_semantic_category_assigned":false,"retired_generation_a_tail_sink":"routing_only","retired_generation_a_server_tail_packet_count":0,"generation_b_sequenced_after_fresh_accept":true,"bounded_transport_complete":true,"generations":[{"generation_ordinal":1,"endpoint_role_identity":"research_client_generation_a","process_role_identity":"owned_client_generation_a","first_observed_ordinal":0,"last_observed_ordinal":0,"connectionless_exchange_count":1,"connect_observed":true,"accept_observed":true,"first_sequenced_packet_ordinal":0,"client_to_server_packet_count":1,"server_to_client_packet_count":1,"profile_identity":"stock_protocol_48_build_10210_evidence_pending","post_resource_boundary_status":"evidence_pending","candidate_status":"evidence_pending","candidate_body_consumed":false,"candidate_semantic_category_assigned":false},{"generation_ordinal":2,"endpoint_role_identity":"research_client_generation_b","process_role_identity":"owned_client_generation_b","first_observed_ordinal":1,"last_observed_ordinal":1,"connectionless_exchange_count":1,"connect_observed":true,"accept_observed":true,"first_sequenced_packet_ordinal":1,"client_to_server_packet_count":1,"server_to_client_packet_count":1,"profile_identity":"stock_protocol_48_build_10210_evidence_pending","post_resource_boundary_status":"evidence_pending","candidate_status":"evidence_pending","candidate_body_consumed":false,"candidate_semantic_category_assigned":false}]})json");
+    write_text(
+        run / "reconnect-orchestration.staged.json",
+        R"json({"schema":"hlclient.stock-runtime-reconnect-orchestration.v1","connection_generation_count":2,"generation_distinct":true,"generation_a_process_role_identity":"owned_client_generation_a","generation_b_process_role_identity":"owned_client_generation_b","generation_a_endpoint_role_identity":"research_client_generation_a","generation_b_endpoint_role_identity":"research_client_generation_b","generation_a_tail_emitter_ready_before_shutdown":true,"generation_a_controlled_shutdown":true,"generation_a_endpoint_quiet":true,"generation_b_fresh_owned_process":true,"generation_b_fresh_connection_lifecycle":"observed_by_relay","guard_continuity":true,"server_continuity":true,"relay_continuity":true,"cleanup_status":"exact","restoration_status":"wrapper_pending","post_resource_boundary_status":"evidence_pending","candidate_status":"evidence_pending","candidate_body_consumed":false,"candidate_semantic_category_assigned":false,"publication_status":"staged"})json");
+}
+
+void publish_reconnect_manifest(const fs::path& run)
+{
+    publish_manifest(run);
+    replace_text_once(
+        run / "research-run-metadata.json", "\"scenario\":\"baseline\"",
+        "\"scenario\":\"reconnect\"");
+    replace_text_once(
+        run / "research-run-metadata.json",
+        "\"first_candidate_recurrence\":1",
+        "\"first_candidate_recurrence\":2");
+    replace_text_once(
+        run / "research-run-metadata.json",
+        "\"candidate_stability\":\"single_observation\"",
+        "\"candidate_stability\":\"stable_observation\"");
+    replace_text_once(
+        run / "research-run-metadata.json",
+        "\"failure_category\":\"none\"}",
+        "\"connection_generation_count\":2,"
+        "\"exact_boundary_count\":2,\"runtime_candidate_count\":2,"
+        "\"generation_distinct\":true,\"candidate_conflict\":false,"
+        "\"failure_category\":\"none\"}");
+    write_text(
+        run / "reconnect-observation.json",
+        R"json({"schema":"hlclient.stock-runtime-reconnect-observation.v1","connection_generation_count":2,"exact_boundary_count":2,"runtime_candidate_count":2,"generation_distinct":true,"candidate_conflict":false,"guard_continuity":true,"server_continuity":true,"relay_continuity":true,"cleanup_exact":true,"restoration_exact":true,"candidate_body_consumed":false,"candidate_semantic_category_assigned":false,"retired_generation_a_tail_sink":"routing_only","retired_generation_a_server_tail_packet_count":0,"generation_b_sequenced_after_fresh_accept":true,"generations":[{"generation_ordinal":1,"profile_identity":"stock_protocol_48_build_10210_evidence_pending","owned_client_process_role_identity":"owned_client_generation_a","learned_client_endpoint_role_identity":"research_client_generation_a","fresh_owned_client_process":true,"learned_client_endpoint_observed":true,"learned_client_endpoint_distinct_from_previous":false,"first_observed_ordinal":0,"last_observed_ordinal":0,"connectionless_exchange_count":1,"connect_observed":true,"accept_observed":true,"first_sequenced_packet_ordinal":0,"client_to_server_packet_count":1,"server_to_client_packet_count":1,"controlled_client_shutdown_observed":true,"retired_client_endpoint_quiet":true,"exact_post_resource_boundary":{"observed":true,"replay_payload_ordinal":0,"corpus_observed_ordinal":0,"delivery_ordinal":0,"byte_offset":0,"bit_offset":0,"source_payload_byte_count":8,"source_payload_bit_count":64,"next_unconsumed_bit_count":64},"candidate_observation":{"observed":true,"candidate_bit_width":8,"numeric_candidate":7,"bounded_bit_prefix":null,"byte_aligned":true,"body_consumed":false,"semantic_category_assigned":false}},{"generation_ordinal":2,"profile_identity":"stock_protocol_48_build_10210_evidence_pending","owned_client_process_role_identity":"owned_client_generation_b","learned_client_endpoint_role_identity":"research_client_generation_b","fresh_owned_client_process":true,"learned_client_endpoint_observed":true,"learned_client_endpoint_distinct_from_previous":true,"first_observed_ordinal":1,"last_observed_ordinal":1,"connectionless_exchange_count":1,"connect_observed":true,"accept_observed":true,"first_sequenced_packet_ordinal":1,"client_to_server_packet_count":1,"server_to_client_packet_count":1,"controlled_client_shutdown_observed":false,"retired_client_endpoint_quiet":false,"exact_post_resource_boundary":{"observed":true,"replay_payload_ordinal":0,"corpus_observed_ordinal":1,"delivery_ordinal":1,"byte_offset":0,"bit_offset":0,"source_payload_byte_count":8,"source_payload_bit_count":64,"next_unconsumed_bit_count":64},"candidate_observation":{"observed":true,"candidate_bit_width":8,"numeric_candidate":7,"bounded_bit_prefix":null,"byte_aligned":true,"body_consumed":false,"semantic_category_assigned":false}}]})json");
+}
+
 TEST_CASE("Corpus prepublication is a fail-closed transaction boundary",
           "[goldsrc][stock-runtime][corpus][prepublication]")
 {
@@ -1130,6 +1169,110 @@ TEST_CASE("Published corpus owns bytes after its exact sources are destroyed",
     CHECK(std::ranges::equal(
         loaded.state->delivered_datagrams()[1U].bytes(), s2c));
     CHECK(loaded.state->structural_sha256() == structural_sha256);
+}
+
+TEST_CASE("Reconnect corpus leaves are strict and scenario dependent",
+          "[goldsrc][stock-runtime][corpus][reconnect][mutation]")
+{
+    const goldsrc::StockRuntimeCaptureCorpusLoader loader;
+
+    SECTION("staged pair is accepted only by reconnect prepublication")
+    {
+        TemporaryCorpus fixture;
+        populate_corpus_bytes(
+            fixture.run(), kSequencedClientDatagram, kSequencedServerDatagram);
+        populate_reconnect_documents(fixture.run());
+        const auto loaded = loader.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::prepublication);
+        REQUIRE(loaded);
+        REQUIRE(loaded.state);
+        CHECK(loaded.state->reconnect_transport_observation().has_value());
+        CHECK(loaded.state->reconnect_orchestration_attestation().has_value());
+        CHECK_FALSE(loaded.state->reconnect_observation().has_value());
+
+        replace_text_once(
+            fixture.run() / "capture-metadata.json",
+            "\"scenario\": \"reconnect\"", "\"scenario\": \"baseline\"");
+        const auto wrong_scenario = loader.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::prepublication);
+        CHECK_FALSE(wrong_scenario);
+    }
+
+    SECTION("staged pair is atomic and structurally bound")
+    {
+        TemporaryCorpus first;
+        TemporaryCorpus second;
+        populate_corpus_bytes(
+            first.run(), kSequencedClientDatagram, kSequencedServerDatagram);
+        populate_corpus_bytes(
+            second.run(), kSequencedClientDatagram, kSequencedServerDatagram);
+        populate_reconnect_documents(first.run());
+        populate_reconnect_documents(second.run());
+        replace_text_once(
+            second.run() / "reconnect-transport-observation.staged.json",
+            "\"retired_generation_a_server_tail_packet_count\":0",
+            "\"retired_generation_a_server_tail_packet_count\":1");
+        const auto left = loader.load(
+            first.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::prepublication);
+        const auto right = loader.load(
+            second.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::prepublication);
+        REQUIRE(left);
+        REQUIRE(left.state);
+        REQUIRE(right);
+        REQUIRE(right.state);
+        CHECK(left.state->structural_sha256() !=
+              right.state->structural_sha256());
+
+        REQUIRE(fs::remove(
+            second.run() / "reconnect-orchestration.staged.json"));
+        const auto partial = loader.load(
+            second.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::prepublication);
+        CHECK_FALSE(partial);
+    }
+
+    SECTION("accepted reconnect requires strict final observation and claims")
+    {
+        TemporaryCorpus fixture;
+        populate_corpus_bytes(
+            fixture.run(), kSequencedClientDatagram, kSequencedServerDatagram);
+        populate_reconnect_documents(fixture.run());
+        publish_reconnect_manifest(fixture.run());
+        const auto published = loader.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published);
+        REQUIRE(published);
+        REQUIRE(published.state);
+        REQUIRE(published.state->reconnect_observation());
+        REQUIRE(published.state->accepted_manifest_claims());
+        CHECK(published.state->accepted_manifest_claims()->candidate_recurrence ==
+              2U);
+        CHECK(published.state->accepted_manifest_claims()->candidate_stability ==
+              "stable_observation");
+
+        const auto manifest = fixture.run() / "research-run-metadata.json";
+        replace_text_once(
+            manifest, "\"connection_generation_count\":2",
+            "\"connection_generation_count\":1");
+        CHECK_FALSE(loader.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+        replace_text_once(
+            manifest, "\"connection_generation_count\":1",
+            "\"connection_generation_count\":2");
+
+        const auto final = fixture.run() / "reconnect-observation.json";
+        replace_text_once(
+            final, "\"candidate_semantic_category_assigned\":false",
+            "\"candidate_semantic_category_assigned\":true");
+        CHECK_FALSE(loader.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+    }
 }
 
 } // namespace

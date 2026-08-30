@@ -231,6 +231,8 @@ add_executable(hlclient_tests
     test_stock_captured_signon_replay.cpp
     test_stock_runtime_capture_corpus.cpp
     test_stock_runtime_first_observation.cpp
+    test_stock_runtime_campaign.cpp
+    test_stock_runtime_reconnect_lifecycle.cpp
     test_stock_runtime_transport_journal.cpp
     test_stock_runtime_transport_replay.cpp
     test_udp_socket.cpp
@@ -245,6 +247,7 @@ if(WIN32)
             test_windows_binary_identity.cpp
             test_windows_network_isolation.cpp
             test_windows_process_orchestrator.cpp
+            test_stock_research_copy_topology.cpp
             test_windows_secure_output.cpp)
 endif()
 
@@ -291,7 +294,9 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_entity_snapshots
         hlclient_goldsrc_stock_runtime
         hlclient_goldsrc_stock_runtime_capture
+        hlclient_stock_runtime_campaign
         hlclient_stock_runtime_corpus
+        hlclient_stock_runtime_reconnect
         hlclient_stock_runtime_transport_journal
         hlclient_stock_runtime_transport_replay
         hlclient_stock_authoritative_adapter
@@ -344,6 +349,7 @@ if(WIN32)
             hlclient::windows_binary_identity
             hlclient::windows_network_isolation
             hlclient::windows_process_orchestrator
+            hlclient::windows_stock_research_copy
             hlclient::windows_secure_output
             ws2_32)
 endif()
@@ -356,6 +362,7 @@ if(WIN32)
     add_dependencies(
         hlclient_tests
         hlclient_network_isolation_probe
+        hlclient_stock_research_copy
         hlclient_stock_runtime_capture
         hlclient_stock_runtime_fake_client
         hlclient_stock_runtime_fake_server

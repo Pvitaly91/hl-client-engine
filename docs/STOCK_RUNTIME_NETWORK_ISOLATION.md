@@ -54,6 +54,17 @@ or termination keeps the guard alive and WFP installed while it retries. Only
 after exact zero may the research tree be restored and the run marked
 incomplete. No weaker ordinary firewall fallback exists.
 
+A reconnect run does not release or recreate isolation between generations.
+The redundant orchestrator WFP session, guard session, guard Job, campaign Job,
+relay and HLDS remain continuously owned while stock client A exits and stock
+client B starts. The relay's private send-only A-tail emitter is loopback-only
+and remains inside the already-approved relay process; it neither learns a
+remote endpoint nor weakens the executable allowlist. Guard/server/relay loss,
+failure to prove A absent, failure of the 250-ms A-source quiet handshake, or a
+non-fresh B lifecycle aborts the transaction. The same exact zero-process proof
+is still required before either WFP session can be released and restoration can
+begin.
+
 Dynamic WFP setup may require an elevated PowerShell. Insufficient privilege
 is `network_isolation_privilege_required`; the tools never self-elevate or
 bypass UAC. CI exercises pure policy/configuration tests and reports the actual

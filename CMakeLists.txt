@@ -927,6 +927,37 @@ set_property(
     TARGET hlclient_stock_runtime_transport_replay
     PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Evidence")
 
+hlclient_add_library(
+    hlclient_stock_runtime_reconnect
+    include/hlclient/goldsrc/stock_runtime_reconnect_lifecycle.hpp
+    src/goldsrc/stock_runtime_reconnect_lifecycle.cpp
+)
+add_library(
+    hlclient::stock_runtime_reconnect ALIAS
+    hlclient_stock_runtime_reconnect)
+target_link_libraries(
+    hlclient_stock_runtime_reconnect PRIVATE hlclient::core)
+target_link_libraries(
+    hlclient_stock_runtime_corpus
+    PRIVATE hlclient::stock_runtime_reconnect)
+set_property(
+    TARGET hlclient_stock_runtime_reconnect
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Evidence")
+
+hlclient_add_library(
+    hlclient_stock_runtime_campaign
+    include/hlclient/goldsrc/stock_runtime_campaign.hpp
+    src/goldsrc/stock_runtime_campaign.cpp
+)
+add_library(
+    hlclient::stock_runtime_campaign ALIAS hlclient_stock_runtime_campaign)
+target_link_libraries(
+    hlclient_stock_runtime_campaign
+    PRIVATE hlclient::core hlclient::hash_sha256)
+set_property(
+    TARGET hlclient_stock_runtime_campaign
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Evidence")
+
 if(WIN32)
     hlclient_add_library(
         hlclient_windows_secure_output
@@ -989,13 +1020,29 @@ if(WIN32)
             hlclient::windows_process_orchestrator
         PRIVATE fwpuclnt rpcrt4 iphlpapi ws2_32 hlclient::core)
 
+    hlclient_add_library(
+        hlclient_windows_stock_research_copy
+        include/hlclient/platform/windows/stock_research_copy.hpp
+        src/platform/windows/stock_research_copy.cpp
+    )
+    add_library(
+        hlclient::windows_stock_research_copy ALIAS
+        hlclient_windows_stock_research_copy)
+    target_compile_definitions(
+        hlclient_windows_stock_research_copy
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_windows_stock_research_copy
+        PRIVATE bcrypt ntdll hlclient::core)
+
     foreach(
         _hlclient_windows_isolation_target
         IN ITEMS
             hlclient_windows_secure_output
             hlclient_windows_binary_identity
             hlclient_windows_process_orchestrator
-            hlclient_windows_network_isolation)
+            hlclient_windows_network_isolation
+            hlclient_windows_stock_research_copy)
         set_property(
             TARGET ${_hlclient_windows_isolation_target}
             PROPERTY FOLDER "Engine/Platform/Windows/Network Isolation")
@@ -1991,6 +2038,7 @@ target_link_libraries(
     PRIVATE
         hlclient::goldsrc_stock_runtime_capture
         hlclient::hash_sha256
+        hlclient::stock_runtime_reconnect
         hlclient::stock_runtime_transport_journal
         hlclient::network)
 if(WIN32)
@@ -2014,13 +2062,25 @@ target_link_libraries(
     PRIVATE
         hlclient::goldsrc_stock_runtime_capture
         hlclient::hash_sha256
+        hlclient::stock_runtime_campaign
         hlclient::stock_runtime_corpus
+        hlclient::stock_runtime_reconnect
         hlclient::stock_runtime_transport_replay)
 set_property(
     TARGET hlclient_stock_runtime_check
     PROPERTY FOLDER "Tools/Research/GoldSrc")
 
 if(WIN32)
+    add_executable(
+        hlclient_stock_research_copy
+        apps/hlclient_stock_research_copy/main.cpp)
+    hlclient_enable_warnings(hlclient_stock_research_copy)
+    target_compile_definitions(
+        hlclient_stock_research_copy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_stock_research_copy
+        PRIVATE hlclient::windows_stock_research_copy)
+
     add_executable(
         hlclient_stock_binary_observer
         apps/hlclient_stock_binary_observer/main.cpp)
@@ -2062,10 +2122,12 @@ if(WIN32)
         hlclient_stock_runtime_orchestrator
         PRIVATE
             hlclient::goldsrc_stock_runtime_capture
+            hlclient::stock_runtime_reconnect
             hlclient::windows_binary_identity
             hlclient::windows_network_isolation
             hlclient::windows_process_orchestrator
-            hlclient::windows_secure_output)
+            hlclient::windows_secure_output
+            hlclient::windows_stock_research_copy)
 
     add_executable(
         hlclient_stock_runtime_fake_server
@@ -2086,6 +2148,7 @@ if(WIN32)
     foreach(
         _hlclient_stock_runtime_tool
         IN ITEMS
+            hlclient_stock_research_copy
             hlclient_stock_binary_observer
             hlclient_stock_runtime_isolation_guard
             hlclient_network_isolation_probe
@@ -2150,6 +2213,22 @@ if(BUILD_TESTING)
 
     if(WIN32)
         add_test(
+            NAME hlclient_stock_research_copy_topology
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_research_copy_topology.ps1"
+                -ResearchCopyToolPath
+                    $<TARGET_FILE:hlclient_stock_research_copy>)
+        set_tests_properties(
+            hlclient_stock_research_copy_topology
+            PROPERTIES TIMEOUT 120)
+
+        add_test(
             NAME hlclient_stock_runtime_active_preflight
             COMMAND
                 "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
@@ -2163,6 +2242,56 @@ if(BUILD_TESTING)
                     $<TARGET_FILE:hlclient_stock_runtime_orchestrator>)
         set_tests_properties(
             hlclient_stock_runtime_active_preflight
+            PROPERTIES TIMEOUT 30)
+
+        add_test(
+            NAME hlclient_stock_runtime_research_manifest
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_research_manifest.ps1"
+                -CaptureScriptPath
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1")
+        set_tests_properties(
+            hlclient_stock_runtime_research_manifest
+            PROPERTIES TIMEOUT 60)
+
+        add_test(
+            NAME hlclient_stock_runtime_campaign_resume
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_campaign_resume.ps1"
+                -TestExecutable
+                    $<TARGET_FILE:hlclient_tests>
+                -CheckerPath
+                    $<TARGET_FILE:hlclient_stock_runtime_check>)
+        set_tests_properties(
+            hlclient_stock_runtime_campaign_resume
+            PROPERTIES TIMEOUT 30)
+
+        add_test(
+            NAME hlclient_stock_runtime_evidence_threshold
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_runtime_evidence_threshold.ps1"
+                -TestExecutable
+                    $<TARGET_FILE:hlclient_tests>)
+        set_tests_properties(
+            hlclient_stock_runtime_evidence_threshold
             PROPERTIES TIMEOUT 30)
     endif()
 
@@ -2464,6 +2593,8 @@ foreach(
         hlclient_stock_runtime_transport_journal
         hlclient_stock_runtime_corpus
         hlclient_stock_runtime_transport_replay
+        hlclient_stock_runtime_reconnect
+        hlclient_stock_runtime_campaign
         hlclient_stock_authoritative_adapter
         hlclient_goldsrc_local_movement
         hlclient_local_prediction
@@ -2478,6 +2609,11 @@ foreach(
 )
     hlclient_enable_address_sanitizer(${_hlclient_sanitized_target})
 endforeach()
+
+if(WIN32)
+    hlclient_enable_address_sanitizer(hlclient_windows_stock_research_copy)
+    hlclient_enable_address_sanitizer(hlclient_stock_research_copy)
+endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

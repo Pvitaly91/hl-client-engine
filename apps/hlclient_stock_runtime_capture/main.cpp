@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/stock_runtime_capture.hpp>
+#include <hlclient/goldsrc/stock_runtime_reconnect_lifecycle.hpp>
 #include <hlclient/goldsrc/stock_runtime_transport_journal.hpp>
 #include <hlclient/hash/sha256.hpp>
 #include <hlclient/network/network_address.hpp>
@@ -22,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -56,6 +58,8 @@ constexpr std::string_view kUsage =
     "--byte-preserving --no-payload-rewrite "
     "--precreated-empty-run-root "
     "--stop-handle <inherited event handle> "
+    "[--reconnect-transition-handle <inherited event handle> "
+    "--reconnect-transition-ack-handle <inherited event handle>] "
     "--orchestrator-capability-handle <inherited event handle> "
     "--orchestrator-process-id <pid>\n";
 
@@ -74,9 +78,13 @@ struct Options final {
     bool precreated_empty_run_root{false};
 #ifdef _WIN32
     HANDLE stop_handle{nullptr};
+    HANDLE reconnect_transition_handle{nullptr};
+    HANDLE reconnect_transition_ack_handle{nullptr};
     HANDLE orchestrator_capability_handle{nullptr};
 #else
     std::uintptr_t stop_handle{0U};
+    std::uintptr_t reconnect_transition_handle{0U};
+    std::uintptr_t reconnect_transition_ack_handle{0U};
     std::uintptr_t orchestrator_capability_handle{0U};
 #endif
     std::uint32_t orchestrator_process_id{0U};
@@ -104,7 +112,7 @@ template<typename Integer>
     const std::span<const std::string_view> arguments)
 {
     Options options;
-    std::array<bool, 25U> seen{};
+    std::array<bool, 27U> seen{};
     const auto mark = [&seen](const std::size_t index) {
         if (seen[index]) {
             return false;
@@ -161,6 +169,8 @@ template<typename Integer>
         else if (argument == "--stop-handle") option_index = 21U;
         else if (argument == "--orchestrator-capability-handle") option_index = 23U;
         else if (argument == "--orchestrator-process-id") option_index = 24U;
+        else if (argument == "--reconnect-transition-handle") option_index = 25U;
+        else if (argument == "--reconnect-transition-ack-handle") option_index = 26U;
         else return std::nullopt;
 
         if (!mark(option_index)) return std::nullopt;
@@ -190,7 +200,9 @@ template<typename Integer>
                 return std::nullopt;
             }
         } else if (argument == "--stop-handle" ||
-                   argument == "--orchestrator-capability-handle") {
+                   argument == "--orchestrator-capability-handle" ||
+                   argument == "--reconnect-transition-handle" ||
+                   argument == "--reconnect-transition-ack-handle") {
             std::uintptr_t parsed{};
             if (!parse_integer(value, parsed) || parsed == 0U) {
                 return std::nullopt;
@@ -198,6 +210,12 @@ template<typename Integer>
 #ifdef _WIN32
             if (argument == "--stop-handle") {
                 options.stop_handle = reinterpret_cast<HANDLE>(parsed);
+            } else if (argument == "--reconnect-transition-handle") {
+                options.reconnect_transition_handle =
+                    reinterpret_cast<HANDLE>(parsed);
+            } else if (argument == "--reconnect-transition-ack-handle") {
+                options.reconnect_transition_ack_handle =
+                    reinterpret_cast<HANDLE>(parsed);
             } else {
                 options.orchestrator_capability_handle =
                     reinterpret_cast<HANDLE>(parsed);
@@ -205,6 +223,10 @@ template<typename Integer>
 #else
             if (argument == "--stop-handle") {
                 options.stop_handle = parsed;
+            } else if (argument == "--reconnect-transition-handle") {
+                options.reconnect_transition_handle = parsed;
+            } else if (argument == "--reconnect-transition-ack-handle") {
+                options.reconnect_transition_ack_handle = parsed;
             } else {
                 options.orchestrator_capability_handle = parsed;
             }
@@ -246,9 +268,13 @@ template<typename Integer>
                         options.orchestrator_process_id != 0U ||
 #ifdef _WIN32
                        options.stop_handle != nullptr ||
+                        options.reconnect_transition_handle != nullptr ||
+                        options.reconnect_transition_ack_handle != nullptr ||
                         options.orchestrator_capability_handle != nullptr
 #else
                        options.stop_handle != 0U ||
+                        options.reconnect_transition_handle != 0U ||
+                        options.reconnect_transition_ack_handle != 0U ||
                         options.orchestrator_capability_handle != 0U
 #endif
             ? std::nullopt
@@ -268,6 +294,21 @@ template<typename Integer>
         options.orchestrator_process_id == 0U) {
         return std::nullopt;
     }
+    const bool reconnect = *options.scenario ==
+        goldsrc::StockRuntimeCaptureScenario::reconnect;
+    if (reconnect != (options.reconnect_transition_handle != nullptr) ||
+        reconnect != (options.reconnect_transition_ack_handle != nullptr) ||
+        (reconnect &&
+         (options.reconnect_transition_handle ==
+              options.reconnect_transition_ack_handle ||
+          options.reconnect_transition_handle == options.stop_handle ||
+          options.reconnect_transition_ack_handle == options.stop_handle ||
+          options.reconnect_transition_handle ==
+              options.orchestrator_capability_handle ||
+          options.reconnect_transition_ack_handle ==
+              options.orchestrator_capability_handle))) {
+        return std::nullopt;
+    }
     DWORD stop_flags = 0U;
     DWORD capability_flags = 0U;
     if (!::GetHandleInformation(options.stop_handle, &stop_flags) ||
@@ -276,6 +317,23 @@ template<typename Integer>
         (stop_flags & HANDLE_FLAG_INHERIT) == 0U ||
         (capability_flags & HANDLE_FLAG_INHERIT) == 0U) {
         return std::nullopt;
+    }
+    if (reconnect) {
+        DWORD transition_flags = 0U;
+        DWORD acknowledgement_flags = 0U;
+        if (!::GetHandleInformation(
+                options.reconnect_transition_handle, &transition_flags) ||
+            !::GetHandleInformation(
+                options.reconnect_transition_ack_handle,
+                &acknowledgement_flags) ||
+            (transition_flags & HANDLE_FLAG_INHERIT) == 0U ||
+            (acknowledgement_flags & HANDLE_FLAG_INHERIT) == 0U ||
+            ::WaitForSingleObject(
+                options.reconnect_transition_handle, 0U) != WAIT_TIMEOUT ||
+            ::WaitForSingleObject(
+                options.reconnect_transition_ack_handle, 0U) != WAIT_TIMEOUT) {
+            return std::nullopt;
+        }
     }
 #else
     // The active relay is a Windows-only child of the verified orchestrator.
@@ -370,6 +428,14 @@ template<typename Integer>
         ::WaitForSingleObject(options.orchestrator_capability_handle, 0U) !=
             WAIT_OBJECT_0) {
         error = "inherited orchestrator capability handles are invalid";
+        return false;
+    }
+    if (options.scenario == goldsrc::StockRuntimeCaptureScenario::reconnect &&
+        (::WaitForSingleObject(
+             options.reconnect_transition_handle, 0U) != WAIT_TIMEOUT ||
+         ::WaitForSingleObject(
+             options.reconnect_transition_ack_handle, 0U) != WAIT_TIMEOUT)) {
+        error = "reconnect transition capability handles are invalid";
         return false;
     }
     return true;
@@ -809,6 +875,187 @@ struct HeldDatagram final {
     }
 }
 
+struct ReconnectTransportGeneration final {
+    std::size_t generation_ordinal{0U};
+    std::optional<std::size_t> first_observed_ordinal;
+    std::optional<std::size_t> last_observed_ordinal;
+    std::size_t connectionless_exchange_count{0U};
+    bool connect_observed{false};
+    bool accept_observed{false};
+    std::optional<std::size_t> first_sequenced_packet_ordinal;
+    std::size_t client_to_server_packet_count{0U};
+    std::size_t server_to_client_packet_count{0U};
+};
+
+[[nodiscard]] bool is_connectionless_observation(
+    const std::span<const std::byte> payload) noexcept
+{
+    return payload.size() >= 4U && payload[0] == std::byte{0xff} &&
+           payload[1] == std::byte{0xff} && payload[2] == std::byte{0xff} &&
+           payload[3] == std::byte{0xff};
+}
+
+[[nodiscard]] bool has_ascii_prefix_after_connectionless_header(
+    const std::span<const std::byte> payload,
+    const std::string_view prefix) noexcept
+{
+    if (!is_connectionless_observation(payload) ||
+        payload.size() < 4U + prefix.size()) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < prefix.size(); ++index) {
+        if (payload[4U + index] !=
+            static_cast<std::byte>(static_cast<unsigned char>(prefix[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool is_stock_connect_observation(
+    const std::span<const std::byte> payload) noexcept
+{
+    // Observation-only prefix. The verified stock client owns this endpoint;
+    // opaque authentication bytes are forwarded and stored without parsing or
+    // presentation. Production connect codecs and bytes remain untouched.
+    return payload.size() <= 1'400U &&
+           has_ascii_prefix_after_connectionless_header(payload, "connect 48 ");
+}
+
+[[nodiscard]] bool is_stock_accept_observation(
+    const std::span<const std::byte> payload) noexcept
+{
+    return payload.size() <= 1'024U &&
+           has_ascii_prefix_after_connectionless_header(payload, "B ");
+}
+
+void observe_reconnect_transport(
+    ReconnectTransportGeneration& generation,
+    const goldsrc::StockRuntimeCaptureDirection direction,
+    const std::span<const std::byte> payload,
+    const std::size_t observed_ordinal) noexcept
+{
+    if (!generation.first_observed_ordinal) {
+        generation.first_observed_ordinal = observed_ordinal;
+    }
+    generation.last_observed_ordinal = observed_ordinal;
+    if (direction == goldsrc::StockRuntimeCaptureDirection::client_to_server) {
+        ++generation.client_to_server_packet_count;
+    } else {
+        ++generation.server_to_client_packet_count;
+    }
+    if (is_connectionless_observation(payload)) {
+        ++generation.connectionless_exchange_count;
+        if (direction ==
+                goldsrc::StockRuntimeCaptureDirection::client_to_server &&
+            is_stock_connect_observation(payload)) {
+            generation.connect_observed = true;
+        }
+        if (direction ==
+                goldsrc::StockRuntimeCaptureDirection::server_to_client &&
+            generation.connect_observed && is_stock_accept_observation(payload)) {
+            generation.accept_observed = true;
+        }
+        return;
+    }
+    if (direction == goldsrc::StockRuntimeCaptureDirection::server_to_client &&
+        generation.accept_observed &&
+        !generation.first_sequenced_packet_ordinal) {
+        generation.first_sequenced_packet_ordinal = observed_ordinal;
+    }
+}
+
+[[nodiscard]] bool reconnect_transport_generation_complete(
+    const ReconnectTransportGeneration& generation) noexcept
+{
+    return generation.first_observed_ordinal.has_value() &&
+           generation.last_observed_ordinal.has_value() &&
+           generation.connectionless_exchange_count != 0U &&
+           generation.connect_observed && generation.accept_observed &&
+           generation.first_sequenced_packet_ordinal.has_value() &&
+           generation.client_to_server_packet_count != 0U &&
+           generation.server_to_client_packet_count != 0U;
+}
+
+[[nodiscard]] std::string reconnect_transport_observation_json(
+    const std::array<ReconnectTransportGeneration, 2U>& generations,
+    const bool tail_emitter_ready_before_shutdown,
+    const bool transition_quiet,
+    const bool endpoint_distinct,
+    const std::size_t retired_generation_a_server_tail_packet_count,
+    const bool transport_complete)
+{
+    std::ostringstream output;
+    output << "{\n"
+           << "  \"schema\": \""
+           << goldsrc::kStockRuntimeReconnectTransportObservationSchema
+           << "\",\n"
+           << "  \"connection_generation_count\": 2,\n"
+           << "  \"generation_distinct\": "
+           << (endpoint_distinct ? "true" : "false") << ",\n"
+           << "  \"generation_a_tail_emitter_ready_before_shutdown\": "
+           << (tail_emitter_ready_before_shutdown ? "true" : "false")
+           << ",\n"
+           << "  \"generation_a_controlled_shutdown\": \"observed_by_orchestrator\",\n"
+           << "  \"generation_a_endpoint_quiet\": "
+           << (transition_quiet ? "true" : "false") << ",\n"
+           << "  \"guard_continuity\": \"observed_by_orchestrator\",\n"
+           << "  \"server_continuity\": \"observed_by_orchestrator\",\n"
+           << "  \"relay_continuity\": \"observed\",\n"
+           << "  \"post_resource_boundary_status\": \"evidence_pending\",\n"
+           << "  \"candidate_status\": \"evidence_pending\",\n"
+           << "  \"candidate_body_consumed\": false,\n"
+           << "  \"candidate_semantic_category_assigned\": false,\n"
+           << "  \"retired_generation_a_tail_sink\": \"routing_only\",\n"
+           << "  \"retired_generation_a_server_tail_packet_count\": "
+           << retired_generation_a_server_tail_packet_count << ",\n"
+           << "  \"generation_b_sequenced_after_fresh_accept\": true,\n"
+           << "  \"bounded_transport_complete\": "
+           << (transport_complete ? "true" : "false") << ",\n"
+           << "  \"generations\": [\n";
+    for (std::size_t index = 0U; index < generations.size(); ++index) {
+        const auto& generation = generations[index];
+        output << "    {\n"
+               << "      \"generation_ordinal\": "
+               << generation.generation_ordinal << ",\n"
+               << "      \"endpoint_role_identity\": \""
+               << (index == 0U
+                       ? goldsrc::kStockRuntimeGenerationAEndpointRole
+                       : goldsrc::kStockRuntimeGenerationBEndpointRole)
+               << "\",\n"
+               << "      \"process_role_identity\": \""
+               << (index == 0U
+                       ? goldsrc::kStockRuntimeGenerationAProcessRole
+                       : goldsrc::kStockRuntimeGenerationBProcessRole)
+               << "\",\n"
+               << "      \"first_observed_ordinal\": "
+               << generation.first_observed_ordinal.value_or(0U) << ",\n"
+               << "      \"last_observed_ordinal\": "
+               << generation.last_observed_ordinal.value_or(0U) << ",\n"
+               << "      \"connectionless_exchange_count\": "
+               << generation.connectionless_exchange_count << ",\n"
+               << "      \"connect_observed\": "
+               << (generation.connect_observed ? "true" : "false") << ",\n"
+               << "      \"accept_observed\": "
+               << (generation.accept_observed ? "true" : "false") << ",\n"
+               << "      \"first_sequenced_packet_ordinal\": "
+               << generation.first_sequenced_packet_ordinal.value_or(0U) << ",\n"
+               << "      \"client_to_server_packet_count\": "
+               << generation.client_to_server_packet_count << ",\n"
+               << "      \"server_to_client_packet_count\": "
+               << generation.server_to_client_packet_count << ",\n"
+               << "      \"profile_identity\": \""
+               << goldsrc::kStockRuntimePendingProfile << "\",\n"
+               << "      \"post_resource_boundary_status\": \"evidence_pending\",\n"
+               << "      \"candidate_status\": \"evidence_pending\",\n"
+               << "      \"candidate_body_consumed\": false,\n"
+               << "      \"candidate_semantic_category_assigned\": false\n"
+               << "    }" << (index + 1U == generations.size() ? "\n" : ",\n");
+    }
+    output << "  ]\n}\n";
+    return output.str();
+}
+
 [[nodiscard]] int run_capture(const Options& options)
 {
     std::string error;
@@ -874,6 +1121,12 @@ struct HeldDatagram final {
 
     const auto server = network::NetworkAddress::loopback(*options.server_port);
     std::optional<network::NetworkAddress> client;
+    std::optional<network::NetworkAddress> retired_generation_a_client;
+    // Created only at the proven A->B transition. This relay-owned socket is
+    // send-only, never participates in endpoint learning/receive, and keeps a
+    // Windows ICMP port-unreachable for the closed A socket from poisoning the
+    // active client-facing receive socket. Its ephemeral port is never exposed.
+    std::optional<network::UdpSocket> retired_generation_a_tail_emitter;
     std::optional<HeldDatagram> held_client;
     std::optional<HeldDatagram> held_server;
     goldsrc::StockRuntimeCaptureCounters counters;
@@ -884,6 +1137,19 @@ struct HeldDatagram final {
     bool bidirectional_reported = false;
     bool wrong_source_observed = false;
     bool stop_requested = false;
+    const bool reconnect = *options.scenario ==
+        goldsrc::StockRuntimeCaptureScenario::reconnect;
+    std::array<ReconnectTransportGeneration, 2U> reconnect_generations{
+        ReconnectTransportGeneration{1U}, ReconnectTransportGeneration{2U}};
+    std::size_t current_generation_index = 0U;
+    bool reconnect_retirement_prepared = false;
+    bool reconnect_transition_requested = false;
+    bool reconnect_transition_completed = false;
+    bool reconnect_transition_quiet = false;
+    bool reconnect_endpoint_distinct = false;
+    std::chrono::steady_clock::time_point reconnect_quiet_since{};
+    constexpr auto reconnect_quiet_window = std::chrono::milliseconds{250};
+    goldsrc::StockRuntimeReconnectRelayTransition reconnect_transition_state;
     std::vector<goldsrc::StockRuntimeTransportJournalEntry> journal;
     journal.reserve(options.limits.maximum_datagrams);
     const auto start = std::chrono::steady_clock::now();
@@ -893,7 +1159,8 @@ struct HeldDatagram final {
 
     const auto record_observation = [&](const goldsrc::StockRuntimeCaptureDirection direction,
                                         const std::span<const std::byte> payload,
-                                        const bool wrong_source)
+                                        const bool wrong_source,
+                                        const bool attribute_to_reconnect_generation = true)
         -> std::optional<std::size_t> {
         auto next = counters;
         if (!goldsrc::stock_runtime_capture_observe_datagram(
@@ -927,6 +1194,12 @@ struct HeldDatagram final {
         }
         journal.push_back(std::move(*entry));
         counters = next;
+        if (reconnect && !wrong_source &&
+            attribute_to_reconnect_generation) {
+            observe_reconnect_transport(
+                reconnect_generations[current_generation_index], direction,
+                payload, journal.size() - 1U);
+        }
         if (wrong_source) {
             ++perturbation_count;
         }
@@ -934,10 +1207,19 @@ struct HeldDatagram final {
     };
 
     const auto report_bidirectional = [&]() {
+        const bool reconnect_generation_ready = !reconnect ||
+            current_generation_index == 0U ||
+            (reconnect_transition_state.generation_b_accept_observed() &&
+             reconnect_generations[1U].first_sequenced_packet_ordinal);
         if (!bidirectional_reported && accepted_client_observed &&
-            accepted_server_observed) {
-            std::cout << "[stock-runtime-capture] bidirectional-traffic=true\n"
-                      << std::flush;
+            accepted_server_observed && reconnect_generation_ready) {
+            std::cout << "[stock-runtime-capture] bidirectional-traffic=true\n";
+            if (reconnect) {
+                std::cout << "[stock-runtime-capture] reconnect-generation="
+                          << (current_generation_index + 1U)
+                          << ";bidirectional-traffic=true\n";
+            }
+            std::cout << std::flush;
             bidirectional_reported = true;
         }
     };
@@ -955,6 +1237,72 @@ struct HeldDatagram final {
                 return 17;
             }
         }
+        if (reconnect) {
+            const DWORD transition_signal = ::WaitForSingleObject(
+                options.reconnect_transition_handle, 0U);
+            if (transition_signal == WAIT_FAILED) {
+                std::cerr << "[stock-runtime-capture] result="
+                             "reconnect-transition-handle-failed\n";
+                return 20;
+            }
+            if (transition_signal == WAIT_OBJECT_0) {
+                if (!client || current_generation_index != 0U ||
+                    !reconnect_transport_generation_complete(
+                        reconnect_generations[0]) || held_client ||
+                    held_server) {
+                    std::cerr << "[stock-runtime-capture] result="
+                                 "reconnect-generation-a-incomplete\n";
+                    return 19;
+                }
+                if (!reconnect_retirement_prepared) {
+                    auto tail_emitter =
+                        network::UdpSocket::open_ipv4(runtime, error);
+                    if (!tail_emitter || !tail_emitter->bind(
+                            network::NetworkAddress::loopback(0U), error)) {
+                        std::cerr << "[stock-runtime-capture] result="
+                                     "reconnect-tail-emitter-create-failed\n";
+                        return 24;
+                    }
+                    if (!reconnect_transition_state.
+                            prepare_generation_a_retirement(true, true)) {
+                        std::cerr << "[stock-runtime-capture] result="
+                                     "reconnect-transition-state-invalid\n";
+                        return 20;
+                    }
+                    retired_generation_a_client = client;
+                    retired_generation_a_tail_emitter =
+                        std::move(*tail_emitter);
+                    reconnect_retirement_prepared = true;
+                    if (::SetEvent(
+                            options.reconnect_transition_ack_handle) == FALSE) {
+                        std::cerr << "[stock-runtime-capture] result="
+                                     "reconnect-transition-ack-failed\n";
+                        return 21;
+                    }
+                    std::cout << "[stock-runtime-capture] reconnect-transition="
+                                 "generation-a-tail-emitter-ready\n"
+                              << std::flush;
+                } else if (!reconnect_transition_requested) {
+                    if (!retired_generation_a_client ||
+                        !retired_generation_a_tail_emitter ||
+                        !reconnect_transition_state.
+                            confirm_generation_a_shutdown(true, true)) {
+                        std::cerr << "[stock-runtime-capture] result="
+                                     "reconnect-transition-state-invalid\n";
+                        return 20;
+                    }
+                    reconnect_transition_requested = true;
+                    reconnect_quiet_since = std::chrono::steady_clock::now();
+                    std::cout << "[stock-runtime-capture] reconnect-transition="
+                                 "generation-a-exit-attested\n"
+                              << std::flush;
+                } else {
+                    std::cerr << "[stock-runtime-capture] result="
+                                 "reconnect-transition-signal-unexpected\n";
+                    return 20;
+                }
+            }
+        }
 #endif
         bool progressed = false;
         auto from_client = client_socket->receive(options.limits.maximum_payload_bytes);
@@ -967,19 +1315,78 @@ struct HeldDatagram final {
             from_client.datagram) {
             progressed = true;
             const auto source = from_client.datagram->source;
-            if (source.ipv4_host_order() != network::NetworkAddress::loopback(0U).ipv4_host_order() ||
-                (client && source != *client)) {
+            const auto& payload = from_client.datagram->payload;
+            const bool source_is_loopback = source.ipv4_host_order() ==
+                network::NetworkAddress::loopback(0U).ipv4_host_order();
+            const bool initial_endpoint_is_valid = !client &&
+                source_is_loopback &&
+                (!reconnect ||
+                 (!reconnect_transition_completed &&
+                  current_generation_index == 0U &&
+                  is_connectionless_observation(payload)));
+            const bool new_generation_b_endpoint_is_valid =
+                reconnect && reconnect_transition_completed && !client &&
+                !reconnect_transition_state.generation_b_endpoint_learned() &&
+                source_is_loopback && retired_generation_a_client &&
+                source != *retired_generation_a_client &&
+                is_connectionless_observation(payload);
+            if (!source_is_loopback || (client && source != *client) ||
+                (!client && !initial_endpoint_is_valid &&
+                 !new_generation_b_endpoint_is_valid)) {
                 if (!record_observation(
                         goldsrc::StockRuntimeCaptureDirection::client_to_server,
-                        from_client.datagram->payload, true)) {
+                        payload, true)) {
                     std::cerr << "[stock-runtime-capture] result=capture-bound-exceeded\n";
                     return 7;
                 }
                 wrong_source_observed = true;
                 break;
             } else {
-                if (!client) client = source;
-                const auto& payload = from_client.datagram->payload;
+                if (reconnect_transition_requested &&
+                    !reconnect_transition_completed) {
+                    // Only a datagram from the still-learned A source resets
+                    // endpoint quiet. Exact-server tail traffic does not prove
+                    // that the retired client socket still exists.
+                    reconnect_quiet_since = std::chrono::steady_clock::now();
+                }
+                if (new_generation_b_endpoint_is_valid) {
+                    if (!reconnect_transition_state.
+                            observe_generation_b_client_datagram(
+                                true, true,
+                                is_stock_connect_observation(payload))) {
+                        std::cerr << "[stock-runtime-capture] result="
+                                     "reconnect-generation-b-lifecycle-invalid\n";
+                        return 23;
+                    }
+                    client = source;
+                    current_generation_index = 1U;
+                    reconnect_endpoint_distinct = true;
+                    std::cout << "[stock-runtime-capture] reconnect-endpoint="
+                                 "generation-b-learned\n"
+                              << std::flush;
+                } else if (!client) {
+                    client = source;
+                } else if (reconnect && reconnect_transition_completed &&
+                           current_generation_index == 1U &&
+                           !reconnect_transition_state.
+                                observe_generation_b_client_datagram(
+                                    true,
+                                    is_connectionless_observation(payload),
+                                    is_stock_connect_observation(payload))) {
+                    std::cerr << "[stock-runtime-capture] result="
+                                 "reconnect-generation-b-lifecycle-invalid\n";
+                    return 23;
+                }
+                if (reconnect && reconnect_transition_completed &&
+                    current_generation_index == 1U &&
+                    reconnect_transition_state.generation_b_connect_observed()) {
+                    if (!reconnect_generations[1U].connect_observed &&
+                        is_stock_connect_observation(payload)) {
+                        std::cout << "[stock-runtime-capture] reconnect-generation="
+                                     "2;connect-observed=true\n"
+                                  << std::flush;
+                    }
+                }
                 const auto journal_index = record_observation(
                     goldsrc::StockRuntimeCaptureDirection::client_to_server,
                     payload, false);
@@ -1010,17 +1417,81 @@ struct HeldDatagram final {
         if (from_server.status == network::ReceiveStatus::received &&
             from_server.datagram) {
             progressed = true;
-            if (from_server.datagram->source != server || !client) {
+            const auto& payload = from_server.datagram->payload;
+            if (from_server.datagram->source != server) {
                 if (!record_observation(
                         goldsrc::StockRuntimeCaptureDirection::server_to_client,
-                        from_server.datagram->payload, true)) {
+                        payload, true)) {
                     std::cerr << "[stock-runtime-capture] result=capture-bound-exceeded\n";
                     return 7;
                 }
                 wrong_source_observed = true;
                 break;
+            } else if (reconnect_retirement_prepared) {
+                bool generation_b_route = false;
+                if (reconnect_transition_requested) {
+                    const auto route = reconnect_transition_state.
+                        route_server_datagram(
+                            true, is_connectionless_observation(payload),
+                            is_stock_accept_observation(payload));
+                    if (route ==
+                        goldsrc::StockRuntimeReconnectServerRoute::reject) {
+                        std::cerr << "[stock-runtime-capture] result="
+                                     "reconnect-generation-b-lifecycle-invalid\n";
+                        return 23;
+                    }
+                    generation_b_route = reconnect_transition_completed &&
+                        route ==
+                        goldsrc::StockRuntimeReconnectServerRoute::generation_b;
+                }
+                // Between the first ACK and A's controlled exit, the datagram
+                // still belongs to generation A, but the actual send already
+                // uses the isolated emitter. After the second signal, only a
+                // proven B route is generation-attributed here.
+                const auto destination = generation_b_route
+                    ? client : retired_generation_a_client;
+                if (!destination ||
+                    (!generation_b_route &&
+                     !retired_generation_a_tail_emitter)) {
+                    std::cerr << "[stock-runtime-capture] result="
+                                 "reconnect-tail-route-missing\n";
+                    return 23;
+                }
+                const auto journal_index = record_observation(
+                    goldsrc::StockRuntimeCaptureDirection::server_to_client,
+                    payload, false,
+                    !reconnect_transition_requested || generation_b_route);
+                if (!journal_index) {
+                    std::cerr << "[stock-runtime-capture] result=capture-bound-exceeded\n";
+                    return 7;
+                }
+                auto& destination_socket = generation_b_route
+                    ? *client_socket : *retired_generation_a_tail_emitter;
+                if (!process_datagram(
+                        destination_socket, *destination, payload,
+                        journal[*journal_index].action, *journal_index,
+                        held_server, counters, journal, perturbation_count,
+                        reorder_completed, error)) {
+                    std::cerr << "[stock-runtime-capture] result=server-forward-failed\n";
+                    return 10;
+                }
+                if (!reconnect_transition_requested || generation_b_route) {
+                    accepted_server_observed = true;
+                    report_bidirectional();
+                }
             } else {
-                const auto& payload = from_server.datagram->payload;
+                if (!client) {
+                    if (!record_observation(
+                            goldsrc::StockRuntimeCaptureDirection::
+                                server_to_client,
+                            payload, true)) {
+                        std::cerr << "[stock-runtime-capture] result="
+                                     "capture-bound-exceeded\n";
+                        return 7;
+                    }
+                    wrong_source_observed = true;
+                    break;
+                }
                 const auto journal_index = record_observation(
                     goldsrc::StockRuntimeCaptureDirection::server_to_client,
                     payload, false);
@@ -1044,6 +1515,40 @@ struct HeldDatagram final {
         if (wrong_source_observed) {
             break;
         }
+#ifdef _WIN32
+        if (reconnect_transition_requested &&
+            !reconnect_transition_completed &&
+            std::chrono::steady_clock::now() - reconnect_quiet_since >=
+                reconnect_quiet_window) {
+            if (!client || held_client || held_server ||
+                !reconnect_transport_generation_complete(
+                    reconnect_generations[0])) {
+                std::cerr << "[stock-runtime-capture] result="
+                             "reconnect-transition-not-quiescent\n";
+                return 20;
+            }
+            client.reset();
+            accepted_client_observed = false;
+            accepted_server_observed = false;
+            bidirectional_reported = false;
+            if (!reconnect_transition_state.begin_generation_b_relearn(
+                    true, true, true)) {
+                std::cerr << "[stock-runtime-capture] result="
+                             "reconnect-transition-state-invalid\n";
+                return 20;
+            }
+            reconnect_transition_quiet = true;
+            reconnect_transition_completed = true;
+            if (::SetEvent(options.reconnect_transition_ack_handle) == FALSE) {
+                std::cerr << "[stock-runtime-capture] result="
+                             "reconnect-transition-ack-failed\n";
+                return 21;
+            }
+            std::cout << "[stock-runtime-capture] reconnect-generation="
+                         "2;endpoint-relearn=ready\n"
+                      << std::flush;
+        }
+#endif
         if (!progressed) std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
 
@@ -1087,12 +1592,28 @@ struct HeldDatagram final {
     const bool scenario_requires_reorder =
         *options.scenario ==
         goldsrc::StockRuntimeCaptureScenario::reorder_server_runtime;
+    const bool reconnect_transport_complete = !reconnect ||
+        (reconnect_retirement_prepared && reconnect_transition_completed &&
+         reconnect_transition_quiet &&
+         reconnect_transition_state.generation_a_retirement_prepared() &&
+         reconnect_transition_state.generation_a_shutdown_confirmed() &&
+         reconnect_endpoint_distinct && current_generation_index == 1U &&
+         reconnect_transition_state.generation_b_endpoint_learned() &&
+         reconnect_transition_state.generation_b_connect_observed() &&
+         reconnect_transition_state.generation_b_accept_observed() &&
+         reconnect_transport_generation_complete(reconnect_generations[0]) &&
+         reconnect_transport_generation_complete(reconnect_generations[1]) &&
+         reconnect_generations[0].last_observed_ordinal &&
+         reconnect_generations[1].first_observed_ordinal &&
+         *reconnect_generations[0].last_observed_ordinal <
+             *reconnect_generations[1].first_observed_ordinal);
     const bool complete = !wrong_source_observed && client.has_value() &&
         counters.client_packets != 0U &&
         counters.server_packets != 0U &&
         counters.ignored_wrong_source_datagrams == 0U &&
         mutation_counters_consistent &&
         perturbation_count == expected_perturbations(*options.scenario) &&
+        reconnect_transport_complete &&
         (!scenario_requires_reorder ||
             (reorder_completed && !unresolved_reorder));
     goldsrc::StockRuntimeCaptureMetadata metadata;
@@ -1101,6 +1622,24 @@ struct HeldDatagram final {
     metadata.counters = counters;
     metadata.perturbation_count = perturbation_count;
     metadata.bounded_transport_complete = complete;
+    if (reconnect) {
+        const auto reconnect_json = reconnect_transport_observation_json(
+            reconnect_generations, reconnect_retirement_prepared,
+            reconnect_transition_quiet,
+            reconnect_endpoint_distinct,
+            reconnect_transition_state.
+                retired_generation_a_server_tail_packet_count(),
+            reconnect_transport_complete);
+        if (!write_new_output_file(
+                *held_run_root,
+                "reconnect-transport-observation.staged.json",
+                std::as_bytes(std::span{
+                    reconnect_json.data(), reconnect_json.size()}), error)) {
+            std::cerr << "[stock-runtime-capture] result="
+                         "reconnect-observation-write-failed\n";
+            return 22;
+        }
+    }
     if (!write_transport_journal(
             *held_run_root, journal, options.limits, complete, error)) {
         std::cerr << "[stock-runtime-capture] result=journal-write-failed\n";
@@ -1120,6 +1659,14 @@ struct HeldDatagram final {
               << (stop_requested ? "orchestrator-request" : "duration-bound") << '\n'
               << "[stock-runtime-capture] payload-rewrites=0\n"
               << "[stock-runtime-capture] processes-started=0\n"
+              << "[stock-runtime-capture] connection-generations="
+              << (reconnect ? 2U : 1U) << '\n'
+              << "[stock-runtime-capture] generation-distinct="
+              << (reconnect_endpoint_distinct ? "true" : "false") << '\n'
+              << "[stock-runtime-capture] reconnect-transport="
+              << (reconnect
+                      ? reconnect_transport_complete ? "complete" : "incomplete"
+                      : "not-applicable") << '\n'
               << "[stock-runtime-capture] result="
               << (wrong_source_observed
                       ? "unexpected-source"

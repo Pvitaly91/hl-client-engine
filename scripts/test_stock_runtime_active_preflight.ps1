@@ -94,14 +94,14 @@ try {
         -Game valve -Map boot_camp -Scenario reconnect |
         ForEach-Object { [void]$reconnectOutput.Add($_.ToString()) }
 } catch { $reconnectMessage = $_.Exception.Message }
-if ($reconnectMessage -cnotmatch '^Reconnect requires two controlled stock sessions' -or
+if ($reconnectMessage -cnotmatch '^A two-generation reconnect observation requires at least 60 seconds' -or
     $reconnectOutput -cnotcontains
-        '[stock-runtime-capture] failure-category=reconnect_lifecycle_pending' -or
+        '[stock-runtime-capture] failure-category=minimum_reconnect_duration_required' -or
     $reconnectOutput -cnotcontains '[stock-runtime-capture] processes-started=0' -or
     $reconnectOutput -cnotcontains
-        '[stock-runtime-capture] restoration-backups-created=0' -or
+        '[stock-runtime-capture] files-written=0' -or
     (Get-PathObservation $manualRoot) -cne $beforeManual) {
-    throw 'Single-session reconnect did not fail before path/backup/run mutation.'
+    throw 'Undersized reconnect did not fail before path/backup/run mutation.'
 }
 
 $sourceText = Get-Content -Raw -LiteralPath $capture
@@ -196,6 +196,55 @@ if (-not (Test-IsElevatedAdministrator)) {
             (Join-Path $missingMarker '.hlclient-research-isolated'),
             'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1',
             [Text.Encoding]::ASCII)
+        $message = ''
+        try {
+            & $capture -ValidateActiveCaptureEnvironment `
+                -ResearchHalfLifeRoot $missingMarker `
+                -ClientPath (Join-Path $missingMarker 'hl.exe') `
+                -HldsPath (Join-Path $missingMarker 'hlds.exe') `
+                -CaptureToolPath 'Z:\absent-capture.exe' `
+                -NetworkIsolationGuardPath 'Z:\absent-guard.exe' `
+                -AppManifestPath 'Z:\appmanifest_70.acf' | Out-Null
+        } catch { $message = $_.Exception.Message }
+        if ($message -cnotmatch '^Research root lacks a preparation manifest') {
+            throw 'Missing-manifest preflight case did not fail at the manifest gate.'
+        }
+
+        $clientHash = (Get-FileHash -LiteralPath (
+                Join-Path $missingMarker 'hl.exe') -Algorithm SHA256).Hash
+        $serverHash = (Get-FileHash -LiteralPath (
+                Join-Path $missingMarker 'hlds.exe') -Algorithm SHA256).Hash
+        $clientLength = (Get-Item -LiteralPath (
+                Join-Path $missingMarker 'hl.exe')).Length
+        $serverLength = (Get-Item -LiteralPath (
+                Join-Path $missingMarker 'hlds.exe')).Length
+        $records = @(
+            'd|valve',
+            ('f|hl.exe|{0}|{1}' -f $clientLength, $clientHash),
+            ('f|hlds.exe|{0}|{1}' -f $serverLength, $serverHash)) |
+            Sort-Object
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            $inventoryHash = ([BitConverter]::ToString(
+                    $algorithm.ComputeHash(
+                        [Text.UTF8Encoding]::new($false).GetBytes(
+                            ($records -join "`n"))))).Replace('-', '')
+        } finally { $algorithm.Dispose() }
+        $v1Manifest = [ordered]@{
+            schema = 'hlclient.stock-runtime-research-preparation.v1'
+            marker = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
+            source_inventory_entries = 3
+            source_inventory_bytes = ($clientLength + $serverLength)
+            source_inventory_sha256 = $inventoryHash
+            client_sha256 = $clientHash
+            server_launcher_sha256 = $serverHash
+            paths_recorded = $false
+            preparation_status = 'exact-copy-verified'
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $missingMarker '.hlclient-research-preparation.json'),
+            (($v1Manifest | ConvertTo-Json -Depth 3) + "`r`n"),
+            [Text.UTF8Encoding]::new($false))
         $message = ''
         try {
             & $capture -ValidateActiveCaptureEnvironment `

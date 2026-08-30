@@ -188,6 +188,12 @@ public:
     [[nodiscard]] const StockRuntimeCorpusDocument& restoration_attestation() const noexcept;
     [[nodiscard]] const std::optional<StockRuntimeCorpusDocument>&
     research_run_metadata() const noexcept;
+    [[nodiscard]] const std::optional<StockRuntimeCorpusDocument>&
+    reconnect_transport_observation() const noexcept;
+    [[nodiscard]] const std::optional<StockRuntimeCorpusDocument>&
+    reconnect_orchestration_attestation() const noexcept;
+    [[nodiscard]] const std::optional<StockRuntimeCorpusDocument>&
+    reconnect_observation() const noexcept;
     [[nodiscard]] const std::optional<StockRuntimeAcceptedManifestClaims>&
     accepted_manifest_claims() const noexcept;
     // Geometry-only identity. It excludes raw bytes and per-datagram SHA-256,
@@ -213,6 +219,11 @@ private:
         StockRuntimeCorpusDocument isolation_attestation,
         StockRuntimeCorpusDocument restoration_attestation,
         std::optional<StockRuntimeCorpusDocument> research_run_metadata,
+        std::optional<StockRuntimeCorpusDocument>
+            reconnect_transport_observation,
+        std::optional<StockRuntimeCorpusDocument>
+            reconnect_orchestration_attestation,
+        std::optional<StockRuntimeCorpusDocument> reconnect_observation,
         std::optional<StockRuntimeAcceptedManifestClaims> accepted_manifest_claims,
         std::string structural_sha256) noexcept;
 
@@ -234,6 +245,10 @@ private:
     StockRuntimeCorpusDocument isolation_attestation_;
     StockRuntimeCorpusDocument restoration_attestation_;
     std::optional<StockRuntimeCorpusDocument> research_run_metadata_;
+    std::optional<StockRuntimeCorpusDocument> reconnect_transport_observation_;
+    std::optional<StockRuntimeCorpusDocument>
+        reconnect_orchestration_attestation_;
+    std::optional<StockRuntimeCorpusDocument> reconnect_observation_;
     std::optional<StockRuntimeAcceptedManifestClaims> accepted_manifest_claims_;
     std::string structural_sha256_;
 };

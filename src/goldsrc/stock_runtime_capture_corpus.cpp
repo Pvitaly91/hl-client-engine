@@ -1,6 +1,7 @@
 #include <hlclient/goldsrc/stock_runtime_capture_corpus.hpp>
 
 #include <hlclient/goldsrc/netchan_packet.hpp>
+#include <hlclient/goldsrc/stock_runtime_reconnect_lifecycle.hpp>
 #include <hlclient/hash/sha256.hpp>
 
 #include <algorithm>
@@ -42,6 +43,236 @@ struct ManifestReadResult final {
     std::optional<ManifestProperties> properties;
     std::optional<StockRuntimeCaptureCorpusError> error;
 };
+
+struct StrictJsonValue final {
+    enum class Kind { string, integer, boolean, null_value, object, array };
+    Kind kind{Kind::null_value};
+    std::string scalar;
+    std::map<std::string, StrictJsonValue, std::less<>> object;
+    std::vector<StrictJsonValue> array;
+};
+
+class StrictJsonReader final {
+public:
+    explicit StrictJsonReader(const std::string_view input) noexcept
+        : input_{input}
+    {
+    }
+
+    [[nodiscard]] std::optional<StrictJsonValue> read()
+    {
+        auto value = read_value(0U);
+        whitespace();
+        return value && cursor_ == input_.size()
+            ? std::move(value) : std::nullopt;
+    }
+
+private:
+    static constexpr std::size_t kMaximumDepth = 8U;
+    static constexpr std::size_t kMaximumMembers = 512U;
+
+    void whitespace() noexcept
+    {
+        while (cursor_ < input_.size() &&
+               (input_[cursor_] == ' ' || input_[cursor_] == '\t' ||
+                input_[cursor_] == '\r' || input_[cursor_] == '\n')) {
+            ++cursor_;
+        }
+    }
+
+    [[nodiscard]] std::optional<std::string> string()
+    {
+        if (cursor_ >= input_.size() || input_[cursor_++] != '"') {
+            return std::nullopt;
+        }
+        std::string result;
+        while (cursor_ < input_.size() && input_[cursor_] != '"') {
+            const auto character = input_[cursor_++];
+            // Project-owned reconnect metadata is canonical printable ASCII.
+            // Reject escape aliases and control bytes rather than normalizing.
+            if (character == '\\' ||
+                static_cast<unsigned char>(character) < 0x20U ||
+                static_cast<unsigned char>(character) > 0x7eU) {
+                return std::nullopt;
+            }
+            result.push_back(character);
+        }
+        if (cursor_ >= input_.size() || input_[cursor_++] != '"') {
+            return std::nullopt;
+        }
+        return result;
+    }
+
+    [[nodiscard]] bool literal(const std::string_view expected) noexcept
+    {
+        if (input_.substr(cursor_, expected.size()) != expected) return false;
+        cursor_ += expected.size();
+        return true;
+    }
+
+    [[nodiscard]] std::optional<StrictJsonValue> read_value(
+        const std::size_t depth)
+    {
+        if (depth > kMaximumDepth) return std::nullopt;
+        whitespace();
+        if (cursor_ >= input_.size()) return std::nullopt;
+        StrictJsonValue value;
+        if (input_[cursor_] == '"') {
+            auto parsed = string();
+            if (!parsed) return std::nullopt;
+            value.kind = StrictJsonValue::Kind::string;
+            value.scalar = std::move(*parsed);
+            return value;
+        }
+        if (input_[cursor_] == '{') {
+            value.kind = StrictJsonValue::Kind::object;
+            ++cursor_;
+            whitespace();
+            if (cursor_ < input_.size() && input_[cursor_] == '}') {
+                ++cursor_;
+                return value;
+            }
+            while (cursor_ < input_.size()) {
+                whitespace();
+                auto name = string();
+                whitespace();
+                if (!name || name->empty() || cursor_ >= input_.size() ||
+                    input_[cursor_++] != ':') {
+                    return std::nullopt;
+                }
+                auto child = read_value(depth + 1U);
+                if (!child || value.object.size() >= kMaximumMembers ||
+                    !value.object.emplace(
+                        std::move(*name), std::move(*child)).second) {
+                    return std::nullopt;
+                }
+                whitespace();
+                if (cursor_ >= input_.size()) return std::nullopt;
+                if (input_[cursor_] == '}') {
+                    ++cursor_;
+                    return value;
+                }
+                if (input_[cursor_++] != ',') return std::nullopt;
+            }
+            return std::nullopt;
+        }
+        if (input_[cursor_] == '[') {
+            value.kind = StrictJsonValue::Kind::array;
+            ++cursor_;
+            whitespace();
+            if (cursor_ < input_.size() && input_[cursor_] == ']') {
+                ++cursor_;
+                return value;
+            }
+            while (cursor_ < input_.size()) {
+                auto child = read_value(depth + 1U);
+                if (!child || value.array.size() >= kMaximumMembers) {
+                    return std::nullopt;
+                }
+                value.array.push_back(std::move(*child));
+                whitespace();
+                if (cursor_ >= input_.size()) return std::nullopt;
+                if (input_[cursor_] == ']') {
+                    ++cursor_;
+                    return value;
+                }
+                if (input_[cursor_++] != ',') return std::nullopt;
+            }
+            return std::nullopt;
+        }
+        if (literal("true")) {
+            value.kind = StrictJsonValue::Kind::boolean;
+            value.scalar = "true";
+            return value;
+        }
+        if (literal("false")) {
+            value.kind = StrictJsonValue::Kind::boolean;
+            value.scalar = "false";
+            return value;
+        }
+        if (literal("null")) {
+            value.kind = StrictJsonValue::Kind::null_value;
+            value.scalar = "null";
+            return value;
+        }
+        const auto begin = cursor_;
+        while (cursor_ < input_.size() && input_[cursor_] >= '0' &&
+               input_[cursor_] <= '9') {
+            ++cursor_;
+        }
+        if (cursor_ == begin ||
+            (cursor_ - begin > 1U && input_[begin] == '0')) {
+            return std::nullopt;
+        }
+        value.kind = StrictJsonValue::Kind::integer;
+        value.scalar = std::string{input_.substr(begin, cursor_ - begin)};
+        return value;
+    }
+
+    std::string_view input_;
+    std::size_t cursor_{0U};
+};
+
+[[nodiscard]] const StrictJsonValue* json_property(
+    const StrictJsonValue& object,
+    const std::string_view name,
+    const StrictJsonValue::Kind kind) noexcept
+{
+    if (object.kind != StrictJsonValue::Kind::object) return nullptr;
+    const auto found = object.object.find(name);
+    return found != object.object.end() && found->second.kind == kind
+        ? &found->second : nullptr;
+}
+
+[[nodiscard]] bool json_exact_properties(
+    const StrictJsonValue& object,
+    const std::span<const std::string_view> names) noexcept
+{
+    return object.kind == StrictJsonValue::Kind::object &&
+           object.object.size() == names.size() &&
+           std::ranges::all_of(names, [&object](const auto name) {
+               return object.object.contains(name);
+           });
+}
+
+[[nodiscard]] bool json_string_equals(
+    const StrictJsonValue& object,
+    const std::string_view name,
+    const std::string_view expected) noexcept
+{
+    const auto* value = json_property(
+        object, name, StrictJsonValue::Kind::string);
+    return value != nullptr && value->scalar == expected;
+}
+
+[[nodiscard]] bool json_boolean_equals(
+    const StrictJsonValue& object,
+    const std::string_view name,
+    const bool expected) noexcept
+{
+    const auto* value = json_property(
+        object, name, StrictJsonValue::Kind::boolean);
+    return value != nullptr &&
+           value->scalar == (expected ? "true" : "false");
+}
+
+[[nodiscard]] std::optional<std::size_t> json_integer(
+    const StrictJsonValue& object,
+    const std::string_view name,
+    const std::size_t maximum) noexcept
+{
+    const auto* value = json_property(
+        object, name, StrictJsonValue::Kind::integer);
+    if (value == nullptr) return std::nullopt;
+    std::size_t result = 0U;
+    const auto converted = std::from_chars(
+        value->scalar.data(), value->scalar.data() + value->scalar.size(),
+        result, 10);
+    return converted.ec == std::errc{} &&
+           converted.ptr == value->scalar.data() + value->scalar.size() &&
+           result <= maximum
+        ? std::optional<std::size_t>{result} : std::nullopt;
+}
 
 [[nodiscard]] StockRuntimeCaptureCorpusLoadResult failure(
     const StockRuntimeCaptureCorpusErrorCode code,
@@ -713,7 +944,7 @@ template<typename Integer>
 [[nodiscard]] bool valid_research_manifest_shape(
     const ManifestProperties& properties) noexcept
 {
-    constexpr std::array names{
+    constexpr std::array base_names{
         std::string_view{"schema"},
         std::string_view{"run_id"},
         std::string_view{"scenario"},
@@ -760,7 +991,29 @@ template<typename Integer>
         std::string_view{"accepted_evidence_run"},
         std::string_view{"failure_category"},
     };
-    if (!exact_properties(properties, names)) {
+    constexpr std::array reconnect_names{
+        std::string_view{"connection_generation_count"},
+        std::string_view{"exact_boundary_count"},
+        std::string_view{"runtime_candidate_count"},
+        std::string_view{"generation_distinct"},
+        std::string_view{"candidate_conflict"},
+    };
+    const auto* scenario = property(
+        properties, "scenario", ManifestScalar::Kind::string);
+    const auto* accepted = property(
+        properties, "accepted_evidence_run", ManifestScalar::Kind::boolean);
+    if (scenario == nullptr || accepted == nullptr) return false;
+    const bool accepted_reconnect = scenario->value == "reconnect" &&
+                                    accepted->value == "true";
+    if (properties.size() != base_names.size() +
+            (accepted_reconnect ? reconnect_names.size() : 0U) ||
+        !std::ranges::all_of(base_names, [&properties](const auto name) {
+            return properties.contains(name);
+        }) ||
+        (accepted_reconnect &&
+         !std::ranges::all_of(reconnect_names, [&properties](const auto name) {
+             return properties.contains(name);
+         }))) {
         return false;
     }
     constexpr std::array required_strings{
@@ -811,7 +1064,7 @@ template<typename Integer>
         std::string_view{"last_observed_transport_timestamp_us"},
         std::string_view{"last_delivered_sequenced_s2c_timestamp_us"},
     };
-    return std::ranges::all_of(
+    const bool base_valid = std::ranges::all_of(
                nullable_integers, [&properties](const auto name) {
                    return nullable_kind(
                        properties, name, ManifestScalar::Kind::integer);
@@ -829,7 +1082,18 @@ template<typename Integer>
            nullable_kind(properties, "replay_structural_sha256",
                          ManifestScalar::Kind::string) &&
            nullable_kind(properties, "candidate_stability",
-                          ManifestScalar::Kind::string);
+                           ManifestScalar::Kind::string);
+    if (!base_valid || !accepted_reconnect) return base_valid;
+    return property(properties, "connection_generation_count",
+                    ManifestScalar::Kind::integer) != nullptr &&
+           property(properties, "exact_boundary_count",
+                    ManifestScalar::Kind::integer) != nullptr &&
+           property(properties, "runtime_candidate_count",
+                    ManifestScalar::Kind::integer) != nullptr &&
+           property(properties, "generation_distinct",
+                    ManifestScalar::Kind::boolean) != nullptr &&
+           property(properties, "candidate_conflict",
+                    ManifestScalar::Kind::boolean) != nullptr;
 }
 
 [[nodiscard]] std::optional<std::string_view> canonical_runtime_scenario(
@@ -958,9 +1222,33 @@ template<typename Integer>
         next_unconsumed_bits == 0U || candidate_bit_width == 0U ||
         candidate_bit_width > 8U ||
         candidate_bit_width > next_unconsumed_bits ||
-        candidate_recurrence != 1U ||
         !hexadecimal_sha256(properties, "transport_structural_sha256", true) ||
         !hexadecimal_sha256(properties, "replay_structural_sha256", true)) {
+        return false;
+    }
+    const bool reconnect_scenario = scenario->value == "reconnect";
+    if (candidate_recurrence != (reconnect_scenario ? 2U : 1U) ||
+        stability->value !=
+            (reconnect_scenario ? "stable_observation"
+                                : "single_observation")) {
+        return false;
+    }
+    if (reconnect_scenario &&
+        (!property_equals(
+             properties, "connection_generation_count",
+             ManifestScalar::Kind::integer, "2") ||
+         !property_equals(
+             properties, "exact_boundary_count",
+             ManifestScalar::Kind::integer, "2") ||
+         !property_equals(
+             properties, "runtime_candidate_count",
+             ManifestScalar::Kind::integer, "2") ||
+         !property_equals(
+             properties, "generation_distinct",
+             ManifestScalar::Kind::boolean, "true") ||
+         !property_equals(
+             properties, "candidate_conflict",
+             ManifestScalar::Kind::boolean, "false"))) {
         return false;
     }
     const bool duration_gated = scenario->value == "baseline" ||
@@ -1024,8 +1312,7 @@ template<typename Integer>
            property_equals(properties, "accepted_evidence_run",
                            ManifestScalar::Kind::boolean, "true") &&
            property_equals(properties, "failure_category",
-                           ManifestScalar::Kind::string, "none") &&
-           stability->value == "single_observation";
+                           ManifestScalar::Kind::string, "none");
 }
 
 [[nodiscard]] std::optional<StockRuntimeAcceptedManifestClaims>
@@ -1082,6 +1369,533 @@ parse_accepted_manifest_claims(const ManifestProperties& properties)
     claims.candidate_stability = stability->value;
     claims.replay_structural_sha256 = replay_hash->value;
     return claims;
+}
+
+[[nodiscard]] bool valid_reconnect_transport_generation(
+    const StrictJsonValue& object,
+    const std::size_t index,
+    StockRuntimeConnectionGenerationObservation& generation) noexcept
+{
+    static constexpr std::array names{
+        std::string_view{"generation_ordinal"},
+        std::string_view{"endpoint_role_identity"},
+        std::string_view{"process_role_identity"},
+        std::string_view{"first_observed_ordinal"},
+        std::string_view{"last_observed_ordinal"},
+        std::string_view{"connectionless_exchange_count"},
+        std::string_view{"connect_observed"},
+        std::string_view{"accept_observed"},
+        std::string_view{"first_sequenced_packet_ordinal"},
+        std::string_view{"client_to_server_packet_count"},
+        std::string_view{"server_to_client_packet_count"},
+        std::string_view{"profile_identity"},
+        std::string_view{"post_resource_boundary_status"},
+        std::string_view{"candidate_status"},
+        std::string_view{"candidate_body_consumed"},
+        std::string_view{"candidate_semantic_category_assigned"}};
+    const std::array endpoint_roles{
+        kStockRuntimeGenerationAEndpointRole,
+        kStockRuntimeGenerationBEndpointRole};
+    const std::array process_roles{
+        kStockRuntimeGenerationAProcessRole,
+        kStockRuntimeGenerationBProcessRole};
+    const auto ordinal = json_integer(object, "generation_ordinal", 2U);
+    const auto first = json_integer(
+        object, "first_observed_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams - 1U);
+    const auto last = json_integer(
+        object, "last_observed_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams - 1U);
+    const auto connectionless = json_integer(
+        object, "connectionless_exchange_count",
+        StockRuntimeCaptureHardCaps::maximum_datagrams);
+    const auto first_sequenced = json_integer(
+        object, "first_sequenced_packet_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams - 1U);
+    const auto c2s = json_integer(
+        object, "client_to_server_packet_count",
+        StockRuntimeCaptureHardCaps::maximum_datagrams);
+    const auto s2c = json_integer(
+        object, "server_to_client_packet_count",
+        StockRuntimeCaptureHardCaps::maximum_datagrams);
+    if (index >= 2U || !json_exact_properties(object, names) || !ordinal ||
+        *ordinal != index + 1U || !first || !last || *first > *last ||
+        !connectionless || *connectionless == 0U || !first_sequenced ||
+        *first_sequenced < *first || *first_sequenced > *last ||
+        !c2s || *c2s == 0U || !s2c || *s2c == 0U ||
+        !json_string_equals(
+            object, "endpoint_role_identity", endpoint_roles[index]) ||
+        !json_string_equals(
+            object, "process_role_identity", process_roles[index]) ||
+        !json_boolean_equals(object, "connect_observed", true) ||
+        !json_boolean_equals(object, "accept_observed", true) ||
+        !json_string_equals(
+            object, "profile_identity", kStockRuntimePendingProfile) ||
+        !json_string_equals(
+            object, "post_resource_boundary_status", "evidence_pending") ||
+        !json_string_equals(object, "candidate_status", "evidence_pending") ||
+        !json_boolean_equals(object, "candidate_body_consumed", false) ||
+        !json_boolean_equals(
+            object, "candidate_semantic_category_assigned", false)) {
+        return false;
+    }
+    generation.generation_ordinal = *ordinal;
+    generation.learned_client_endpoint_role_identity =
+        std::string{endpoint_roles[index]};
+    generation.owned_client_process_role_identity =
+        std::string{process_roles[index]};
+    generation.first_observed_ordinal = *first;
+    generation.last_observed_ordinal = *last;
+    generation.connectionless_exchange_count = *connectionless;
+    generation.connect_observed = true;
+    generation.accept_observed = true;
+    generation.first_sequenced_packet_ordinal = *first_sequenced;
+    generation.client_to_server_packet_count = *c2s;
+    generation.server_to_client_packet_count = *s2c;
+    generation.profile_identity = std::string{kStockRuntimePendingProfile};
+    return true;
+}
+
+[[nodiscard]] bool valid_reconnect_transport_document(
+    const StrictJsonValue& root) noexcept
+{
+    static constexpr std::array names{
+        std::string_view{"schema"},
+        std::string_view{"connection_generation_count"},
+        std::string_view{"generation_distinct"},
+        std::string_view{"generation_a_tail_emitter_ready_before_shutdown"},
+        std::string_view{"generation_a_controlled_shutdown"},
+        std::string_view{"generation_a_endpoint_quiet"},
+        std::string_view{"guard_continuity"},
+        std::string_view{"server_continuity"},
+        std::string_view{"relay_continuity"},
+        std::string_view{"post_resource_boundary_status"},
+        std::string_view{"candidate_status"},
+        std::string_view{"candidate_body_consumed"},
+        std::string_view{"candidate_semantic_category_assigned"},
+        std::string_view{"retired_generation_a_tail_sink"},
+        std::string_view{"retired_generation_a_server_tail_packet_count"},
+        std::string_view{"generation_b_sequenced_after_fresh_accept"},
+        std::string_view{"bounded_transport_complete"},
+        std::string_view{"generations"}};
+    const auto generations = json_property(
+        root, "generations", StrictJsonValue::Kind::array);
+    if (!json_exact_properties(root, names) ||
+        !json_string_equals(
+            root, "schema", kStockRuntimeReconnectTransportObservationSchema) ||
+        json_integer(root, "connection_generation_count", 2U) != 2U ||
+        !json_boolean_equals(root, "generation_distinct", true) ||
+        !json_boolean_equals(
+            root, "generation_a_tail_emitter_ready_before_shutdown", true) ||
+        !json_string_equals(
+            root, "generation_a_controlled_shutdown",
+            "observed_by_orchestrator") ||
+        !json_boolean_equals(root, "generation_a_endpoint_quiet", true) ||
+        !json_string_equals(
+            root, "guard_continuity", "observed_by_orchestrator") ||
+        !json_string_equals(
+            root, "server_continuity", "observed_by_orchestrator") ||
+        !json_string_equals(root, "relay_continuity", "observed") ||
+        !json_string_equals(
+            root, "post_resource_boundary_status", "evidence_pending") ||
+        !json_string_equals(root, "candidate_status", "evidence_pending") ||
+        !json_boolean_equals(root, "candidate_body_consumed", false) ||
+        !json_boolean_equals(
+            root, "candidate_semantic_category_assigned", false) ||
+        !json_string_equals(
+            root, "retired_generation_a_tail_sink", "routing_only") ||
+        !json_integer(
+            root, "retired_generation_a_server_tail_packet_count",
+            StockRuntimeCaptureHardCaps::maximum_datagrams) ||
+        !json_boolean_equals(
+            root, "generation_b_sequenced_after_fresh_accept", true) ||
+        !json_boolean_equals(root, "bounded_transport_complete", true) ||
+        generations == nullptr || generations->array.size() != 2U) {
+        return false;
+    }
+    std::array<StockRuntimeConnectionGenerationObservation, 2U> parsed;
+    return valid_reconnect_transport_generation(
+               generations->array[0U], 0U, parsed[0U]) &&
+           valid_reconnect_transport_generation(
+               generations->array[1U], 1U, parsed[1U]) &&
+           parsed[0U].last_observed_ordinal <
+               parsed[1U].first_observed_ordinal;
+}
+
+[[nodiscard]] bool valid_reconnect_orchestration_document(
+    const StrictJsonValue& root) noexcept
+{
+    static constexpr std::array names{
+        std::string_view{"schema"},
+        std::string_view{"connection_generation_count"},
+        std::string_view{"generation_distinct"},
+        std::string_view{"generation_a_process_role_identity"},
+        std::string_view{"generation_b_process_role_identity"},
+        std::string_view{"generation_a_endpoint_role_identity"},
+        std::string_view{"generation_b_endpoint_role_identity"},
+        std::string_view{"generation_a_tail_emitter_ready_before_shutdown"},
+        std::string_view{"generation_a_controlled_shutdown"},
+        std::string_view{"generation_a_endpoint_quiet"},
+        std::string_view{"generation_b_fresh_owned_process"},
+        std::string_view{"generation_b_fresh_connection_lifecycle"},
+        std::string_view{"guard_continuity"},
+        std::string_view{"server_continuity"},
+        std::string_view{"relay_continuity"},
+        std::string_view{"cleanup_status"},
+        std::string_view{"restoration_status"},
+        std::string_view{"post_resource_boundary_status"},
+        std::string_view{"candidate_status"},
+        std::string_view{"candidate_body_consumed"},
+        std::string_view{"candidate_semantic_category_assigned"},
+        std::string_view{"publication_status"}};
+    return json_exact_properties(root, names) &&
+           json_string_equals(
+               root, "schema",
+               kStockRuntimeReconnectOrchestrationAttestationSchema) &&
+           json_integer(root, "connection_generation_count", 2U) == 2U &&
+           json_boolean_equals(root, "generation_distinct", true) &&
+           json_string_equals(
+               root, "generation_a_process_role_identity",
+               kStockRuntimeGenerationAProcessRole) &&
+           json_string_equals(
+               root, "generation_b_process_role_identity",
+               kStockRuntimeGenerationBProcessRole) &&
+           json_string_equals(
+               root, "generation_a_endpoint_role_identity",
+               kStockRuntimeGenerationAEndpointRole) &&
+           json_string_equals(
+               root, "generation_b_endpoint_role_identity",
+               kStockRuntimeGenerationBEndpointRole) &&
+           json_boolean_equals(
+               root, "generation_a_tail_emitter_ready_before_shutdown",
+               true) &&
+           json_boolean_equals(
+               root, "generation_a_controlled_shutdown", true) &&
+           json_boolean_equals(root, "generation_a_endpoint_quiet", true) &&
+           json_boolean_equals(
+               root, "generation_b_fresh_owned_process", true) &&
+           json_string_equals(
+               root, "generation_b_fresh_connection_lifecycle",
+               "observed_by_relay") &&
+           json_boolean_equals(root, "guard_continuity", true) &&
+           json_boolean_equals(root, "server_continuity", true) &&
+           json_boolean_equals(root, "relay_continuity", true) &&
+           json_string_equals(root, "cleanup_status", "exact") &&
+           json_string_equals(root, "restoration_status", "wrapper_pending") &&
+           json_string_equals(
+               root, "post_resource_boundary_status", "evidence_pending") &&
+           json_string_equals(root, "candidate_status", "evidence_pending") &&
+           json_boolean_equals(root, "candidate_body_consumed", false) &&
+           json_boolean_equals(
+               root, "candidate_semantic_category_assigned", false) &&
+           json_string_equals(root, "publication_status", "staged");
+}
+
+[[nodiscard]] bool read_final_boundary(
+    const StrictJsonValue& object,
+    StockRuntimeGenerationBoundaryObservation& boundary) noexcept
+{
+    static constexpr std::array names{
+        std::string_view{"observed"},
+        std::string_view{"replay_payload_ordinal"},
+        std::string_view{"corpus_observed_ordinal"},
+        std::string_view{"delivery_ordinal"},
+        std::string_view{"byte_offset"},
+        std::string_view{"bit_offset"},
+        std::string_view{"source_payload_byte_count"},
+        std::string_view{"source_payload_bit_count"},
+        std::string_view{"next_unconsumed_bit_count"}};
+    const auto replay_payload = json_integer(
+        object, "replay_payload_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams - 1U);
+    const auto observed = json_integer(
+        object, "corpus_observed_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams - 1U);
+    const auto delivery = json_integer(
+        object, "delivery_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams * 2U - 1U);
+    const auto byte_offset = json_integer(
+        object, "byte_offset", StockRuntimeCaptureHardCaps::maximum_payload_bytes);
+    const auto bit_offset = json_integer(object, "bit_offset", 7U);
+    const auto source_bytes = json_integer(
+        object, "source_payload_byte_count",
+        StockRuntimeCaptureHardCaps::maximum_decompressed_bytes);
+    const auto source_bits = json_integer(
+        object, "source_payload_bit_count",
+        StockRuntimeCaptureHardCaps::maximum_decompressed_bytes * 8U);
+    const auto remaining = json_integer(
+        object, "next_unconsumed_bit_count",
+        StockRuntimeCaptureHardCaps::maximum_decompressed_bytes * 8U);
+    if (!json_exact_properties(object, names) ||
+        !json_boolean_equals(object, "observed", true) || !replay_payload ||
+        !observed || !delivery || !byte_offset || !bit_offset || !source_bytes ||
+        *source_bytes == 0U || !source_bits || !remaining) {
+        return false;
+    }
+    boundary = {true, *replay_payload, *observed, *delivery, *byte_offset,
+                *bit_offset, *source_bytes, *source_bits, *remaining};
+    return true;
+}
+
+[[nodiscard]] bool read_optional_candidate_byte(
+    const StrictJsonValue& object,
+    const std::string_view name,
+    std::optional<std::uint8_t>& result) noexcept
+{
+    if (json_property(object, name, StrictJsonValue::Kind::null_value) !=
+        nullptr) {
+        result.reset();
+        return true;
+    }
+    const auto value = json_integer(object, name, 255U);
+    if (!value) return false;
+    result = static_cast<std::uint8_t>(*value);
+    return true;
+}
+
+[[nodiscard]] bool read_final_candidate(
+    const StrictJsonValue& object,
+    StockRuntimeGenerationCandidateObservation& candidate) noexcept
+{
+    static constexpr std::array names{
+        std::string_view{"observed"},
+        std::string_view{"candidate_bit_width"},
+        std::string_view{"numeric_candidate"},
+        std::string_view{"bounded_bit_prefix"},
+        std::string_view{"byte_aligned"},
+        std::string_view{"body_consumed"},
+        std::string_view{"semantic_category_assigned"}};
+    const auto width = json_integer(object, "candidate_bit_width", 8U);
+    if (!json_exact_properties(object, names) || !width || *width == 0U ||
+        !json_boolean_equals(object, "observed", true) ||
+        !read_optional_candidate_byte(
+            object, "numeric_candidate", candidate.numeric_candidate) ||
+        !read_optional_candidate_byte(
+            object, "bounded_bit_prefix", candidate.bounded_bit_prefix) ||
+        candidate.numeric_candidate.has_value() ==
+            candidate.bounded_bit_prefix.has_value() ||
+        !json_boolean_equals(object, "body_consumed", false) ||
+        !json_boolean_equals(object, "semantic_category_assigned", false)) {
+        return false;
+    }
+    candidate.observed = true;
+    candidate.candidate_bit_width = *width;
+    candidate.byte_aligned =
+        json_boolean_equals(object, "byte_aligned", true);
+    candidate.body_consumed = false;
+    candidate.semantic_category_assigned = false;
+    return json_boolean_equals(
+        object, "byte_aligned", candidate.byte_aligned);
+}
+
+[[nodiscard]] bool read_final_generation(
+    const StrictJsonValue& object,
+    const std::size_t index,
+    StockRuntimeConnectionGenerationObservation& generation) noexcept
+{
+    static constexpr std::array names{
+        std::string_view{"generation_ordinal"},
+        std::string_view{"profile_identity"},
+        std::string_view{"owned_client_process_role_identity"},
+        std::string_view{"learned_client_endpoint_role_identity"},
+        std::string_view{"fresh_owned_client_process"},
+        std::string_view{"learned_client_endpoint_observed"},
+        std::string_view{"learned_client_endpoint_distinct_from_previous"},
+        std::string_view{"first_observed_ordinal"},
+        std::string_view{"last_observed_ordinal"},
+        std::string_view{"connectionless_exchange_count"},
+        std::string_view{"connect_observed"},
+        std::string_view{"accept_observed"},
+        std::string_view{"first_sequenced_packet_ordinal"},
+        std::string_view{"client_to_server_packet_count"},
+        std::string_view{"server_to_client_packet_count"},
+        std::string_view{"controlled_client_shutdown_observed"},
+        std::string_view{"retired_client_endpoint_quiet"},
+        std::string_view{"exact_post_resource_boundary"},
+        std::string_view{"candidate_observation"}};
+    if (!json_exact_properties(object, names) || index >= 2U) return false;
+    const std::array endpoint_roles{
+        kStockRuntimeGenerationAEndpointRole,
+        kStockRuntimeGenerationBEndpointRole};
+    const std::array process_roles{
+        kStockRuntimeGenerationAProcessRole,
+        kStockRuntimeGenerationBProcessRole};
+    const auto ordinal = json_integer(object, "generation_ordinal", 2U);
+    const auto first = json_integer(
+        object, "first_observed_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams - 1U);
+    const auto last = json_integer(
+        object, "last_observed_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams - 1U);
+    const auto connectionless = json_integer(
+        object, "connectionless_exchange_count",
+        StockRuntimeCaptureHardCaps::maximum_datagrams);
+    const auto first_sequenced = json_integer(
+        object, "first_sequenced_packet_ordinal",
+        StockRuntimeCaptureHardCaps::maximum_datagrams - 1U);
+    const auto c2s = json_integer(
+        object, "client_to_server_packet_count",
+        StockRuntimeCaptureHardCaps::maximum_datagrams);
+    const auto s2c = json_integer(
+        object, "server_to_client_packet_count",
+        StockRuntimeCaptureHardCaps::maximum_datagrams);
+    const auto* boundary = json_property(
+        object, "exact_post_resource_boundary", StrictJsonValue::Kind::object);
+    const auto* candidate = json_property(
+        object, "candidate_observation", StrictJsonValue::Kind::object);
+    if (!ordinal || *ordinal != index + 1U || !first || !last ||
+        *first > *last || !connectionless || *connectionless == 0U ||
+        !first_sequenced || *first_sequenced < *first ||
+        *first_sequenced > *last || !c2s || *c2s == 0U || !s2c ||
+        *s2c == 0U ||
+        !json_string_equals(
+            object, "profile_identity", kStockRuntimePendingProfile) ||
+        !json_string_equals(
+            object, "owned_client_process_role_identity",
+            process_roles[index]) ||
+        !json_string_equals(
+            object, "learned_client_endpoint_role_identity",
+            endpoint_roles[index]) ||
+        !json_boolean_equals(object, "fresh_owned_client_process", true) ||
+        !json_boolean_equals(
+            object, "learned_client_endpoint_observed", true) ||
+        !json_boolean_equals(
+            object, "learned_client_endpoint_distinct_from_previous",
+            index != 0U) ||
+        !json_boolean_equals(object, "connect_observed", true) ||
+        !json_boolean_equals(object, "accept_observed", true) ||
+        !json_boolean_equals(
+            object, "controlled_client_shutdown_observed", index == 0U) ||
+        !json_boolean_equals(
+            object, "retired_client_endpoint_quiet", index == 0U) ||
+        boundary == nullptr || candidate == nullptr) {
+        return false;
+    }
+    generation.generation_ordinal = *ordinal;
+    generation.profile_identity = std::string{kStockRuntimePendingProfile};
+    generation.owned_client_process_role_identity =
+        std::string{process_roles[index]};
+    generation.learned_client_endpoint_role_identity =
+        std::string{endpoint_roles[index]};
+    generation.owned_client_process_observed = true;
+    generation.fresh_owned_client_process = true;
+    generation.learned_client_endpoint_observed = true;
+    generation.learned_client_endpoint_distinct_from_previous = index != 0U;
+    generation.first_observed_ordinal = *first;
+    generation.last_observed_ordinal = *last;
+    generation.connectionless_exchange_count = *connectionless;
+    generation.connect_observed = true;
+    generation.accept_observed = true;
+    generation.first_sequenced_packet_ordinal = *first_sequenced;
+    generation.client_to_server_packet_count = *c2s;
+    generation.server_to_client_packet_count = *s2c;
+    generation.controlled_client_shutdown_observed = index == 0U;
+    generation.retired_client_endpoint_quiet = index == 0U;
+    return read_final_boundary(
+               *boundary, generation.exact_post_resource_boundary) &&
+           read_final_candidate(*candidate, generation.candidate_observation);
+}
+
+[[nodiscard]] bool valid_reconnect_final_document(
+    const StrictJsonValue& root)
+{
+    static constexpr std::array names{
+        std::string_view{"schema"},
+        std::string_view{"connection_generation_count"},
+        std::string_view{"exact_boundary_count"},
+        std::string_view{"runtime_candidate_count"},
+        std::string_view{"generation_distinct"},
+        std::string_view{"candidate_conflict"},
+        std::string_view{"guard_continuity"},
+        std::string_view{"server_continuity"},
+        std::string_view{"relay_continuity"},
+        std::string_view{"cleanup_exact"},
+        std::string_view{"restoration_exact"},
+        std::string_view{"candidate_body_consumed"},
+        std::string_view{"candidate_semantic_category_assigned"},
+        std::string_view{"retired_generation_a_tail_sink"},
+        std::string_view{"retired_generation_a_server_tail_packet_count"},
+        std::string_view{"generation_b_sequenced_after_fresh_accept"},
+        std::string_view{"generations"}};
+    const auto* generations = json_property(
+        root, "generations", StrictJsonValue::Kind::array);
+    if (!json_exact_properties(root, names) ||
+        !json_string_equals(
+            root, "schema", kStockRuntimeReconnectObservationSchema) ||
+        json_integer(root, "connection_generation_count", 2U) != 2U ||
+        json_integer(root, "exact_boundary_count", 2U) != 2U ||
+        json_integer(root, "runtime_candidate_count", 2U) != 2U ||
+        !json_boolean_equals(root, "generation_distinct", true) ||
+        !json_boolean_equals(root, "candidate_conflict", false) ||
+        !json_boolean_equals(root, "guard_continuity", true) ||
+        !json_boolean_equals(root, "server_continuity", true) ||
+        !json_boolean_equals(root, "relay_continuity", true) ||
+        !json_boolean_equals(root, "cleanup_exact", true) ||
+        !json_boolean_equals(root, "restoration_exact", true) ||
+        !json_boolean_equals(root, "candidate_body_consumed", false) ||
+        !json_boolean_equals(
+            root, "candidate_semantic_category_assigned", false) ||
+        !json_string_equals(
+            root, "retired_generation_a_tail_sink", "routing_only") ||
+        !json_integer(
+            root, "retired_generation_a_server_tail_packet_count",
+            StockRuntimeCaptureHardCaps::maximum_datagrams) ||
+        !json_boolean_equals(
+            root, "generation_b_sequenced_after_fresh_accept", true) ||
+        generations == nullptr || generations->array.size() != 2U) {
+        return false;
+    }
+    std::array<StockRuntimeConnectionGenerationObservation, 2U> parsed;
+    if (!read_final_generation(generations->array[0U], 0U, parsed[0U]) ||
+        !read_final_generation(generations->array[1U], 1U, parsed[1U])) {
+        return false;
+    }
+    StockRuntimeReconnectLifecycleInput input;
+    input.generations = parsed;
+    input.guard_continuous_between_generations = true;
+    input.server_continuous_between_generations = true;
+    input.relay_continuous_between_generations = true;
+    input.cleanup_exact = true;
+    input.restoration_exact = true;
+    input.transactional_publication_ready = true;
+    return static_cast<bool>(validate_stock_runtime_reconnect_lifecycle(input));
+}
+
+using StrictDocumentValidator = bool (*)(const StrictJsonValue&);
+
+[[nodiscard]] std::optional<StockRuntimeCorpusDocument>
+read_strict_reconnect_document(
+    const fs::path& path,
+    const std::string_view expected_schema,
+    const std::size_t maximum_bytes,
+    const StrictDocumentValidator validator,
+    StockRuntimeCaptureCorpusError& error)
+{
+    auto read = read_bounded_regular_file(path, maximum_bytes);
+    if (!read.bytes) {
+        error = std::move(*read.error);
+        return std::nullopt;
+    }
+    const auto text = bytes_as_string(*read.bytes);
+    auto parsed = StrictJsonReader{text}.read();
+    if (!parsed || parsed->kind != StrictJsonValue::Kind::object ||
+        !validator(*parsed)) {
+        error = StockRuntimeCaptureCorpusError{
+            StockRuntimeCaptureCorpusErrorCode::invalid_json, 0U,
+            "reconnect document violates its exact bounded schema",
+            std::nullopt};
+        return std::nullopt;
+    }
+    const auto digest = hash::sha256(*read.bytes);
+    if (!digest) {
+        error = StockRuntimeCaptureCorpusError{
+            StockRuntimeCaptureCorpusErrorCode::structural_hash_failed, 0U,
+            "reconnect document structural hash could not be computed",
+            std::nullopt};
+        return std::nullopt;
+    }
+    return StockRuntimeCorpusDocument{
+        std::string{expected_schema}, hash::sha256_hex(*digest)};
 }
 
 [[nodiscard]] std::optional<StockRuntimeCorpusDocument> read_document(
@@ -1212,6 +2026,9 @@ StockRuntimeCaptureCorpusState::StockRuntimeCaptureCorpusState(
     StockRuntimeCorpusDocument isolation_attestation,
     StockRuntimeCorpusDocument restoration_attestation,
     std::optional<StockRuntimeCorpusDocument> research_run_metadata,
+    std::optional<StockRuntimeCorpusDocument> reconnect_transport_observation,
+    std::optional<StockRuntimeCorpusDocument> reconnect_orchestration_attestation,
+    std::optional<StockRuntimeCorpusDocument> reconnect_observation,
     std::optional<StockRuntimeAcceptedManifestClaims> accepted_manifest_claims,
     std::string structural_sha256) noexcept
     : run_id_{std::move(run_id)},
@@ -1226,6 +2043,11 @@ StockRuntimeCaptureCorpusState::StockRuntimeCaptureCorpusState(
       isolation_attestation_{std::move(isolation_attestation)},
       restoration_attestation_{std::move(restoration_attestation)},
       research_run_metadata_{std::move(research_run_metadata)},
+      reconnect_transport_observation_{
+          std::move(reconnect_transport_observation)},
+      reconnect_orchestration_attestation_{
+          std::move(reconnect_orchestration_attestation)},
+      reconnect_observation_{std::move(reconnect_observation)},
       accepted_manifest_claims_{std::move(accepted_manifest_claims)},
       structural_sha256_{std::move(structural_sha256)}
 {
@@ -1282,6 +2104,21 @@ const std::optional<StockRuntimeCorpusDocument>&
 StockRuntimeCaptureCorpusState::research_run_metadata() const noexcept
 {
     return research_run_metadata_;
+}
+const std::optional<StockRuntimeCorpusDocument>&
+StockRuntimeCaptureCorpusState::reconnect_transport_observation() const noexcept
+{
+    return reconnect_transport_observation_;
+}
+const std::optional<StockRuntimeCorpusDocument>&
+StockRuntimeCaptureCorpusState::reconnect_orchestration_attestation() const noexcept
+{
+    return reconnect_orchestration_attestation_;
+}
+const std::optional<StockRuntimeCorpusDocument>&
+StockRuntimeCaptureCorpusState::reconnect_observation() const noexcept
+{
+    return reconnect_observation_;
 }
 const std::optional<StockRuntimeAcceptedManifestClaims>&
 StockRuntimeCaptureCorpusState::accepted_manifest_claims() const noexcept
@@ -1382,12 +2219,17 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
                            "run directory enumeration failed");
         }
         const auto name = item.path().filename().string();
+        const bool reconnect_document =
+            name == "reconnect-transport-observation.staged.json" ||
+            name == "reconnect-orchestration.staged.json" ||
+            name == "reconnect-observation.json";
         if (name == "research-run-metadata.json") {
             if (policy == StockRuntimeCaptureCorpusLoadPolicy::prepublication) {
                 return failure(StockRuntimeCaptureCorpusErrorCode::unexpected_manifest,
                                "prepublication corpus already has a final run manifest");
             }
-        } else if (!required_root_entries.contains(name)) {
+        } else if (!reconnect_document &&
+                   !required_root_entries.contains(name)) {
             return failure(StockRuntimeCaptureCorpusErrorCode::unexpected_file,
                            "run directory contains an unexpected entry");
         }
@@ -1460,6 +2302,32 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     if (!capture_parse || !capture_parse.metadata) {
         return failure(StockRuntimeCaptureCorpusErrorCode::invalid_capture_metadata,
                        "capture metadata v1 is invalid");
+    }
+    const bool reconnect_capture = capture_parse.metadata->scenario ==
+        StockRuntimeCaptureScenario::reconnect;
+    const bool has_reconnect_transport = seen_root_entries.contains(
+        "reconnect-transport-observation.staged.json");
+    const bool has_reconnect_orchestration = seen_root_entries.contains(
+        "reconnect-orchestration.staged.json");
+    const bool has_reconnect_final = seen_root_entries.contains(
+        "reconnect-observation.json");
+    if (!reconnect_capture &&
+        (has_reconnect_transport || has_reconnect_orchestration ||
+         has_reconnect_final)) {
+        return failure(
+            StockRuntimeCaptureCorpusErrorCode::unexpected_manifest,
+            "non-reconnect corpus contains a reconnect-only document");
+    }
+    if (reconnect_capture &&
+        has_reconnect_transport != has_reconnect_orchestration) {
+        return failure(
+            StockRuntimeCaptureCorpusErrorCode::missing_manifest,
+            "reconnect staged transport and orchestration documents are atomic");
+    }
+    if (prepublication && has_reconnect_final) {
+        return failure(
+            StockRuntimeCaptureCorpusErrorCode::unexpected_manifest,
+            "prepublication reconnect corpus already has a final observation");
     }
 
     StockRuntimeCaptureCorpusError document_error;
@@ -1551,6 +2419,53 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
                 return failure(
                     StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
                     "accepted final manifest claims could not be typed");
+            }
+        }
+    }
+
+    std::optional<StockRuntimeCorpusDocument> reconnect_transport;
+    std::optional<StockRuntimeCorpusDocument> reconnect_orchestration;
+    std::optional<StockRuntimeCorpusDocument> reconnect_final;
+    if (reconnect_capture) {
+        if ((prepublication || manifest_accepted) &&
+            (!has_reconnect_transport || !has_reconnect_orchestration)) {
+            return failure(
+                StockRuntimeCaptureCorpusErrorCode::missing_manifest,
+                "publication-ready reconnect corpus lacks staged lifecycle proof");
+        }
+        if (manifest_accepted != has_reconnect_final) {
+            return failure(
+                manifest_accepted
+                    ? StockRuntimeCaptureCorpusErrorCode::missing_manifest
+                    : StockRuntimeCaptureCorpusErrorCode::unexpected_manifest,
+                "final reconnect observation exists only for an accepted run");
+        }
+        if (has_reconnect_transport) {
+            reconnect_transport = read_strict_reconnect_document(
+                absolute / "reconnect-transport-observation.staged.json",
+                kStockRuntimeReconnectTransportObservationSchema,
+                limits_.maximum_manifest_bytes,
+                valid_reconnect_transport_document, document_error);
+            if (!reconnect_transport) {
+                return {std::nullopt, std::move(document_error)};
+            }
+            reconnect_orchestration = read_strict_reconnect_document(
+                absolute / "reconnect-orchestration.staged.json",
+                kStockRuntimeReconnectOrchestrationAttestationSchema,
+                limits_.maximum_manifest_bytes,
+                valid_reconnect_orchestration_document, document_error);
+            if (!reconnect_orchestration) {
+                return {std::nullopt, std::move(document_error)};
+            }
+        }
+        if (has_reconnect_final) {
+            reconnect_final = read_strict_reconnect_document(
+                absolute / "reconnect-observation.json",
+                kStockRuntimeReconnectObservationSchema,
+                limits_.maximum_manifest_bytes,
+                valid_reconnect_final_document, document_error);
+            if (!reconnect_final) {
+                return {std::nullopt, std::move(document_error)};
             }
         }
     }
@@ -1883,6 +2798,17 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     canonical.append("isolation-attestation=validated-v1");
     canonical.push_back('|');
     canonical.append("restoration-attestation=validated-v1");
+    if (reconnect_transport && reconnect_orchestration) {
+        canonical.append("|reconnect-transport=")
+            .append(reconnect_transport->structural_sha256);
+        canonical.append("|reconnect-orchestration=")
+            .append(reconnect_orchestration->structural_sha256);
+    }
+    // The final reconnect document is created from this prepublication replay
+    // and therefore cannot feed back into the transport identity without a
+    // hash cycle. Its own exact byte digest remains exposed by
+    // reconnect_observation(); the staged transport/orchestration inputs above
+    // are the reconnect material bound into the stable corpus hash.
     for (const auto& datagram : observed) {
         canonical.push_back('|');
         canonical.append(std::to_string(datagram.journal().observed_ordinal));
@@ -1966,6 +2892,9 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
             std::move(delivered_c2s), std::move(delivered_s2c),
             std::move(*version), std::move(*isolation),
             std::move(*restoration), std::move(research_run),
+            std::move(reconnect_transport),
+            std::move(reconnect_orchestration),
+            std::move(reconnect_final),
             std::move(accepted_manifest_claims),
             std::move(structural_hex)},
         std::nullopt,

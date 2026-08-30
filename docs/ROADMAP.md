@@ -955,12 +955,42 @@ walker agreement. It may retain only one unconsumed neutral
 current checkout honestly contains zero accepted real M4.7.1.1 runs and no
 threshold evidence JSON.
 
-The current owned orchestrator is single-session. A `reconnect` campaign
-request therefore fails before backup/run/stock launch with
-`reconnect_lifecycle_pending`; it is not counted as either required reconnect
-observation. Baseline/idle acceptance also requires at least 100 delivered
-sequenced S2C packets per run. Until two controlled generations and both exact
-boundaries are implemented, the 24-run threshold remains honestly pending.
+### M4.7.1.1.1 — Research-copy topology, reconnect lifecycle and campaign
+
+**Status: implementation complete; real corpus and evidence remain pending.**
+The handle-based research-copy helper now inventories source topology, rejects
+escaped/unsupported links and ADS, materializes supported contained directory
+links and source hardlinks into an ordinary independent destination, and binds
+the result to the v2 preparation manifest. Inspection is read-only; unsafe
+topology prevents materialization and all later stock launch.
+
+The owned orchestrator now supports a real two-generation `reconnect` run
+inside one uninterrupted guard/relay/HLDS lifetime. While generation A is
+alive, the relay binds a private send-only retired-tail emitter, switches later
+A-directed server traffic to it and acknowledges readiness. The orchestrator
+then stops A and proves its absence; a second signal starts the relay's bounded
+source-quiet interval, whose acknowledgement is required before a fresh B
+process may launch. B must use a distinct learned endpoint and complete a new
+connect/ACCEPT lifecycle before sequenced traffic. Exact-HLDS A-tail datagrams
+remain byte-preserved and accounted, but are excluded from generation B replay
+and all per-run/campaign packet thresholds.
+
+The deterministic runner first requires a distinct accepted
+`boot_camp`/`baseline` canary, stored and hash-bound in an exact ignored sibling;
+canary failure starts no campaign run and the canary is not a matrix slot. An
+unbound canary is quarantined and never recovered or rebound. Campaign progress
+uses exact-prior, no-replace manifest publication so mutation fails closed. The
+campaign itself has exactly 24 slots: six `boot_camp`
+baseline, four `crossfire` baseline, four `stalkyard` baseline, four
+`crossfire` idle-runtime, two `boot_camp` drop, one `crossfire` duplicate, one
+`stalkyard` reorder and two `boot_camp` reconnect runs. Promotion requires the
+canary plus all 24 accepted runs (25 accepted observations total), at least 100
+threshold-eligible sequenced S2C packets in
+every run, at least 1,000 in aggregate, four reconnect generations, at least
+26 exact boundaries and 26 matching neutral candidates, plus identical output
+from two checker passes and two independent-walker passes. No real slot has yet
+been accepted, so the campaign and evidence thresholds remain pending and no
+tracked runtime evidence JSON exists.
 
 M4.7.1.2 retains evidence-backed runtime opcode/body grammar and catalog
 promotion. It cannot be inferred from the first candidate alone.
@@ -1067,8 +1097,10 @@ verification boundaries remain offline. M4.6.3.3 is complete only for typed
 synthetic authority. M4.7.1 supplies the bounded pending stock
 runtime/entity/authority evidence boundary. M4.7.1.1 supplies the isolated,
 capability-gated capture and neutral first-observation boundary without adding
-runtime semantics. M4.7.1.2 owns that grammar; M4.7.2 stock usercmd
-envelope/checksum follows, then M4.7.3 live runtime work.
+runtime semantics. M4.7.1.1.1 supplies the handle-safe research copy, exact
+resumable 24-run campaign and two-generation reconnect lifecycle, while its
+real evidence threshold remains pending. M4.7.1.2 owns the runtime grammar;
+M4.7.2 stock usercmd envelope/checksum follows, then M4.7.3 live runtime work.
 
 Every milestone retains these gates:
 

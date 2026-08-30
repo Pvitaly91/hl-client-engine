@@ -15,6 +15,9 @@ Every local run is an exact child of ignored
     version-observation.json
     isolation-attestation.json
     restoration-attestation.json
+    reconnect-transport-observation.staged.json   # reconnect only
+    reconnect-orchestration.staged.json           # reconnect only
+    reconnect-observation.json                    # accepted reconnect only
     transport-journal.jsonl
     raw/
     logs/
@@ -44,6 +47,16 @@ retains those staged leaves, requires the final trio plus the run manifest, and
 requires every staged/final pair to have the same exact structural SHA-256.
 This prevents a mixed or partially published attestation generation from
 being treated as one accepted corpus.
+
+Reconnect leaves are scenario-dependent and fail closed. A non-reconnect run
+rejects all three. Reconnect prepublication accepts only the atomic staged
+transport/orchestration pair. Published accepted reconnect requires that pair
+plus strict `hlclient.stock-runtime-reconnect-observation.v1`; incomplete
+publication cannot contain the final leaf. The two staged document hashes bind
+the corpus structural hash. The final post-replay leaf is exposed separately,
+avoiding a manifest/hash publication cycle. These schemas contain bounded role
+tokens and counters, never endpoints, ports, PIDs, paths, candidate bodies or
+semantic names.
 
 `capture-metadata.json` is the immutable relay source for scenario identity;
 only the three documented relay-to-campaign aliases are canonicalized.
@@ -76,14 +89,21 @@ The checker publishes both populations explicitly. `delivered-sequenced-c2s`,
 peer-delivered journal emission, including duplicate and reordered-old
 datagrams. Its existing `sequenced-c2s`, `sequenced-s2c` and `fragments`
 values are the replay-accepted-new subset after sequence suppression. Final
-run manifests name that population explicitly as
+run manifests name the peer-delivered population as
 `delivered_sequenced_c2s_count`, `delivered_sequenced_s2c_count` and
-`delivered_fragment_datagram_count`; campaign thresholds bind only to those
-fields. The checker also publishes aggregate `duplicate-packets` and
+`delivered_fragment_datagram_count`. The checker also publishes aggregate
+`duplicate-packets` and
 `old-packets`, and verification requires accepted-new plus those two
 suppressed classes to equal the total delivered sequenced population. Accepted
 replay fragments remain a subset of delivered fragment datagrams because a
 suppressed packet may itself carry a fragment flag.
+
+Campaign totals and the 100-S2C per-run floor bind peer-delivered counts for
+normal slots. For reconnect they instead bind the `sequenced-*` sum of
+independently replayed generation A and B. Exact-HLDS sequenced traffic after A retirement and before
+B's fresh ACCEPT remains byte-preserved as
+`retired_generation_a_server_tail_packet_count`, but is excluded from B replay,
+generation proof and every campaign packet threshold.
 
 For a published first-observation check, the loader exposes the final replay,
 cursor, candidate, reassembly/decompression and replay-hash claims as one
@@ -95,19 +115,18 @@ diagnostic scenarios deliberately defer acceptance and print false.
 
 Acceptance requires verified isolation/version/process ownership, bounded
 transport completion, exact restoration, no external drift, valid corpus,
-successful offline sign-on replay, exact post-resource boundary and an
-unconsumed first observation. Every baseline and idle run additionally needs
-at least 100 delivered sequenced S2C packets; perturbation runs need delivered
-sequenced server traffic. Transport completion alone is insufficient.
+successful offline sign-on replay, exact post-resource boundary, an unconsumed
+first observation and at least 100 threshold-eligible S2C packets.
+Transport completion alone is insufficient.
 
-No reconnect corpus can be accepted from the current single-session
-orchestrator. Such a request fails before run publication with
-`reconnect_lifecycle_pending` until two controlled generations and both exact
-boundaries can be attested.
-
-Per-run metadata records `candidate_stability=single_observation`. Cross-run
-`stable_observation` is a corpus-verifier conclusion, never something one run
-or one checker invocation may assert by itself.
+Accepted reconnect requires two controlled generations, two exact boundaries,
+two matching neutral candidates, distinct process/endpoint roles, continuous
+guard/server/relay, exact cleanup/restoration and a fresh B ACCEPT before B
+sequenced traffic. Its manifest adds exact claims `2/2/2/true/false` for
+generation/boundary/candidate counts, distinctness and conflict; other
+scenarios reject those fields. Normal runs record `single_observation`.
+Reconnect records `stable_observation` only from its two independent replays;
+campaign-wide stability remains verifier-owned.
 
 Raw datagrams, logs and private binary fingerprints stay under ignored local
 paths. CI does not upload them. Authentication bytes, player/Steam identity,
