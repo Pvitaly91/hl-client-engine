@@ -960,9 +960,10 @@ threshold evidence JSON.
 **Status: implementation complete; real corpus and evidence remain pending.**
 The handle-based research-copy helper now inventories source topology, rejects
 escaped/unsupported links and ADS, materializes supported contained directory
-links and source hardlinks into an ordinary independent destination, and binds
-the result to the v2 preparation manifest. Inspection is read-only; unsafe
-topology prevents materialization and all later stock launch.
+links and source hardlinks into an ordinary independent destination, and
+originally bound the result to the v2 preparation manifest. M4.7.1.1.3 moves
+new copies to v3 while capture retains v1/v2 readers. Inspection is read-only;
+unsafe topology prevents materialization and all later stock launch.
 
 The owned orchestrator now supports a real two-generation `reconnect` run
 inside one uninterrupted guard/relay/HLDS lifetime. While generation A is
@@ -994,6 +995,25 @@ tracked runtime evidence JSON exists.
 
 M4.7.1.2 retains evidence-backed runtime opcode/body grammar and catalog
 promotion. It cannot be inferred from the first candidate alone.
+
+### M4.7.1.1.3 — Exact external-target review and approval
+
+**Status: implementation boundary present; no real approval or stock evidence
+is claimed by this entry.** A source-only `-ReviewExternalTargets` operation, a
+separate `approve_stock_runtime_external_targets.ps1` authorization step and
+materialization with `-ExternalTargetApprovalManifest` keep review, approval
+and copying distinct. Approval is exact, local, bounded and expiring. It
+permits only reviewed non-executable, non-mutable external directory content
+and never arbitrary external links.
+
+The materializer must independently validate review/approval and source/target
+stability, create only an ordinary new destination, and publish preparation
+manifest v3. Active preflight validates v3 and the live prepared tree, then
+requires one exact repository-local ignored approval artifact whose current
+SHA-256 matches the reviewed v3 digest. Downstream provenance carries only a
+path-free external-target profile/count. Private review paths remain ignored
+and local. Review/approval adds no runtime semantic interpretation or evidence
+and cannot satisfy any campaign threshold.
 M4.7.2 retains the stock usercmd envelope/checksum, exact acknowledgement
 correlation and project-to-stock command acceptance. M4.7.3 retains the live
 connected runtime/render loop. M3.3 retains download/cache.

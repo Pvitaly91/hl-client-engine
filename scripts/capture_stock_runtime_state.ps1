@@ -176,6 +176,7 @@ $markerName = '.hlclient-research-isolated'
 $markerText = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
 $pendingMarkerName = '.hlclient-research-pending'
 $preparationManifestName = '.hlclient-research-preparation.json'
+$externalApprovalName = 'external-target-approval.json'
 $activeCaptureToken = 'HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1'
 $maximumEntries = 199999
 $maximumResearchBytes = [Int64]17179869184
@@ -349,6 +350,49 @@ function Get-BoundedItems {
 function Get-FileSha256 {
     param([string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+}
+
+function Assert-ExternalApprovalDigestAvailable {
+    param([string]$ExpectedSha256)
+
+    $reviewParent = [IO.Path]::GetFullPath((Join-Path `
+            $manualRoot 'stock-runtime-source-review')).TrimEnd('\', '/')
+    if (-not (Test-Path -LiteralPath $reviewParent -PathType Container)) {
+        throw 'Reviewed research copy lacks its local approval artifact.'
+    }
+    Assert-NoReparsePointInExistingPath $reviewParent `
+        'external-target approval root'
+    Assert-OnlyDefaultDataStream $reviewParent 'external-target approval root'
+
+    $reviewRoots = @(Get-ChildItem -LiteralPath $reviewParent -Force `
+            -Directory -ErrorAction Stop)
+    if ($reviewRoots.Count -gt 1024) {
+        throw 'External-target approval root exceeds its review bound.'
+    }
+    $digestMatchCount = 0
+    foreach ($reviewRoot in $reviewRoots) {
+        if ($reviewRoot.Name -cnotmatch '^[0-9a-f]{32}$') { continue }
+        if (($reviewRoot.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'External-target approval review root must not be a reparse point.'
+        }
+        $candidate = Join-Path $reviewRoot.FullName $externalApprovalName
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            ($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+            $item.Length -lt 1 -or $item.Length -gt 65536) {
+            throw 'External-target approval artifact is not a bounded ordinary file.'
+        }
+        Assert-OnlyDefaultDataStream $candidate `
+            'external-target approval artifact'
+        Assert-NoHardLink $candidate 'external-target approval artifact'
+        $observed = (Get-FileSha256 $candidate).ToLowerInvariant()
+        if ($observed -ceq $ExpectedSha256) { ++$digestMatchCount }
+    }
+    if ($digestMatchCount -ne 1) {
+        throw 'Reviewed research copy approval digest is not backed by one exact local artifact.'
+    }
 }
 
 function Read-BoundedAsciiMarker {
@@ -2220,7 +2264,150 @@ function Assert-ResearchPreparationManifest {
             $manifest.server_launcher_sha256 -cne $inventory.ServerSha256) {
             throw 'Research preparation manifest v1 inventory disagrees with the tree.'
         }
-        return [string]$manifest.schema
+        return [pscustomobject]@{
+            Schema = [string]$manifest.schema
+            ExternalTargetProfile = 'none'
+            ExternalTargetCount = [Int64]0
+        }
+    }
+
+    if ([string]$manifest.schema -ceq
+        'hlclient.stock-runtime-research-preparation.v3') {
+        $expected = @(
+            'schema', 'marker', 'preparation_profile',
+            'source_root_identity_fingerprint',
+            'source_inventory_entries', 'source_inventory_bytes',
+            'source_inventory_sha256',
+            'contained_materialized_link_count',
+            'approved_external_materialized_link_count',
+            'source_hardlink_count',
+            'destination_entry_count', 'destination_byte_count',
+            'destination_inventory_sha256',
+            'destination_reparse_count', 'destination_hardlink_count',
+            'destination_ads_count', 'external_approval_sha256',
+            'external_classification_summary', 'executable_target_count',
+            'mutable_state_target_count', 'source_unchanged_status',
+            'external_targets_unchanged_status', 'evidence_eligibility',
+            'external_target_profile',
+            'client_binary_private_identity_reference',
+            'server_binary_private_identity_reference', 'paths_recorded',
+            'preparation_status')
+        Assert-ExactJsonProperties $manifest $expected `
+            'research preparation manifest v3'
+
+        if ($manifest.marker -cne $markerText -or
+            -not ($manifest.paths_recorded -is [bool]) -or
+            $manifest.paths_recorded -ne $false -or
+            $manifest.source_unchanged_status -cne 'verified' -or
+            $manifest.external_targets_unchanged_status -cne 'verified') {
+            throw 'Research preparation manifest v3 policy is invalid.'
+        }
+
+        # Evidence eligibility is checked before any active-capture tool or WFP
+        # operation. Keep the public failure typed and path-free so an
+        # ineligible private review cannot be converted into a canary launch.
+        if (-not ($manifest.evidence_eligibility -is [string]) -or
+            $manifest.evidence_eligibility -cne 'eligible') {
+            throw 'research_copy_not_evidence_eligible'
+        }
+
+        [Int64]$sourceEntryCount = Get-BoundedJsonInteger `
+            $manifest.source_inventory_entries 2 $maximumEntries `
+            'v3 source entry count'
+        [Int64]$sourceByteCount = Get-BoundedJsonInteger `
+            $manifest.source_inventory_bytes 1 $maximumResearchBytes `
+            'v3 source byte count'
+        [Int64]$destinationEntryCount = Get-BoundedJsonInteger `
+            $manifest.destination_entry_count 2 $maximumEntries `
+            'v3 destination entry count'
+        [Int64]$destinationByteCount = Get-BoundedJsonInteger `
+            $manifest.destination_byte_count 1 $maximumResearchBytes `
+            'v3 destination byte count'
+        [Int64]$containedLinkCount = Get-BoundedJsonInteger `
+            $manifest.contained_materialized_link_count 0 $sourceEntryCount `
+            'v3 contained materialized link count'
+        [Int64]$approvedExternalCount = Get-BoundedJsonInteger `
+            $manifest.approved_external_materialized_link_count 0 `
+            $sourceEntryCount 'v3 approved external materialized link count'
+        [void](Get-BoundedJsonInteger $manifest.source_hardlink_count 0 `
+            $sourceEntryCount 'v3 source hardlink count')
+        [void](Get-BoundedJsonInteger $manifest.destination_reparse_count 0 0 `
+            'v3 destination reparse count')
+        [void](Get-BoundedJsonInteger $manifest.destination_hardlink_count 0 0 `
+            'v3 destination hardlink count')
+        [void](Get-BoundedJsonInteger $manifest.destination_ads_count 0 0 `
+            'v3 destination alternate-data-stream count')
+        [void](Get-BoundedJsonInteger $manifest.executable_target_count 0 0 `
+            'v3 executable external target count')
+        [void](Get-BoundedJsonInteger $manifest.mutable_state_target_count 0 0 `
+            'v3 mutable-state external target count')
+        if ($containedLinkCount -gt
+            ($sourceEntryCount - $approvedExternalCount)) {
+            throw 'Research preparation manifest v3 link counts are inconsistent.'
+        }
+
+        foreach ($property in @(
+                'source_root_identity_fingerprint',
+                'source_inventory_sha256', 'destination_inventory_sha256',
+                'external_approval_sha256',
+                'client_binary_private_identity_reference',
+                'server_binary_private_identity_reference')) {
+            Assert-LowerSha256Reference $manifest.$property `
+                "research preparation manifest v3 $property"
+        }
+
+        $zeroSha256 = '0' * 64
+        if ($manifest.preparation_profile -ceq 'ordinary-or-contained-v3') {
+            if ($approvedExternalCount -ne 0 -or
+                $manifest.external_approval_sha256 -cne $zeroSha256 -or
+                $manifest.external_classification_summary -cne 'none' -or
+                $manifest.external_target_profile -cne 'none' -or
+                $manifest.preparation_status -cne
+                    'exact-materialized-copy-verified') {
+                throw 'Research preparation manifest v3 ordinary profile is invalid.'
+            }
+        } elseif ($manifest.preparation_profile -ceq
+            'reviewed-external-targets-v1') {
+            if ($approvedExternalCount -lt 1 -or
+                $manifest.external_approval_sha256 -ceq $zeroSha256 -or
+                $manifest.external_classification_summary -cne
+                    'eligible_non_executable_asset_tree' -or
+                $manifest.external_target_profile -cne
+                    'reviewed-non-executable-v1' -or
+                $manifest.preparation_status -cne
+                    'exact-reviewed-materialized-copy-verified') {
+                throw 'Research preparation manifest v3 reviewed profile is invalid.'
+            }
+            Assert-ExternalApprovalDigestAvailable `
+                ([string]$manifest.external_approval_sha256)
+        } else {
+            throw 'Research preparation manifest v3 preparation profile is invalid.'
+        }
+
+        if ($sourceEntryCount -ne $inventory.EntryCount -or
+            $sourceByteCount -ne $inventory.ByteCount -or
+            $destinationEntryCount -ne $inventory.EntryCount -or
+            $destinationByteCount -ne $inventory.ByteCount -or
+            $manifest.source_inventory_sha256 -cne $inventory.V2Sha256 -or
+            $manifest.destination_inventory_sha256 -cne $inventory.V2Sha256) {
+            throw 'Research preparation manifest v3 inventory disagrees with the tree.'
+        }
+
+        # The manifest counts are attestations, not a substitute for checking
+        # the exact destination. Re-screen every materialized entry before the
+        # active caller can begin isolation or process work.
+        foreach ($item in $Items) {
+            Assert-OnlyDefaultDataStream $item.FullName 'v3 research entry'
+            if (($item.Attributes -band [IO.FileAttributes]::Directory) -eq 0) {
+                Assert-NoHardLink $item.FullName 'v3 research file'
+            }
+        }
+        Assert-ResearchPendingMarker $Root
+        return [pscustomobject]@{
+            Schema = [string]$manifest.schema
+            ExternalTargetProfile = [string]$manifest.external_target_profile
+            ExternalTargetCount = $approvedExternalCount
+        }
     }
 
     if ([string]$manifest.schema -cne
@@ -2307,7 +2494,11 @@ function Assert-ResearchPreparationManifest {
         throw 'Research preparation manifest v2 inventory disagrees with the tree.'
     }
     Assert-ResearchPendingMarker $Root
-    return [string]$manifest.schema
+    return [pscustomobject]@{
+        Schema = [string]$manifest.schema
+        ExternalTargetProfile = 'none'
+        ExternalTargetCount = [Int64]0
+    }
 }
 
 function Assert-ApprovedLocalDriveRoot {
@@ -2388,7 +2579,7 @@ function Resolve-IsolatedResearchRoot {
         $markerValue -cne ($markerText + "`r`n")) {
         throw 'Research root lacks the exact isolation marker.'
     }
-    $preparationManifestSchema = Assert-ResearchPreparationManifest `
+    $preparationManifest = Assert-ResearchPreparationManifest `
         $root $boundedResearchItems
     $client = [IO.Path]::GetFullPath($ClientPath)
     $server = [IO.Path]::GetFullPath($HldsPath)
@@ -2417,7 +2608,9 @@ function Resolve-IsolatedResearchRoot {
         Root = $root
         Client = $client
         Server = $server
-        PreparationManifestSchema = $preparationManifestSchema
+        PreparationManifestSchema = $preparationManifest.Schema
+        ExternalTargetProfile = $preparationManifest.ExternalTargetProfile
+        ExternalTargetCount = [Int64]$preparationManifest.ExternalTargetCount
     }
 }
 
@@ -3670,6 +3863,8 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
             (($testRestoration | ConvertTo-Json -Depth 8) + "`r`n"))
         $testManifest = [ordered]@{
             scenario = 'baseline'
+            external_target_profile = 'none'
+            external_target_count = 0
             accepted_transport_run = $true
             accepted_evidence_run = $true
             failure_category = 'none'
@@ -3884,6 +4079,8 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
             New-ReconnectFinalObservation -Values $reconnectValues
         $testReconnectManifest = [ordered]@{
             scenario = 'reconnect'
+            external_target_profile = 'none'
+            external_target_count = 0
             accepted_transport_run = $true
             accepted_evidence_run = $true
             failure_category = 'none'
@@ -4023,6 +4220,10 @@ if ($PSCmdlet.ParameterSetName -eq 'Preflight') {
     [void](Get-ResearchSnapshot $research.Root)
     Write-Output ("[stock-runtime-capture] preparation-manifest={0}" -f
         $research.PreparationManifestSchema)
+    Write-Output ("[stock-runtime-capture] external-target-profile={0}" -f
+        $research.ExternalTargetProfile)
+    Write-Output ("[stock-runtime-capture] external-target-count={0}" -f
+        $research.ExternalTargetCount)
     Write-Output '[stock-runtime-capture] research-root=policy-screened-copy-physical-identity-pending'
     Write-Output '[stock-runtime-capture] client-version=1.1.1.1'
     Write-Output '[stock-runtime-capture] server-launcher-version=4.1.1.1'
@@ -4041,10 +4242,26 @@ if ($PSCmdlet.ParameterSetName -eq 'ActivePreflight') {
         Write-Output '[stock-runtime-capture] capture-files-written=0'
         throw 'Active environment validation requires an elevated PowerShell; automatic elevation is forbidden.'
     }
-    $research = Resolve-IsolatedResearchRoot
+    try {
+        $research = Resolve-IsolatedResearchRoot
+    } catch {
+        if ($_.Exception.Message -ceq
+            'research_copy_not_evidence_eligible') {
+            Write-Output '[stock-runtime-capture] active-environment=invalid'
+            Write-Output '[stock-runtime-capture] failure-category=research_copy_not_evidence_eligible'
+            Write-Output '[stock-runtime-capture] stock-processes-started=0'
+            Write-Output '[stock-runtime-capture] capture-files-written=0'
+            Write-Output '[stock-runtime-capture] wfp-sessions-started=0'
+        }
+        throw
+    }
     [void](Get-ResearchSnapshot $research.Root)
     Write-Output ("[stock-runtime-capture] preparation-manifest={0}" -f
         $research.PreparationManifestSchema)
+    Write-Output ("[stock-runtime-capture] external-target-profile={0}" -f
+        $research.ExternalTargetProfile)
+    Write-Output ("[stock-runtime-capture] external-target-count={0}" -f
+        $research.ExternalTargetCount)
     $tool = Resolve-TrustedRepositoryTool $CaptureToolPath `
         'hlclient_stock_runtime_capture.exe' 'stock runtime relay'
     if ($ExpectedCaptureToolSha256 -and
@@ -4173,9 +4390,29 @@ $activeScenarios = @(
 if ($activeScenarios -cnotcontains $canonicalScenario) {
     throw 'The requested scenario is outside the M4.7.1.1 active-capture allowlist; no run was started.'
 }
-$research = Resolve-IsolatedResearchRoot
+try {
+    $research = Resolve-IsolatedResearchRoot
+} catch {
+    if ($_.Exception.Message -ceq 'research_copy_not_evidence_eligible') {
+        Write-Output '[stock-runtime-capture] active-capture=blocked'
+        Write-Output '[stock-runtime-capture] failure-category=research_copy_not_evidence_eligible'
+        Write-Output '[stock-runtime-capture] processes-started=0'
+        Write-Output '[stock-runtime-capture] stock-processes-started=0'
+        Write-Output '[stock-runtime-capture] files-written=0'
+        Write-Output '[stock-runtime-capture] capture-files-written=0'
+        Write-Output '[stock-runtime-capture] network-operations=0'
+        Write-Output '[stock-runtime-capture] wfp-sessions-started=0'
+        Write-Output '[stock-runtime-capture] capture-runs-created=0'
+        Write-Output '[stock-runtime-capture] restoration-backups-created=0'
+    }
+    throw
+}
 Write-Output ("[stock-runtime-capture] preparation-manifest={0}" -f
     $research.PreparationManifestSchema)
+Write-Output ("[stock-runtime-capture] external-target-profile={0}" -f
+    $research.ExternalTargetProfile)
+Write-Output ("[stock-runtime-capture] external-target-count={0}" -f
+    $research.ExternalTargetCount)
 $output = [IO.Path]::GetFullPath($OutputRoot).TrimEnd('\', '/')
 if ($PreCampaignCanary) {
     if ($canonicalScenario -cne 'baseline' -or $Map -cne 'boot_camp' -or
@@ -5002,6 +5239,8 @@ if ($runExists) {
         run_id = $runId
         scenario = $canonicalScenario
         map_category = $Map
+        external_target_profile = $research.ExternalTargetProfile
+        external_target_count = [Int64]$research.ExternalTargetCount
         duration_ms = $duration
         isolation_status = $(if ($publicationReady) { 'verified' } else { 'not-accepted' })
         process_ownership_status = $(if ($ownedStopped) { 'verified-cleanup' } else { 'not-accepted' })

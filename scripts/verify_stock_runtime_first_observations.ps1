@@ -52,6 +52,13 @@ $maximumRuns = 4096
 $requiredEvidenceImplementationMessage =
     'Complete stock runtime capture campaign lifecycle'
 
+function Test-ExternalTargetMetadata {
+    param([Int64]$Count, [string]$Profile)
+    return (($Count -eq 0 -and $Profile -ceq 'none') -or
+        ($Count -gt 0 -and
+            $Profile -ceq 'reviewed-non-executable-v1'))
+}
+
 function Assert-NoReparsePointInExistingPath {
     param([string]$Path, [string]$Label)
     $full = [IO.Path]::GetFullPath($Path)
@@ -699,6 +706,8 @@ function Get-CanaryBindingSha256 {
         "run_id=$([string]$Value.run_id)",
         "map_category=$([string]$Value.map_category)",
         "scenario=$([string]$Value.scenario)",
+        "external_target_profile=$([string]$Value.external_target_profile)",
+        "external_target_count=$([string]$Value.external_target_count)",
         "accepted_evidence_run=$(([bool]$Value.accepted_evidence_run).ToString().ToLowerInvariant())",
         "delivered_sequenced_s2c_count=$([string]$Value.delivered_sequenced_s2c_count)",
         "exact_boundary_count=$([string]$Value.exact_boundary_count)",
@@ -717,6 +726,7 @@ function Assert-CanaryManifestContract {
     param([object]$Manifest, [object]$Expected)
     $names = @(
         'schema', 'implementation_commit', 'run_id', 'map_category', 'scenario',
+        'external_target_profile', 'external_target_count',
         'accepted_evidence_run', 'delivered_sequenced_s2c_count',
         'exact_boundary_count', 'runtime_candidate_count', 'candidate_stability',
         'profile_fingerprint', 'transport_structural_sha256',
@@ -729,6 +739,11 @@ function Assert-CanaryManifestContract {
         [string]$Manifest.run_id -cnotmatch '^[0-9a-f]{32}$' -or
         [string]$Manifest.map_category -cne 'boot_camp' -or
         [string]$Manifest.scenario -cne 'baseline' -or
+        [string]$Manifest.external_target_count -cnotmatch '^(?:0|[1-9][0-9]*)$' -or
+        [Int64]$Manifest.external_target_count -gt 4096 -or
+        -not (Test-ExternalTargetMetadata `
+            ([Int64]$Manifest.external_target_count) `
+            ([string]$Manifest.external_target_profile)) -or
         $Manifest.accepted_evidence_run -isnot [bool] -or
         -not [bool]$Manifest.accepted_evidence_run -or
         [string]$Manifest.delivered_sequenced_s2c_count -cnotmatch
@@ -913,7 +928,9 @@ function Assert-IndependentWalkerMatchesChecker {
         [object]$WalkerValues,
         [object]$CheckerValues,
         [string]$RunId,
-        [bool]$Reconnect)
+        [bool]$Reconnect,
+        [string]$ExpectedExternalTargetProfile,
+        [Int64]$ExpectedExternalTargetCount)
     $agreementKeys = @(
         'delivered-sequenced-c2s', 'delivered-sequenced-s2c',
         'delivered-fragment-datagrams', 'boundary-payload-ordinal',
@@ -935,6 +952,10 @@ function Assert-IndependentWalkerMatchesChecker {
         [string]$WalkerValues['run-id'] -cne $RunId -or
         [string]$WalkerValues['result'] -cne 'success' -or
         [string]$WalkerValues['final-manifest'] -cne 'accepted' -or
+        [string]$WalkerValues['external-target-profile'] -cne
+            $ExpectedExternalTargetProfile -or
+        [string]$WalkerValues['external-target-count'] -cne
+            [string]$ExpectedExternalTargetCount -or
         [string]$WalkerValues['wrong-source-datagrams'] -cne '0' -or
         [string]$WalkerValues['transport-complete'] -cne 'true') {
         throw 'Independent walker did not validate the exact accepted run.'
@@ -1693,10 +1714,12 @@ if ($PSCmdlet.ParameterSetName -ceq 'EvidencePolicy') {
     $agreementWalker['run-id'] = '2' * 32
     $agreementWalker['result'] = 'success'
     $agreementWalker['final-manifest'] = 'accepted'
+    $agreementWalker['external-target-profile'] = 'none'
+    $agreementWalker['external-target-count'] = '0'
     $agreementWalker['wrong-source-datagrams'] = '0'
     $agreementWalker['transport-complete'] = 'true'
     Assert-IndependentWalkerMatchesChecker $agreementWalker `
-        $agreementChecker ('2' * 32) $false
+        $agreementChecker ('2' * 32) $false 'none' 0
 
     $walkerInvocationState = @{ Count = 0; Diverge = $false }
     $fakeWalkerInvocation = {
@@ -1707,7 +1730,7 @@ if ($PSCmdlet.ParameterSetName -ceq 'EvidencePolicy') {
             Lines = @("[stock-runtime-walk] result=success$suffix")
             ExitCode = 0
         }
-    }.GetNewClosure()
+    }
     [void](Invoke-DeterministicWalkerPair $fakeWalkerInvocation `
         'Policy canary walker')
     if ($walkerInvocationState.Count -ne 2) {
@@ -1732,7 +1755,7 @@ if ($PSCmdlet.ParameterSetName -ceq 'EvidencePolicy') {
     $mutatedAgreement['first-candidate'] = '2'
     try {
         Assert-IndependentWalkerMatchesChecker $mutatedAgreement `
-            $agreementChecker ('2' * 32) $false
+            $agreementChecker ('2' * 32) $false 'none' 0
     } catch { $canaryWalkerGateRejections++ }
     if ($canaryWalkerGateRejections -ne 3) {
         throw 'Canary independent-walker gate mutations failed open.'
@@ -1743,6 +1766,8 @@ if ($PSCmdlet.ParameterSetName -ceq 'EvidencePolicy') {
         run_id = '2' * 32
         map_category = 'boot_camp'
         scenario = 'baseline'
+        external_target_profile = 'none'
+        external_target_count = 0
         accepted_evidence_run = $true
         delivered_sequenced_s2c_count = 100
         exact_boundary_count = 1
@@ -1758,6 +1783,31 @@ if ($PSCmdlet.ParameterSetName -ceq 'EvidencePolicy') {
     $fakeCanary.canary_structural_sha256 = Get-CanaryBindingSha256 $fakeCanary
     $fakeCanary = [pscustomobject]$fakeCanary
     Assert-CanaryManifestContract $fakeCanary $fakeCanary
+    $reviewedCanary = $fakeCanary | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+    $reviewedCanary.external_target_profile = 'reviewed-non-executable-v1'
+    $reviewedCanary.external_target_count = 1
+    $reviewedCanary.canary_structural_sha256 =
+        Get-CanaryBindingSha256 $reviewedCanary
+    Assert-CanaryManifestContract $reviewedCanary $reviewedCanary
+    $externalTargetMetadataRejections = 0
+    foreach ($mutation in @(
+            { param($value) $value.external_target_profile =
+                'syntactically-valid-unknown'; $value.external_target_count = 1 },
+            { param($value) $value.external_target_profile =
+                'reviewed-non-executable-v1'; $value.external_target_count = 0 },
+            { param($value) $value.external_target_profile =
+                'none'; $value.external_target_count = 1 },
+            { param($value) $value.external_target_profile =
+                'syntactically-valid-unknown'; $value.external_target_count = 0 })) {
+        $mutated = $fakeCanary | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+        & $mutation $mutated
+        $mutated.canary_structural_sha256 = Get-CanaryBindingSha256 $mutated
+        try { Assert-CanaryManifestContract $mutated $mutated }
+        catch { $externalTargetMetadataRejections++ }
+    }
+    if ($externalTargetMetadataRejections -ne 4) {
+        throw 'Verifier canary external-target metadata policy failed open.'
+    }
     $canaryMutationRejected = 0
     foreach ($mutation in @(
             { param($value) $value.implementation_commit = '7' * 40 },
@@ -1786,6 +1836,8 @@ if ($PSCmdlet.ParameterSetName -ceq 'EvidencePolicy') {
     Write-Output '[stock-runtime-evidence-policy] timestamp-binding-rejections=2'
     Write-Output '[stock-runtime-evidence-policy] candidate-stability-binding-rejections=1'
     Write-Output '[stock-runtime-evidence-policy] rejected-overflow-candidate-binding-rejections=1'
+    Write-Output '[stock-runtime-evidence-policy] external-target-metadata-acceptances=2'
+    Write-Output "[stock-runtime-evidence-policy] external-target-metadata-rejections=$externalTargetMetadataRejections"
     Write-Output '[stock-runtime-evidence-policy] canary-mutation-rejections=4'
     Write-Output "[stock-runtime-evidence-policy] fatal-resume-category-rejections=$fatalResumeRejections"
     Write-Output "[stock-runtime-evidence-policy] fatal-resume-state-rejections=$fatalResumeStateRejections"
@@ -1844,6 +1896,7 @@ $campaignManifest = Read-BoundedJson `
     (Join-Path $root 'campaign-manifest.json') 131072 'campaign manifest'
 $campaignManifestKeys = @(
     'schema', 'implementation_commit', 'profile_fingerprint',
+    'external_target_profile', 'external_target_count',
     'required_matrix', 'attempted_slots', 'accepted_slots', 'rejected_slots',
     'incomplete_slots', 'pending_slots', 'packet_totals', 'boundary_totals',
     'candidate_stability', 'threshold_status', 'campaign_structural_sha256')
@@ -1857,7 +1910,10 @@ if ([string]$campaignManifest.schema -cne
         '^[0-9a-f]{64}$' -or
     ([string]$campaignManifest.profile_fingerprint -cne 'evidence_pending' -and
         [string]$campaignManifest.profile_fingerprint -cnotmatch
-            '^[0-9a-f]{64}$')) {
+            '^[0-9a-f]{64}$') -or
+    -not (Test-ExternalTargetMetadata `
+        (Get-StrictInteger $campaignManifest external_target_count 0 4096) `
+        ([string]$campaignManifest.external_target_profile))) {
     throw 'Campaign manifest identity or structural hash is invalid.'
 }
 $campaignImplementationCommit =
@@ -1966,6 +2022,7 @@ $walkerKeys = @(
     'wrong-source-datagrams', 'emitted-datagrams', 'transport-complete',
     'last-observed-timestamp-us', 'last-delivered-sequenced-s2c-timestamp-us',
     'observed-delivered-policy', 'final-manifest',
+    'external-target-profile', 'external-target-count',
     'post-resource-boundary', 'boundary-payload-ordinal',
     'boundary-observed-ordinal', 'boundary-delivery-ordinal',
     'boundary-byte-offset', 'boundary-bit-offset',
@@ -2038,7 +2095,8 @@ function Get-VerifiedPreCampaignCanary {
         '[stock-runtime-walk] ' $walkerKeys `
         'Pre-campaign canary independent walker'
     Assert-IndependentWalkerMatchesChecker $walkerValues $values `
-        $runs[0].Name $false
+        $runs[0].Name $false ([string]$run.external_target_profile) `
+        (Get-StrictInteger $run external_target_count 0 4096)
     [Int64]$deliveredS2c = Get-StrictOutputInteger $values `
         'delivered-sequenced-s2c' 100 131072 'Pre-campaign canary checker'
     $version = Read-BoundedJson (Join-Path $runRoot 'version-observation.json') `
@@ -2057,6 +2115,8 @@ function Get-VerifiedPreCampaignCanary {
         run_id = $runs[0].Name
         map_category = 'boot_camp'
         scenario = 'baseline'
+        external_target_profile = [string]$run.external_target_profile
+        external_target_count = Get-StrictInteger $run external_target_count 0 4096
         accepted_evidence_run = $true
         delivered_sequenced_s2c_count = $deliveredS2c
         exact_boundary_count = 1
@@ -2077,6 +2137,8 @@ function Get-VerifiedPreCampaignCanary {
         RunId = $runs[0].Name
         ProfileFingerprint = [string]$expected.profile_fingerprint
         StructuralHash = [string]$expected.canary_structural_sha256
+        ExternalTargetProfile = [string]$expected.external_target_profile
+        ExternalTargetCount = [Int64]$expected.external_target_count
     }
 }
 
@@ -2085,6 +2147,12 @@ if ([string]$campaignManifest.profile_fingerprint -cne 'evidence_pending' -and
     [string]$campaignManifest.profile_fingerprint -cne
         [string]$canaryBinding.ProfileFingerprint) {
     throw 'Campaign stock profile differs from the accepted pre-campaign canary.'
+}
+if ([string]$campaignManifest.external_target_profile -cne
+        [string]$canaryBinding.ExternalTargetProfile -or
+    (Get-StrictInteger $campaignManifest external_target_count 0 4096) -ne
+        [Int64]$canaryBinding.ExternalTargetCount) {
+    throw 'Campaign external-target binding differs from the accepted pre-campaign canary.'
 }
 
 foreach ($directory in $entries) {
@@ -2140,6 +2208,7 @@ foreach ($directory in $entries) {
             'isolation_status', 'process_ownership_status',
             'version_profile_status', 'relay_status', 'client_ready_status',
             'restoration_status', 'external_drift_status',
+            'external_target_profile', 'external_target_count',
             'raw_datagram_count', 'journal_entry_count',
             'delivered_sequenced_c2s_count',
             'delivered_sequenced_s2c_count',
@@ -2178,6 +2247,15 @@ foreach ($directory in $entries) {
             $run.accepted_evidence_run -isnot [bool] -or
             $run.accepted_transport_run -isnot [bool]) {
             throw 'Research run manifest is invalid.'
+        }
+        $externalTargetCount = Get-StrictInteger $run external_target_count 0 4096
+        if (-not (Test-ExternalTargetMetadata $externalTargetCount `
+                ([string]$run.external_target_profile)) -or
+            [string]$run.external_target_profile -cne
+                [string]$canaryBinding.ExternalTargetProfile -or
+            $externalTargetCount -ne
+                [Int64]$canaryBinding.ExternalTargetCount) {
+            throw 'Research run manifest external-target metadata is invalid.'
         }
         $acceptedPublication = [bool]$run.accepted_evidence_run
         $presentAcceptedOnlyEntries = @($acceptedOnlyEntries | Where-Object {
@@ -2534,7 +2612,9 @@ foreach ($directory in $entries) {
         $walkerValues = Convert-PrefixedOutputToValues $walkerResult.Lines `
             '[stock-runtime-walk] ' $walkerKeys 'independent walker'
         Assert-IndependentWalkerMatchesChecker $walkerValues $checkerValues `
-            $directory.Name ($canonicalScenario -ceq 'reconnect')
+            $directory.Name ($canonicalScenario -ceq 'reconnect') `
+            ([string]$canaryBinding.ExternalTargetProfile) `
+            ([Int64]$canaryBinding.ExternalTargetCount)
         $binding = Assert-RunEvidenceBindings $run $capture $version `
             $checkerValues $walkerValues
         $walkerAgreements++
@@ -2643,7 +2723,8 @@ foreach ($directory in $entries) {
 Assert-NoCampaignResumeBlockingFailures $resumeBlockingFailures
 
 $campaignSummaryKeys = @(
-    'profile', 'accepted', 'rejected', 'incomplete', 'pending',
+    'profile', 'external-target-profile', 'external-target-count',
+    'accepted', 'rejected', 'incomplete', 'pending',
     'sequenced-c2s', 'sequenced-s2c', 'reassembled', 'decompressed',
     'boundaries', 'candidates', 'reconnect-generations',
     'candidate-stability', 'threshold', 'implementation-commit',
@@ -2664,6 +2745,10 @@ $campaignSummary = Convert-PrefixedOutputToValues `
 Assert-CampaignManifestSummaryIdentity $campaignManifest $campaignSummary
 if ($campaignSummary['profile'] -cne
         'stock_protocol_48_build_10210_evidence_pending' -or
+    $campaignSummary['external-target-profile'] -cne
+        [string]$canaryBinding.ExternalTargetProfile -or
+    $campaignSummary['external-target-count'] -cne
+        [string]$canaryBinding.ExternalTargetCount -or
     $campaignSummary['result'] -cne 'campaign-summary' -or
     $campaignSummary['accepted'] -cne [string]$accepted -or
     $campaignSummary['rejected'] -cne [string]$rejected -or
@@ -2782,6 +2867,10 @@ if ((Get-StrictInteger $campaignManifest attempted_slots 0 $maximumRuns) -ne
         100000000) -ne $reconnectGenerations -or
     [string]$campaignManifest.profile_fingerprint -cne
         $expectedProfileFingerprint -or
+    [string]$campaignManifest.external_target_profile -cne
+        [string]$canaryBinding.ExternalTargetProfile -or
+    (Get-StrictInteger $campaignManifest external_target_count 0 4096) -ne
+        [Int64]$canaryBinding.ExternalTargetCount -or
     [string]$campaignManifest.candidate_stability -cne
         $expectedCampaignStability -or
     [string]$campaignManifest.threshold_status -cne

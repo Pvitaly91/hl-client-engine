@@ -248,6 +248,7 @@ void publish_manifest(const fs::path& run)
         "\"version_profile_status\":\"verified\","
         "\"relay_status\":\"true\",\"client_ready_status\":\"true\","
         "\"restoration_status\":\"exact\",\"external_drift_status\":\"none\","
+        "\"external_target_profile\":\"none\",\"external_target_count\":0,"
         "\"raw_datagram_count\":2,\"journal_entry_count\":2,"
         "\"delivered_sequenced_c2s_count\":1,"
         "\"delivered_sequenced_s2c_count\":1,"
@@ -365,6 +366,76 @@ TEST_CASE("Corpus prepublication is a fail-closed transaction boundary",
     CHECK(published.state->publication_state() ==
           goldsrc::StockRuntimeCaptureCorpusPublicationState::published_accepted);
     REQUIRE(published.state->research_run_metadata());
+
+    SECTION("external target metadata is required and exactly typed") {
+        replace_text_once(
+            fixture.run() / "research-run-metadata.json",
+            "\"external_target_profile\":\"none\",\"external_target_count\":0,",
+            "\"external_target_profile\":\"none\",");
+        CHECK_FALSE(goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+    }
+    SECTION("reviewed non-executable external targets are accepted") {
+        replace_text_once(
+            fixture.run() / "research-run-metadata.json",
+            "\"external_target_profile\":\"none\",\"external_target_count\":0,",
+            "\"external_target_profile\":\"reviewed-non-executable-v1\","
+            "\"external_target_count\":1,");
+        CHECK(goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+    }
+    SECTION("unknown positive external target profile is rejected") {
+        replace_text_once(
+            fixture.run() / "research-run-metadata.json",
+            "\"external_target_profile\":\"none\",\"external_target_count\":0,",
+            "\"external_target_profile\":\"syntactically-valid-unknown\","
+            "\"external_target_count\":1,");
+        CHECK_FALSE(goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+    }
+    SECTION("reviewed external target profile requires a positive count") {
+        replace_text_once(
+            fixture.run() / "research-run-metadata.json",
+            "\"external_target_profile\":\"none\",\"external_target_count\":0,",
+            "\"external_target_profile\":\"reviewed-non-executable-v1\","
+            "\"external_target_count\":0,");
+        CHECK_FALSE(goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+    }
+    SECTION("none external target profile requires a zero count") {
+        replace_text_once(
+            fixture.run() / "research-run-metadata.json",
+            "\"external_target_profile\":\"none\",\"external_target_count\":0,",
+            "\"external_target_profile\":\"none\","
+            "\"external_target_count\":1,");
+        CHECK_FALSE(goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+    }
+    SECTION("unknown zero-count external target profile is rejected") {
+        replace_text_once(
+            fixture.run() / "research-run-metadata.json",
+            "\"external_target_profile\":\"none\",\"external_target_count\":0,",
+            "\"external_target_profile\":\"syntactically-valid-unknown\","
+            "\"external_target_count\":0,");
+        CHECK_FALSE(goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+    }
+    SECTION("external target count is bounded by materialization") {
+        replace_text_once(
+            fixture.run() / "research-run-metadata.json",
+            "\"external_target_profile\":\"none\",\"external_target_count\":0,",
+            "\"external_target_profile\":\"reviewed-non-executable-v1\","
+            "\"external_target_count\":4097,");
+        CHECK_FALSE(goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published));
+    }
     REQUIRE(published.state->accepted_manifest_claims());
     goldsrc::StockRuntimeAcceptedManifestClaims expected_claims;
     expected_claims.replay_payload_ordinal = 1U;

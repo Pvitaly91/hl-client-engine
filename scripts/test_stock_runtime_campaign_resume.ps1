@@ -473,10 +473,15 @@ function Write-RetainedJson {
 function Invoke-CampaignSummary {
     param(
         [string]$Root, [string]$RefreshCommit = '',
-        [string[]]$WalkerValidatedRunIds = @())
+        [string[]]$WalkerValidatedRunIds = @(),
+        [string]$ExternalTargetProfile = 'reviewed-non-executable-v1',
+        [Int64]$ExternalTargetCount = 1)
     $arguments = @('--capture-root', $Root, '--scenario', 'campaign-summary')
     if (-not [string]::IsNullOrEmpty($RefreshCommit)) {
-        $arguments += @('--campaign-refresh-implementation-commit', $RefreshCommit)
+        $arguments += @(
+            '--campaign-refresh-implementation-commit', $RefreshCommit,
+            '--campaign-external-target-profile', $ExternalTargetProfile,
+            '--campaign-external-target-count', [string]$ExternalTargetCount)
     }
     foreach ($runId in $WalkerValidatedRunIds) {
         $arguments += @('--independent-walker-validated-run', $runId)
@@ -537,6 +542,8 @@ function New-FakeCampaignManifest {
         schema = 'hlclient.stock-runtime-first-campaign.v1'
         implementation_commit = $ImplementationCommit
         profile_fingerprint = 'evidence_pending'
+        external_target_profile = 'reviewed-non-executable-v1'
+        external_target_count = 1
         required_matrix = $matrix
         attempted_slots = $Attempted
         accepted_slots = 0
@@ -560,6 +567,8 @@ function Assert-PendingCampaignSummary {
     param([object]$Values, [string]$ImplementationCommit)
     $expected = [ordered]@{
         profile = 'stock_protocol_48_build_10210_evidence_pending'
+        'external-target-profile' = 'reviewed-non-executable-v1'
+        'external-target-count' = '1'
         accepted = '0'; rejected = '1'; incomplete = '1'; pending = '24'
         'sequenced-c2s' = '0'; 'sequenced-s2c' = '0'
         reassembled = '0'; decompressed = '0'; boundaries = '0'
@@ -682,6 +691,12 @@ if ($policyLines -cnotcontains
     $policyLines -cnotcontains
         '[stock-runtime-campaign-policy] walker-nonzero-exit-rejections=1' -or
     $policyLines -cnotcontains
+        '[stock-runtime-campaign-policy] external-target-metadata-acceptances=2' -or
+    $policyLines -cnotcontains
+        '[stock-runtime-campaign-policy] external-target-metadata-rejections=4' -or
+    $policyLines -cnotcontains
+        '[stock-runtime-campaign-policy] mixed-external-target-binding-rejections=2' -or
+    $policyLines -cnotcontains
         '[stock-runtime-campaign-policy] canary-mutation-rejections=4' -or
     $policyLines -cnotcontains
         '[stock-runtime-campaign-policy] unbound-canary-rebind-rejections=1' -or
@@ -709,6 +724,7 @@ if ($beforeManual -ceq 'absent') {
   $fixtureRootHandle = $null
   $fixtureRunHandles = [Collections.Generic.List[IDisposable]]::new()
   $fixtureRetainedFiles = [Collections.Generic.List[IDisposable]]::new()
+  $fixtureMetadataHandles = [Collections.Generic.List[object]]::new()
   $fixtureRunIds = @(
       '00000000000000000000000000000001',
       '00000000000000000000000000000002')
@@ -768,6 +784,8 @@ if ($beforeManual -ceq 'absent') {
             accepted_transport_run = $false
             accepted_evidence_run = $false
             failure_category = $fakeRun.failure_category
+            external_target_profile = 'reviewed-non-executable-v1'
+            external_target_count = 1
         }
         $metadataPath = Join-Path $runRoot 'research-run-metadata.json'
         $createdMetadata = $null
@@ -780,6 +798,7 @@ if ($beforeManual -ceq 'absent') {
                 [HlClient.CampaignFixture.OwnedDirectory]::RetainExactFile(
                     $createdMetadata)
             $fixtureRetainedFiles.Add($metadataHandle)
+            $fixtureMetadataHandles.Add($metadataHandle)
         } finally {
             if ($null -ne $createdMetadata) { $createdMetadata.Dispose() }
         }
@@ -801,6 +820,30 @@ if ($beforeManual -ceq 'absent') {
         ($validatedRejectedRuns.Lines -join "`n") -cne
             ($refreshA.Lines -join "`n")) {
         throw 'Walker capability changed rejected/incomplete classification.'
+    }
+    $mixedBindingRejections = 0
+    $mixedProfile = $fakeRuns[1].Clone()
+    $mixedProfile.schema = 'hlclient.stock-runtime-research-run.v1'
+    $mixedProfile.accepted_transport_run = $false
+    $mixedProfile.external_target_profile = 'none'
+    $mixedProfile.external_target_count = 0
+    Write-RetainedJson $fixtureMetadataHandles[1] $mixedProfile
+    if ((Invoke-CampaignSummary $fixtureRoot $fixtureCommit).ExitCode -ne 0) {
+        $mixedBindingRejections++
+    }
+    $mixedCount = $mixedProfile.Clone()
+    $mixedCount.external_target_profile = 'reviewed-non-executable-v1'
+    $mixedCount.external_target_count = 2
+    Write-RetainedJson $fixtureMetadataHandles[1] $mixedCount
+    if ((Invoke-CampaignSummary $fixtureRoot $fixtureCommit).ExitCode -ne 0) {
+        $mixedBindingRejections++
+    }
+    $restoredMetadata = $mixedProfile.Clone()
+    $restoredMetadata.external_target_profile = 'reviewed-non-executable-v1'
+    $restoredMetadata.external_target_count = 1
+    Write-RetainedJson $fixtureMetadataHandles[1] $restoredMetadata
+    if ($mixedBindingRejections -ne 2) {
+        throw 'Mixed external-target campaign bindings failed open.'
     }
     $duplicateWalkerCapability = Invoke-CampaignSummary $fixtureRoot `
         $fixtureCommit @($fixtureRunIds[0], $fixtureRunIds[0])

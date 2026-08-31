@@ -91,12 +91,22 @@ try {
     $manifest = Get-Content -Raw -LiteralPath (
         Join-Path $ordinaryCopy '.hlclient-research-preparation.json') |
         ConvertFrom-Json
-    if ($manifest.schema -cne 'hlclient.stock-runtime-research-preparation.v2' -or
+    if ($manifest.schema -cne 'hlclient.stock-runtime-research-preparation.v3' -or
         $manifest.marker -cne 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1' -or
+        $manifest.preparation_profile -cne 'ordinary-or-contained-v3' -or
+        $manifest.approved_external_materialized_link_count -ne 0 -or
+        $manifest.external_approval_sha256 -cne ('0' * 64) -or
+        $manifest.external_classification_summary -cne 'none' -or
+        $manifest.executable_target_count -ne 0 -or
+        $manifest.mutable_state_target_count -ne 0 -or
+        $manifest.source_unchanged_status -cne 'verified' -or
+        $manifest.external_targets_unchanged_status -cne 'verified' -or
+        $manifest.evidence_eligibility -cne 'eligible' -or
+        $manifest.external_target_profile -cne 'none' -or
         $manifest.paths_recorded -ne $false -or
         $manifest.preparation_status -cne
             'exact-materialized-copy-verified') {
-        throw 'Preparation manifest v2 is invalid.'
+        throw 'Preparation manifest v3 is invalid.'
     }
 
     $physicalParent = Join-Path $fixture 'physical-parent'
@@ -148,7 +158,7 @@ try {
     Write-Output '[research-copy-test] ordinary=passed'
     Write-Output '[research-copy-test] root-junction=passed'
     Write-Output '[research-copy-test] external-target=passed'
-    Write-Output '[research-copy-test] v1-marker-v2-manifest=passed'
+    Write-Output '[research-copy-test] v1-marker-v3-manifest=passed'
     Write-Output '[research-copy-test] result=success'
 } finally {
     foreach ($junction in @($junctions)) {

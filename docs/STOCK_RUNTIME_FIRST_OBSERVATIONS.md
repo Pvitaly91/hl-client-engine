@@ -109,6 +109,18 @@ output, and reconcile the complete boundary/candidate/replay facts before the
 canary is accepted. Canary failure prevents creation of the 24-slot campaign
 state.
 
+For a research copy produced through M4.7.1.1.3 external-target approval,
+capture preflight first validates the path-free v3 manifest, live prepared
+destination and exactly one repository-local ignored approval artifact whose
+fresh SHA-256 matches `external_approval_sha256`. The run, canary and
+campaign-resume contracts then retain the sanitized
+`external_target_profile` and `external_target_count`; mismatched
+profiles/counts cannot be mixed or rebound. Approval expiration and live
+source/target mutation are checked by materialization before that immutable
+copy is published, while private review paths and identities never enter run
+evidence. This provenance is a filesystem safety gate only: it adds no
+candidate meaning and contributes nothing to the 24-run evidence threshold.
+
 Run the campaign from elevated PowerShell with the explicit token:
 
 ```powershell

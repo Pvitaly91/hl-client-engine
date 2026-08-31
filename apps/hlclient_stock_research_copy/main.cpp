@@ -15,6 +15,7 @@ struct Options final {
     Mode mode{Mode::none};
     std::filesystem::path source;
     std::filesystem::path destination;
+    std::filesystem::path external_target_approval_manifest;
 };
 
 [[nodiscard]] std::optional<Options> parse_options(
@@ -37,12 +38,19 @@ struct Options final {
                 return std::nullopt;
             }
             options.destination = argv[index];
+        } else if (argument == L"--external-target-approval-manifest") {
+            if (++index >= argc ||
+                !options.external_target_approval_manifest.empty()) {
+                return std::nullopt;
+            }
+            options.external_target_approval_manifest = argv[index];
         } else {
             return std::nullopt;
         }
     }
     if (options.mode == Mode::inspect) {
-        if (options.source.empty() || !options.destination.empty()) {
+        if (options.source.empty() || !options.destination.empty() ||
+            !options.external_target_approval_manifest.empty()) {
             return std::nullopt;
         }
     } else if (options.mode == Mode::materialize) {
@@ -102,13 +110,19 @@ int wmain(const int argc, wchar_t** const argv)
         // Unsafe topology is still a completed read-only diagnostic.
         return 0;
     }
-    if (!topology.summary->safe_to_materialize) {
+    if (!topology.summary->safe_to_materialize &&
+        options->external_target_approval_manifest.empty()) {
         std::cerr << "[research-copy] result=source_topology_unsafe\n";
         return 1;
     }
 
+    windows::StockResearchCopyOptions materialization_options;
+    if (!options->external_target_approval_manifest.empty()) {
+        materialization_options.external_target_approval_manifest =
+            options->external_target_approval_manifest;
+    }
     const auto materialized = windows::materialize_stock_research_copy(
-        options->source, options->destination);
+        options->source, options->destination, materialization_options);
     if (!materialized) {
         std::cerr << "[research-copy] result="
                   << windows::to_string(materialized.code) << '\n'
@@ -127,6 +141,19 @@ int wmain(const int argc, wchar_t** const argv)
               << result.destination_alternate_data_stream_count << '\n'
               << "[research-copy] source-changed="
               << (result.source_unchanged ? "false" : "true") << '\n'
+              << "[research-copy] external-targets-changed="
+              << (result.external_targets_unchanged ? "false" : "true")
+              << '\n'
+              << "[research-copy] external-target-count="
+              << result.approved_external_materialized_link_count << '\n'
+              << "[research-copy] external-target-profile="
+              << result.external_target_profile << '\n'
+              << "[research-copy] research-copy-evidence-eligible="
+              << (result.evidence_eligibility ==
+                          windows::StockResearchCopyEvidenceEligibility::eligible
+                      ? "true"
+                      : "false")
+              << '\n'
               << "[research-copy] copied-entry-count="
               << result.entry_count << '\n'
               << "[research-copy] materialized-link-count="

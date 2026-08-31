@@ -18,15 +18,16 @@ defence-in-depth active-only argument.
 
 ## Preparation and elevated preflight
 
-Inspect the source first, then create a new isolated copy. The v2 helper uses
-Windows handles and stable volume/file identities; it does not treat a path
-string, `Get-Item.Attributes`, or `LinkType` as an identity. Root/ancestor
+Inspect the source first, then create a new isolated copy. The research-copy
+helper uses Windows handles and stable volume/file identities; it does not
+treat a path string, `Get-Item.Attributes`, or `LinkType` as an identity. Root/ancestor
 junctions and physically-contained directory junctions/symlinks are
 materialized as ordinary directories. External targets, cycles, file symlinks,
-mount points, unsupported reparse tags and ADS remain fail-closed. Source hard
-links are copied from verified handles into independent single-link files. The
-destination is a new local fixed-volume tree with zero reparse points, hard
-links and ADS. See [research-copy topology and materialization](STOCK_RUNTIME_RESEARCH_COPY.md).
+mount points, unsupported reparse tags and ADS remain fail-closed by default.
+Source hard links are copied from verified handles into independent
+single-link files. The destination is a new local fixed-volume tree with zero
+reparse points, hard links and ADS. See
+[research-copy topology and materialization](STOCK_RUNTIME_RESEARCH_COPY.md).
 
 The diagnostic is read-only even when the supplied destination does not exist:
 
@@ -39,6 +40,23 @@ The diagnostic is read-only even when the supplied destination does not exist:
 
 Unsafe topology is a successfully completed diagnostic (`exit 0` with
 `result=unsafe`); it is not permission to materialize that topology.
+
+M4.7.1.1.3 permits only exact eligible non-executable, non-mutable external
+directory targets after a separate read-only review and explicit local,
+expiring approval. Arbitrary external links remain blocked. Private review
+records remain ignored and local; raw review paths/identities never enter the
+v3 preparation manifest or runtime evidence. Review and approval contain no
+runtime semantics or evidence and cannot replace active preflight. Follow
+[external-target review](STOCK_RUNTIME_EXTERNAL_TARGET_REVIEW.md) and
+[external-target approval](STOCK_RUNTIME_EXTERNAL_TARGET_APPROVAL.md). Every
+new copy must carry the exact v3 preparation manifest; a reviewed copy must use
+`reviewed-external-targets-v1`, `reviewed-non-executable-v1` and
+`evidence_eligibility=eligible`. Its ignored
+`external-target-approval.json` must remain in the exact repository-local
+32-lower-hex review directory. Preflight screens that artifact as bounded,
+ordinary, single-link and no-ADS, then requires its freshly computed SHA-256 to
+equal the v3 `external_approval_sha256`; absence or ambiguity blocks WFP and
+process launch.
 
 ```powershell
 .\scripts\prepare_stock_runtime_research_copy.ps1 `

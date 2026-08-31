@@ -941,6 +941,14 @@ template<typename Integer>
                            ManifestScalar::Kind::string, "exact");
 }
 
+[[nodiscard]] constexpr bool valid_external_target_metadata(
+    const std::uint64_t count,
+    const std::string_view profile) noexcept
+{
+    return (count == 0U && profile == "none") ||
+           (count != 0U && profile == "reviewed-non-executable-v1");
+}
+
 [[nodiscard]] bool valid_research_manifest_shape(
     const ManifestProperties& properties) noexcept
 {
@@ -957,6 +965,8 @@ template<typename Integer>
         std::string_view{"client_ready_status"},
         std::string_view{"restoration_status"},
         std::string_view{"external_drift_status"},
+        std::string_view{"external_target_profile"},
+        std::string_view{"external_target_count"},
         std::string_view{"raw_datagram_count"},
         std::string_view{"journal_entry_count"},
         std::string_view{"delivered_sequenced_c2s_count"},
@@ -1026,6 +1036,7 @@ template<typename Integer>
         std::string_view{"client_ready_status"},
         std::string_view{"restoration_status"},
         std::string_view{"external_drift_status"},
+        std::string_view{"external_target_profile"},
         std::string_view{"offline_replay_status"},
         std::string_view{"post_resource_boundary_status"},
         std::string_view{"first_observation_status"},
@@ -1038,7 +1049,9 @@ template<typename Integer>
         property(properties, "accepted_transport_run",
                  ManifestScalar::Kind::boolean) == nullptr ||
         property(properties, "accepted_evidence_run",
-                 ManifestScalar::Kind::boolean) == nullptr) {
+                 ManifestScalar::Kind::boolean) == nullptr ||
+        property(properties, "external_target_count",
+                 ManifestScalar::Kind::integer) == nullptr) {
         return false;
     }
     constexpr std::array nullable_integers{
@@ -1083,7 +1096,19 @@ template<typename Integer>
                          ManifestScalar::Kind::string) &&
            nullable_kind(properties, "candidate_stability",
                            ManifestScalar::Kind::string);
-    if (!base_valid || !accepted_reconnect) return base_valid;
+    std::uint64_t external_target_count = 0U;
+    const auto* external_target_profile = property(
+        properties, "external_target_profile", ManifestScalar::Kind::string);
+    const bool external_metadata_valid =
+        manifest_integer(properties, "external_target_count",
+                         external_target_count) &&
+        external_target_count <= 4'096U &&
+        external_target_profile != nullptr &&
+        valid_external_target_metadata(
+            external_target_count, external_target_profile->value);
+    if (!base_valid || !external_metadata_valid || !accepted_reconnect) {
+        return base_valid && external_metadata_valid;
+    }
     return property(properties, "connection_generation_count",
                     ManifestScalar::Kind::integer) != nullptr &&
            property(properties, "exact_boundary_count",
@@ -1180,6 +1205,8 @@ template<typename Integer>
         properties, "scenario", ManifestScalar::Kind::string);
     const auto* map_category = property(
         properties, "map_category", ManifestScalar::Kind::string);
+    const auto* external_target_profile = property(
+        properties, "external_target_profile", ManifestScalar::Kind::string);
     std::uint64_t duration_ms = 0U;
     std::uint64_t byte_offset = 0U;
     std::uint64_t bit_offset = 0U;
@@ -1190,6 +1217,7 @@ template<typename Integer>
     std::uint64_t candidate_recurrence = 0U;
     std::uint64_t last_observed_us = 0U;
     std::uint64_t last_s2c_us = 0U;
+    std::uint64_t external_target_count = 0U;
     if (scenario == nullptr || map_category == nullptr ||
         !canonical_runtime_scenario(scenario->value) ||
         !accepted_runtime_map_category(map_category->value) ||
@@ -1211,6 +1239,12 @@ template<typename Integer>
         !manifest_integer(properties,
                           "last_delivered_sequenced_s2c_timestamp_us",
                           last_s2c_us) ||
+        !manifest_integer(properties, "external_target_count",
+                          external_target_count) ||
+        external_target_count > 4'096U ||
+        external_target_profile == nullptr ||
+        !valid_external_target_metadata(
+            external_target_count, external_target_profile->value) ||
         bit_offset > 7U || source_payload_bytes == 0U ||
         source_payload_bytes >
             (std::numeric_limits<std::uint64_t>::max)() / 8U ||

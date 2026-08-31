@@ -7,9 +7,8 @@ param(
     [string]$CaptureScriptPath = '.\scripts\capture_stock_runtime_state.ps1',
 
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$WalkerScriptPath = (Join-Path $PSScriptRoot `
-        'walk_stock_runtime_transport.ps1')
+    [AllowEmptyString()]
+    [string]$WalkerScriptPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +17,12 @@ Set-StrictMode -Version Latest
 $capture = [IO.Path]::GetFullPath($CaptureScriptPath)
 if (-not (Test-Path -LiteralPath $capture -PathType Leaf)) {
     throw 'Capture wrapper is unavailable.'
+}
+$scriptDirectory = [IO.Path]::GetFullPath(
+    (Split-Path -Parent $MyInvocation.MyCommand.Path)).TrimEnd('\', '/')
+if ([string]::IsNullOrWhiteSpace($WalkerScriptPath)) {
+    $WalkerScriptPath = Join-Path $scriptDirectory `
+        'walk_stock_runtime_transport.ps1'
 }
 $walker = [IO.Path]::GetFullPath($WalkerScriptPath)
 if (-not (Test-Path -LiteralPath $walker -PathType Leaf)) {
@@ -50,6 +55,12 @@ $walkerOtherFixture = [IO.Path]::GetFullPath((Join-Path $temporaryRoot (
     [Guid]::NewGuid().ToString('N'))))
 $fixture = [IO.Path]::GetFullPath((Join-Path $temporaryRoot (
     'hlclient-stock-runtime-manifest-test-' + [Guid]::NewGuid().ToString('N'))))
+$v3HardlinkTarget = $null
+$approvalReviewParent = [IO.Path]::GetFullPath((Join-Path `
+        $manualArtifacts 'stock-runtime-source-review')).TrimEnd('\', '/')
+$approvalReviewParentCreated = -not (Test-Path -LiteralPath $approvalReviewParent)
+$approvalReviewRoot = [IO.Path]::GetFullPath((Join-Path `
+        $approvalReviewParent ([Guid]::NewGuid().ToString('N'))))
 
 function Get-TextSha256 {
     param([string]$Text, [switch]$Lower)
@@ -225,9 +236,9 @@ function Reset-TestDirectoryAfterAdsProbe {
     $reset = [IO.Path]::GetFullPath((Join-Path $parent $resetLeaf)).TrimEnd('\', '/')
     if ($parent -ine $temporaryRoot -or
         $leaf -cnotmatch '^hlclient-stock-runtime-manifest-test-[0-9a-f]{32}$' -or
-        $SchemaLabel -cnotmatch '^v[12]$' -or
+        $SchemaLabel -cnotmatch '^v[123]$' -or
         $resetLeaf -cnotmatch
-            '^hlclient-stock-runtime-manifest-test-[0-9a-f]{32}-ads-reset-v[12]$' -or
+            '^hlclient-stock-runtime-manifest-test-[0-9a-f]{32}-ads-reset-v[123]$' -or
         -not (Test-Path -LiteralPath $full -PathType Container) -or
         (Test-Path -LiteralPath $reset)) {
         throw 'ADS fixture directory reset target is invalid.'
@@ -496,6 +507,149 @@ try {
     Write-Manifest $v2
     Invoke-ExpectedManifestResult '^Research preparation topology profile is invalid'
 
+    $v3InventorySha256 = Get-TextSha256 `
+        ((@($v2Records) -join "`n") + "`n") -Lower
+    $v3 = [ordered]@{
+        schema = 'hlclient.stock-runtime-research-preparation.v3'
+        marker = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
+        preparation_profile = 'ordinary-or-contained-v3'
+        source_root_identity_fingerprint = '3' * 64
+        source_inventory_entries = 3
+        source_inventory_bytes = 2
+        source_inventory_sha256 = $v3InventorySha256
+        contained_materialized_link_count = 0
+        approved_external_materialized_link_count = 0
+        source_hardlink_count = 0
+        destination_entry_count = 3
+        destination_byte_count = 2
+        destination_inventory_sha256 = $v3InventorySha256
+        destination_reparse_count = 0
+        destination_hardlink_count = 0
+        destination_ads_count = 0
+        external_approval_sha256 = '0' * 64
+        external_classification_summary = 'none'
+        executable_target_count = 0
+        mutable_state_target_count = 0
+        source_unchanged_status = 'verified'
+        external_targets_unchanged_status = 'verified'
+        evidence_eligibility = 'eligible'
+        external_target_profile = 'none'
+        client_binary_private_identity_reference = '4' * 64
+        server_binary_private_identity_reference = '5' * 64
+        paths_recorded = $false
+        preparation_status = 'exact-materialized-copy-verified'
+    }
+    Write-Manifest $v3
+    Invoke-ExpectedRootAdsRejection 'v3'
+    Invoke-ExpectedManifestResult '^stock client version is not accepted'
+
+    $v3.preparation_profile = 'reviewed-external-targets-v1'
+    $v3.approved_external_materialized_link_count = 1
+    [IO.Directory]::CreateDirectory($approvalReviewRoot) | Out-Null
+    $approvalFixtureId = [IO.Path]::GetFileName($approvalReviewRoot)
+    $approvalBytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(
+        ('{{"schema":"hlclient.stock-runtime-external-target-approval.v1",' +
+            '"fixture":"{0}"}}' -f $approvalFixtureId))
+    [IO.File]::WriteAllBytes(
+        (Join-Path $approvalReviewRoot 'external-target-approval.json'),
+        $approvalBytes)
+    $v3.external_approval_sha256 = Get-BytesSha256 $approvalBytes
+    $v3.external_classification_summary =
+        'eligible_non_executable_asset_tree'
+    $v3.external_target_profile = 'reviewed-non-executable-v1'
+    $v3.preparation_status = 'exact-reviewed-materialized-copy-verified'
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult '^stock client version is not accepted'
+
+    $v3.external_approval_sha256 = '6' * 64
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^Reviewed research copy approval digest is not backed by one exact local artifact'
+    $v3.external_approval_sha256 = Get-BytesSha256 $approvalBytes
+
+    $v3.evidence_eligibility = 'ineligible_external_code'
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult '^research_copy_not_evidence_eligible$'
+    $v3.evidence_eligibility = 'eligible'
+
+    $v3.external_approval_sha256 = '0' * 64
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^Research preparation manifest v3 reviewed profile is invalid'
+    $v3.external_approval_sha256 = Get-BytesSha256 $approvalBytes
+
+    $v3.destination_hardlink_count = 1
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^v3 destination hardlink count is outside its bound'
+    $v3.destination_hardlink_count = 0
+
+    $v3.source_unchanged_status = 'changed'
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^Research preparation manifest v3 policy is invalid'
+    $v3.source_unchanged_status = 'verified'
+
+    $v3.destination_inventory_sha256 = '7' * 64
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^Research preparation manifest v3 inventory disagrees with the tree'
+    $v3.destination_inventory_sha256 = $v3InventorySha256
+
+    $v3.client_binary_private_identity_reference = 'A' * 64
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^research preparation manifest v3 client_binary_private_identity_reference is not a private SHA-256 reference'
+    $v3.client_binary_private_identity_reference = '4' * 64
+
+    $v3.external_target_path = 'private-path-must-not-be-metadata'
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^research preparation manifest v3 property set is not exact'
+    [void]$v3.Remove('external_target_path')
+
+    [IO.File]::Delete($pendingPath)
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^Research preparation v2 lacks its pending/commit state marker'
+    [IO.File]::WriteAllText(
+        $pendingPath, (($pending | ConvertTo-Json) + "`r`n"),
+        [Text.UTF8Encoding]::new($false, $true))
+
+    $v3ClientPath = Join-Path $fixture 'hl.exe'
+    $v3ClientStream = 'hlclient-v3-destination-ads'
+    Write-Manifest $v3
+    try {
+        Set-TestAlternateDataStream $v3ClientPath $v3ClientStream
+        Invoke-ExpectedManifestResult `
+            '^v3 research entry must contain only its default data stream\.$'
+    } finally {
+        Remove-TestAlternateDataStream $v3ClientPath $v3ClientStream
+    }
+
+    $v3HardlinkTarget = [IO.Path]::GetFullPath($fixture +
+        '-v3-hardlink-target.bin')
+    if ((Split-Path -Parent $v3HardlinkTarget) -ine $temporaryRoot -or
+        [IO.Path]::GetFileName($v3HardlinkTarget) -cnotmatch
+            '^hlclient-stock-runtime-manifest-test-[0-9a-f]{32}-v3-hardlink-target\.bin$' -or
+        (Test-Path -LiteralPath $v3HardlinkTarget)) {
+        throw 'V3 hardlink fixture target is invalid.'
+    }
+    [IO.File]::WriteAllBytes($v3HardlinkTarget, [byte[]](0))
+    [IO.File]::Delete($v3ClientPath)
+    try {
+        New-Item -ItemType HardLink -Path $v3ClientPath `
+            -Target $v3HardlinkTarget -ErrorAction Stop | Out-Null
+        Write-Manifest $v3
+        Invoke-ExpectedManifestResult '^v3 research file must not be linked\.$'
+    } finally {
+        if (Test-Path -LiteralPath $v3ClientPath) {
+            [IO.File]::Delete($v3ClientPath)
+        }
+        [IO.File]::Copy($v3HardlinkTarget, $v3ClientPath, $false)
+        [IO.File]::Delete($v3HardlinkTarget)
+    }
+
     # Exercise the same retained native reader through the real walker entry
     # points. The oversized leaf is length-only (SetLength) so the reader must
     # reject it before allocating or invoking either JSON parser.
@@ -615,6 +769,8 @@ try {
 
     Write-Output '[stock-runtime-research-manifest-test] v1=passed'
     Write-Output '[stock-runtime-research-manifest-test] v2=passed'
+    Write-Output '[stock-runtime-research-manifest-test] v3=passed'
+    Write-Output '[stock-runtime-research-manifest-test] v3-ineligible=blocked-before-active-capture'
     Write-Output '[stock-runtime-research-manifest-test] mutation=passed'
     Write-Output '[stock-runtime-research-manifest-test] walker-bounded-read=passed'
     Write-Output '[stock-runtime-research-manifest-test] walker-path-roots=campaign-and-canary'
@@ -622,6 +778,40 @@ try {
     Write-Output '[stock-runtime-research-manifest-test] processes-started=0'
     Write-Output '[stock-runtime-research-manifest-test] result=success'
 } finally {
+    if (Test-Path -LiteralPath $approvalReviewRoot) {
+        $approvalParent = [IO.Path]::GetFullPath(
+            (Split-Path -Parent $approvalReviewRoot)).TrimEnd('\', '/')
+        $approvalLeaf = [IO.Path]::GetFileName($approvalReviewRoot)
+        $approvalAttributes = [IO.File]::GetAttributes($approvalReviewRoot)
+        if ($approvalParent -ine $approvalReviewParent -or
+            $approvalLeaf -cnotmatch '^[0-9a-f]{32}$' -or
+            ($approvalAttributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Approval digest fixture cleanup target is invalid.'
+        }
+        [IO.Directory]::Delete($approvalReviewRoot, $true)
+    }
+    if ($approvalReviewParentCreated -and
+        (Test-Path -LiteralPath $approvalReviewParent) -and
+        @(Get-ChildItem -LiteralPath $approvalReviewParent -Force).Count -eq 0) {
+        [IO.Directory]::Delete($approvalReviewParent, $false)
+    }
+    if ($null -ne $v3HardlinkTarget -and
+        (Test-Path -LiteralPath $v3HardlinkTarget)) {
+        $hardlinkTargetParent = [IO.Path]::GetFullPath(
+            (Split-Path -Parent $v3HardlinkTarget)).TrimEnd('\', '/')
+        $hardlinkTargetLeaf = [IO.Path]::GetFileName($v3HardlinkTarget)
+        $hardlinkTargetAttributes =
+            [IO.File]::GetAttributes($v3HardlinkTarget)
+        if ($hardlinkTargetParent -ine $temporaryRoot -or
+            $hardlinkTargetLeaf -cnotmatch
+                '^hlclient-stock-runtime-manifest-test-[0-9a-f]{32}-v3-hardlink-target\.bin$' -or
+            ($hardlinkTargetAttributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'V3 hardlink fixture cleanup target is invalid.'
+        }
+        [IO.File]::Delete($v3HardlinkTarget)
+    }
     foreach ($cleanup in @(
             [pscustomobject]@{ Path = $walkerCanaryFixture; Parent = $walkerCanaryParent },
             [pscustomobject]@{ Path = $walkerNearFixture; Parent = $walkerNearParent })) {

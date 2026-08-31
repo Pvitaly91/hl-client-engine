@@ -247,6 +247,9 @@ if(WIN32)
             test_windows_binary_identity.cpp
             test_windows_network_isolation.cpp
             test_windows_process_orchestrator.cpp
+            test_stock_external_target_approval.cpp
+            test_stock_external_target_materialization.cpp
+            test_stock_external_target_review.cpp
             test_stock_research_copy_topology.cpp
             test_windows_secure_output.cpp)
 endif()
@@ -349,6 +352,7 @@ if(WIN32)
             hlclient::windows_binary_identity
             hlclient::windows_network_isolation
             hlclient::windows_process_orchestrator
+            hlclient::windows_stock_external_target_api
             hlclient::windows_stock_research_copy
             hlclient::windows_secure_output
             ws2_32)
@@ -362,6 +366,7 @@ if(WIN32)
     add_dependencies(
         hlclient_tests
         hlclient_network_isolation_probe
+        hlclient_stock_external_target_review
         hlclient_stock_research_copy
         hlclient_stock_runtime_capture
         hlclient_stock_runtime_fake_client

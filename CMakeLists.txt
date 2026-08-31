@@ -1033,7 +1033,32 @@ if(WIN32)
         PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(
         hlclient_windows_stock_research_copy
-        PRIVATE bcrypt ntdll hlclient::core)
+        PRIVATE
+            bcrypt
+            ntdll
+            hlclient::core
+            hlclient::windows_stock_external_target_api)
+
+    hlclient_add_library(
+        hlclient_windows_stock_external_target_api
+        include/hlclient/platform/windows/stock_external_target_artifact.hpp
+        include/hlclient/platform/windows/stock_external_target_review.hpp
+        src/platform/windows/stock_external_target_artifact.cpp
+        src/platform/windows/stock_external_target_review.cpp
+    )
+    add_library(
+        hlclient::windows_stock_external_target_api ALIAS
+        hlclient_windows_stock_external_target_api)
+    target_compile_definitions(
+        hlclient_windows_stock_external_target_api
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_windows_stock_external_target_api
+        PRIVATE
+            bcrypt
+            hlclient::hash_sha256
+            hlclient::windows_secure_output
+            hlclient::core)
 
     foreach(
         _hlclient_windows_isolation_target
@@ -1041,12 +1066,16 @@ if(WIN32)
             hlclient_windows_secure_output
             hlclient_windows_binary_identity
             hlclient_windows_process_orchestrator
-            hlclient_windows_network_isolation
-            hlclient_windows_stock_research_copy)
+            hlclient_windows_network_isolation)
         set_property(
             TARGET ${_hlclient_windows_isolation_target}
             PROPERTY FOLDER "Engine/Platform/Windows/Network Isolation")
     endforeach()
+    set_property(
+        TARGET
+            hlclient_windows_stock_external_target_api
+            hlclient_windows_stock_research_copy
+        PROPERTY FOLDER "Engine/Platform/Windows/Research Copy")
 endif()
 
 hlclient_add_library(
@@ -2072,6 +2101,17 @@ set_property(
 
 if(WIN32)
     add_executable(
+        hlclient_stock_external_target_review
+        apps/hlclient_stock_external_target_review/main.cpp)
+    hlclient_enable_warnings(hlclient_stock_external_target_review)
+    target_compile_definitions(
+        hlclient_stock_external_target_review
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_stock_external_target_review
+        PRIVATE hlclient::windows_stock_external_target_api)
+
+    add_executable(
         hlclient_stock_research_copy
         apps/hlclient_stock_research_copy/main.cpp)
     hlclient_enable_warnings(hlclient_stock_research_copy)
@@ -2148,6 +2188,7 @@ if(WIN32)
     foreach(
         _hlclient_stock_runtime_tool
         IN ITEMS
+            hlclient_stock_external_target_review
             hlclient_stock_research_copy
             hlclient_stock_binary_observer
             hlclient_stock_runtime_isolation_guard
@@ -2212,6 +2253,24 @@ if(BUILD_TESTING)
         PROPERTIES TIMEOUT 15)
 
     if(WIN32)
+        foreach(
+            _hlclient_external_target_script_test
+            IN ITEMS review approval materialization)
+            add_test(
+                NAME hlclient_stock_external_target_${_hlclient_external_target_script_test}
+                COMMAND
+                    "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+                    -NoLogo
+                    -NoProfile
+                    -NonInteractive
+                    -ExecutionPolicy Bypass
+                    -File
+                        "${PROJECT_SOURCE_DIR}/scripts/test_stock_external_target_${_hlclient_external_target_script_test}.ps1")
+            set_tests_properties(
+                hlclient_stock_external_target_${_hlclient_external_target_script_test}
+                PROPERTIES TIMEOUT 120)
+        endforeach()
+
         add_test(
             NAME hlclient_stock_research_copy_topology
             COMMAND
@@ -2611,7 +2670,10 @@ foreach(
 endforeach()
 
 if(WIN32)
+    hlclient_enable_address_sanitizer(
+        hlclient_windows_stock_external_target_api)
     hlclient_enable_address_sanitizer(hlclient_windows_stock_research_copy)
+    hlclient_enable_address_sanitizer(hlclient_stock_external_target_review)
     hlclient_enable_address_sanitizer(hlclient_stock_research_copy)
 endif()
 

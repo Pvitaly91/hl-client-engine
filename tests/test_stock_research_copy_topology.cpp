@@ -941,7 +941,11 @@ TEST_CASE(
     const std::string json{
         std::istreambuf_iterator<char>{manifest},
         std::istreambuf_iterator<char>{}};
-    CHECK(json.find("hlclient.stock-runtime-research-preparation.v2") !=
+    CHECK(json.find("hlclient.stock-runtime-research-preparation.v3") !=
+          std::string::npos);
+    CHECK(json.find("\"preparation_profile\":\"ordinary-or-contained-v3\"") !=
+          std::string::npos);
+    CHECK(json.find("\"evidence_eligibility\":\"eligible\"") !=
           std::string::npos);
     CHECK(json.find(source.string()) == std::string::npos);
     CHECK(json.find(destination.string()) == std::string::npos);

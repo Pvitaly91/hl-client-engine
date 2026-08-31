@@ -71,6 +71,10 @@ if ($policyLines -cnotcontains '[stock-runtime-evidence-policy] files-written=0'
     $policyLines -cnotcontains
         '[stock-runtime-evidence-policy] campaign-identity-rejections=2' -or
     $policyLines -cnotcontains
+        '[stock-runtime-evidence-policy] external-target-metadata-acceptances=2' -or
+    $policyLines -cnotcontains
+        '[stock-runtime-evidence-policy] external-target-metadata-rejections=4' -or
+    $policyLines -cnotcontains
         '[stock-runtime-evidence-policy] canary-mutation-rejections=4' -or
     $policyLines -cnotcontains
         '[stock-runtime-evidence-policy] fatal-resume-category-rejections=5' -or

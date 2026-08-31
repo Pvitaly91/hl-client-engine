@@ -95,6 +95,13 @@ $requiredCaptureParents = @(
         (Join-Path $repositoryRoot 'manual-artifacts\stock-runtime-canary')).TrimEnd('\', '/')
 )
 
+function Test-ExternalTargetMetadata {
+    param([Int64]$Count, [string]$Profile)
+    return (($Count -eq 0 -and $Profile -ceq 'none') -or
+        ($Count -gt 0 -and
+            $Profile -ceq 'reviewed-non-executable-v1'))
+}
+
 function Initialize-StockRuntimeWalkerBoundedReader {
     if ($null -ne ('Hlclient.StockRuntimeWalkerBoundedReader' -as [type])) {
         return
@@ -1272,6 +1279,7 @@ if ($reconnect) {
 }
 
 $finalManifestState = 'absent-prepublication'
+$externalTargetMetadataPublished = $false
 $boundaryState = 'not-published'
 $boundary = $requestedBoundary
 $finalManifestPath = Join-Path $root 'research-run-metadata.json'
@@ -1282,6 +1290,13 @@ if (Test-Path -LiteralPath $finalManifestPath -PathType Leaf) {
         [string]$manifest.run_id -cne $runId) {
         throw 'Research run manifest identity is invalid.'
     }
+    $externalTargetCount = Get-StrictInteger $manifest `
+        external_target_count 0 4096
+    if (-not (Test-ExternalTargetMetadata $externalTargetCount `
+            ([string]$manifest.external_target_profile))) {
+        throw 'Research run manifest external-target metadata is invalid.'
+    }
+    $externalTargetMetadataPublished = $true
     if ($manifest.accepted_evidence_run -isnot [bool] -or
         $manifest.accepted_transport_run -isnot [bool]) {
         throw 'Research run manifest acceptance fields are not Boolean.'
@@ -1768,6 +1783,10 @@ Write-Output ("[stock-runtime-walk] transport-complete=" +
     $(if ($transportComplete) { 'true' } else { 'false' }))
 Write-Output '[stock-runtime-walk] observed-delivered-policy=distinct'
 Write-Output "[stock-runtime-walk] final-manifest=$finalManifestState"
+if ($externalTargetMetadataPublished) {
+    Write-Output "[stock-runtime-walk] external-target-profile=$([string]$manifest.external_target_profile)"
+    Write-Output "[stock-runtime-walk] external-target-count=$externalTargetCount"
+}
 Write-Output "[stock-runtime-walk] post-resource-boundary=$boundaryState"
 Write-Output "[stock-runtime-walk] boundary-payload-ordinal=$($boundaryOutput.PayloadOrdinal)"
 Write-Output "[stock-runtime-walk] boundary-observed-ordinal=$($boundaryOutput.ObservedOrdinal)"

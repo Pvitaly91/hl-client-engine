@@ -515,6 +515,48 @@ tree:
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
 ```
 
+If inspection reports an external directory target, do not treat that
+diagnostic as permission and do not weaken the topology policy. M4.7.1.1.3 uses
+the following separate command surfaces:
+
+```powershell
+.\scripts\prepare_stock_runtime_research_copy.ps1 `
+  -ReviewExternalTargets `
+  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -ReviewOutputRoot ".\manual-artifacts\stock-runtime-source-review"
+
+.\scripts\approve_stock_runtime_external_targets.ps1 `
+  -ReviewRoot `
+    ".\manual-artifacts\stock-runtime-source-review\<review-id>" `
+  -ConfirmExternalMaterialization `
+    HLCLIENT_APPROVE_REVIEWED_EXTERNAL_TARGETS_V1
+
+.\scripts\prepare_stock_runtime_research_copy.ps1 `
+  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life" `
+  -ExternalTargetApprovalManifest `
+    ".\manual-artifacts\stock-runtime-source-review\<review-id>\external-target-approval.json"
+```
+
+Review is read-only; approval is explicit, local and expiring; materialization
+still accepts only a new destination. Only exact reviewed non-executable,
+non-mutable directory targets are eligible. Arbitrary external links and all
+unsupported topology remain fail-closed. Successful materialization carries
+preparation manifest v3, which the stock-free preflight must verify. Private
+ignored review records intentionally contain local link/target paths and
+identities; the public summary, approval, v3 manifest and runtime evidence do
+not contain those raw paths. None of these filesystem artifacts supplies
+runtime semantics or counts as evidence.
+
+For a reviewed copy, keep the ignored
+`manual-artifacts/stock-runtime-source-review/<review-id>/external-target-approval.json`
+artifact in place. Stock-free preflight requires exactly one matching local
+artifact, rejects reparse/ADS/hardlink or size-policy violations, and hashes it
+again to match v3 `external_approval_sha256` before WFP/process work.
+
+The commands document the M4.7.1.1.3 interface; do not infer that a real review,
+canary or campaign has succeeded.
+
 From an elevated PowerShell, validate the active environment without launching
 stock processes or creating a capture directory:
 

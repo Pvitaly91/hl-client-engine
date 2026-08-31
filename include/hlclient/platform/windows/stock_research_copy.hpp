@@ -12,6 +12,8 @@ namespace hlclient::platform::windows {
 
 inline constexpr std::string_view kStockResearchPreparationSchemaV2 =
     "hlclient.stock-runtime-research-preparation.v2";
+inline constexpr std::string_view kStockResearchPreparationSchemaV3 =
+    "hlclient.stock-runtime-research-preparation.v3";
 inline constexpr std::string_view kStockResearchIsolationMarkerV1 =
     "HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1";
 
@@ -43,6 +45,7 @@ enum class StockResearchTopologyCategory {
     source_link_depth_exceeded,
     source_entry_limit_exceeded,
     source_byte_limit_exceeded,
+    source_reviewed_external_target,
 };
 
 [[nodiscard]] std::string_view to_string(
@@ -64,6 +67,14 @@ enum class StockResearchCopyErrorCode {
     source_changed_during_materialization,
     source_read_failed,
     source_digest_failed,
+    external_target_review_invalid,
+    external_target_approval_missing,
+    external_target_approval_invalid,
+    external_target_approval_expired,
+    external_target_approval_mismatch,
+    external_target_not_evidence_eligible,
+    external_materialization_path_collision,
+    source_or_external_target_changed_during_materialization,
     destination_not_absolute,
     destination_exists,
     destination_parent_invalid,
@@ -97,6 +108,7 @@ struct StockResearchTopologySummary final {
     std::size_t alternate_data_stream_count{0U};
     std::size_t contained_target_count{0U};
     std::size_t escaped_target_count{0U};
+    std::size_t reviewed_external_target_count{0U};
     std::size_t entry_count{0U};
     std::uint64_t byte_count{0U};
 };
@@ -152,6 +164,11 @@ struct StockResearchCopyOptions final {
     // bounded libraryfolders.vdf discovery as well.
     std::vector<std::filesystem::path> configured_steam_library_roots;
 
+    // Exact local approval artifact produced by the external-target review
+    // helper. An absent value preserves the v2 fail-closed behaviour: every
+    // target outside the physical source root remains unmaterializable.
+    std::optional<std::filesystem::path> external_target_approval_manifest;
+
     // Deterministic fixture hook. Production callers leave this null. The
     // callback receives no source or destination path and is never used by the
     // command-line tool.
@@ -159,10 +176,22 @@ struct StockResearchCopyOptions final {
     void* progress_context{nullptr};
 };
 
+enum class StockResearchCopyEvidenceEligibility {
+    eligible,
+    ineligible_external_code,
+    ineligible_mutable_state,
+    ineligible_cross_application,
+    ineligible_unknown_external_target,
+};
+
+[[nodiscard]] std::string_view to_string(
+    StockResearchCopyEvidenceEligibility status) noexcept;
+
 struct StockResearchMaterialization final {
     StockResearchTopologySummary topology;
     std::size_t materialized_link_count{0U};
     std::size_t materialized_hardlink_count{0U};
+    std::size_t approved_external_materialized_link_count{0U};
     std::size_t rejected_link_count{0U};
     std::size_t destination_reparse_count{0U};
     std::size_t destination_hardlink_count{0U};
@@ -170,9 +199,17 @@ struct StockResearchMaterialization final {
     std::size_t entry_count{0U};
     std::uint64_t byte_count{0U};
     bool source_unchanged{false};
+    bool external_targets_unchanged{false};
     bool destination_unlinked{false};
     std::string source_root_identity_fingerprint;
     std::string inventory_sha256;
+    std::string external_approval_sha256;
+    std::string external_classification_summary;
+    std::size_t executable_external_target_count{0U};
+    std::size_t mutable_state_external_target_count{0U};
+    StockResearchCopyEvidenceEligibility evidence_eligibility{
+        StockResearchCopyEvidenceEligibility::eligible};
+    std::string external_target_profile;
     std::string client_binary_private_identity_reference;
     std::string server_binary_private_identity_reference;
     std::string preparation_status;

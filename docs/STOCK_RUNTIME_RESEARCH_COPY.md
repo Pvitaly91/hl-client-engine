@@ -32,7 +32,7 @@ inside that canonical root on the same volume, the target identity is not in
 the active recursion stack, and the reparse-depth bound is not exceeded. Every
 link/target witness is checked again during copying and final source inventory.
 
-The following categories remain fail-closed:
+The following categories remain fail-closed by default:
 
 - external link target;
 - link cycle or excessive link depth;
@@ -42,7 +42,15 @@ The following categories remain fail-closed:
 - UNC, remote-volume, or substituted-drive source;
 - entry/byte bound exhaustion.
 
-## Materialization v2
+M4.7.1.1.3 defines one narrow exception for an exact escaped directory target
+that has passed the separate local review and explicit approval workflow. It
+does not make arbitrary external links safe. Only eligible non-executable,
+non-mutable directory content can be approved; every other category above
+remains non-overridable. See
+[external-target review](STOCK_RUNTIME_EXTERNAL_TARGET_REVIEW.md) and
+[external-target approval](STOCK_RUNTIME_EXTERNAL_TARGET_APPROVAL.md).
+
+## Verified materialization
 
 The complete source inventory is measured before mutation. Each regular file
 is reopened by its verified physical path and compared with the inventory
@@ -56,7 +64,9 @@ After all files are copied, the helper independently inventories staging and
 requires exact entry/byte/content-inventory agreement, zero reparse points,
 zero hardlinks and zero ADS. It then repeats the source inventory. Any metadata,
 identity, target, stream, byte, or content change yields
-`source_changed_during_materialization` and removes staging.
+`source_changed_during_materialization` and removes staging. For a reviewed
+external target, approval/source/target drift instead yields the combined typed
+failure `source_or_external_target_changed_during_materialization`.
 
 Only a new destination is accepted. Its parent chain must consist of ordinary
 directories on a local fixed, non-substituted volume. Source/destination and
@@ -88,19 +98,68 @@ New copies contain:
   `HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1`, published only as the final commit
   record;
 - `.hlclient-research-preparation.json` with schema
-  `hlclient.stock-runtime-research-preparation.v2`.
+  `hlclient.stock-runtime-research-preparation.v3`.
 
-The v2 manifest records metadata only: topology profile, anonymized source-root
-identity fingerprint, entry/byte counts, materialized link/hardlink counts,
-inventory digest, private client/server identity references, unlinked
-destination status, unchanged-source status, and preparation result. It stores
-no paths. Existing v1 marker consumers remain valid; consumers that inspect the
-manifest must continue accepting the prior v1 schema and apply stricter v2
-checks when v2 is present. Capture preflight performs those stricter checks: it
-validates the v2 field contract and pending record, requires the separate
-commit marker, and binds the live prepared-tree inventory and binary identities
-to the manifest before active launch. The pending and commit records are
-metadata and are excluded from the source inventory digest.
+All new materializations publish v3, including sources with only ordinary or
+contained-link topology. The exact v3 property set is:
+
+- `schema`, `marker`, `preparation_profile`;
+- `source_root_identity_fingerprint`, `source_inventory_entries`,
+  `source_inventory_bytes`, `source_inventory_sha256`;
+- `contained_materialized_link_count`,
+  `approved_external_materialized_link_count`, `source_hardlink_count`;
+- `destination_entry_count`, `destination_byte_count`,
+  `destination_inventory_sha256`, `destination_reparse_count`,
+  `destination_hardlink_count`, `destination_ads_count`;
+- `external_approval_sha256`, `external_classification_summary`,
+  `executable_target_count`, `mutable_state_target_count`;
+- `source_unchanged_status`, `external_targets_unchanged_status`,
+  `evidence_eligibility`, `external_target_profile`;
+- `client_binary_private_identity_reference`,
+  `server_binary_private_identity_reference`, `paths_recorded`,
+  `preparation_status`.
+
+For an ordinary/contained copy, `preparation_profile` is
+`ordinary-or-contained-v3`, the external approval digest is the all-zero
+SHA-256 value, the external classification/profile are `none`, and status is
+`exact-materialized-copy-verified`. For a reviewed copy, the exact profile is
+`reviewed-external-targets-v1`, classification is
+`eligible_non_executable_asset_tree`, public run profile is
+`reviewed-non-executable-v1`, and status is
+`exact-reviewed-materialized-copy-verified`. Both successful profiles require
+`evidence_eligibility=eligible`, `paths_recorded=false`, verified unchanged
+statuses and zero destination reparse/hardlink/ADS counts.
+
+The evidence-eligibility enum also reserves
+`ineligible_external_code`, `ineligible_mutable_state`,
+`ineligible_cross_application` and `ineligible_unknown_external_target`.
+Materialization fails before publication for those states; capture rejects any
+non-`eligible` v3 value as `research_copy_not_evidence_eligible` before WFP or
+process launch.
+
+Materialization validates the exact unexpired approval and current source and
+target identities/inventories before publishing v3. Capture preflight then
+validates the closed v3 field contract, pending record, commit marker, live
+prepared-tree inventory, zero destination links/ADS and private binary
+identity references. For `reviewed-external-targets-v1`, it additionally scans
+the exact repository-local ignored review layout, accepts exactly one bounded
+ordinary single-link/no-ADS `external-target-approval.json` under a
+32-lower-hex review root, hashes its current bytes and requires equality with
+`external_approval_sha256`. Removing, linking, changing or duplicating the
+matching approval therefore blocks active capture before WFP/process work.
+This later digest-presence check does not extend approval lifetime: expiration
+and live source/target bindings are enforced by materialization before copy
+publication.
+
+Preflight retains only path-free `external_target_profile` and
+`external_target_count` in run/canary/campaign provenance; the locally checked
+approval path, private review paths and identities do not enter evidence. The
+pending and commit records are metadata and are excluded from the inventory
+digest.
+
+Capture readers retain the prior v1 and v2 preparation schemas for their
+original strict contracts. Neither legacy schema can represent or authorize a
+reviewed external target.
 
 ## Commands
 
@@ -113,11 +172,35 @@ metadata and are excluded from the source inventory digest.
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
   -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
+
+.\scripts\prepare_stock_runtime_research_copy.ps1 `
+  -ReviewExternalTargets `
+  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -ReviewOutputRoot ".\manual-artifacts\stock-runtime-source-review"
+
+.\scripts\approve_stock_runtime_external_targets.ps1 `
+  -ReviewRoot `
+    ".\manual-artifacts\stock-runtime-source-review\<review-id>" `
+  -ConfirmExternalMaterialization `
+    HLCLIENT_APPROVE_REVIEWED_EXTERNAL_TARGETS_V1
+
+.\scripts\prepare_stock_runtime_research_copy.ps1 `
+  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life" `
+  -ExternalTargetApprovalManifest `
+    ".\manual-artifacts\stock-runtime-source-review\<review-id>\external-target-approval.json"
 ```
 
-Inspection exits zero after a complete safe or unsafe diagnostic. Materialize
-exits zero only for `exact-materialized-copy-verified`; typed topology,
-mutation, destination, publication, or cleanup failures exit nonzero without a
+Inspection exits zero after a complete safe or unsafe diagnostic. External
+review also exits zero after a complete ineligible diagnostic; that does not
+permit approval. Materialization exits zero only for
+`exact-materialized-copy-verified` or
+`exact-reviewed-materialized-copy-verified`; typed topology, approval,
+mutation, destination, publication or cleanup failures exit nonzero without a
 verified published destination. Ordinary helper-owned staging is removed on
 failure; an identity-mismatched replacement path is deliberately preserved
 rather than deleted by name.
+
+These review/approval commands are the M4.7.1.1.3 contract; this repository
+does not claim that a real installation has completed them or that a real
+canary/evidence run has consequently been accepted.

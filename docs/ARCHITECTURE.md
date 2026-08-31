@@ -1034,3 +1034,24 @@ packet. The catalog is not yet composed into production `PostResourceSignon`;
 M4.7.1.2 owns runtime grammar and M4.7.2 owns stock usercmd. No protocol library
 depends on prediction or a renderer, and reserved confirmed profiles remain
 unreachable while this checkout has zero accepted real runtime runs.
+
+### M4.7.1.1.3 external-target provenance boundary
+
+The research-copy boundary adds a separate read-only topology review and an
+explicit local, expiring approval artifact for exact eligible external
+directory targets. Review is not approval; approval is not a generic bypass.
+Only non-executable, non-mutable content named by the exact review may be
+materialized, and it becomes ordinary unlinked destination data. Arbitrary or
+changed external links, executable/mutable targets and every unsupported
+topology remain fail-closed.
+
+All new materializations publish preparation manifest v3. Materialization
+binds an approved copy to the exact local review/approval digest and verified
+source/target state. Active preflight verifies the closed, path-free v3
+contract and live prepared destination. For a reviewed profile it also
+requires exactly one bounded, ordinary, single-link/no-ADS repository-local
+approval artifact whose fresh SHA-256 equals the v3 approval digest;
+canary/run/campaign/verifier metadata retains only the sanitized
+external-target profile and count. The boundary provides no runtime semantics
+and no evidence. No real review, canary or campaign success is claimed by this
+architecture entry.

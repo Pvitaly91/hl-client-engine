@@ -114,10 +114,19 @@ single-session run is accepted as reconnect. See
 [capture corpus](docs/STOCK_RUNTIME_CAPTURE_CORPUS.md),
 [offline replay](docs/STOCK_RUNTIME_OFFLINE_REPLAY.md),
 [first observations](docs/STOCK_RUNTIME_FIRST_OBSERVATIONS.md),
+[external-target review](docs/STOCK_RUNTIME_EXTERNAL_TARGET_REVIEW.md),
+[external-target approval](docs/STOCK_RUNTIME_EXTERNAL_TARGET_APPROVAL.md),
 [stock runtime transcript](docs/GOLDSRC_STOCK_RUNTIME_TRANSCRIPT.md),
 [local-player identity](docs/GOLDSRC_LOCAL_PLAYER_IDENTITY.md),
 [authoritative projection](docs/GOLDSRC_AUTHORITATIVE_STATE_PROJECTION.md) and
 [command-ACK evidence](docs/GOLDSRC_COMMAND_ACK_EVIDENCE.md).
+
+M4.7.1.1.3 adds a narrowly scoped, local and expiring review/approval contract
+for exact non-executable, non-mutable external directory targets. Arbitrary
+external links still fail closed. Approval is not runtime evidence and does not
+claim that a real review, canary or campaign has succeeded; approved copies use
+the reviewed v3 profile, all new copies use preparation manifest v3, and every
+copy must pass the same stock-free preflight.
 
 The CPU-only production boundary is `--stop-after collision-world`. The
 network-free `hlclient_collision_check` and

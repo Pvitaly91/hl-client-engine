@@ -33,6 +33,8 @@ constexpr std::string_view kUsage =
     "netchan|signon-replay|post-resource-first|first-observation|campaign-summary "
     "[--publication-stage prepublication] "
     "[--campaign-refresh-implementation-commit <40-lower-hex>] "
+    "[--campaign-external-target-profile none|reviewed-non-executable-v1] "
+    "[--campaign-external-target-count <0..4096>] "
     "[--independent-walker-validated-run <32-lower-hex>]...\n";
 
 enum class Scenario {
@@ -55,6 +57,8 @@ struct Options final {
     Scenario scenario{Scenario::transcript};
     bool prepublication{false};
     std::optional<std::string> campaign_refresh_implementation_commit;
+    std::optional<std::string> campaign_external_target_profile;
+    std::optional<std::size_t> campaign_external_target_count;
     std::vector<std::string> independent_walker_validated_runs;
 };
 
@@ -84,11 +88,15 @@ struct Options final {
     bool scenario_seen = false;
     bool publication_seen = false;
     bool campaign_refresh_seen = false;
+    bool campaign_external_profile_seen = false;
+    bool campaign_external_count_seen = false;
     for (std::size_t index = 0U; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
         if ((argument != "--capture-root" && argument != "--scenario" &&
              argument != "--publication-stage" &&
              argument != "--campaign-refresh-implementation-commit" &&
+             argument != "--campaign-external-target-profile" &&
+             argument != "--campaign-external-target-count" &&
              argument != "--independent-walker-validated-run") ||
             index + 1U >= arguments.size()) {
             return std::nullopt;
@@ -126,6 +134,26 @@ struct Options final {
             }
             campaign_refresh_seen = true;
             options.campaign_refresh_implementation_commit = std::string{value};
+        } else if (argument == "--campaign-external-target-profile") {
+            if (campaign_external_profile_seen ||
+                (value != "none" &&
+                 value != "reviewed-non-executable-v1")) {
+                return std::nullopt;
+            }
+            campaign_external_profile_seen = true;
+            options.campaign_external_target_profile = std::string{value};
+        } else if (argument == "--campaign-external-target-count") {
+            std::size_t count = 0U;
+            const auto converted = std::from_chars(
+                value.data(), value.data() + value.size(), count, 10);
+            if (campaign_external_count_seen || value.empty() ||
+                converted.ec != std::errc{} ||
+                converted.ptr != value.data() + value.size() ||
+                count > 4'096U) {
+                return std::nullopt;
+            }
+            campaign_external_count_seen = true;
+            options.campaign_external_target_count = count;
         } else {
             const bool valid_run_id = value.size() == 32U &&
                 std::ranges::all_of(value, [](const char character) {
@@ -148,6 +176,14 @@ struct Options final {
              options.scenario == Scenario::first_observation) &&
             (!options.campaign_refresh_implementation_commit ||
              options.scenario == Scenario::campaign_summary) &&
+            (campaign_external_profile_seen == campaign_external_count_seen) &&
+            (campaign_refresh_seen == campaign_external_profile_seen) &&
+            (!campaign_external_profile_seen ||
+             ((*options.campaign_external_target_count == 0U &&
+               *options.campaign_external_target_profile == "none") ||
+              (*options.campaign_external_target_count != 0U &&
+               *options.campaign_external_target_profile ==
+                   "reviewed-non-executable-v1"))) &&
             (options.independent_walker_validated_runs.empty() ||
              options.scenario == Scenario::campaign_summary)
         ? std::optional<Options>{std::move(options)}
@@ -2278,6 +2314,8 @@ campaign_observation_from_run(
 struct CampaignManifestContract final {
     std::string implementation_commit;
     std::string profile_fingerprint;
+    std::string external_target_profile;
+    std::size_t external_target_count{0U};
     std::array<std::size_t, 8U> matrix_accepted{};
     std::size_t attempted{0U};
     std::size_t accepted{0U};
@@ -2296,6 +2334,32 @@ struct CampaignManifestContract final {
     std::string structural_sha256;
 };
 
+struct CampaignExternalTargetMetadata final {
+    std::string profile;
+    std::size_t count{0U};
+};
+
+[[nodiscard]] std::optional<CampaignExternalTargetMetadata>
+campaign_external_target_metadata(const fs::path& run_root)
+{
+    const auto text = read_metadata(run_root / "research-run-metadata.json");
+    TopLevelJsonObject manifest;
+    if (!text || !parse_top_level_json_object(*text, manifest)) {
+        return std::nullopt;
+    }
+    const auto* profile = top_level_property(
+        manifest, "external_target_profile", TopLevelJsonKind::string);
+    const auto count = top_level_integer(
+        manifest, "external_target_count", 4'096U);
+    if (profile == nullptr || !count ||
+        !((*count == 0U && profile->value == "none") ||
+          (*count != 0U && profile->value ==
+              "reviewed-non-executable-v1"))) {
+        return std::nullopt;
+    }
+    return CampaignExternalTargetMetadata{profile->value, *count};
+}
+
 [[nodiscard]] std::optional<CampaignManifestContract>
 read_campaign_manifest_contract(const fs::path& root)
 {
@@ -2303,6 +2367,8 @@ read_campaign_manifest_contract(const fs::path& root)
         std::string_view{"schema"},
         std::string_view{"implementation_commit"},
         std::string_view{"profile_fingerprint"},
+        std::string_view{"external_target_profile"},
+        std::string_view{"external_target_count"},
         std::string_view{"required_matrix"},
         std::string_view{"attempted_slots"},
         std::string_view{"accepted_slots"},
@@ -2346,6 +2412,10 @@ read_campaign_manifest_contract(const fs::path& root)
         manifest, "implementation_commit", TopLevelJsonKind::string);
     const auto* profile = top_level_property(
         manifest, "profile_fingerprint", TopLevelJsonKind::string);
+    const auto* external_profile = top_level_property(
+        manifest, "external_target_profile", TopLevelJsonKind::string);
+    const auto external_count = top_level_integer(
+        manifest, "external_target_count", 4'096U);
     const auto* matrix_value = top_level_property(
         manifest, "required_matrix", TopLevelJsonKind::compound);
     const auto* packet_value = top_level_property(
@@ -2384,6 +2454,12 @@ read_campaign_manifest_contract(const fs::path& root)
         !attempted || !accepted || !rejected || !incomplete || !pending ||
         *accepted + *rejected + *incomplete != *attempted ||
         (*accepted != 0U && !is_lower_hex_sha256(profile->value))) {
+        return std::nullopt;
+    }
+    if (external_profile == nullptr || !external_count ||
+        !((*external_count == 0U && external_profile->value == "none") ||
+          (*external_count != 0U && external_profile->value ==
+              "reviewed-non-executable-v1"))) {
         return std::nullopt;
     }
 
@@ -2448,6 +2524,8 @@ read_campaign_manifest_contract(const fs::path& root)
 
     result.implementation_commit = commit->value;
     result.profile_fingerprint = profile->value;
+    result.external_target_profile = external_profile->value;
+    result.external_target_count = *external_count;
     result.attempted = *attempted;
     result.accepted = *accepted;
     result.rejected = *rejected;
@@ -2466,10 +2544,35 @@ read_campaign_manifest_contract(const fs::path& root)
     return result;
 }
 
+[[nodiscard]] std::optional<std::string>
+campaign_external_bound_sha256(
+    const std::string_view campaign_sha256,
+    const std::string_view external_target_profile,
+    const std::size_t external_target_count)
+{
+    std::string canonical{
+        "hlclient.stock-runtime-first-campaign-external-binding.v1|campaign="};
+    canonical.append(campaign_sha256)
+        .append("|external-target-profile=")
+        .append(external_target_profile)
+        .append("|external-target-count=")
+        .append(std::to_string(external_target_count));
+    const auto bytes = std::as_bytes(std::span{
+        canonical.data(), canonical.size()});
+    const auto digest = hlclient::hash::sha256(bytes);
+    return digest
+        ? std::optional<std::string>{hlclient::hash::sha256_hex(*digest)}
+        : std::nullopt;
+}
+
 [[nodiscard]] bool campaign_manifest_matches(
     const CampaignManifestContract& manifest,
-    const goldsrc::StockRuntimeCampaignState& state) noexcept
+    const goldsrc::StockRuntimeCampaignState& state)
 {
+    const auto bound_sha256 = campaign_external_bound_sha256(
+        state.structural_sha256(), manifest.external_target_profile,
+        manifest.external_target_count);
+    if (!bound_sha256) return false;
     const auto expected_profile = state.accepted_runs() == 0U
         ? std::string_view{"evidence_pending"}
         : state.profile_identity();
@@ -2491,7 +2594,7 @@ read_campaign_manifest_contract(const fs::path& root)
             goldsrc::to_string(state.candidate_stability()) ||
         manifest.threshold_status !=
             goldsrc::to_string(state.threshold_status()) ||
-        manifest.structural_sha256 != state.structural_sha256()) {
+        manifest.structural_sha256 != *bound_sha256) {
         return false;
     }
     const auto specification = goldsrc::stock_runtime_first_campaign_matrix();
@@ -2508,6 +2611,8 @@ read_campaign_manifest_contract(const fs::path& root)
 [[nodiscard]] int run_campaign_summary(
     const fs::path& root,
     const std::optional<std::string>& refresh_implementation_commit,
+    const std::optional<std::string>& refresh_external_target_profile,
+    const std::optional<std::size_t>& refresh_external_target_count,
     const std::span<const std::string> independent_walker_validated_runs)
 {
     std::vector<fs::path> run_roots;
@@ -2552,11 +2657,34 @@ read_campaign_manifest_contract(const fs::path& root)
     if (manifest && manifest->implementation_commit != implementation_commit) {
         return offline_failure("campaign", "implementation_commit_mismatch", 30);
     }
+    const std::string_view external_target_profile =
+        refresh_external_target_profile
+        ? std::string_view{*refresh_external_target_profile}
+        : std::string_view{manifest->external_target_profile};
+    const std::size_t external_target_count = refresh_external_target_count
+        ? *refresh_external_target_count
+        : manifest->external_target_count;
+    if ((manifest &&
+         (manifest->external_target_profile != external_target_profile ||
+          manifest->external_target_count != external_target_count)) ||
+        ((external_target_count == 0U) !=
+         (external_target_profile == "none")) ||
+        (external_target_count != 0U &&
+         external_target_profile != "reviewed-non-executable-v1")) {
+        return offline_failure(
+            "campaign", "external_target_binding_mismatch", 30);
+    }
     std::ranges::sort(run_roots);
     std::vector<goldsrc::StockRuntimeCampaignRunObservation> observations;
     observations.reserve(run_roots.size());
     for (const auto& run_root : run_roots) {
         const auto run_id = run_root.filename().string();
+        const auto run_external = campaign_external_target_metadata(run_root);
+        if (!run_external || run_external->profile != external_target_profile ||
+            run_external->count != external_target_count) {
+            return offline_failure(
+                "campaign", "external_target_binding_mismatch", 30);
+        }
         observations.push_back(campaign_observation_from_run(
             run_root,
             std::ranges::binary_search(
@@ -2575,8 +2703,19 @@ read_campaign_manifest_contract(const fs::path& root)
         !campaign_manifest_matches(*manifest, state)) {
         return offline_failure("campaign", "campaign_manifest_mismatch", 31);
     }
+    const auto bound_sha256 = campaign_external_bound_sha256(
+        state.structural_sha256(), external_target_profile,
+        external_target_count);
+    if (!bound_sha256) {
+        return offline_failure(
+            "campaign", "external_target_binding_hash_failed", 31);
+    }
     std::cout << "[stock-runtime] profile="
               << goldsrc::kStockRuntimePendingProfile << '\n'
+              << "[stock-runtime] external-target-profile="
+              << external_target_profile << '\n'
+              << "[stock-runtime] external-target-count="
+              << external_target_count << '\n'
               << "[stock-runtime] accepted=" << state.accepted_runs() << '\n'
               << "[stock-runtime] rejected=" << state.rejected_runs() << '\n'
               << "[stock-runtime] incomplete=" << state.incomplete_runs() << '\n'
@@ -2602,7 +2741,7 @@ read_campaign_manifest_contract(const fs::path& root)
               << "[stock-runtime] implementation-commit="
               << state.implementation_commit() << '\n'
               << "[stock-runtime] structural-hash="
-              << state.structural_sha256() << '\n'
+              << *bound_sha256 << '\n'
               << "[stock-runtime] result=campaign-summary\n";
     return 0;
 }
@@ -2630,6 +2769,8 @@ int main(const int argc, const char* const* argv)
             return run_campaign_summary(
                 *campaign_root,
                 options->campaign_refresh_implementation_commit,
+                options->campaign_external_target_profile,
+                options->campaign_external_target_count,
                 options->independent_walker_validated_runs);
         } catch (...) {
             return offline_failure(

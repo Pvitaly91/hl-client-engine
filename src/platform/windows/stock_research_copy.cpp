@@ -1,4 +1,5 @@
 #include <hlclient/platform/windows/stock_research_copy.hpp>
+#include <hlclient/platform/windows/stock_external_target_review.hpp>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -13,8 +14,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cwctype>
 #include <filesystem>
 #include <iterator>
 #include <limits>
@@ -440,6 +443,15 @@ struct MaterializeFailure final {
         OPEN_EXISTING, flags, nullptr)};
 }
 
+[[nodiscard]] UniqueHandle open_entry_rename_guard(
+    const fs::path& path) noexcept
+{
+    return UniqueHandle{::CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+}
+
 [[nodiscard]] bool valid_relative_leaf(
     const std::wstring_view leaf) noexcept
 {
@@ -625,6 +637,44 @@ struct MaterializeFailure final {
              candidate_name[root_name.size()] == L'/'));
 }
 
+[[nodiscard]] std::optional<fs::path> half_life_appmanifest_path(
+    const fs::path& member) noexcept
+{
+    try {
+        auto native = member.lexically_normal().native();
+        std::ranges::replace(native, L'/', L'\\');
+        auto folded = native;
+        std::ranges::transform(
+            folded, folded.begin(), [](const wchar_t value) {
+                return static_cast<wchar_t>(std::towlower(value));
+            });
+        constexpr std::wstring_view marker =
+            L"\\steamapps\\common\\half-life";
+        const auto position = folded.find(marker);
+        if (position == std::wstring::npos) return std::nullopt;
+        const auto application_end = position + marker.size();
+        if (application_end < folded.size() &&
+            folded[application_end] != L'\\') {
+            return std::nullopt;
+        }
+        const auto steamapps_end =
+            position + std::wstring_view{L"\\steamapps"}.size();
+        return fs::path{native.substr(0U, steamapps_end)} /
+               L"appmanifest_70.acf";
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] std::optional<fs::path> half_life_libraryfolders_path(
+    const fs::path& member) noexcept
+{
+    const auto manifest = half_life_appmanifest_path(member);
+    return manifest ? std::optional{manifest->parent_path() /
+                                    L"libraryfolders.vdf"}
+                    : std::nullopt;
+}
+
 [[nodiscard]] bool physical_same_or_below(
     const PhysicalLocation& root,
     const PhysicalLocation& candidate) noexcept
@@ -709,6 +759,7 @@ void add_category(
     case StockResearchTopologyCategory::source_internal_directory_junction:
     case StockResearchTopologyCategory::source_internal_directory_symlink:
     case StockResearchTopologyCategory::source_file_hardlink:
+    case StockResearchTopologyCategory::source_reviewed_external_target:
         return false;
     case StockResearchTopologyCategory::source_internal_file_symlink:
     case StockResearchTopologyCategory::source_internal_mount_point:
@@ -1125,7 +1176,9 @@ struct TraversalNode final {
     const fs::path& source_root,
     const StockResearchCopyLimits& limits,
     const bool hash_contents,
-    const bool accept_prepared_marker = false) noexcept
+    const bool accept_prepared_marker = false,
+    const StockExternalApprovalValidation* const external_approval =
+        nullptr) noexcept
 {
     try {
         if (!valid_limits(limits) || source_root.empty()) {
@@ -1306,14 +1359,7 @@ struct TraversalNode final {
                                 source_unsupported_reparse_tag);
                         continue;
                     }
-                    if (!snapshot.directory) {
-                        add_category(
-                            inventory.summary,
-                            StockResearchTopologyCategory::
-                                source_internal_file_symlink);
-                        continue;
-                    }
-                    if (is_volume_mount_point(
+                    if (snapshot.directory && is_volume_mount_point(
                             no_follow.get(), snapshot.reparse_tag)) {
                         add_category(
                             inventory.summary,
@@ -1321,13 +1367,6 @@ struct TraversalNode final {
                                 source_internal_mount_point);
                         continue;
                     }
-                    const auto kind = snapshot.reparse_tag ==
-                                              IO_REPARSE_TAG_SYMLINK
-                                          ? StockResearchTopologyCategory::
-                                                source_internal_directory_symlink
-                                          : StockResearchTopologyCategory::
-                                                source_internal_directory_junction;
-                    add_category(inventory.summary, kind);
                     if (node.reparse_depth >= limits.maximum_reparse_depth) {
                         add_category(
                             inventory.summary,
@@ -1342,13 +1381,17 @@ struct TraversalNode final {
                     if (!target || !query_snapshot(target.get(), target_snapshot) ||
                         !query_final_path(target.get(), target_final) ||
                         !query_volume_relative_path(
-                            target.get(), target_volume_relative) ||
-                        !target_snapshot.directory) {
-                        // A broken, inaccessible, or non-directory target
-                        // cannot be proven physically contained. Inspection is
-                        // still complete and read-only; materialization remains
-                        // fail-closed and never traverses the entry.
+                            target.get(), target_volume_relative)) {
+                        // A broken or inaccessible target cannot be proven
+                        // physically contained. Inspection is still complete
+                        // and read-only; materialization remains fail-closed.
                         ++inventory.summary.escaped_target_count;
+                        if (!snapshot.directory) {
+                            add_category(
+                                inventory.summary,
+                                StockResearchTopologyCategory::
+                                    source_internal_file_symlink);
+                        }
                         add_category(
                             inventory.summary,
                             StockResearchTopologyCategory::
@@ -1364,16 +1407,120 @@ struct TraversalNode final {
                     const PhysicalLocation target_location{
                         target_snapshot.identity.volume_serial,
                         target_volume_relative};
-                    if (!physical_same_or_below(
-                            source_location, target_location)) {
+                    const bool external = !physical_same_or_below(
+                        source_location, target_location);
+                    bool approved = false;
+                    if (external && external_approval != nullptr) {
+                        approved = std::ranges::any_of(
+                            external_approval->targets,
+                            [&](const StockApprovedExternalTarget& candidate) {
+                                return path_equal(
+                                           candidate.source_link_relative_path
+                                               .lexically_normal(),
+                                           relative.lexically_normal()) &&
+                                       path_equal(
+                                           candidate.target_root
+                                               .lexically_normal(),
+                                           target_final);
+                            });
+                    }
+                    if (external) {
                         ++inventory.summary.escaped_target_count;
+                        if (!approved) {
+                            add_category(
+                                inventory.summary,
+                                StockResearchTopologyCategory::
+                                    source_link_target_outside_root);
+                            continue;
+                        }
+                        ++inventory.summary.reviewed_external_target_count;
                         add_category(
                             inventory.summary,
                             StockResearchTopologyCategory::
-                                source_link_target_outside_root);
+                                source_reviewed_external_target);
+                    }
+                    if (!target_snapshot.directory) {
+                        if (!external || !approved) {
+                            add_category(
+                                inventory.summary,
+                                StockResearchTopologyCategory::
+                                    source_internal_file_symlink);
+                            continue;
+                        }
+                        classify_alternate_streams(
+                            target_final, limits, inventory.summary);
+                        const bool hardlink = target_snapshot.link_count > 1U;
+                        if (hardlink) {
+                            ++inventory.summary.hardlink_count;
+                            add_category(
+                                inventory.summary,
+                                StockResearchTopologyCategory::
+                                    source_file_hardlink);
+                        }
+                        if (target_snapshot.size > limits.maximum_file_bytes ||
+                            inventory.summary.byte_count >
+                                limits.maximum_total_bytes -
+                                    target_snapshot.size) {
+                            add_category(
+                                inventory.summary,
+                                StockResearchTopologyCategory::
+                                    source_byte_limit_exceeded);
+                            bounded_stop = true;
+                            break;
+                        }
+                        inventory.summary.byte_count += target_snapshot.size;
+                        std::array<std::byte, 32U> digest{};
+                        if (hash_contents) {
+                            auto readable =
+                                open_entry(target_final, false, true);
+                            EntrySnapshot before;
+                            EntrySnapshot after;
+                            if (!readable ||
+                                !query_snapshot(readable.get(), before) ||
+                                before != target_snapshot ||
+                                !hash_handle(readable.get(), digest) ||
+                                !query_snapshot(readable.get(), after)) {
+                                return {
+                                    std::nullopt,
+                                    StockResearchCopyErrorCode::
+                                        source_read_failed,
+                                    ::GetLastError()};
+                            }
+                            if (before != after) {
+                                return {
+                                    std::nullopt,
+                                    StockResearchCopyErrorCode::
+                                        source_changed_during_materialization,
+                                    ERROR_FILE_INVALID};
+                            }
+                        }
+                        auto witnesses = node.witnesses;
+                        try {
+                            witnesses.push_back(LinkWitness{
+                                logical, snapshot, target_snapshot,
+                                target_final, target_volume_relative});
+                            inventory.entries.push_back(InventoryEntry{
+                                relative, logical, target_final,
+                                target_snapshot, digest,
+                                std::move(witnesses), false, hardlink});
+                        } catch (...) {
+                            return {
+                                std::nullopt,
+                                StockResearchCopyErrorCode::enumeration_failed,
+                                ERROR_NOT_ENOUGH_MEMORY};
+                        }
                         continue;
                     }
-                    ++inventory.summary.contained_target_count;
+                    const auto kind = snapshot.reparse_tag ==
+                                              IO_REPARSE_TAG_SYMLINK
+                                          ? StockResearchTopologyCategory::
+                                                source_internal_directory_symlink
+                                          : StockResearchTopologyCategory::
+                                                source_internal_directory_junction;
+                    add_category(inventory.summary, kind);
+                    if (!external) {
+                        ++inventory.summary.contained_target_count;
+                    }
                     classify_alternate_streams(
                         target_final, limits, inventory.summary);
                     if (identity_in_stack(
@@ -1730,6 +1877,13 @@ struct SourceCommitGuard final {
     fs::path expected_path;
     EntrySnapshot snapshot{};
     bool require_default_stream{false};
+    UniqueHandle handle;
+};
+
+struct ExternalProvenanceGuard final {
+    fs::path expected_path;
+    EntrySnapshot snapshot{};
+    std::array<std::byte, 32U> digest{};
     UniqueHandle handle;
 };
 
@@ -2773,6 +2927,7 @@ struct DestinationPreparation final {
     const fs::path& requested,
     const Inventory& source,
     const StockResearchCopyOptions& options,
+    const StockExternalApprovalValidation* const external_approval,
     MaterializeFailure& failure) noexcept
 {
     try {
@@ -2905,6 +3060,32 @@ struct DestinationPreparation final {
                 StockResearchCopyErrorCode::destination_overlaps_source,
                 ERROR_ACCESS_DENIED};
             return std::nullopt;
+        }
+        if (external_approval != nullptr) {
+            for (const auto& target : external_approval->targets) {
+                auto target_handle = open_entry(target.target_root, true);
+                EntrySnapshot target_snapshot;
+                PhysicalLocation target_location;
+                if (!target_handle ||
+                    !query_snapshot(target_handle.get(), target_snapshot) ||
+                    !query_physical_location(
+                        target_handle.get(), target_snapshot,
+                        target_location)) {
+                    failure = {
+                        StockResearchCopyErrorCode::
+                            external_target_approval_mismatch,
+                        ::GetLastError()};
+                    return std::nullopt;
+                }
+                if (physical_overlap(
+                        target_location, prospective_destination)) {
+                    failure = {
+                        StockResearchCopyErrorCode::
+                            external_materialization_path_collision,
+                        ERROR_ACCESS_DENIED};
+                    return std::nullopt;
+                }
+            }
         }
         if (std::ranges::any_of(
                 steam_roots,
@@ -3704,19 +3885,6 @@ enum class CommitMarkerRevocation {
     return true;
 }
 
-[[nodiscard]] std::string topology_json(
-    const StockResearchTopologySummary& topology)
-{
-    std::ostringstream output;
-    output << '[';
-    for (std::size_t index = 0U; index < topology.categories.size(); ++index) {
-        if (index != 0U) output << ',';
-        output << '\"' << to_string(topology.categories[index]) << '\"';
-    }
-    output << ']';
-    return output.str();
-}
-
 [[nodiscard]] std::optional<std::string> preparation_manifest(
     const Inventory& source,
     StockResearchMaterialization& materialization) noexcept
@@ -3749,34 +3917,67 @@ enum class CommitMarkerRevocation {
         }
         std::ostringstream json;
         json << "{\r\n"
-             << "  \"schema\":\"" << kStockResearchPreparationSchemaV2
+             << "  \"schema\":\"" << kStockResearchPreparationSchemaV3
              << "\",\r\n"
              << "  \"marker\":\"" << kStockResearchIsolationMarkerV1
              << "\",\r\n"
-             << "  \"topology_profile\":"
-             << topology_json(materialization.topology) << ",\r\n"
+             << "  \"preparation_profile\":\""
+             << (materialization.approved_external_materialized_link_count ==
+                         0U
+                     ? "ordinary-or-contained-v3"
+                     : "reviewed-external-targets-v1")
+             << "\",\r\n"
              << "  \"source_root_identity_fingerprint\":\""
              << materialization.source_root_identity_fingerprint << "\",\r\n"
-             << "  \"entry_count\":" << materialization.entry_count
+             << "  \"source_inventory_entries\":"
+             << materialization.entry_count
              << ",\r\n"
-             << "  \"byte_count\":" << materialization.byte_count
+             << "  \"source_inventory_bytes\":"
+             << materialization.byte_count
              << ",\r\n"
-             << "  \"materialized_link_count\":"
-             << materialization.materialized_link_count << ",\r\n"
-             << "  \"materialized_hardlink_count\":"
-             << materialization.materialized_hardlink_count << ",\r\n"
-             << "  \"rejected_link_count\":"
-             << materialization.rejected_link_count << ",\r\n"
-             << "  \"inventory_sha256\":\""
+             << "  \"source_inventory_sha256\":\""
              << materialization.inventory_sha256 << "\",\r\n"
+             << "  \"contained_materialized_link_count\":"
+             << materialization.materialized_link_count << ",\r\n"
+             << "  \"approved_external_materialized_link_count\":"
+             << materialization.approved_external_materialized_link_count
+             << ",\r\n"
+             << "  \"source_hardlink_count\":"
+             << materialization.materialized_hardlink_count << ",\r\n"
+             << "  \"destination_entry_count\":"
+             << materialization.entry_count << ",\r\n"
+             << "  \"destination_byte_count\":"
+             << materialization.byte_count << ",\r\n"
+             << "  \"destination_inventory_sha256\":\""
+             << materialization.inventory_sha256 << "\",\r\n"
+             << "  \"destination_reparse_count\":"
+             << materialization.destination_reparse_count << ",\r\n"
+             << "  \"destination_hardlink_count\":"
+             << materialization.destination_hardlink_count << ",\r\n"
+             << "  \"destination_ads_count\":"
+             << materialization.destination_alternate_data_stream_count
+             << ",\r\n"
+             << "  \"external_approval_sha256\":\""
+             << materialization.external_approval_sha256 << "\",\r\n"
+             << "  \"external_classification_summary\":\""
+             << materialization.external_classification_summary << "\",\r\n"
+             << "  \"executable_target_count\":"
+             << materialization.executable_external_target_count << ",\r\n"
+             << "  \"mutable_state_target_count\":"
+             << materialization.mutable_state_external_target_count
+             << ",\r\n"
+             << "  \"source_unchanged_status\":\"verified\",\r\n"
+             << "  \"external_targets_unchanged_status\":\"verified\",\r\n"
+             << "  \"evidence_eligibility\":\""
+             << to_string(materialization.evidence_eligibility) << "\",\r\n"
+             << "  \"external_target_profile\":\""
+             << materialization.external_target_profile << "\",\r\n"
              << "  \"client_binary_private_identity_reference\":\""
              << materialization.client_binary_private_identity_reference
              << "\",\r\n"
              << "  \"server_binary_private_identity_reference\":\""
              << materialization.server_binary_private_identity_reference
              << "\",\r\n"
-             << "  \"destination_unlinked_status\":\"verified\",\r\n"
-             << "  \"source_unchanged_status\":\"verified\",\r\n"
              << "  \"paths_recorded\":false,\r\n"
              << "  \"preparation_status\":\""
              << materialization.preparation_status << "\"\r\n"
@@ -3787,17 +3988,447 @@ enum class CommitMarkerRevocation {
     }
 }
 
+[[nodiscard]] bool approval_validation_equal(
+    const StockExternalApprovalValidation& left,
+    const StockExternalApprovalValidation& right) noexcept
+{
+    if (left.review_set_sha256 != right.review_set_sha256 ||
+        left.approval_manifest_sha256 != right.approval_manifest_sha256 ||
+        left.executable_count != right.executable_count ||
+        left.script_or_command_count != right.script_or_command_count ||
+        left.mutable_state_count != right.mutable_state_count ||
+        left.nested_link_count != right.nested_link_count ||
+        left.expires_at != right.expires_at ||
+        left.targets.size() != right.targets.size()) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < left.targets.size(); ++index) {
+        const auto& a = left.targets[index];
+        const auto& b = right.targets[index];
+        if (!path_equal(
+                a.source_link_relative_path, b.source_link_relative_path) ||
+            !path_equal(a.target_root, b.target_root) ||
+            a.link_identity_sha256 != b.link_identity_sha256 ||
+            a.target_identity_sha256 != b.target_identity_sha256 ||
+            a.target_inventory_sha256 != b.target_inventory_sha256) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool materialization_leaf_is_unambiguous(
+    const std::wstring_view leaf) noexcept
+{
+    if (!valid_relative_leaf(leaf) || leaf.back() == L'.' ||
+        leaf.back() == L' ') {
+        return false;
+    }
+    std::wstring stem{leaf.substr(0U, leaf.find(L'.'))};
+    std::ranges::transform(stem, stem.begin(), [](const wchar_t value) {
+        return static_cast<wchar_t>(std::towlower(value));
+    });
+    if (stem == L"con" || stem == L"prn" || stem == L"aux" ||
+        stem == L"nul") {
+        return false;
+    }
+    return !(stem.size() == 4U &&
+             ((stem.starts_with(L"com") || stem.starts_with(L"lpt")) &&
+              stem[3U] >= L'1' && stem[3U] <= L'9'));
+}
+
+[[nodiscard]] bool destination_paths_are_unambiguous(
+    const Inventory& inventory) noexcept
+{
+    try {
+        std::vector<const InventoryEntry*> ordered;
+        ordered.reserve(inventory.entries.size());
+        for (const auto& entry : inventory.entries) {
+            for (const auto& component : entry.relative_path) {
+                if (!materialization_leaf_is_unambiguous(
+                        component.native())) {
+                    return false;
+                }
+            }
+            ordered.push_back(&entry);
+        }
+        const auto compare = [](const InventoryEntry* const left,
+                                const InventoryEntry* const right) {
+            const auto& a = left->relative_path.native();
+            const auto& b = right->relative_path.native();
+            const int result = ::CompareStringOrdinal(
+                a.data(), static_cast<int>(a.size()), b.data(),
+                static_cast<int>(b.size()), TRUE);
+            if (result != CSTR_EQUAL) return result == CSTR_LESS_THAN;
+            return a < b;
+        };
+        std::ranges::sort(ordered, compare);
+        for (std::size_t index = 1U; index < ordered.size(); ++index) {
+            if (path_equal(
+                    ordered[index - 1U]->relative_path,
+                    ordered[index]->relative_path)) {
+                return false;
+            }
+        }
+        const std::array<fs::path, 3U> metadata{
+            fs::path{L".hlclient-research-preparation.json"},
+            fs::path{L".hlclient-research-pending"},
+            fs::path{L".hlclient-research-isolated"}};
+        return std::ranges::none_of(
+            inventory.entries, [&metadata](const InventoryEntry& entry) {
+                return std::ranges::any_of(
+                    metadata, [&entry](const fs::path& value) {
+                        return path_equal(entry.relative_path, value);
+                    });
+            });
+    } catch (...) {
+        return false;
+    }
+}
+
 [[nodiscard]] StockResearchMaterializationResult materialize_impl(
     const fs::path& source_root,
     const fs::path& destination_root,
     const StockResearchCopyOptions& options) noexcept
 {
-    auto source_result = build_inventory(source_root, options.limits, true);
+    std::optional<StockExternalApprovalValidation> external_approval;
+    UniqueHandle approval_artifact_guard;
+    EntrySnapshot approval_artifact_snapshot{};
+    std::array<std::byte, 32U> approval_artifact_digest{};
+    UniqueHandle source_root_rename_guard;
+    std::vector<UniqueHandle> external_target_rename_guards;
+    std::vector<ExternalProvenanceGuard> external_provenance_guards;
+    const auto external_provenance_unchanged = [&]() noexcept {
+        for (const auto& provenance : external_provenance_guards) {
+            EntrySnapshot observed;
+            std::array<std::byte, 32U> digest{};
+            if (!provenance.handle ||
+                !query_snapshot(provenance.handle.get(), observed) ||
+                observed != provenance.snapshot ||
+                !exact_opened_path(
+                    provenance.handle.get(), provenance.expected_path) ||
+                !handle_has_only_default_stream(provenance.handle.get()) ||
+                !hash_handle(provenance.handle.get(), digest) ||
+                digest != provenance.digest ||
+                !query_snapshot(provenance.handle.get(), observed) ||
+                observed != provenance.snapshot) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (options.external_target_approval_manifest) {
+        const auto validation = validate_stock_external_target_approval(
+            *options.external_target_approval_manifest, source_root,
+            options.limits);
+        if (!validation) {
+            auto code = StockResearchCopyErrorCode::
+                external_target_approval_invalid;
+            if (validation.code ==
+                StockExternalReviewErrorCode::approval_expired) {
+                code = StockResearchCopyErrorCode::
+                    external_target_approval_expired;
+            } else if (
+                validation.code ==
+                StockExternalReviewErrorCode::approval_mismatch) {
+                code = StockResearchCopyErrorCode::
+                    external_target_approval_mismatch;
+            } else if (
+                validation.code ==
+                StockExternalReviewErrorCode::target_ineligible) {
+                code = StockResearchCopyErrorCode::
+                    external_target_not_evidence_eligible;
+            }
+            return materialization_failure(code, validation.native_error);
+        }
+        if (validation.value->targets.empty()) {
+            return materialization_failure(
+                StockResearchCopyErrorCode::external_target_approval_invalid,
+                ERROR_INVALID_DATA);
+        }
+        external_approval = *validation.value;
+        approval_artifact_guard = UniqueHandle{::CreateFileW(
+            options.external_target_approval_manifest->c_str(),
+            GENERIC_READ | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr)};
+        EntrySnapshot approval_after;
+        if (!approval_artifact_guard ||
+            !query_snapshot(
+                approval_artifact_guard.get(), approval_artifact_snapshot) ||
+            approval_artifact_snapshot.directory ||
+            (approval_artifact_snapshot.attributes &
+             FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
+            approval_artifact_snapshot.link_count != 1U ||
+            !exact_opened_path(
+                approval_artifact_guard.get(),
+                *options.external_target_approval_manifest) ||
+            !handle_has_only_default_stream(approval_artifact_guard.get()) ||
+            !hash_handle(
+                approval_artifact_guard.get(), approval_artifact_digest) ||
+            digest_hex(approval_artifact_digest) !=
+                external_approval->approval_manifest_sha256 ||
+            !query_snapshot(approval_artifact_guard.get(), approval_after) ||
+            approval_after != approval_artifact_snapshot) {
+            return materialization_failure(
+                StockResearchCopyErrorCode::external_target_approval_mismatch,
+                ::GetLastError() == ERROR_SUCCESS ? ERROR_FILE_INVALID
+                                                  : ::GetLastError());
+        }
+        for (const auto& target : external_approval->targets) {
+            if (same_or_below(target.target_root, destination_root) ||
+                same_or_below(destination_root, target.target_root)) {
+                return materialization_failure(
+                    StockResearchCopyErrorCode::
+                        external_materialization_path_collision,
+                    ERROR_ACCESS_DENIED);
+            }
+        }
+    }
+    auto source_result = build_inventory(
+        source_root, options.limits, true, false,
+        external_approval ? &*external_approval : nullptr);
     if (!source_result.inventory) {
+        const auto code =
+            external_approval &&
+                    source_result.code == StockResearchCopyErrorCode::
+                                              source_changed_during_materialization
+                ? StockResearchCopyErrorCode::
+                      source_or_external_target_changed_during_materialization
+                : source_result.code;
         return materialization_failure(
-            source_result.code, source_result.native_error);
+            code, source_result.native_error);
     }
     Inventory source = std::move(*source_result.inventory);
+    const auto source_mutation_code =
+        external_approval
+            ? StockResearchCopyErrorCode::
+                  source_or_external_target_changed_during_materialization
+            : StockResearchCopyErrorCode::
+                  source_changed_during_materialization;
+    const auto approval_artifact_unchanged = [&]() noexcept {
+        if (!external_approval) return true;
+        EntrySnapshot before;
+        EntrySnapshot after;
+        std::array<std::byte, 32U> digest{};
+        return approval_artifact_guard &&
+               query_snapshot(approval_artifact_guard.get(), before) &&
+               before == approval_artifact_snapshot &&
+               exact_opened_path(
+                   approval_artifact_guard.get(),
+                   *options.external_target_approval_manifest) &&
+               handle_has_only_default_stream(approval_artifact_guard.get()) &&
+               hash_handle(approval_artifact_guard.get(), digest) &&
+               digest == approval_artifact_digest &&
+               query_snapshot(approval_artifact_guard.get(), after) &&
+               after == before;
+    };
+    if (external_approval &&
+        (source.summary.reviewed_external_target_count !=
+             external_approval->targets.size() ||
+         source.summary.escaped_target_count !=
+             source.summary.reviewed_external_target_count)) {
+        return materialization_failure(
+            StockResearchCopyErrorCode::external_target_approval_mismatch,
+            ERROR_INVALID_DATA);
+    }
+    if (external_approval) {
+        const auto refreshed = validate_stock_external_target_approval(
+            *options.external_target_approval_manifest, source_root,
+            options.limits);
+        if (!refreshed) {
+            auto code =
+                StockResearchCopyErrorCode::external_target_approval_mismatch;
+            if (refreshed.code ==
+                StockExternalReviewErrorCode::approval_expired) {
+                code = StockResearchCopyErrorCode::
+                    external_target_approval_expired;
+            } else if (
+                refreshed.code ==
+                StockExternalReviewErrorCode::target_ineligible) {
+                code = StockResearchCopyErrorCode::
+                    external_target_not_evidence_eligible;
+            }
+            return materialization_failure(code, refreshed.native_error);
+        }
+        if (!approval_validation_equal(*external_approval, *refreshed.value)) {
+            return materialization_failure(
+                StockResearchCopyErrorCode::external_target_approval_mismatch,
+                ERROR_FILE_INVALID);
+        }
+        external_approval = *refreshed.value;
+    }
+
+    source_root_rename_guard =
+        open_entry_rename_guard(source.canonical_root);
+    EntrySnapshot guarded_source_snapshot;
+    PhysicalLocation guarded_source_location;
+    const PhysicalLocation inventoried_source_location{
+        source.canonical_root_snapshot.identity.volume_serial,
+        source.canonical_root_volume_relative_path};
+    if (!source_root_rename_guard ||
+        !query_snapshot(
+            source_root_rename_guard.get(), guarded_source_snapshot) ||
+        guarded_source_snapshot != source.canonical_root_snapshot ||
+        !guarded_source_snapshot.directory ||
+        (guarded_source_snapshot.attributes & FILE_ATTRIBUTE_REPARSE_POINT) !=
+            0U ||
+        !exact_opened_path(
+            source_root_rename_guard.get(), source.canonical_root) ||
+        !query_physical_location(
+            source_root_rename_guard.get(), guarded_source_snapshot,
+            guarded_source_location) ||
+        !physical_equal(guarded_source_location, inventoried_source_location)) {
+        return materialization_failure(
+            source_mutation_code,
+            ::GetLastError() == ERROR_SUCCESS ? ERROR_FILE_INVALID
+                                              : ::GetLastError());
+    }
+    if (external_approval) {
+        try {
+            external_target_rename_guards.reserve(
+                external_approval->targets.size());
+        } catch (...) {
+            return materialization_failure(
+                StockResearchCopyErrorCode::
+                    source_or_external_target_changed_during_materialization,
+                ERROR_NOT_ENOUGH_MEMORY);
+        }
+        for (const auto& target : external_approval->targets) {
+            auto guard = open_entry_rename_guard(target.target_root);
+            EntrySnapshot guarded_target_snapshot;
+            if (!guard ||
+                !query_snapshot(guard.get(), guarded_target_snapshot) ||
+                (guarded_target_snapshot.attributes &
+                 FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
+                !exact_opened_path(guard.get(), target.target_root)) {
+                return materialization_failure(
+                    StockResearchCopyErrorCode::
+                        source_or_external_target_changed_during_materialization,
+                    ::GetLastError() == ERROR_SUCCESS ? ERROR_FILE_INVALID
+                                                      : ::GetLastError());
+            }
+            external_target_rename_guards.push_back(std::move(guard));
+        }
+        std::vector<std::pair<fs::path, std::uint64_t>> provenance_paths;
+        try {
+            const auto add_path = [&](const fs::path& path,
+                                      const std::uint64_t maximum_bytes) {
+                const auto existing = std::ranges::find_if(
+                    provenance_paths, [&](const auto& candidate) {
+                        return path_equal(candidate.first, path);
+                    });
+                if (existing != provenance_paths.end()) {
+                    return existing->second == maximum_bytes;
+                }
+                provenance_paths.emplace_back(path, maximum_bytes);
+                return true;
+            };
+            const auto add_appmanifest = [&](const fs::path& member) {
+                const auto manifest = half_life_appmanifest_path(member);
+                if (!manifest) return false;
+                return add_path(*manifest, 64U * 1'024U);
+            };
+            const auto libraryfolders =
+                half_life_libraryfolders_path(source.canonical_root);
+            if (!libraryfolders ||
+                !add_path(*libraryfolders, 1U * 1'024U * 1'024U) ||
+                !add_appmanifest(source.canonical_root)) {
+                return materialization_failure(
+                    StockResearchCopyErrorCode::
+                        external_target_not_evidence_eligible,
+                    ERROR_INVALID_DATA);
+            }
+            for (const auto& target : external_approval->targets) {
+                if (!add_appmanifest(target.target_root)) {
+                    return materialization_failure(
+                        StockResearchCopyErrorCode::
+                            external_target_not_evidence_eligible,
+                        ERROR_INVALID_DATA);
+                }
+            }
+            external_provenance_guards.reserve(provenance_paths.size());
+        } catch (...) {
+            return materialization_failure(
+                StockResearchCopyErrorCode::
+                    source_or_external_target_changed_during_materialization,
+                ERROR_NOT_ENOUGH_MEMORY);
+        }
+        for (const auto& [provenance_path, maximum_bytes] : provenance_paths) {
+            UniqueHandle guard{::CreateFileW(
+                provenance_path.c_str(), GENERIC_READ | FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+                nullptr)};
+            EntrySnapshot provenance_snapshot;
+            EntrySnapshot provenance_after;
+            std::array<std::byte, 32U> provenance_digest{};
+            if (!guard ||
+                !query_snapshot(guard.get(), provenance_snapshot) ||
+                provenance_snapshot.directory ||
+                (provenance_snapshot.attributes &
+                 FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
+                provenance_snapshot.link_count != 1U ||
+                provenance_snapshot.size == 0U ||
+                provenance_snapshot.size > maximum_bytes ||
+                !exact_opened_path(guard.get(), provenance_path) ||
+                !handle_has_only_default_stream(guard.get()) ||
+                !hash_handle(guard.get(), provenance_digest) ||
+                !query_snapshot(guard.get(), provenance_after) ||
+                provenance_after != provenance_snapshot) {
+                return materialization_failure(
+                    StockResearchCopyErrorCode::
+                        source_or_external_target_changed_during_materialization,
+                    ::GetLastError() == ERROR_SUCCESS ? ERROR_FILE_INVALID
+                                                      : ::GetLastError());
+            }
+            external_provenance_guards.push_back(ExternalProvenanceGuard{
+                provenance_path, provenance_snapshot, provenance_digest,
+                std::move(guard)});
+        }
+        const auto guarded_validation =
+            validate_stock_external_target_approval(
+                *options.external_target_approval_manifest, source_root,
+                options.limits);
+        if (!guarded_validation) {
+            auto code = StockResearchCopyErrorCode::
+                source_or_external_target_changed_during_materialization;
+            if (guarded_validation.code ==
+                StockExternalReviewErrorCode::approval_expired) {
+                code = StockResearchCopyErrorCode::
+                    external_target_approval_expired;
+            } else if (guarded_validation.code ==
+                       StockExternalReviewErrorCode::target_ineligible) {
+                code = StockResearchCopyErrorCode::
+                    external_target_not_evidence_eligible;
+            }
+            return materialization_failure(
+                code, guarded_validation.native_error);
+        }
+        if (!approval_validation_equal(
+                *external_approval, *guarded_validation.value)) {
+            return materialization_failure(
+                StockResearchCopyErrorCode::
+                    source_or_external_target_changed_during_materialization,
+                ERROR_FILE_INVALID);
+        }
+        external_approval = *guarded_validation.value;
+        if (!external_provenance_unchanged()) {
+            return materialization_failure(
+                StockResearchCopyErrorCode::
+                    source_or_external_target_changed_during_materialization,
+                ERROR_FILE_INVALID);
+        }
+    }
+    if (!destination_paths_are_unambiguous(source)) {
+        return materialization_failure(
+            external_approval
+                ? StockResearchCopyErrorCode::
+                      external_materialization_path_collision
+                : StockResearchCopyErrorCode::destination_create_failed,
+            ERROR_DUP_NAME);
+    }
     if (!source.summary.safe_to_materialize) {
         return materialization_failure(
             StockResearchCopyErrorCode::source_topology_unsafe,
@@ -3806,7 +4437,8 @@ enum class CommitMarkerRevocation {
 
     MaterializeFailure failure;
     const auto destination = prepare_destination_parent(
-        destination_root, source, options, failure);
+        destination_root, source, options,
+        external_approval ? &*external_approval : nullptr, failure);
     if (!destination) {
         return materialization_failure(failure.code, failure.native_error);
     }
@@ -3990,9 +4622,7 @@ enum class CommitMarkerRevocation {
         DWORD witness_error = ERROR_SUCCESS;
         if (!validate_witnesses(entry->witnesses, witness_error)) {
             return fail_and_clean(
-                StockResearchCopyErrorCode::
-                    source_changed_during_materialization,
-                witness_error);
+                source_mutation_code, witness_error);
         }
         fs::path directory;
         try {
@@ -4062,8 +4692,14 @@ enum class CommitMarkerRevocation {
                 &entry.relative_path, *copied_identity, false});
         }
         if (!copied) {
+            const auto code =
+                external_approval &&
+                        copy_failure.code == StockResearchCopyErrorCode::
+                                                 source_changed_during_materialization
+                    ? source_mutation_code
+                    : copy_failure.code;
             return fail_and_clean(
-                copy_failure.code, copy_failure.native_error);
+                code, copy_failure.native_error);
         }
         ++file_ordinal;
     }
@@ -4139,8 +4775,7 @@ enum class CommitMarkerRevocation {
         source_commit_guards.reserve(source.entries.size() * 2U + 1U);
     } catch (...) {
         return fail_and_clean(
-            StockResearchCopyErrorCode::source_changed_during_materialization,
-            ERROR_NOT_ENOUGH_MEMORY);
+            source_mutation_code, ERROR_NOT_ENOUGH_MEMORY);
     }
     bool source_retained = retain_source_entry(
         source.canonical_root, source.canonical_root_snapshot, true, false);
@@ -4156,7 +4791,7 @@ enum class CommitMarkerRevocation {
     }
     if (!source_retained) {
         return fail_and_clean(
-            StockResearchCopyErrorCode::source_changed_during_materialization,
+            source_mutation_code,
             source_change_error == ERROR_SUCCESS ? ERROR_FILE_INVALID
                                                  : source_change_error);
     }
@@ -4178,19 +4813,40 @@ enum class CommitMarkerRevocation {
         }
         return true;
     };
-    auto source_after_result =
-        build_inventory(source_root, options.limits, true);
+    auto source_after_result = build_inventory(
+        source_root, options.limits, true, false,
+        external_approval ? &*external_approval : nullptr);
     if (!source_after_result.inventory ||
         !inventory_equal(source, *source_after_result.inventory) ||
         !source_commit_unchanged()) {
         return fail_and_clean(
-            StockResearchCopyErrorCode::
-                source_changed_during_materialization,
+            source_mutation_code,
             source_change_error != ERROR_SUCCESS
                 ? source_change_error
                 : (source_after_result.native_error == ERROR_SUCCESS
                        ? ERROR_FILE_INVALID
                        : source_after_result.native_error));
+    }
+    if (external_approval) {
+        const auto refreshed = validate_stock_external_target_approval(
+            *options.external_target_approval_manifest, source_root,
+            options.limits);
+        if (!refreshed ||
+            !approval_validation_equal(*external_approval, *refreshed.value) ||
+            !approval_artifact_unchanged()) {
+            const auto code =
+                !refreshed && refreshed.code ==
+                                  StockExternalReviewErrorCode::approval_expired
+                    ? StockResearchCopyErrorCode::
+                          external_target_approval_expired
+                    : StockResearchCopyErrorCode::
+                          external_target_approval_mismatch;
+            return fail_and_clean(
+                code,
+                refreshed.native_error == ERROR_SUCCESS ? ERROR_FILE_INVALID
+                                                        : refreshed.native_error);
+        }
+        external_approval = *refreshed.value;
     }
 
     StockResearchMaterialization materialization;
@@ -4200,6 +4856,8 @@ enum class CommitMarkerRevocation {
         (source.summary.root_reparse ? 1U : 0U);
     materialization.materialized_hardlink_count =
         source.summary.hardlink_count;
+    materialization.approved_external_materialized_link_count =
+        source.summary.reviewed_external_target_count;
     materialization.rejected_link_count = 0U;
     materialization.destination_reparse_count = 0U;
     materialization.destination_hardlink_count = 0U;
@@ -4207,10 +4865,25 @@ enum class CommitMarkerRevocation {
     materialization.entry_count = source.summary.entry_count;
     materialization.byte_count = source.summary.byte_count;
     materialization.source_unchanged = true;
+    materialization.external_targets_unchanged = true;
     materialization.destination_unlinked = true;
     materialization.inventory_sha256 = digest_hex(source.inventory_digest);
-    materialization.preparation_status =
-        "exact-materialized-copy-verified";
+    materialization.external_approval_sha256 =
+        external_approval ? external_approval->approval_manifest_sha256
+                          : std::string(64U, '0');
+    materialization.external_classification_summary =
+        external_approval ? "eligible_non_executable_asset_tree" : "none";
+    materialization.executable_external_target_count =
+        external_approval ? external_approval->executable_count : 0U;
+    materialization.mutable_state_external_target_count =
+        external_approval ? external_approval->mutable_state_count : 0U;
+    materialization.evidence_eligibility =
+        StockResearchCopyEvidenceEligibility::eligible;
+    materialization.external_target_profile =
+        external_approval ? "reviewed-non-executable-v1" : "none";
+    materialization.preparation_status = external_approval
+                                             ? "exact-reviewed-materialized-copy-verified"
+                                             : "exact-materialized-copy-verified";
     const auto manifest = preparation_manifest(source, materialization);
     if (!manifest) {
         return fail_and_clean(
@@ -4954,8 +5627,7 @@ enum class CommitMarkerRevocation {
         return fail_published(
             source_unchanged_before_commit
                 ? StockResearchCopyErrorCode::destination_inventory_mismatch
-                : StockResearchCopyErrorCode::
-                      source_changed_during_materialization,
+                : source_mutation_code,
             inventory_error);
     }
 
@@ -4966,6 +5638,24 @@ enum class CommitMarkerRevocation {
         options.progress_hook(
             StockResearchCopyProgressPhase::before_commit_marker_publish,
             file_ordinal, options.progress_context);
+    }
+
+    const bool external_provenance_valid =
+        !external_approval || external_provenance_unchanged();
+    if (external_approval &&
+        (std::chrono::system_clock::now() >= external_approval->expires_at ||
+         !approval_artifact_unchanged() || !external_provenance_valid)) {
+        tree_change_witness.abandon();
+        published_file_guards.clear();
+        commit_candidate.handle.reset();
+        return fail_published(
+            std::chrono::system_clock::now() >= external_approval->expires_at
+                ? StockResearchCopyErrorCode::external_target_approval_expired
+                : (!external_provenance_valid
+                       ? source_mutation_code
+                       : StockResearchCopyErrorCode::
+                             external_target_approval_mismatch),
+            ERROR_FILE_INVALID);
     }
 
     if (!rename_open_file_without_replace(
@@ -4998,7 +5688,8 @@ enum class CommitMarkerRevocation {
             tree_change_error == ERROR_SUCCESS ? ERROR_FILE_INVALID
                                                : tree_change_error);
     }
-    if (!source_commit_unchanged()) {
+    if (!source_commit_unchanged() ||
+        (external_approval && !external_provenance_unchanged())) {
         const auto revocation =
             revoke_commit_marker(staging_handle.get(), commit_candidate);
         if (revocation == CommitMarkerRevocation::removed) {
@@ -5008,7 +5699,7 @@ enum class CommitMarkerRevocation {
         published_file_guards.clear();
         commit_candidate.handle.reset();
         return fail_published(
-            StockResearchCopyErrorCode::source_changed_during_materialization,
+            source_mutation_code,
             source_change_error == ERROR_SUCCESS ? ERROR_FILE_INVALID
                                                  : source_change_error);
     }
@@ -5061,6 +5752,8 @@ std::string_view to_string(
         return "source_entry_limit_exceeded";
     case StockResearchTopologyCategory::source_byte_limit_exceeded:
         return "source_byte_limit_exceeded";
+    case StockResearchTopologyCategory::source_reviewed_external_target:
+        return "source_reviewed_external_target";
     }
     return "unknown";
 }
@@ -5095,6 +5788,23 @@ std::string_view to_string(const StockResearchCopyErrorCode code) noexcept
         return "source_read_failed";
     case StockResearchCopyErrorCode::source_digest_failed:
         return "source_digest_failed";
+    case StockResearchCopyErrorCode::external_target_review_invalid:
+        return "external_target_review_invalid";
+    case StockResearchCopyErrorCode::external_target_approval_missing:
+        return "external_target_approval_missing";
+    case StockResearchCopyErrorCode::external_target_approval_invalid:
+        return "external_target_approval_invalid";
+    case StockResearchCopyErrorCode::external_target_approval_expired:
+        return "external_target_approval_expired";
+    case StockResearchCopyErrorCode::external_target_approval_mismatch:
+        return "external_target_approval_mismatch";
+    case StockResearchCopyErrorCode::external_target_not_evidence_eligible:
+        return "external_target_not_evidence_eligible";
+    case StockResearchCopyErrorCode::external_materialization_path_collision:
+        return "external_materialization_path_collision";
+    case StockResearchCopyErrorCode::
+        source_or_external_target_changed_during_materialization:
+        return "source_or_external_target_changed_during_materialization";
     case StockResearchCopyErrorCode::destination_not_absolute:
         return "destination_not_absolute";
     case StockResearchCopyErrorCode::destination_exists:
@@ -5132,6 +5842,25 @@ std::string_view to_string(const StockResearchCopyErrorCode code) noexcept
         return "native_api_unavailable";
     }
     return "unknown";
+}
+
+std::string_view to_string(
+    const StockResearchCopyEvidenceEligibility status) noexcept
+{
+    switch (status) {
+    case StockResearchCopyEvidenceEligibility::eligible:
+        return "eligible";
+    case StockResearchCopyEvidenceEligibility::ineligible_external_code:
+        return "ineligible_external_code";
+    case StockResearchCopyEvidenceEligibility::ineligible_mutable_state:
+        return "ineligible_mutable_state";
+    case StockResearchCopyEvidenceEligibility::ineligible_cross_application:
+        return "ineligible_cross_application";
+    case StockResearchCopyEvidenceEligibility::
+        ineligible_unknown_external_target:
+        return "ineligible_unknown_external_target";
+    }
+    return "ineligible_unknown_external_target";
 }
 
 StockResearchTopologyResult inspect_stock_research_topology(
