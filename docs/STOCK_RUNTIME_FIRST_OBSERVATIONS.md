@@ -134,7 +134,7 @@ Run the campaign from elevated PowerShell with the explicit token:
   -NetworkIsolationGuardPath `
     ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
   -CheckerPath ".\build\bin\Debug\hlclient_stock_runtime_check.exe" `
-  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf" `
+  -AppManifestPath "F:\SteamLibrary\steamapps\appmanifest_70.acf" `
   -OutputRoot ".\manual-artifacts\stock-runtime"
 ```
 

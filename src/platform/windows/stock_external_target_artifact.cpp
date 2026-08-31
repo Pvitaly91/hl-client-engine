@@ -1,4 +1,5 @@
 #include <hlclient/platform/windows/stock_external_target_artifact.hpp>
+#include <hlclient/platform/windows/windows_reparse_provenance.hpp>
 
 #include <algorithm>
 #include <array>
@@ -802,6 +803,406 @@ private:
                (!value.targets.empty() && value.eligible_count == count);
 }
 
+template <std::size_t Size>
+[[nodiscard]] constexpr bool exact_token(
+    const std::string_view value,
+    const std::array<std::string_view, Size>& accepted) noexcept
+{
+    return std::ranges::find(accepted, value) != accepted.end();
+}
+
+[[nodiscard]] constexpr bool valid_tag_category(
+    const std::string_view value) noexcept
+{
+    constexpr std::array accepted{
+        std::string_view{"none"},
+        std::string_view{"mount_point"},
+        std::string_view{"symbolic_link"},
+        std::string_view{"app_exec_link"},
+        std::string_view{"cloud_placeholder"},
+        std::string_view{"cloud_placeholder_variant"},
+        std::string_view{"wci"},
+        std::string_view{"wci_tombstone"},
+        std::string_view{"wof"},
+        std::string_view{"dedup"},
+        std::string_view{"hsm"},
+        std::string_view{"dfs"},
+        std::string_view{"sis"},
+        std::string_view{"projected_file_system"},
+        std::string_view{"microsoft_name_surrogate_other"},
+        std::string_view{"microsoft_non_name_surrogate_other"},
+        std::string_view{"third_party_name_surrogate"},
+        std::string_view{"third_party_other"},
+        std::string_view{"malformed_or_unreadable"},
+    };
+    return exact_token(value, accepted);
+}
+
+[[nodiscard]] constexpr bool valid_expression_kind(
+    const std::string_view value) noexcept
+{
+    constexpr std::array accepted{
+        std::string_view{"none"},
+        std::string_view{"relative_path"},
+        std::string_view{"drive_absolute_path"},
+        std::string_view{"volume_guid_path"},
+        std::string_view{"nt_object_manager_path"},
+        std::string_view{"unc_path"},
+        std::string_view{"device_path"},
+        std::string_view{"app_execution_alias"},
+        std::string_view{"opaque_non_path_payload"},
+        std::string_view{"malformed"},
+    };
+    return exact_token(value, accepted);
+}
+
+[[nodiscard]] constexpr bool valid_reachability(
+    const std::string_view value) noexcept
+{
+    constexpr std::array accepted{
+        std::string_view{"reachable"},
+        std::string_view{"target_path_not_found"},
+        std::string_view{"target_component_not_found"},
+        std::string_view{"target_volume_not_found"},
+        std::string_view{"target_access_denied"},
+        std::string_view{"target_not_directory"},
+        std::string_view{"target_remote_or_device"},
+        std::string_view{"target_cycle"},
+        std::string_view{"target_depth_exceeded"},
+        std::string_view{"target_changed"},
+        std::string_view{"target_open_failed_other"},
+        std::string_view{"not_applicable"},
+    };
+    return exact_token(value, accepted);
+}
+
+[[nodiscard]] constexpr bool valid_failure_phase(
+    const std::string_view value) noexcept
+{
+    constexpr std::array accepted{
+        std::string_view{"source_link_open"},
+        std::string_view{"reparse_payload_read"},
+        std::string_view{"reparse_payload_decode"},
+        std::string_view{"target_expression_parse"},
+        std::string_view{"target_open"},
+        std::string_view{"target_identity"},
+        std::string_view{"target_inventory"},
+        std::string_view{"nested_entry_open"},
+        std::string_view{"nested_reparse_decode"},
+        std::string_view{"post_inventory_revalidation"},
+    };
+    return exact_token(value, accepted);
+}
+
+[[nodiscard]] constexpr bool valid_native_error_category(
+    const std::string_view value) noexcept
+{
+    constexpr std::array accepted{
+        std::string_view{"none"},
+        std::string_view{"file_not_found"},
+        std::string_view{"path_not_found"},
+        std::string_view{"invalid_name"},
+        std::string_view{"bad_pathname"},
+        std::string_view{"bad_network_path"},
+        std::string_view{"bad_network_name"},
+        std::string_view{"volume_not_ready"},
+        std::string_view{"device_not_exist"},
+        std::string_view{"device_not_connected"},
+        std::string_view{"access_denied"},
+        std::string_view{"cannot_access_file"},
+        std::string_view{"not_directory"},
+        std::string_view{"reparse_tag_invalid"},
+        std::string_view{"reparse_tag_mismatch"},
+        std::string_view{"reparse_point_encountered"},
+        std::string_view{"circular_dependency"},
+        std::string_view{"too_many_links"},
+        std::string_view{"other"},
+    };
+    return exact_token(value, accepted);
+}
+
+[[nodiscard]] constexpr bool valid_reachability_native_semantics(
+    const std::string_view reachability,
+    const std::string_view native_error_category) noexcept
+{
+    if (reachability == "reachable" || reachability == "not_applicable") {
+        return native_error_category == "none";
+    }
+    if (reachability == "target_path_not_found") {
+        return native_error_category == "file_not_found" ||
+               native_error_category == "invalid_name" ||
+               native_error_category == "bad_pathname";
+    }
+    if (reachability == "target_component_not_found") {
+        return native_error_category == "path_not_found";
+    }
+    if (reachability == "target_volume_not_found") {
+        return native_error_category == "volume_not_ready" ||
+               native_error_category == "device_not_exist" ||
+               native_error_category == "device_not_connected";
+    }
+    if (reachability == "target_access_denied") {
+        return native_error_category == "access_denied" ||
+               native_error_category == "cannot_access_file";
+    }
+    if (reachability == "target_not_directory") {
+        return native_error_category == "not_directory";
+    }
+    if (reachability == "target_remote_or_device") {
+        // A syntactically remote/device expression is rejected before an OS
+        // open and therefore has no native error.  A failed network open uses
+        // the two exact network-path categories.
+        return native_error_category == "none" ||
+               native_error_category == "bad_network_path" ||
+               native_error_category == "bad_network_name";
+    }
+    if (reachability == "target_cycle") {
+        return native_error_category == "circular_dependency";
+    }
+    if (reachability == "target_depth_exceeded") {
+        return native_error_category == "too_many_links";
+    }
+    if (reachability == "target_changed") {
+        // Revalidation can either detect an identity/payload mismatch without
+        // an OS error or fail with any typed native error while proving that
+        // the original observation is no longer stable.
+        return valid_native_error_category(native_error_category);
+    }
+    if (reachability == "target_open_failed_other") {
+        return native_error_category == "reparse_point_encountered" ||
+               native_error_category == "other";
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_reachability_native_semantics(
+    const std::string_view reachability,
+    const std::string_view native_error_category,
+    const std::uint32_t native_error) noexcept
+{
+    return to_string(classify_windows_reparse_native_error(native_error)) ==
+               native_error_category &&
+           valid_reachability_native_semantics(reachability,
+                                               native_error_category);
+}
+
+[[nodiscard]] constexpr bool non_path_expression(
+    const std::string_view value) noexcept
+{
+    return value == "none" || value == "app_execution_alias" ||
+           value == "opaque_non_path_payload" || value == "malformed";
+}
+
+[[nodiscard]] constexpr bool valid_tag_expression_semantics(
+    const std::string_view tag_category,
+    const std::string_view expression_kind,
+    const std::string_view reachability,
+    const std::string_view failure_phase) noexcept
+{
+    const bool path_contract_tag = tag_category == "mount_point" ||
+                                   tag_category == "symbolic_link";
+    if (!path_contract_tag) {
+        if (tag_category == "app_exec_link") {
+            return expression_kind == "app_execution_alias" &&
+                   reachability == "not_applicable" &&
+                   failure_phase == "target_expression_parse";
+        }
+        if (tag_category == "malformed_or_unreadable") {
+            return expression_kind == "malformed" &&
+                   reachability == "not_applicable" &&
+                   failure_phase == "reparse_payload_decode";
+        }
+        return expression_kind == "opaque_non_path_payload" &&
+               reachability == "not_applicable" &&
+               failure_phase == "target_expression_parse";
+    }
+    if (!non_path_expression(expression_kind)) {
+        return true;
+    }
+
+    // A syntactically readable standard name-surrogate can still carry a
+    // malformed path payload.  That is a complete fail-closed diagnostic, not
+    // an opaque target and never a target-open attempt.
+    return expression_kind == "malformed" &&
+           reachability == "not_applicable" &&
+           failure_phase == "reparse_payload_decode";
+}
+
+[[nodiscard]] bool valid_private_expression(
+    const std::string_view value) noexcept
+{
+    return value.size() <= 65'534U && valid_utf8(value) &&
+           std::ranges::none_of(value, [](const char character) {
+               const auto byte = static_cast<unsigned char>(character);
+               return byte < 0x20U && character != '\t';
+           });
+}
+
+[[nodiscard]] bool valid_private_target_v2(
+    const StockExternalPrivateTargetArtifactV2& value) noexcept
+{
+    const bool target_binding_complete =
+        value.target_canonical_path.has_value() &&
+        value.target_identity.has_value();
+    const bool reachable = value.reachability == "reachable";
+    const bool inventory_available = value.target_inventory.has_value();
+    if (value.ordinal < 1U ||
+        value.ordinal > kMaximumStockExternalArtifactTargets ||
+        !valid_nonce(value.review_nonce) ||
+        !is_ascii_hex_lower(value.source_root_fingerprint, 64U) ||
+        !valid_relative_path(value.source_link_relative_path) ||
+        !valid_identity(value.source_link_identity) ||
+        value.source_link_identity.reparse_tag == 0U ||
+        value.raw_reparse_tag == 0U ||
+        value.raw_reparse_tag != value.source_link_identity.reparse_tag ||
+        value.directory != value.source_link_identity.directory ||
+        value.payload_byte_count > 16'384U ||
+        !is_ascii_hex_lower(value.payload_sha256, 64U) ||
+        !valid_tag_category(value.tag_category) ||
+        !valid_private_expression(value.substitute_name) ||
+        !valid_private_expression(value.print_name) ||
+        !valid_private_expression(value.normalized_target_expression) ||
+        !valid_expression_kind(value.expression_kind) ||
+        !valid_reachability(value.reachability) ||
+        !valid_failure_phase(value.failure_phase) ||
+        !valid_native_error_category(value.native_error_category) ||
+        (!value.witness_sha256.empty() &&
+         !is_ascii_hex_lower(value.witness_sha256, 64U)) ||
+        value.microsoft_tag != ((value.raw_reparse_tag & 0x80000000U) != 0U) ||
+        value.name_surrogate_tag !=
+            ((value.raw_reparse_tag & 0x20000000U) != 0U) ||
+        to_string(classify_windows_reparse_tag(value.raw_reparse_tag)) !=
+            value.tag_category ||
+        value.tag_category == "none" ||
+        !valid_tag_expression_semantics(
+            value.tag_category, value.expression_kind, value.reachability,
+            value.failure_phase) ||
+        target_binding_complete != reachable ||
+        value.target_canonical_path.has_value() !=
+            value.target_identity.has_value() ||
+        (value.target_canonical_path &&
+         !valid_private_path(*value.target_canonical_path)) ||
+        (value.target_identity &&
+         (!valid_identity(*value.target_identity) ||
+          value.target_identity->directory != value.directory)) ||
+        (value.target_inventory &&
+         !valid_inventory(*value.target_inventory)) ||
+        (inventory_available && !reachable) ||
+        !valid_reachability_native_semantics(
+            value.reachability, value.native_error_category,
+            value.native_error) ||
+        (non_path_expression(value.expression_kind) &&
+         (reachable || value.native_error != 0U ||
+          value.native_error_category != "none")) ||
+        value.eligible != eligible_classification(value.classification)) {
+        return false;
+    }
+    if (value.eligible) {
+        return value.diagnostic_complete && reachable &&
+               inventory_available && value.witness_sha256.empty() &&
+               value.native_error == 0U &&
+               value.native_error_category == "none";
+    }
+    if (!value.diagnostic_complete) return true;
+    if (!reachable && inventory_available) return false;
+    if ((!reachable || !inventory_available) &&
+        value.witness_sha256.empty()) {
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool valid_summary_target_v2(
+    const StockExternalReviewTargetBindingArtifactV2& value) noexcept
+{
+    const bool identity_available =
+        value.target_identity_sha256.has_value();
+    if (value.ordinal < 1U ||
+        value.ordinal > kMaximumStockExternalArtifactTargets ||
+        !is_ascii_hex_lower(value.private_record_sha256, 64U) ||
+        !is_ascii_hex_lower(value.link_identity_sha256, 64U) ||
+        (value.target_identity_sha256 &&
+         !is_ascii_hex_lower(*value.target_identity_sha256, 64U)) ||
+        (value.target_inventory_sha256 &&
+         !is_ascii_hex_lower(*value.target_inventory_sha256, 64U)) ||
+        !valid_tag_category(value.tag_category) ||
+        !valid_expression_kind(value.expression_kind) ||
+        !valid_reachability(value.reachability) ||
+        !valid_failure_phase(value.failure_phase) ||
+        !valid_native_error_category(value.native_error_category) ||
+        !valid_reachability_native_semantics(
+            value.reachability, value.native_error_category) ||
+        value.tag_category == "none" ||
+        !valid_tag_expression_semantics(
+            value.tag_category, value.expression_kind, value.reachability,
+            value.failure_phase) ||
+        value.inventory_available !=
+            value.target_inventory_sha256.has_value() ||
+        identity_available != (value.reachability == "reachable") ||
+        (value.inventory_available && !identity_available) ||
+        (non_path_expression(value.expression_kind) &&
+         (identity_available || value.native_error_category != "none")) ||
+        value.eligible != eligible_classification(value.classification)) {
+        return false;
+    }
+    if (value.eligible) {
+        return value.diagnostic_complete && identity_available &&
+               value.inventory_available && value.reachability == "reachable" &&
+               value.native_error_category == "none";
+    }
+    return value.diagnostic_complete;
+}
+
+[[nodiscard]] bool unique_summary_targets_v2(
+    const std::vector<StockExternalReviewTargetBindingArtifactV2>& targets)
+    noexcept
+{
+    for (std::size_t left = 0U; left < targets.size(); ++left) {
+        for (std::size_t right = left + 1U; right < targets.size(); ++right) {
+            if (targets[left].ordinal == targets[right].ordinal ||
+                targets[left].link_identity_sha256 ==
+                    targets[right].link_identity_sha256 ||
+                (targets[left].target_identity_sha256 &&
+                 targets[right].target_identity_sha256 &&
+                 targets[left].target_identity_sha256 ==
+                     targets[right].target_identity_sha256)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool valid_summary_v2(
+    const StockExternalReviewSummaryArtifactV2& value) noexcept
+{
+    if (!is_ascii_hex_lower(value.review_root_fingerprint, 64U) ||
+        !is_ascii_hex_lower(value.source_root_fingerprint, 64U) ||
+        !valid_inventory(value.source_inventory) ||
+        !valid_nonce(value.review_nonce) ||
+        value.review_timestamp_unix_seconds == 0U ||
+        !valid_profile(value.implementation_profile) ||
+        value.targets.empty() ||
+        value.targets.size() > kMaximumStockExternalArtifactTargets ||
+        !std::ranges::all_of(value.targets, valid_summary_target_v2) ||
+        !unique_summary_targets_v2(value.targets)) {
+        return false;
+    }
+    const auto count = static_cast<std::uint64_t>(value.targets.size());
+    const auto completed = static_cast<std::uint64_t>(std::ranges::count_if(
+        value.targets, [](const auto& target) {
+            return target.diagnostic_complete;
+        }));
+    const auto eligible = static_cast<std::uint64_t>(std::ranges::count_if(
+        value.targets, [](const auto& target) { return target.eligible; }));
+    return value.completed_count == completed &&
+           value.eligible_count == eligible &&
+           value.ineligible_count == completed - eligible &&
+           value.incomplete_count == count - completed &&
+           value.all_targets_eligible ==
+               (count != 0U && eligible == count && completed == count);
+}
+
 [[nodiscard]] bool valid_approved_target(
     const StockExternalApprovedTargetBindingArtifact& value) noexcept
 {
@@ -816,8 +1217,12 @@ private:
 [[nodiscard]] bool valid_approval(
     const StockExternalApprovalArtifact& value) noexcept
 {
-    if (value.review_schema != kStockExternalReviewSummarySchemaV1 ||
-        value.review_version != 1U ||
+    const bool valid_review_version =
+        (value.review_schema == kStockExternalReviewSummarySchemaV1 &&
+         value.review_version == 1U) ||
+        (value.review_schema == kStockExternalReviewSummarySchemaV2 &&
+         value.review_version == 2U);
+    if (!valid_review_version ||
         !is_ascii_hex_lower(value.review_root_fingerprint, 64U) ||
         !is_ascii_hex_lower(value.review_digest_sha256, 64U) ||
         !is_ascii_hex_lower(value.source_root_fingerprint, 64U) ||
@@ -1761,6 +2166,669 @@ parse_stock_external_review_summary(const std::string_view json) noexcept
         return {std::move(output), StockExternalArtifactErrorCode::none, 0U};
     } catch (...) {
         return value_failure<StockExternalReviewSummaryArtifact>(
+            StockExternalArtifactErrorCode::invalid_argument);
+    }
+}
+
+StockExternalArtifactTextResult serialize_stock_external_review_request_v2(
+    const StockExternalReviewRequestArtifact& artifact) noexcept
+{
+    try {
+        if (!valid_request(artifact)) {
+            return text_failure(
+                StockExternalArtifactErrorCode::invalid_property_value);
+        }
+        bool valid = true;
+        std::string output{"{"};
+        append_string_property(
+            output, "schema", kStockExternalReviewRequestSchemaV2, valid);
+        output.push_back(',');
+        append_key(output, "source-root-identity", valid);
+        append_identity(output, artifact.source_root_identity, valid);
+        output.push_back(',');
+        append_key(output, "source-inventory", valid);
+        append_inventory(output, artifact.source_inventory, valid);
+        output.push_back(',');
+        append_string_property(output, "review-root-fingerprint",
+                               artifact.review_root_fingerprint, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "review-nonce", artifact.review_nonce, valid);
+        output.push_back(',');
+        append_unsigned_property(output, "review-timestamp-unix-seconds",
+                                 artifact.review_timestamp_unix_seconds,
+                                 valid);
+        output.push_back(',');
+        append_string_property(output, "implementation-profile",
+                               artifact.implementation_profile, valid);
+        output.push_back(',');
+        append_unsigned_property(
+            output, "target-count", artifact.target_count, valid);
+        output.push_back('}');
+        return finish_serialized(std::move(output), valid);
+    } catch (...) {
+        return text_failure(StockExternalArtifactErrorCode::invalid_argument);
+    }
+}
+
+StockExternalArtifactResult<StockExternalReviewRequestArtifact>
+parse_stock_external_review_request_v2(const std::string_view json) noexcept
+{
+    try {
+        JsonValue root{};
+        StockExternalArtifactErrorCode code{};
+        StockExternalReviewRequestArtifact output{};
+        if (!parse_root(json, root, code) ||
+            !exact_object(
+                root,
+                {"schema", "source-root-identity", "source-inventory",
+                 "review-root-fingerprint", "review-nonce",
+                 "review-timestamp-unix-seconds", "implementation-profile",
+                 "target-count"},
+                code) ||
+            !exact_schema(root, kStockExternalReviewRequestSchemaV2, code)) {
+            return value_failure<StockExternalReviewRequestArtifact>(code);
+        }
+        const auto* identity = member(root, "source-root-identity");
+        const auto* inventory = member(root, "source-inventory");
+        if (identity == nullptr || inventory == nullptr ||
+            !parse_identity(*identity, output.source_root_identity, code) ||
+            !parse_inventory(*inventory, output.source_inventory, code) ||
+            !string_member(root, "review-root-fingerprint",
+                           output.review_root_fingerprint, code) ||
+            !string_member(root, "review-nonce", output.review_nonce, code) ||
+            !unsigned_member(root, "review-timestamp-unix-seconds",
+                             output.review_timestamp_unix_seconds, code) ||
+            !string_member(root, "implementation-profile",
+                           output.implementation_profile, code) ||
+            !unsigned_member(root, "target-count", output.target_count,
+                             code) ||
+            !valid_request(output)) {
+            if (code == StockExternalArtifactErrorCode::none) {
+                code = StockExternalArtifactErrorCode::invalid_property_value;
+            }
+            return value_failure<StockExternalReviewRequestArtifact>(code);
+        }
+        return {std::move(output), StockExternalArtifactErrorCode::none, 0U};
+    } catch (...) {
+        return value_failure<StockExternalReviewRequestArtifact>(
+            StockExternalArtifactErrorCode::invalid_argument);
+    }
+}
+
+namespace {
+
+void append_private_target_binding_v2(
+    std::string& output,
+    const StockExternalPrivateTargetArtifactV2& artifact,
+    bool& valid)
+{
+    output.push_back('{');
+    append_bool_property(output, "available",
+                         artifact.target_identity.has_value(), valid);
+    if (artifact.target_identity && artifact.target_canonical_path) {
+        output.push_back(',');
+        append_string_property(output, "canonical-path",
+                               *artifact.target_canonical_path, valid);
+        output.push_back(',');
+        append_key(output, "identity", valid);
+        append_identity(output, *artifact.target_identity, valid);
+    }
+    output.push_back('}');
+}
+
+void append_private_inventory_v2(
+    std::string& output,
+    const StockExternalPrivateTargetArtifactV2& artifact,
+    bool& valid)
+{
+    output.push_back('{');
+    append_bool_property(output, "available",
+                         artifact.target_inventory.has_value(), valid);
+    if (artifact.target_inventory) {
+        output.push_back(',');
+        append_key(output, "inventory", valid);
+        append_inventory(output, *artifact.target_inventory, valid);
+    }
+    output.push_back('}');
+}
+
+[[nodiscard]] bool parse_private_target_binding_v2(
+    const JsonValue& value,
+    StockExternalPrivateTargetArtifactV2& output,
+    StockExternalArtifactErrorCode& code) noexcept
+{
+    bool available = false;
+    if (!bool_member(value, "available", available, code)) return false;
+    if (!available) {
+        return exact_object(value, {"available"}, code);
+    }
+    if (!exact_object(value, {"available", "canonical-path", "identity"},
+                      code)) {
+        return false;
+    }
+    std::string path;
+    StockExternalArtifactFileIdentity identity_value{};
+    const auto* identity = member(value, "identity");
+    if (identity == nullptr ||
+        !string_member(value, "canonical-path", path, code) ||
+        !parse_identity(*identity, identity_value, code)) {
+        return false;
+    }
+    output.target_canonical_path = std::move(path);
+    output.target_identity = std::move(identity_value);
+    return true;
+}
+
+[[nodiscard]] bool parse_private_inventory_v2(
+    const JsonValue& value,
+    StockExternalPrivateTargetArtifactV2& output,
+    StockExternalArtifactErrorCode& code) noexcept
+{
+    bool available = false;
+    if (!bool_member(value, "available", available, code)) return false;
+    if (!available) {
+        return exact_object(value, {"available"}, code);
+    }
+    if (!exact_object(value, {"available", "inventory"}, code)) return false;
+    const auto* inventory = member(value, "inventory");
+    StockExternalArtifactInventory inventory_value{};
+    if (inventory == nullptr ||
+        !parse_inventory(*inventory, inventory_value, code)) {
+        return false;
+    }
+    output.target_inventory = std::move(inventory_value);
+    return true;
+}
+
+} // namespace
+
+StockExternalArtifactTextResult serialize_stock_external_private_target_v2(
+    const StockExternalPrivateTargetArtifactV2& artifact) noexcept
+{
+    try {
+        if (!valid_private_target_v2(artifact)) {
+            return text_failure(
+                StockExternalArtifactErrorCode::invalid_property_value);
+        }
+        bool valid = true;
+        std::string output{"{"};
+        append_string_property(
+            output, "schema", kStockExternalPrivateTargetSchemaV2, valid);
+        output.push_back(',');
+        append_unsigned_property(output, "ordinal", artifact.ordinal, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "review-nonce", artifact.review_nonce, valid);
+        output.push_back(',');
+        append_string_property(output, "source-root-fingerprint",
+                               artifact.source_root_fingerprint, valid);
+        output.push_back(',');
+        append_string_property(output, "source-link-relative-path",
+                               artifact.source_link_relative_path, valid);
+        output.push_back(',');
+        append_key(output, "source-link-identity", valid);
+        append_identity(output, artifact.source_link_identity, valid);
+        output.push_back(',');
+        append_unsigned_property(
+            output, "raw-reparse-tag", artifact.raw_reparse_tag, valid);
+        output.push_back(',');
+        append_bool_property(
+            output, "microsoft-tag", artifact.microsoft_tag, valid);
+        output.push_back(',');
+        append_bool_property(output, "name-surrogate-tag",
+                             artifact.name_surrogate_tag, valid);
+        output.push_back(',');
+        append_bool_property(output, "directory", artifact.directory, valid);
+        output.push_back(',');
+        append_unsigned_property(output, "payload-byte-count",
+                                 artifact.payload_byte_count, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "payload-sha256", artifact.payload_sha256, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "tag-category", artifact.tag_category, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "substitute-name", artifact.substitute_name, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "print-name", artifact.print_name, valid);
+        output.push_back(',');
+        append_string_property(output, "normalized-target-expression",
+                               artifact.normalized_target_expression, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "expression-kind", artifact.expression_kind, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "reachability", artifact.reachability, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "failure-phase", artifact.failure_phase, valid);
+        output.push_back(',');
+        append_string_property(output, "native-error-category",
+                               artifact.native_error_category, valid);
+        output.push_back(',');
+        append_unsigned_property(
+            output, "native-error", artifact.native_error, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "witness-sha256", artifact.witness_sha256, valid);
+        output.push_back(',');
+        append_key(output, "target-binding", valid);
+        append_private_target_binding_v2(output, artifact, valid);
+        output.push_back(',');
+        append_key(output, "target-inventory", valid);
+        append_private_inventory_v2(output, artifact, valid);
+        output.push_back(',');
+        append_string_property(output, "classification",
+                               to_string(artifact.classification), valid);
+        output.push_back(',');
+        append_bool_property(output, "diagnostic-complete",
+                             artifact.diagnostic_complete, valid);
+        output.push_back(',');
+        append_bool_property(output, "eligible", artifact.eligible, valid);
+        output.push_back('}');
+        return finish_serialized(std::move(output), valid);
+    } catch (...) {
+        return text_failure(StockExternalArtifactErrorCode::invalid_argument);
+    }
+}
+
+StockExternalArtifactResult<StockExternalPrivateTargetArtifactV2>
+parse_stock_external_private_target_v2(const std::string_view json) noexcept
+{
+    try {
+        JsonValue root{};
+        StockExternalArtifactErrorCode code{};
+        StockExternalPrivateTargetArtifactV2 output{};
+        if (!parse_root(json, root, code) ||
+            !exact_object(
+                root,
+                {"schema", "ordinal", "review-nonce",
+                 "source-root-fingerprint", "source-link-relative-path",
+                 "source-link-identity", "raw-reparse-tag",
+                 "microsoft-tag", "name-surrogate-tag", "directory",
+                 "payload-byte-count", "payload-sha256", "tag-category",
+                 "substitute-name", "print-name",
+                 "normalized-target-expression", "expression-kind",
+                 "reachability", "failure-phase", "native-error-category",
+                 "native-error", "witness-sha256", "target-binding",
+                 "target-inventory", "classification",
+                 "diagnostic-complete", "eligible"},
+                code) ||
+            !exact_schema(root, kStockExternalPrivateTargetSchemaV2, code)) {
+            return value_failure<StockExternalPrivateTargetArtifactV2>(code);
+        }
+        const auto* source_identity = member(root, "source-link-identity");
+        const auto* target_binding = member(root, "target-binding");
+        const auto* target_inventory = member(root, "target-inventory");
+        std::uint64_t raw_tag = 0U;
+        std::uint64_t native_error = 0U;
+        if (source_identity == nullptr || target_binding == nullptr ||
+            target_inventory == nullptr ||
+            !unsigned_member(root, "ordinal", output.ordinal, code) ||
+            !string_member(root, "review-nonce", output.review_nonce, code) ||
+            !string_member(root, "source-root-fingerprint",
+                           output.source_root_fingerprint, code) ||
+            !string_member(root, "source-link-relative-path",
+                           output.source_link_relative_path, code) ||
+            !parse_identity(
+                *source_identity, output.source_link_identity, code) ||
+            !unsigned_member(root, "raw-reparse-tag", raw_tag, code) ||
+            !bool_member(root, "microsoft-tag", output.microsoft_tag, code) ||
+            !bool_member(root, "name-surrogate-tag",
+                         output.name_surrogate_tag, code) ||
+            !bool_member(root, "directory", output.directory, code) ||
+            !unsigned_member(root, "payload-byte-count",
+                             output.payload_byte_count, code) ||
+            !string_member(root, "payload-sha256", output.payload_sha256,
+                           code) ||
+            !string_member(root, "tag-category", output.tag_category, code) ||
+            !string_member(root, "substitute-name", output.substitute_name,
+                           code) ||
+            !string_member(root, "print-name", output.print_name, code) ||
+            !string_member(root, "normalized-target-expression",
+                           output.normalized_target_expression, code) ||
+            !string_member(root, "expression-kind", output.expression_kind,
+                           code) ||
+            !string_member(root, "reachability", output.reachability, code) ||
+            !string_member(root, "failure-phase", output.failure_phase,
+                           code) ||
+            !string_member(root, "native-error-category",
+                           output.native_error_category, code) ||
+            !unsigned_member(root, "native-error", native_error, code) ||
+            !string_member(root, "witness-sha256", output.witness_sha256,
+                           code) ||
+            !parse_private_target_binding_v2(
+                *target_binding, output, code) ||
+            !parse_private_inventory_v2(
+                *target_inventory, output, code) ||
+            !parse_classification(root, output.classification, code) ||
+            !bool_member(root, "diagnostic-complete",
+                         output.diagnostic_complete, code) ||
+            !bool_member(root, "eligible", output.eligible, code) ||
+            raw_tag > (std::numeric_limits<std::uint32_t>::max)() ||
+            native_error > (std::numeric_limits<std::uint32_t>::max)()) {
+            if (code == StockExternalArtifactErrorCode::none) {
+                code = StockExternalArtifactErrorCode::invalid_property_value;
+            }
+            return value_failure<StockExternalPrivateTargetArtifactV2>(code);
+        }
+        output.raw_reparse_tag = static_cast<std::uint32_t>(raw_tag);
+        output.native_error = static_cast<std::uint32_t>(native_error);
+        if (!valid_private_target_v2(output)) {
+            return value_failure<StockExternalPrivateTargetArtifactV2>(
+                StockExternalArtifactErrorCode::invalid_property_value);
+        }
+        return {std::move(output), StockExternalArtifactErrorCode::none, 0U};
+    } catch (...) {
+        return value_failure<StockExternalPrivateTargetArtifactV2>(
+            StockExternalArtifactErrorCode::invalid_argument);
+    }
+}
+
+namespace {
+
+void append_summary_binding_v2(
+    std::string& output,
+    const StockExternalReviewTargetBindingArtifactV2& target,
+    bool& valid)
+{
+    output.push_back('{');
+    append_bool_property(output, "available",
+                         target.target_identity_sha256.has_value(), valid);
+    if (target.target_identity_sha256) {
+        output.push_back(',');
+        append_string_property(output, "identity-sha256",
+                               *target.target_identity_sha256, valid);
+    }
+    output.push_back('}');
+}
+
+void append_summary_inventory_v2(
+    std::string& output,
+    const StockExternalReviewTargetBindingArtifactV2& target,
+    bool& valid)
+{
+    output.push_back('{');
+    append_bool_property(
+        output, "available", target.inventory_available, valid);
+    if (target.target_inventory_sha256) {
+        output.push_back(',');
+        append_string_property(output, "inventory-sha256",
+                               *target.target_inventory_sha256, valid);
+    }
+    output.push_back('}');
+}
+
+void append_summary_target_v2(
+    std::string& output,
+    const StockExternalReviewTargetBindingArtifactV2& target,
+    bool& valid)
+{
+    output.push_back('{');
+    append_unsigned_property(output, "ordinal", target.ordinal, valid);
+    output.push_back(',');
+    append_string_property(output, "private-record-sha256",
+                           target.private_record_sha256, valid);
+    output.push_back(',');
+    append_string_property(output, "link-identity-sha256",
+                           target.link_identity_sha256, valid);
+    output.push_back(',');
+    append_key(output, "target-binding", valid);
+    append_summary_binding_v2(output, target, valid);
+    output.push_back(',');
+    append_key(output, "target-inventory", valid);
+    append_summary_inventory_v2(output, target, valid);
+    output.push_back(',');
+    append_string_property(output, "classification",
+                           to_string(target.classification), valid);
+    output.push_back(',');
+    append_string_property(
+        output, "tag-category", target.tag_category, valid);
+    output.push_back(',');
+    append_string_property(
+        output, "expression-kind", target.expression_kind, valid);
+    output.push_back(',');
+    append_string_property(
+        output, "reachability", target.reachability, valid);
+    output.push_back(',');
+    append_string_property(
+        output, "failure-phase", target.failure_phase, valid);
+    output.push_back(',');
+    append_string_property(output, "native-error-category",
+                           target.native_error_category, valid);
+    output.push_back(',');
+    append_bool_property(output, "diagnostic-complete",
+                         target.diagnostic_complete, valid);
+    output.push_back(',');
+    append_bool_property(
+        output, "inventory-available", target.inventory_available, valid);
+    output.push_back(',');
+    append_bool_property(output, "eligible", target.eligible, valid);
+    output.push_back('}');
+}
+
+[[nodiscard]] bool parse_summary_binding_v2(
+    const JsonValue& value,
+    StockExternalReviewTargetBindingArtifactV2& output,
+    StockExternalArtifactErrorCode& code) noexcept
+{
+    bool available = false;
+    if (!bool_member(value, "available", available, code)) return false;
+    if (!available) return exact_object(value, {"available"}, code);
+    if (!exact_object(value, {"available", "identity-sha256"}, code)) {
+        return false;
+    }
+    std::string digest;
+    if (!string_member(value, "identity-sha256", digest, code)) return false;
+    output.target_identity_sha256 = std::move(digest);
+    return true;
+}
+
+[[nodiscard]] bool parse_summary_inventory_v2(
+    const JsonValue& value,
+    StockExternalReviewTargetBindingArtifactV2& output,
+    StockExternalArtifactErrorCode& code) noexcept
+{
+    bool available = false;
+    if (!bool_member(value, "available", available, code)) return false;
+    output.inventory_available = available;
+    if (!available) return exact_object(value, {"available"}, code);
+    if (!exact_object(value, {"available", "inventory-sha256"}, code)) {
+        return false;
+    }
+    std::string digest;
+    if (!string_member(value, "inventory-sha256", digest, code)) return false;
+    output.target_inventory_sha256 = std::move(digest);
+    return true;
+}
+
+[[nodiscard]] bool parse_summary_target_v2(
+    const JsonValue& value,
+    StockExternalReviewTargetBindingArtifactV2& output,
+    StockExternalArtifactErrorCode& code) noexcept
+{
+    if (!exact_object(
+            value,
+            {"ordinal", "private-record-sha256", "link-identity-sha256",
+             "target-binding", "target-inventory", "classification",
+             "tag-category", "expression-kind", "reachability",
+             "failure-phase", "native-error-category",
+             "diagnostic-complete", "inventory-available", "eligible"},
+            code)) {
+        return false;
+    }
+    const auto* binding = member(value, "target-binding");
+    const auto* inventory = member(value, "target-inventory");
+    bool declared_inventory_available = false;
+    if (binding == nullptr || inventory == nullptr ||
+        !unsigned_member(value, "ordinal", output.ordinal, code) ||
+        !string_member(value, "private-record-sha256",
+                       output.private_record_sha256, code) ||
+        !string_member(value, "link-identity-sha256",
+                       output.link_identity_sha256, code) ||
+        !parse_summary_binding_v2(*binding, output, code) ||
+        !parse_summary_inventory_v2(*inventory, output, code) ||
+        !parse_classification(value, output.classification, code) ||
+        !string_member(value, "tag-category", output.tag_category, code) ||
+        !string_member(value, "expression-kind", output.expression_kind,
+                       code) ||
+        !string_member(value, "reachability", output.reachability, code) ||
+        !string_member(value, "failure-phase", output.failure_phase, code) ||
+        !string_member(value, "native-error-category",
+                       output.native_error_category, code) ||
+        !bool_member(value, "diagnostic-complete",
+                     output.diagnostic_complete, code) ||
+        !bool_member(value, "inventory-available",
+                     declared_inventory_available, code) ||
+        !bool_member(value, "eligible", output.eligible, code) ||
+        declared_inventory_available != output.inventory_available ||
+        !valid_summary_target_v2(output)) {
+        if (code == StockExternalArtifactErrorCode::none) {
+            code = StockExternalArtifactErrorCode::invalid_property_value;
+        }
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+StockExternalArtifactTextResult serialize_stock_external_review_summary_v2(
+    const StockExternalReviewSummaryArtifactV2& artifact) noexcept
+{
+    try {
+        if (!valid_summary_v2(artifact)) {
+            return text_failure(
+                StockExternalArtifactErrorCode::invalid_property_value);
+        }
+        bool valid = true;
+        std::string output{"{"};
+        append_string_property(
+            output, "schema", kStockExternalReviewSummarySchemaV2, valid);
+        output.push_back(',');
+        append_string_property(output, "review-root-fingerprint",
+                               artifact.review_root_fingerprint, valid);
+        output.push_back(',');
+        append_string_property(output, "source-root-fingerprint",
+                               artifact.source_root_fingerprint, valid);
+        output.push_back(',');
+        append_key(output, "source-inventory", valid);
+        append_inventory(output, artifact.source_inventory, valid);
+        output.push_back(',');
+        append_string_property(
+            output, "review-nonce", artifact.review_nonce, valid);
+        output.push_back(',');
+        append_unsigned_property(output, "review-timestamp-unix-seconds",
+                                 artifact.review_timestamp_unix_seconds,
+                                 valid);
+        output.push_back(',');
+        append_string_property(output, "implementation-profile",
+                               artifact.implementation_profile, valid);
+        output.push_back(',');
+        append_key(output, "targets", valid);
+        output.push_back('[');
+        for (std::size_t index = 0U; index < artifact.targets.size(); ++index) {
+            if (index != 0U) output.push_back(',');
+            append_summary_target_v2(output, artifact.targets[index], valid);
+        }
+        output.push_back(']');
+        output.push_back(',');
+        append_unsigned_property(
+            output, "completed-count", artifact.completed_count, valid);
+        output.push_back(',');
+        append_unsigned_property(
+            output, "eligible-count", artifact.eligible_count, valid);
+        output.push_back(',');
+        append_unsigned_property(
+            output, "ineligible-count", artifact.ineligible_count, valid);
+        output.push_back(',');
+        append_unsigned_property(
+            output, "incomplete-count", artifact.incomplete_count, valid);
+        output.push_back(',');
+        append_bool_property(output, "all-targets-eligible",
+                             artifact.all_targets_eligible, valid);
+        output.push_back('}');
+        return finish_serialized(std::move(output), valid);
+    } catch (...) {
+        return text_failure(StockExternalArtifactErrorCode::invalid_argument);
+    }
+}
+
+StockExternalArtifactResult<StockExternalReviewSummaryArtifactV2>
+parse_stock_external_review_summary_v2(const std::string_view json) noexcept
+{
+    try {
+        JsonValue root{};
+        StockExternalArtifactErrorCode code{};
+        StockExternalReviewSummaryArtifactV2 output{};
+        if (!parse_root(json, root, code) ||
+            !exact_object(
+                root,
+                {"schema", "review-root-fingerprint",
+                 "source-root-fingerprint", "source-inventory",
+                 "review-nonce", "review-timestamp-unix-seconds",
+                 "implementation-profile", "targets", "completed-count",
+                 "eligible-count", "ineligible-count", "incomplete-count",
+                 "all-targets-eligible"},
+                code) ||
+            !exact_schema(root, kStockExternalReviewSummarySchemaV2, code)) {
+            return value_failure<StockExternalReviewSummaryArtifactV2>(code);
+        }
+        const auto* inventory = member(root, "source-inventory");
+        const auto* targets = member(root, "targets");
+        if (inventory == nullptr || targets == nullptr ||
+            targets->kind != JsonKind::array ||
+            targets->array_value.empty() ||
+            targets->array_value.size() >
+                kMaximumStockExternalArtifactTargets ||
+            !string_member(root, "review-root-fingerprint",
+                           output.review_root_fingerprint, code) ||
+            !string_member(root, "source-root-fingerprint",
+                           output.source_root_fingerprint, code) ||
+            !parse_inventory(*inventory, output.source_inventory, code) ||
+            !string_member(root, "review-nonce", output.review_nonce, code) ||
+            !unsigned_member(root, "review-timestamp-unix-seconds",
+                             output.review_timestamp_unix_seconds, code) ||
+            !string_member(root, "implementation-profile",
+                           output.implementation_profile, code)) {
+            if (code == StockExternalArtifactErrorCode::none) {
+                code = StockExternalArtifactErrorCode::invalid_property_type;
+            }
+            return value_failure<StockExternalReviewSummaryArtifactV2>(code);
+        }
+        output.targets.reserve(targets->array_value.size());
+        for (const auto& value : targets->array_value) {
+            StockExternalReviewTargetBindingArtifactV2 target{};
+            if (!parse_summary_target_v2(value, target, code)) {
+                return value_failure<StockExternalReviewSummaryArtifactV2>(
+                    code);
+            }
+            output.targets.push_back(std::move(target));
+        }
+        if (!unsigned_member(root, "completed-count",
+                             output.completed_count, code) ||
+            !unsigned_member(root, "eligible-count", output.eligible_count,
+                             code) ||
+            !unsigned_member(root, "ineligible-count",
+                             output.ineligible_count, code) ||
+            !unsigned_member(root, "incomplete-count",
+                             output.incomplete_count, code) ||
+            !bool_member(root, "all-targets-eligible",
+                         output.all_targets_eligible, code) ||
+            !valid_summary_v2(output)) {
+            if (code == StockExternalArtifactErrorCode::none) {
+                code = StockExternalArtifactErrorCode::invalid_property_value;
+            }
+            return value_failure<StockExternalReviewSummaryArtifactV2>(code);
+        }
+        return {std::move(output), StockExternalArtifactErrorCode::none, 0U};
+    } catch (...) {
+        return value_failure<StockExternalReviewSummaryArtifactV2>(
             StockExternalArtifactErrorCode::invalid_argument);
     }
 }

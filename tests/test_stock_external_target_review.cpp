@@ -293,6 +293,89 @@ struct Fixture final {
            L"stock-runtime-source-review";
 }
 
+struct UnexpectedPublicationLeaf final {
+    fs::path root_hint;
+    fs::path published_root;
+    fs::path unexpected_leaf;
+    std::wstring leaf_name{L"unexpected-publication-entry.bin"};
+    HANDLE held{INVALID_HANDLE_VALUE};
+    windows::StockExternalPublicationTestPhase expected_phase{
+        windows::StockExternalPublicationTestPhase::review_summary_published};
+    bool discover_review_child{false};
+    bool invoked{false};
+
+    ~UnexpectedPublicationLeaf()
+    {
+        if (held != INVALID_HANDLE_VALUE) {
+            static_cast<void>(::CloseHandle(held));
+        }
+        if (!unexpected_leaf.empty()) {
+            static_cast<void>(::DeleteFileW(unexpected_leaf.c_str()));
+        }
+    }
+
+    static void inject(
+        const windows::StockExternalPublicationTestPhase phase,
+        void* const opaque) noexcept
+    {
+        auto& state = *static_cast<UnexpectedPublicationLeaf*>(opaque);
+        state.invoked = true;
+        if (phase != state.expected_phase) return;
+        try {
+            state.published_root = state.root_hint;
+            if (state.discover_review_child) {
+                std::error_code error;
+                for (fs::directory_iterator iterator{state.root_hint, error};
+                     !error && iterator != fs::directory_iterator{};
+                     iterator.increment(error)) {
+                    if (iterator->is_directory(error) && !error) {
+                        state.published_root = iterator->path();
+                        break;
+                    }
+                }
+            }
+            state.unexpected_leaf =
+                state.published_root / state.leaf_name;
+            state.held = ::CreateFileW(
+                state.unexpected_leaf.c_str(), GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                nullptr);
+        } catch (...) {
+            state.held = INVALID_HANDLE_VALUE;
+        }
+    }
+};
+
+struct SourceInsertionAtPublication final {
+    fs::path source_root;
+    fs::path inserted_leaf;
+    bool invoked{false};
+    bool created{false};
+
+    static void inject(
+        const windows::StockExternalPublicationTestPhase phase,
+        void* const opaque) noexcept
+    {
+        if (phase != windows::StockExternalPublicationTestPhase::
+                         review_private_records_published) {
+            return;
+        }
+        auto& state = *static_cast<SourceInsertionAtPublication*>(opaque);
+        state.invoked = true;
+        try {
+            state.inserted_leaf =
+                state.source_root / L"post-scan-source-insertion.bin";
+            const HANDLE handle = ::CreateFileW(
+                state.inserted_leaf.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (handle == INVALID_HANDLE_VALUE) return;
+            state.created = ::CloseHandle(handle) != FALSE;
+        } catch (...) {
+            state.created = false;
+        }
+    }
+};
+
 } // namespace
 
 TEST_CASE(
@@ -337,6 +420,110 @@ TEST_CASE(
     const auto private_leaf = windows::stock_external_private_target_leaf(1U);
     REQUIRE(private_leaf);
     CHECK(fs::is_regular_file(result.value->review_root / *private_leaf));
+}
+
+TEST_CASE(
+    "External target review rolls back an unconsumable summary after postcheck failure",
+    "[windows][stock-runtime][external-target][review][publication-rollback]")
+{
+    Fixture fixture;
+    write_minimal_bsp30(
+        fixture.external_root() / L"maps" / L"arena.bsp");
+    write_minimal_wad3(
+        fixture.external_root() / L"textures" / L"shared.wad");
+    if (!fixture.link_external()) {
+        SKIP("Windows junction fixture capability is unavailable");
+    }
+
+    UnexpectedPublicationLeaf injection{};
+    injection.root_hint = review_parent(fixture);
+    injection.discover_review_child = true;
+    const windows::StockExternalPublicationTestHook hook{
+        &UnexpectedPublicationLeaf::inject, &injection};
+    const auto result = windows::review_stock_external_targets(
+        fixture.source_root(), review_parent(fixture), {}, &hook);
+    CHECK_FALSE(result);
+    CHECK(result.code == windows::StockExternalReviewErrorCode::publication_failed);
+    REQUIRE(injection.invoked);
+    REQUIRE(injection.held != INVALID_HANDLE_VALUE);
+    REQUIRE_FALSE(injection.published_root.empty());
+    CHECK(fs::exists(injection.unexpected_leaf));
+    CHECK_FALSE(fs::exists(
+        injection.published_root / windows::kStockExternalReviewSummaryLeaf));
+    CHECK_FALSE(fs::exists(
+        injection.published_root / windows::kStockExternalReviewRequestLeaf));
+    const auto private_leaf = windows::stock_external_private_target_leaf(1U);
+    REQUIRE(private_leaf);
+    CHECK_FALSE(fs::exists(injection.published_root / *private_leaf));
+    const auto summary = windows::read_stock_external_artifact_leaf(
+        injection.published_root, windows::kStockExternalReviewSummaryLeaf);
+    CHECK_FALSE(summary);
+}
+
+TEST_CASE(
+    "External target review removes an unmanifested private review root",
+    "[windows][stock-runtime][external-target][review][publication-rollback]")
+{
+    Fixture fixture;
+    write_minimal_bsp30(
+        fixture.external_root() / L"maps" / L"arena.bsp");
+    write_minimal_wad3(
+        fixture.external_root() / L"textures" / L"shared.wad");
+    if (!fixture.link_external()) {
+        SKIP("Windows junction fixture capability is unavailable");
+    }
+
+    SourceInsertionAtPublication injection{};
+    injection.source_root = fixture.source_root();
+    const windows::StockExternalPublicationTestHook hook{
+        &SourceInsertionAtPublication::inject, &injection};
+    const auto result = windows::review_stock_external_targets(
+        fixture.source_root(), review_parent(fixture), {}, &hook);
+    REQUIRE(injection.invoked);
+    if (!injection.created) {
+        SKIP("Source insertion mutation fixture capability is unavailable");
+    }
+    CHECK_FALSE(result);
+    CHECK(result.code == windows::StockExternalReviewErrorCode::target_changed);
+    REQUIRE(fs::is_directory(review_parent(fixture)));
+    CHECK(fs::is_empty(review_parent(fixture)));
+}
+
+TEST_CASE(
+    "External target review rejects a forged capability lock entry",
+    "[windows][stock-runtime][external-target][review][publication-rollback][exact-set]")
+{
+    Fixture fixture;
+    write_minimal_bsp30(
+        fixture.external_root() / L"maps" / L"arena.bsp");
+    write_minimal_wad3(
+        fixture.external_root() / L"textures" / L"shared.wad");
+    if (!fixture.link_external()) {
+        SKIP("Windows junction fixture capability is unavailable");
+    }
+
+    UnexpectedPublicationLeaf injection{};
+    injection.root_hint = review_parent(fixture);
+    injection.discover_review_child = true;
+    injection.leaf_name =
+        L".hlclient-output-capability-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.lock";
+    const windows::StockExternalPublicationTestHook hook{
+        &UnexpectedPublicationLeaf::inject, &injection};
+    const auto result = windows::review_stock_external_targets(
+        fixture.source_root(), review_parent(fixture), {}, &hook);
+    CHECK_FALSE(result);
+    CHECK(result.code == windows::StockExternalReviewErrorCode::publication_failed);
+    REQUIRE(injection.invoked);
+    REQUIRE(injection.held != INVALID_HANDLE_VALUE);
+    REQUIRE_FALSE(injection.published_root.empty());
+    CHECK(fs::exists(injection.unexpected_leaf));
+    CHECK_FALSE(fs::exists(
+        injection.published_root / windows::kStockExternalReviewSummaryLeaf));
+    CHECK_FALSE(fs::exists(
+        injection.published_root / windows::kStockExternalReviewRequestLeaf));
+    const auto private_leaf = windows::stock_external_private_target_leaf(1U);
+    REQUIRE(private_leaf);
+    CHECK_FALSE(fs::exists(injection.published_root / *private_leaf));
 }
 
 TEST_CASE(

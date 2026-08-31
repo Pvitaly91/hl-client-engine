@@ -306,6 +306,65 @@ void SecureOutputDirectory::close() noexcept
     canonical_path_.clear();
 }
 
+SecureOutputPublishedFile::SecureOutputPublishedFile(
+    void* const native_handle) noexcept
+    : native_handle_{native_handle}
+{
+}
+
+SecureOutputPublishedFile::SecureOutputPublishedFile(
+    SecureOutputPublishedFile&& other) noexcept
+    : native_handle_{std::exchange(other.native_handle_, nullptr)}
+{
+}
+
+SecureOutputPublishedFile& SecureOutputPublishedFile::operator=(
+    SecureOutputPublishedFile&& other) noexcept
+{
+    if (this != &other) {
+        close();
+        native_handle_ = std::exchange(other.native_handle_, nullptr);
+    }
+    return *this;
+}
+
+SecureOutputPublishedFile::~SecureOutputPublishedFile() { close(); }
+
+bool SecureOutputPublishedFile::valid() const noexcept
+{
+    return native_handle_ != nullptr &&
+           native_handle_ != reinterpret_cast<void*>(
+                                 static_cast<std::intptr_t>(-1));
+}
+
+void SecureOutputPublishedFile::close() noexcept
+{
+    if (valid()) {
+        static_cast<void>(::CloseHandle(static_cast<HANDLE>(native_handle_)));
+    }
+    native_handle_ = nullptr;
+}
+
+SecureOutputWriteResult SecureOutputPublishedFile::remove_on_close() noexcept
+{
+    if (!valid()) {
+        return write_failure(
+            SecureOutputErrorCode::published_file_identity_invalid,
+            ERROR_INVALID_HANDLE);
+    }
+    FILE_DISPOSITION_INFO disposition{};
+    disposition.DeleteFile = TRUE;
+    if (::SetFileInformationByHandle(
+            static_cast<HANDLE>(native_handle_), FileDispositionInfo,
+            &disposition, sizeof(disposition)) == FALSE) {
+        return write_failure(
+            SecureOutputErrorCode::published_file_delete_failed,
+            ::GetLastError());
+    }
+    close();
+    return {std::nullopt};
+}
+
 SecureOutputDirectoryOpenResult open_secure_output_directory(
     const std::filesystem::path& path) noexcept
 {
@@ -417,6 +476,24 @@ SecureOutputWriteResult secure_atomic_write_new(
     const std::wstring_view leaf_name,
     const std::span<const std::byte> bytes) noexcept
 {
+    SecureOutputPublishedFile published_file;
+    auto result = secure_atomic_write_new(
+        directory, leaf_name, bytes, published_file);
+    if (result) published_file.close();
+    return result;
+}
+
+SecureOutputWriteResult secure_atomic_write_new(
+    const SecureOutputDirectory& directory,
+    const std::wstring_view leaf_name,
+    const std::span<const std::byte> bytes,
+    SecureOutputPublishedFile& published_file) noexcept
+{
+    if (published_file.valid()) {
+        return write_failure(
+            SecureOutputErrorCode::published_file_identity_invalid,
+            ERROR_INVALID_HANDLE);
+    }
     if (!directory.valid() ||
         !ordinary_directory(
             static_cast<HANDLE>(directory.native_handles_.front())) ||
@@ -525,7 +602,8 @@ SecureOutputWriteResult secure_atomic_write_new(
             SecureOutputErrorCode::published_file_identity_invalid,
             ::GetLastError());
     }
-    temporary.reset();
+    published_file = SecureOutputPublishedFile{
+        static_cast<void*>(temporary.release())};
     return {std::nullopt};
 }
 

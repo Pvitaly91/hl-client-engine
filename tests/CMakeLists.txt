@@ -248,9 +248,14 @@ if(WIN32)
             test_windows_network_isolation.cpp
             test_windows_process_orchestrator.cpp
             test_stock_external_target_approval.cpp
+            test_stock_external_artifact_v2.cpp
+            test_stock_external_reparse_diagnostics.cpp
             test_stock_external_target_materialization.cpp
             test_stock_external_target_review.cpp
+            test_stock_source_eligibility.cpp
             test_stock_research_copy_topology.cpp
+            test_windows_reparse_provenance.cpp
+            test_windows_reparse_reachability.cpp
             test_windows_secure_output.cpp)
 endif()
 
@@ -352,8 +357,10 @@ if(WIN32)
             hlclient::windows_binary_identity
             hlclient::windows_network_isolation
             hlclient::windows_process_orchestrator
+            hlclient::windows_reparse_provenance
             hlclient::windows_stock_external_target_api
             hlclient::windows_stock_research_copy
+            hlclient::windows_stock_source_eligibility
             hlclient::windows_secure_output
             ws2_32)
 endif()
@@ -368,6 +375,7 @@ if(WIN32)
         hlclient_network_isolation_probe
         hlclient_stock_external_target_review
         hlclient_stock_research_copy
+        hlclient_stock_source_eligibility_check
         hlclient_stock_runtime_capture
         hlclient_stock_runtime_fake_client
         hlclient_stock_runtime_fake_server

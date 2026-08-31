@@ -32,18 +32,19 @@ review-set digest is not printed. Public output never contains a source-relative
 path, private identity, target filename, username or source/target content
 hash.
 
-One successful diagnostic publishes the following private, ignored JSON files
-under `manual-artifacts/stock-runtime-source-review/<review-id>/`:
+Every new successful diagnostic publishes the following private, ignored v2
+JSON files under
+`manual-artifacts/stock-runtime-source-review/<review-id>/`:
 
 - `review-request.json`, schema
-  `hlclient.stock-runtime-external-target-review-request.v1`;
+  `hlclient.stock-runtime-external-target-review-request.v2`;
 - `target-0001-private.json` through the exact target count, schema
-  `hlclient.stock-runtime-external-target-private.v1`;
+  `hlclient.stock-runtime-external-target-private.v2`;
 - `review-summary.json`, schema
-  `hlclient.stock-runtime-external-target-review-summary.v1`.
+  `hlclient.stock-runtime-external-target-review-summary.v2`.
 
 The public review command reports interface schema
-`hlclient.stock-runtime-external-target-review.v1`. The private request and
+`hlclient.stock-runtime-external-target-review.v2`. The private request and
 target records intentionally retain the normalized source-relative link path,
 canonical source/target paths, final-path identities, volume/file IDs, reparse
 identity, inventory digest and bounded classification counts. Those records
@@ -62,6 +63,19 @@ claim.
 A complete review returns exit code 0 even when `result=ineligible`; that is a
 diagnostic result, not approval. Malformed arguments, unsafe output placement,
 an incomplete scan or publication failure returns nonzero.
+
+M4.7.1.1.4 retains strict readers for complete eligible v1 review/approval
+sets; it does not silently extend their schemas. The new strictly versioned v2
+request, private-target and summary artifacts carry exact reparse diagnostics.
+A v2 target records tag category,
+expression kind, reachability, failure phase, typed native-error category and
+whether inventory is available. Raw tag, payload digest, expression, numeric
+native error and any handle-derived identity remain private. Public output is
+path-free. A readable dangling or unsupported target can complete with
+`result=ineligible` and exit 0; unavailable inventory counters are absent or
+`unavailable`, never fabricated zeros. `ERROR_PATH_NOT_FOUND` is not
+eligibility. A missing target is not repaired, created, approved or
+materialized, and an opaque tag is not followed.
 
 ## Eligibility is narrow
 

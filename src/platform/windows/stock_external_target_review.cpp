@@ -7,12 +7,15 @@
 #include <Windows.h>
 #include <bcrypt.h>
 #include <winioctl.h>
+#include <winternl.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cctype>
 #include <cwctype>
+#include <deque>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -22,8 +25,10 @@
 namespace hlclient::platform::windows {
 namespace {
 
-constexpr std::string_view kExternalReviewImplementationProfile =
+constexpr std::string_view kExternalReviewImplementationProfileV1 =
     "hlclient.stock-external-target-review.windows-v1";
+constexpr std::string_view kExternalReviewImplementationProfileV2 =
+    "hlclient.stock-external-target-review.windows-v2";
 
 class Handle final {
 public:
@@ -89,14 +94,42 @@ struct Snapshot final {
     bool directory{false};
 };
 
+struct PinnedInventoryEntry final {
+    Handle handle;
+    Snapshot snapshot;
+    std::filesystem::path relative_path;
+};
+
+struct PinnedDirectoryWitness final {
+    HANDLE handle{INVALID_HANDLE_VALUE};
+    std::vector<std::pair<std::wstring, std::uint32_t>> entries;
+};
+
+struct PinnedTargetInventory final {
+    std::filesystem::path source_link_relative_path;
+    HANDLE root_handle{INVALID_HANDLE_VALUE};
+    Snapshot root_snapshot;
+    std::vector<PinnedInventoryEntry> entries;
+    std::vector<PinnedDirectoryWitness> directories;
+};
+
 struct Scan final {
     std::vector<StockExternalTargetReview> targets;
+    std::vector<PinnedTargetInventory> pinned_target_inventories;
+    Handle source_root_guard{INVALID_HANDLE_VALUE};
+    std::vector<PinnedInventoryEntry> source_inventory_entries;
+    std::vector<PinnedDirectoryWitness> source_directory_witnesses;
+    std::vector<WindowsReparseTargetObservation> contained_target_pins;
     Snapshot source_snapshot{};
     std::filesystem::path source_final_path;
     std::string source_identity;
     std::string source_inventory_sha256;
     std::size_t source_entry_count{0U};
     std::uint64_t source_byte_count{0U};
+    std::size_t internal_reparse_count{0U};
+    std::size_t contained_target_count{0U};
+    std::size_t hardlink_count{0U};
+    std::size_t alternate_data_stream_count{0U};
     bool eligible{true};
 };
 
@@ -120,6 +153,19 @@ struct Scan final {
     return Handle{::CreateFileW(
         path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, OPEN_EXISTING, flags, nullptr)};
+}
+
+[[nodiscard]] Handle open_path_inventory_guard(
+    const std::filesystem::path& path, const bool no_follow,
+    const bool directory) noexcept
+{
+    DWORD flags = directory ? FILE_FLAG_BACKUP_SEMANTICS : 0U;
+    if (no_follow) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    return Handle{::CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES |
+                          (directory ? FILE_LIST_DIRECTORY : FILE_READ_DATA),
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+        flags | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
 }
 
 [[nodiscard]] std::optional<Snapshot> snapshot(HANDLE handle) noexcept
@@ -164,6 +210,21 @@ struct Scan final {
     constexpr std::wstring_view prefix = L"\\\\?\\";
     if (buffer.starts_with(prefix)) buffer.erase(0U, prefix.size());
     return std::filesystem::path{buffer};
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> final_volume_guid_path(
+    HANDLE handle)
+{
+    const DWORD needed = ::GetFinalPathNameByHandleW(
+        handle, nullptr, 0U, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+    if (needed == 0U || needed > 32'767U) return std::nullopt;
+    std::wstring buffer(static_cast<std::size_t>(needed), L'\0');
+    const DWORD written = ::GetFinalPathNameByHandleW(
+        handle, buffer.data(), needed,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+    if (written == 0U || written >= needed) return std::nullopt;
+    buffer.resize(written);
+    return std::filesystem::path{std::move(buffer)};
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> physical_path(
@@ -214,6 +275,33 @@ struct Scan final {
     return contains(left, right) || contains(right, left);
 }
 
+[[nodiscard]] bool lexical_path_is_within(
+    const std::filesystem::path& child,
+    const std::filesystem::path& parent) noexcept
+{
+    try {
+        const auto fold = [](std::wstring value) {
+            std::ranges::transform(value, value.begin(), [](wchar_t item) {
+                return static_cast<wchar_t>(std::towlower(item));
+            });
+            return value;
+        };
+        auto child_text = fold(child.lexically_normal().native());
+        auto parent_text = fold(parent.lexically_normal().native());
+        while (parent_text.size() > 3U &&
+               (parent_text.back() == L'\\' || parent_text.back() == L'/')) {
+            parent_text.pop_back();
+        }
+        if (child_text == parent_text) return true;
+        return child_text.size() > parent_text.size() &&
+               child_text.starts_with(parent_text) &&
+               (child_text[parent_text.size()] == L'\\' ||
+                child_text[parent_text.size()] == L'/');
+    } catch (...) {
+        return false;
+    }
+}
+
 [[nodiscard]] std::string hex(std::span<const std::byte> bytes)
 {
     static constexpr char digits[] = "0123456789abcdef";
@@ -252,6 +340,213 @@ struct Scan final {
            before.directory == after.directory;
 }
 
+[[nodiscard]] bool same_inventory_snapshot(const Snapshot& before,
+                                           const Snapshot& after) noexcept
+{
+    return before.volume == after.volume && before.id == after.id &&
+           before.size == after.size &&
+           before.write_time == after.write_time &&
+           before.change_time == after.change_time &&
+           before.creation_time == after.creation_time &&
+           before.attributes == after.attributes &&
+           before.reparse_tag == after.reparse_tag &&
+           before.links == after.links &&
+           before.directory == after.directory;
+}
+
+[[nodiscard]] Handle open_relative_inventory_entry(
+    HANDLE parent, const std::wstring_view leaf, const bool directory) noexcept
+{
+    if (parent == nullptr || parent == INVALID_HANDLE_VALUE || leaf.empty() ||
+        leaf == L"." || leaf == L".." ||
+        leaf.size() >
+            (std::numeric_limits<USHORT>::max)() / sizeof(wchar_t) ||
+        leaf.find_first_of(L"\\/") != std::wstring_view::npos) {
+        ::SetLastError(ERROR_INVALID_NAME);
+        return Handle{};
+    }
+
+    UNICODE_STRING name{};
+    name.Length = static_cast<USHORT>(leaf.size() * sizeof(wchar_t));
+    name.MaximumLength = name.Length;
+    name.Buffer = const_cast<PWSTR>(leaf.data());
+    OBJECT_ATTRIBUTES attributes{};
+    attributes.Length = sizeof(attributes);
+    attributes.RootDirectory = parent;
+    attributes.Attributes = OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE;
+    attributes.ObjectName = &name;
+    IO_STATUS_BLOCK status_block{};
+    HANDLE opened = INVALID_HANDLE_VALUE;
+    const ACCESS_MASK desired = FILE_READ_ATTRIBUTES | SYNCHRONIZE |
+                                (directory ? FILE_LIST_DIRECTORY
+                                           : FILE_READ_DATA);
+    const ULONG options = FILE_OPEN_REPARSE_POINT |
+                          FILE_OPEN_FOR_BACKUP_INTENT |
+                          FILE_SYNCHRONOUS_IO_NONALERT |
+                          (directory ? FILE_DIRECTORY_FILE
+                                     : FILE_NON_DIRECTORY_FILE);
+    const NTSTATUS status = ::NtCreateFile(
+        &opened, desired, &attributes, &status_block, nullptr,
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, options, nullptr,
+        0U);
+    if (status < 0) {
+        if (opened != nullptr && opened != INVALID_HANDLE_VALUE) {
+            static_cast<void>(::CloseHandle(opened));
+        }
+        ::SetLastError(::RtlNtStatusToDosError(status));
+        return Handle{};
+    }
+    ::SetLastError(ERROR_SUCCESS);
+    return Handle{opened};
+}
+
+struct DirectoryListing final {
+    std::vector<std::pair<std::wstring, std::uint32_t>> entries;
+    std::uint32_t native_error{ERROR_SUCCESS};
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return native_error == ERROR_SUCCESS;
+    }
+};
+
+[[nodiscard]] DirectoryListing enumerate_directory_handle(
+    HANDLE directory, const std::size_t maximum_entries) noexcept
+{
+    DirectoryListing result{};
+    if (directory == nullptr || directory == INVALID_HANDLE_VALUE ||
+        maximum_entries == 0U) {
+        result.native_error = ERROR_INVALID_PARAMETER;
+        return result;
+    }
+    try {
+        constexpr std::size_t buffer_bytes = 64U * 1'024U;
+        std::vector<std::uint64_t> storage(
+            (buffer_bytes + sizeof(std::uint64_t) - 1U) /
+            sizeof(std::uint64_t));
+        const auto capacity = storage.size() * sizeof(std::uint64_t);
+        bool restart = true;
+        for (;;) {
+            const auto information_class =
+                restart ? FileIdBothDirectoryRestartInfo
+                        : FileIdBothDirectoryInfo;
+            if (::GetFileInformationByHandleEx(
+                    directory, information_class, storage.data(),
+                    static_cast<DWORD>(capacity)) == FALSE) {
+                const auto native_error = ::GetLastError();
+                if (native_error == ERROR_NO_MORE_FILES) break;
+                result.entries.clear();
+                result.native_error = native_error;
+                return result;
+            }
+            restart = false;
+            std::size_t offset = 0U;
+            for (;;) {
+                constexpr auto fixed_bytes =
+                    offsetof(FILE_ID_BOTH_DIR_INFO, FileName);
+                if (offset > capacity || fixed_bytes > capacity - offset) {
+                    result.entries.clear();
+                    result.native_error = ERROR_INVALID_DATA;
+                    return result;
+                }
+                const auto* entry = reinterpret_cast<
+                    const FILE_ID_BOTH_DIR_INFO*>(
+                    reinterpret_cast<const std::byte*>(storage.data()) +
+                    offset);
+                if ((entry->FileNameLength & 1U) != 0U ||
+                    entry->FileNameLength > capacity - offset - fixed_bytes) {
+                    result.entries.clear();
+                    result.native_error = ERROR_INVALID_DATA;
+                    return result;
+                }
+                const std::wstring_view name{
+                    entry->FileName,
+                    static_cast<std::size_t>(entry->FileNameLength) /
+                        sizeof(wchar_t)};
+                if (name != L"." && name != L"..") {
+                    if (name.empty() || name.find(L'\0') !=
+                                            std::wstring_view::npos ||
+                        name.find_first_of(L"\\/") !=
+                            std::wstring_view::npos) {
+                        result.entries.clear();
+                        result.native_error = ERROR_INVALID_DATA;
+                        return result;
+                    }
+                    if (result.entries.size() >= maximum_entries) {
+                        result.entries.clear();
+                        result.native_error = ERROR_BUFFER_OVERFLOW;
+                        return result;
+                    }
+                    result.entries.emplace_back(
+                        std::wstring{name}, entry->FileAttributes);
+                }
+                if (entry->NextEntryOffset == 0U) break;
+                if (entry->NextEntryOffset < fixed_bytes ||
+                    entry->NextEntryOffset > capacity - offset) {
+                    result.entries.clear();
+                    result.native_error = ERROR_INVALID_DATA;
+                    return result;
+                }
+                offset += entry->NextEntryOffset;
+            }
+        }
+        std::ranges::sort(result.entries, {},
+                          [](const auto& item) -> const std::wstring& {
+                              return item.first;
+                          });
+        return result;
+    } catch (...) {
+        result.entries.clear();
+        result.native_error = ERROR_NOT_ENOUGH_MEMORY;
+        return result;
+    }
+}
+
+[[nodiscard]] bool revalidate_pinned_target_inventory(
+    const PinnedTargetInventory& inventory) noexcept
+{
+    const auto root_after = snapshot(inventory.root_handle);
+    if (!root_after ||
+        !same_inventory_snapshot(inventory.root_snapshot, *root_after)) {
+        return false;
+    }
+    for (const auto& entry : inventory.entries) {
+        const auto after = snapshot(entry.handle.get());
+        if (!after || !same_inventory_snapshot(entry.snapshot, *after)) {
+            return false;
+        }
+    }
+    for (const auto& directory : inventory.directories) {
+        const auto listing = enumerate_directory_handle(
+            directory.handle, directory.entries.size() + 1U);
+        if (!listing || listing.entries != directory.entries) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool revalidate_pinned_source_inventory(
+    const Scan& scan) noexcept
+{
+    if (!scan.source_root_guard.valid()) return false;
+    const auto root_after = snapshot(scan.source_root_guard.get());
+    if (!root_after ||
+        !same_inventory_snapshot(scan.source_snapshot, *root_after)) {
+        return false;
+    }
+    for (const auto& entry : scan.source_inventory_entries) {
+        const auto after = snapshot(entry.handle.get());
+        if (!after || !same_inventory_snapshot(entry.snapshot, *after)) {
+            return false;
+        }
+    }
+    for (const auto& directory : scan.source_directory_witnesses) {
+        const auto listing = enumerate_directory_handle(
+            directory.handle, directory.entries.size() + 1U);
+        if (!listing || listing.entries != directory.entries) return false;
+    }
+    return true;
+}
+
 [[nodiscard]] std::string stable_directory_identity(const Snapshot& value)
 {
     std::ostringstream stream;
@@ -266,30 +561,6 @@ struct Scan final {
     const auto& value = path.native();
     return hex(std::span{reinterpret_cast<const std::byte*>(value.data()),
                          value.size() * sizeof(wchar_t)});
-}
-
-[[nodiscard]] std::optional<std::filesystem::path> logical_source_path(
-    const std::filesystem::path& entry,
-    const std::filesystem::path& source) noexcept
-{
-    try {
-        const auto relative =
-            entry.lexically_normal().lexically_relative(
-                source.lexically_normal());
-        if (relative.empty() || relative.is_absolute() ||
-            relative.has_root_name() || relative.has_root_directory()) {
-            return std::nullopt;
-        }
-        for (const auto& component : relative) {
-            if (component.empty() || component == L"." ||
-                component == L"..") {
-                return std::nullopt;
-            }
-        }
-        return relative;
-    } catch (...) {
-        return std::nullopt;
-    }
 }
 
 [[nodiscard]] std::optional<std::string> utf8(
@@ -518,6 +789,63 @@ path_classification(const std::filesystem::path& path)
     ::FindClose(find);
     if (alternate) return true;
     return enumeration_error != ERROR_HANDLE_EOF;
+}
+
+[[nodiscard]] std::optional<std::size_t> named_ads_count_handle(
+    HANDLE handle, const std::size_t maximum_streams) noexcept
+{
+    if (handle == nullptr || handle == INVALID_HANDLE_VALUE ||
+        maximum_streams == 0U) {
+        return std::nullopt;
+    }
+    try {
+        constexpr std::size_t buffer_bytes = 64U * 1'024U;
+        std::vector<std::uint64_t> storage(
+            (buffer_bytes + sizeof(std::uint64_t) - 1U) /
+            sizeof(std::uint64_t));
+        const auto capacity = storage.size() * sizeof(std::uint64_t);
+        if (::GetFileInformationByHandleEx(
+                handle, FileStreamInfo, storage.data(),
+                static_cast<DWORD>(capacity)) == FALSE) {
+            // Ordinary directories with no named streams may report EOF.
+            return ::GetLastError() == ERROR_HANDLE_EOF
+                       ? std::optional<std::size_t>{0U}
+                       : std::nullopt;
+        }
+
+        std::size_t offset = 0U;
+        std::size_t streams = 0U;
+        std::size_t named = 0U;
+        for (;;) {
+            constexpr std::size_t header =
+                offsetof(FILE_STREAM_INFO, StreamName);
+            if (offset > capacity || header > capacity - offset) {
+                return std::nullopt;
+            }
+            const auto* info = reinterpret_cast<const FILE_STREAM_INFO*>(
+                reinterpret_cast<const std::byte*>(storage.data()) + offset);
+            const auto name_bytes =
+                static_cast<std::size_t>(info->StreamNameLength);
+            if ((name_bytes % sizeof(wchar_t)) != 0U ||
+                name_bytes > capacity - offset - header ||
+                ++streams > maximum_streams) {
+                return std::nullopt;
+            }
+            const std::wstring_view name{
+                info->StreamName, name_bytes / sizeof(wchar_t)};
+            if (name != L"::$DATA") ++named;
+            if (info->NextEntryOffset == 0U) break;
+            const auto next =
+                static_cast<std::size_t>(info->NextEntryOffset);
+            if (next < header || next > capacity - offset) {
+                return std::nullopt;
+            }
+            offset += next;
+        }
+        return named;
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 [[nodiscard]] bool read_hash(HANDLE file, const std::uint64_t size, std::string& out)
@@ -1569,13 +1897,59 @@ private:
     }
 }
 
+[[nodiscard]] StockExternalTopologyFailureWitness make_failure_witness(
+    const std::filesystem::path& private_link_path,
+    const WindowsReparseTargetObservation& observation);
+[[nodiscard]] std::string observation_binding(
+    const WindowsReparseTargetObservation& value);
+
+void mark_target_inventory_failure(
+    const std::filesystem::path& private_path,
+    const std::uint32_t native_error,
+    const StockExternalTopologyFailurePhase phase,
+    StockExternalTargetReview& review)
+{
+    if (!review.reparse_observation) return;
+    auto failure = *review.reparse_observation;
+    failure.native_error = native_error;
+    failure.native_error_category =
+        classify_windows_reparse_native_error(native_error);
+    failure.reachability =
+        classify_windows_reparse_target_reachability(native_error);
+    failure.failure_phase = phase;
+    failure.diagnostic_classification =
+        WindowsReparseDiagnosticClassification::target_open_failed_other;
+    review.failure_witness = make_failure_witness(private_path, failure);
+    review.inventory_available = false;
+    review.target_inventory_sha256.clear();
+    review.classification =
+        native_error == ERROR_FILE_INVALID
+            ? StockExternalTargetClassification::changed_during_review
+            : StockExternalTargetClassification::unsupported_reparse_topology;
+    review.diagnostic_complete = true;
+    review.eligible = false;
+}
+
 [[nodiscard]] bool scan_target(
     const std::filesystem::path& source_root,
     const std::filesystem::path& root,
     const Snapshot& approved_root_snapshot,
+    HANDLE pinned_root_handle,
     const StockResearchCopyLimits& limits,
-    StockExternalTargetReview& review)
+    const WindowsReparseProvenanceLimits& reparse_limits,
+    StockExternalTargetReview& review,
+    PinnedTargetInventory& pinned_inventory)
 {
+    const auto mark_policy_inventory_unavailable = [&] {
+        if (!review.reparse_observation) return;
+        auto failure = *review.reparse_observation;
+        failure.failure_phase =
+            StockExternalTopologyFailurePhase::target_inventory;
+        review.failure_witness = make_failure_witness(root, failure);
+        review.inventory_available = false;
+        review.diagnostic_complete = true;
+        review.eligible = false;
+    };
     if (!local_fixed(root)) {
         review.entry_count = 1U;
         review.byte_count = approved_root_snapshot.directory
@@ -1583,6 +1957,7 @@ private:
                                 : approved_root_snapshot.size;
         review.classification =
             StockExternalTargetClassification::remote_or_device_target;
+        mark_policy_inventory_unavailable();
         return true;
     }
 
@@ -1601,6 +1976,7 @@ private:
                                 : approved_root_snapshot.size;
         review.classification =
             StockExternalTargetClassification::another_application_tree;
+        mark_policy_inventory_unavailable();
         return true;
     }
     if (const auto policy = path_classification(root)) {
@@ -1616,6 +1992,7 @@ private:
                                   contains_executable_code) {
             ++review.executable_count;
         }
+        mark_policy_inventory_unavailable();
         return true;
     }
     if (const auto policy =
@@ -1632,44 +2009,114 @@ private:
                                   contains_executable_code) {
             ++review.executable_count;
         }
+        mark_policy_inventory_unavailable();
         return true;
     }
 
-    auto retained_root = open_path(
-        root, true, approved_root_snapshot.directory);
-    const auto retained_before =
-        retained_root.valid() ? snapshot(retained_root.get()) : std::nullopt;
+    const auto retained_before = snapshot(pinned_root_handle);
+    const auto retained_root_ads = named_ads_count_handle(
+        pinned_root_handle, limits.maximum_streams_per_file);
     if (!retained_before ||
         identity(*retained_before) != identity(approved_root_snapshot) ||
         (retained_before->attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
-        has_ads(root)) {
+        !retained_root_ads || *retained_root_ads != 0U) {
         review.entry_count = 1U;
         review.byte_count = approved_root_snapshot.directory
                                 ? 0U
                                 : approved_root_snapshot.size;
         review.classification =
             StockExternalTargetClassification::changed_during_review;
+        mark_target_inventory_failure(
+            root, ERROR_FILE_INVALID,
+            StockExternalTopologyFailurePhase::target_inventory, review);
         return true;
     }
 
-    std::error_code ec;
-    std::vector<std::filesystem::path> paths{root};
+    pinned_inventory = {};
+    pinned_inventory.root_handle = pinned_root_handle;
+    pinned_inventory.root_snapshot = *retained_before;
+
+    struct PendingDirectory final {
+        HANDLE handle{INVALID_HANDLE_VALUE};
+        std::filesystem::path relative_path;
+    };
+    std::vector<PendingDirectory> pending;
     if (retained_before->directory) {
-        for (std::filesystem::recursive_directory_iterator it(
-                 root, std::filesystem::directory_options::none, ec),
-             end;
-             !ec && it != end; it.increment(ec)) {
-            paths.push_back(it->path());
-            if (paths.size() > limits.maximum_entries) {
+        pending.push_back({pinned_root_handle, std::filesystem::path{L"."}});
+    }
+    while (!pending.empty()) {
+        auto directory = std::move(pending.back());
+        pending.pop_back();
+        const auto listing = enumerate_directory_handle(
+            directory.handle, limits.maximum_entries);
+        if (!listing) {
+            if (listing.native_error == ERROR_BUFFER_OVERFLOW) {
                 review.classification = StockExternalTargetClassification::
                     content_limit_exceeded;
+                mark_policy_inventory_unavailable();
                 return true;
             }
+            mark_target_inventory_failure(
+                root, listing.native_error,
+                StockExternalTopologyFailurePhase::target_inventory, review);
+            return true;
         }
-        if (ec) return false;
+        pinned_inventory.directories.push_back(
+            PinnedDirectoryWitness{directory.handle, listing.entries});
+        for (const auto& [name, listed_attributes] : listing.entries) {
+            if (pinned_inventory.entries.size() + 1U >=
+                limits.maximum_entries) {
+                review.classification = StockExternalTargetClassification::
+                    content_limit_exceeded;
+                mark_policy_inventory_unavailable();
+                return true;
+            }
+            const bool directory_entry =
+                (listed_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U;
+            auto child = open_relative_inventory_entry(
+                directory.handle, name, directory_entry);
+            const auto child_snapshot =
+                child.valid() ? snapshot(child.get()) : std::nullopt;
+            if (!child_snapshot ||
+                child_snapshot->directory != directory_entry) {
+                mark_target_inventory_failure(
+                    root,
+                    child.valid() ? ERROR_FILE_INVALID : ::GetLastError(),
+                    StockExternalTopologyFailurePhase::nested_entry_open,
+                    review);
+                return true;
+            }
+            auto relative = directory.relative_path ==
+                                    std::filesystem::path{L"."}
+                                ? std::filesystem::path{name}
+                                : directory.relative_path / name;
+            pinned_inventory.entries.push_back(PinnedInventoryEntry{
+                std::move(child), *child_snapshot, relative});
+            auto& stored = pinned_inventory.entries.back();
+            if (stored.snapshot.directory &&
+                (stored.snapshot.attributes &
+                 FILE_ATTRIBUTE_REPARSE_POINT) == 0U) {
+                pending.push_back({stored.handle.get(), stored.relative_path});
+            }
+        }
     }
-    std::ranges::sort(paths, {}, [](const auto& path) {
-        return path.native();
+
+    struct InventoryPath final {
+        std::filesystem::path full_path;
+        std::filesystem::path relative_path;
+        HANDLE handle{INVALID_HANDLE_VALUE};
+        Snapshot before;
+    };
+    std::vector<InventoryPath> paths;
+    paths.reserve(pinned_inventory.entries.size() + 1U);
+    paths.push_back({root, std::filesystem::path{L"."},
+                     pinned_root_handle, *retained_before});
+    for (const auto& entry : pinned_inventory.entries) {
+        paths.push_back({root / entry.relative_path, entry.relative_path,
+                         entry.handle.get(), entry.snapshot});
+    }
+    std::ranges::sort(paths, {}, [](const auto& value) {
+        return value.relative_path.native();
     });
 
     bool executable = false;
@@ -1683,39 +2130,77 @@ private:
     if (application_provenance) {
         inventory << "provenance:" << *application_provenance << '\n';
     }
-    for (const auto& path : paths) {
-        const DWORD attributes = ::GetFileAttributesW(path.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) return false;
-        const bool is_root = path == root;
+    for (const auto& item : paths) {
+        const auto& path = item.full_path;
+        const auto& relative = item.relative_path;
+        const auto& before = item.before;
+        const auto attributes = before.attributes;
+        const bool is_root = relative == std::filesystem::path{L"."};
         if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
             ++review.nested_link_count;
             nested_link = true;
-            if (!is_root) continue;
+            if (!is_root) {
+                const auto nested = observe_windows_reparse_target(
+                    path, reparse_limits);
+                const auto nested_after = snapshot(item.handle);
+                if (!nested_after ||
+                    !same_inventory_snapshot(before, *nested_after) ||
+                    !nested || !nested.value->observation_complete) {
+                    return false;
+                }
+                const auto nested_depth = static_cast<std::size_t>(
+                    std::distance(relative.begin(), relative.end()));
+                ++review.entry_count;
+                inventory << wide_hex(relative)
+                          << ':' << identity(before) << ':'
+                          << observation_binding(*nested.value) << '\n';
+                if (!review.failure_witness) {
+                    auto nested_failure = *nested.value;
+                    nested_failure.failure_phase =
+                        StockExternalTopologyFailurePhase::
+                            nested_reparse_decode;
+                    auto witness =
+                        make_failure_witness(path, nested_failure);
+                    witness.traversal_depth = nested_depth;
+                    witness.nested_ordinal = review.nested_link_count;
+                    review.failure_witness = std::move(witness);
+                }
+                if (review.nested_link_count >
+                    reparse_limits.maximum_failure_witnesses) {
+                    review.classification =
+                        StockExternalTargetClassification::
+                            content_limit_exceeded;
+                    review.inventory_available = false;
+                    mark_policy_inventory_unavailable();
+                    return true;
+                }
+                continue;
+            }
         }
-        if (has_ads(path)) unsupported = true;
-        const bool directory =
-            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U;
-        auto handle = open_path(path, true, directory);
-        const auto before =
-            handle.valid() ? snapshot(handle.get()) : std::nullopt;
-        if (!before) return false;
+        const auto ads = named_ads_count_handle(
+            item.handle, limits.maximum_streams_per_file);
+        if (!ads) {
+            mark_target_inventory_failure(
+                path, ERROR_BUFFER_OVERFLOW,
+                StockExternalTopologyFailurePhase::target_inventory, review);
+            return true;
+        }
+        if (*ads != 0U) unsupported = true;
+        const bool directory = before.directory;
         ++review.entry_count;
         if (!directory) {
-            if (before->size > limits.maximum_file_bytes ||
-                before->size > limits.maximum_total_bytes ||
+            if (before.size > limits.maximum_file_bytes ||
+                before.size > limits.maximum_total_bytes ||
                 review.byte_count >
-                    limits.maximum_total_bytes - before->size) {
+                    limits.maximum_total_bytes - before.size) {
                 review.classification = StockExternalTargetClassification::
                     content_limit_exceeded;
+                mark_policy_inventory_unavailable();
                 return true;
             }
-            review.byte_count += before->size;
+            review.byte_count += before.size;
         }
-        auto relative = is_root
-                            ? std::filesystem::path{L"."}
-                            : std::filesystem::relative(path, root, ec);
-        if (ec) return false;
-        inventory << wide_hex(relative) << ':' << identity(*before);
+        inventory << wide_hex(relative) << ':' << identity(before);
         if (const auto policy = path_classification(relative)) {
             if (*policy == StockExternalTargetClassification::
                                contains_mutable_user_state) {
@@ -1729,7 +2214,7 @@ private:
             }
         }
         if (!directory) {
-            const auto kind = content_kind(handle.get());
+            const auto kind = content_kind(item.handle);
             const bool executable_entry =
                 is_executable_extension(path.extension()) ||
                 kind == ContentKind::executable;
@@ -1748,28 +2233,44 @@ private:
             if (!text_entry &&
                 is_goldsrc_asset_extension(path.extension()) &&
                 matches_goldsrc_asset_content(
-                    handle.get(), path.extension(), before->size)) {
+                    item.handle, path.extension(), before.size)) {
                 known_asset = true;
             } else if (!executable_entry && !script_entry) {
                 unknown_asset = true;
             }
             std::string content;
-            if (!read_hash(handle.get(), before->size, content)) return false;
+            if (!read_hash(item.handle, before.size, content)) {
+                const auto native_error = ::GetLastError();
+                mark_target_inventory_failure(
+                    path,
+                    native_error == ERROR_SUCCESS ? ERROR_READ_FAULT
+                                                  : native_error,
+                    StockExternalTopologyFailurePhase::target_inventory,
+                    review);
+                return true;
+            }
             inventory << ':' << content;
         }
-        const auto after = snapshot(handle.get());
-        if (!after || identity(*before) != identity(*after)) {
+        const auto after = snapshot(item.handle);
+        if (!after || !same_inventory_snapshot(before, *after)) {
             review.classification =
                 StockExternalTargetClassification::changed_during_review;
+            mark_target_inventory_failure(
+                path, ERROR_FILE_INVALID,
+                StockExternalTopologyFailurePhase::
+                    post_inventory_revalidation,
+                review);
             return true;
         }
         inventory << '\n';
     }
-    const auto retained_after = snapshot(retained_root.get());
-    if (!retained_after ||
-        identity(*retained_before) != identity(*retained_after)) {
+    if (!revalidate_pinned_target_inventory(pinned_inventory)) {
         review.classification =
             StockExternalTargetClassification::changed_during_review;
+        mark_target_inventory_failure(
+            root, ERROR_FILE_INVALID,
+            StockExternalTopologyFailurePhase::post_inventory_revalidation,
+            review);
         return true;
     }
     review.target_inventory_sha256 = hash_text(inventory.str());
@@ -1799,175 +2300,415 @@ private:
     return true;
 }
 
+[[nodiscard]] StockExternalTargetClassification diagnostic_classification(
+    const WindowsReparseDiagnosticClassification value) noexcept
+{
+    switch (value) {
+    case WindowsReparseDiagnosticClassification::remote_or_device_target:
+        return StockExternalTargetClassification::remote_or_device_target;
+    case WindowsReparseDiagnosticClassification::changed_during_observation:
+        return StockExternalTargetClassification::changed_during_review;
+    case WindowsReparseDiagnosticClassification::none:
+    case WindowsReparseDiagnosticClassification::reachable_name_surrogate:
+    case WindowsReparseDiagnosticClassification::dangling_directory_junction:
+    case WindowsReparseDiagnosticClassification::dangling_directory_symlink:
+    case WindowsReparseDiagnosticClassification::missing_volume_mount:
+    case WindowsReparseDiagnosticClassification::inaccessible_target:
+    case WindowsReparseDiagnosticClassification::cyclic_target:
+    case WindowsReparseDiagnosticClassification::target_depth_exceeded:
+    case WindowsReparseDiagnosticClassification::
+        unsupported_tag_without_path_contract:
+    case WindowsReparseDiagnosticClassification::malformed_reparse_payload:
+    case WindowsReparseDiagnosticClassification::target_open_failed_other:
+        return StockExternalTargetClassification::
+            unsupported_reparse_topology;
+    }
+    return StockExternalTargetClassification::unsupported_reparse_topology;
+}
+
+[[nodiscard]] std::string observation_binding(
+    const WindowsReparseTargetObservation& value)
+{
+    std::ostringstream stream;
+    stream << value.provenance.tag.raw_tag << '|'
+           << value.provenance.tag.microsoft << '|'
+           << value.provenance.tag.name_surrogate << '|'
+           << value.provenance.tag.directory << '|'
+           << to_string(value.provenance.tag.category) << '|'
+           << value.provenance.tag.payload_byte_count << '|'
+           << to_string(value.provenance.payload_status) << '|'
+           << to_string(value.provenance.payload_error) << '|'
+           << value.provenance.private_payload_sha256 << '|'
+           << wide_hex(value.provenance.private_substitute_name) << '|'
+           << wide_hex(value.provenance.private_print_name) << '|'
+           << to_string(value.provenance.target_expression.kind) << '|'
+           << wide_hex(value.provenance.target_expression.private_expression)
+           << '|'
+           << wide_hex(
+                  value.provenance.target_expression.
+                      private_normalized_expression)
+           << '|' << value.provenance.target_expression.relative << '|'
+           << value.provenance.symbolic_link_flags << '|'
+           << value.provenance.symbolic_link_relative << '|'
+           << to_string(value.reachability) << '|'
+           << to_string(value.native_error_category) << '|'
+           << value.native_error << '|'
+           << to_string(value.diagnostic_classification) << '|'
+           << to_string(value.failure_phase) << '|'
+           << value.observation_complete;
+    if (value.target_identity) {
+        stream << '|' << value.target_identity->volume_serial << ':'
+               << hex(value.target_identity->file_id) << ':'
+               << wide_hex(value.target_identity->private_final_handle_path)
+               << ':' << value.target_identity->directory;
+    }
+    if (value.nested_failure) {
+        const auto& nested = *value.nested_failure;
+        stream << "|nested:" << nested.traversal_depth << ':'
+               << nested.nested_ordinal << ':'
+               << to_string(nested.reparse_tag_category) << ':'
+               << to_string(nested.expression_kind) << ':'
+               << to_string(nested.reachability) << ':'
+               << to_string(nested.failure_phase) << ':' << nested.directory
+               << ':' << to_string(nested.native_error_category) << ':'
+               << nested.native_error << ':'
+               << wide_hex(nested.private_link_path);
+    }
+    return hash_text(stream.str());
+}
+
+[[nodiscard]] StockExternalTopologyFailureWitness make_failure_witness(
+    const std::filesystem::path& private_link_path,
+    const WindowsReparseTargetObservation& observation)
+{
+    StockExternalTopologyFailureWitness witness{};
+    const auto* nested = observation.nested_failure
+                             ? &*observation.nested_failure
+                             : nullptr;
+    const auto& witness_path = nested ? nested->private_link_path
+                                      : private_link_path;
+    if (nested) {
+        witness.traversal_depth = nested->traversal_depth;
+        witness.nested_ordinal = nested->nested_ordinal;
+        witness.reparse_tag_category = nested->reparse_tag_category;
+        witness.expression_kind = nested->expression_kind;
+        witness.reachability = nested->reachability;
+        witness.failure_phase = nested->failure_phase;
+        witness.directory = nested->directory;
+        witness.native_error_category = nested->native_error_category;
+    } else {
+        witness.reparse_tag_category = observation.provenance.tag.category;
+        witness.expression_kind = observation.provenance.target_expression.kind;
+        witness.reachability = observation.reachability;
+        witness.failure_phase = observation.failure_phase;
+        witness.directory = observation.provenance.tag.directory;
+        witness.native_error_category = observation.native_error_category;
+    }
+    std::ostringstream private_binding;
+    private_binding << "hlclient.external-topology-failure-witness.v1|"
+                    << wide_hex(witness_path) << '|'
+                    << observation_binding(observation);
+    witness.private_witness_sha256 = hash_text(private_binding.str());
+    return witness;
+}
+
 [[nodiscard]] std::optional<Scan> scan_source(const std::filesystem::path& source,
                                               const StockResearchCopyLimits& limits)
 {
-    if (!source.is_absolute() || !local_fixed(source)) return std::nullopt;
-    auto root = open_path(source, true, true);
+    if (!source.is_absolute() || !local_fixed(source) ||
+        limits.maximum_reparse_depth == 0U) {
+        return std::nullopt;
+    }
+    WindowsReparseProvenanceLimits reparse_limits{};
+    reparse_limits.maximum_nested_reparse_depth = (std::min)(
+        limits.maximum_reparse_depth,
+        kWindowsReparseHardMaximumNestedDepth);
+    if (!valid_windows_reparse_provenance_limits(reparse_limits)) {
+        return std::nullopt;
+    }
+    std::size_t failure_witness_count = 0U;
+    auto root = open_path_inventory_guard(source, true, true);
     const auto root_snapshot = root.valid() ? snapshot(root.get()) : std::nullopt;
     const auto root_final = root.valid() ? final_path(root.get()) : std::nullopt;
-    if (!root_snapshot || !root_final ||
+    const auto root_handle_path =
+        root.valid() ? final_volume_guid_path(root.get()) : std::nullopt;
+    if (!root_snapshot || !root_final || !root_handle_path ||
+        !root_snapshot->directory ||
         (root_snapshot->attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
         return std::nullopt;
     }
     Scan scan{};
+    scan.source_root_guard = std::move(root);
     scan.source_snapshot = *root_snapshot;
     scan.source_final_path = *root_final;
     scan.source_identity = identity(*root_snapshot);
-    std::error_code ec;
+    const auto root_ads =
+        named_ads_count_handle(scan.source_root_guard.get(),
+                               limits.maximum_streams_per_file);
+    if (!root_ads) return std::nullopt;
+    scan.alternate_data_stream_count = *root_ads;
     std::vector<std::pair<std::wstring, std::string>>
         source_inventory_records;
     std::size_t source_entries = 0U;
     std::uint64_t source_bytes = 0U;
-    for (std::filesystem::recursive_directory_iterator it(
-             source,
-             std::filesystem::directory_options::follow_directory_symlink,
-             ec), end;
-         !ec && it != end; it.increment(ec)) {
-        const DWORD attrs = ::GetFileAttributesW(it->path().c_str());
-        if (attrs == INVALID_FILE_ATTRIBUTES) return std::nullopt;
-        if (++source_entries > limits.maximum_entries) return std::nullopt;
-        const bool directory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0U;
-        auto entry = open_path(it->path(), true, directory);
-        const auto entry_snapshot = entry.valid() ? snapshot(entry.get()) : std::nullopt;
-        if (!entry_snapshot) return std::nullopt;
-        if (!directory &&
-            (entry_snapshot->size > limits.maximum_file_bytes ||
-             entry_snapshot->size > limits.maximum_total_bytes ||
-             source_bytes >
-                 limits.maximum_total_bytes - entry_snapshot->size)) {
-            return std::nullopt;
-        }
-        if (!directory) source_bytes += entry_snapshot->size;
-        const auto logical = logical_source_path(it->path(), source);
-        if (!logical) return std::nullopt;
-        const bool reparse =
-            (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0U;
-        std::ostringstream inventory_record;
-        if (!reparse) {
-            inventory_record << wide_hex(*logical) << ':'
-                             << identity(*entry_snapshot);
-        }
-        if (!directory && !reparse) {
-            std::string content;
-            if (!read_hash(entry.get(), entry_snapshot->size, content)) return std::nullopt;
-            inventory_record << ':' << content;
-        }
-        if (!reparse) {
-            const auto entry_after = snapshot(entry.get());
-            if (!entry_after ||
-                identity(*entry_snapshot) != identity(*entry_after)) {
+
+    struct PendingDirectory final {
+        HANDLE handle{INVALID_HANDLE_VALUE};
+        std::filesystem::path relative_path;
+        std::vector<std::string> ancestry;
+    };
+    std::vector<PendingDirectory> pending;
+    pending.push_back({scan.source_root_guard.get(),
+                       std::filesystem::path{L"."},
+                       {stable_directory_identity(*root_snapshot)}});
+    while (!pending.empty()) {
+        auto directory = std::move(pending.back());
+        pending.pop_back();
+        if (source_entries >= limits.maximum_entries) return std::nullopt;
+        const auto listing = enumerate_directory_handle(
+            directory.handle, limits.maximum_entries - source_entries);
+        if (!listing) return std::nullopt;
+        scan.source_directory_witnesses.push_back(
+            PinnedDirectoryWitness{directory.handle, listing.entries});
+
+        for (const auto& [name, listed_attributes] : listing.entries) {
+            if (++source_entries > limits.maximum_entries) {
                 return std::nullopt;
             }
+            const bool listed_directory =
+                (listed_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U;
+            const bool listed_reparse =
+                (listed_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U;
+            auto child = open_relative_inventory_entry(
+                directory.handle, name, listed_directory);
+            const auto child_snapshot =
+                child.valid() ? snapshot(child.get()) : std::nullopt;
+            if (!child_snapshot ||
+                child_snapshot->directory != listed_directory ||
+                ((child_snapshot->attributes &
+                  FILE_ATTRIBUTE_REPARSE_POINT) != 0U) != listed_reparse) {
+                return std::nullopt;
+            }
+
+            auto relative = directory.relative_path ==
+                                    std::filesystem::path{L"."}
+                                ? std::filesystem::path{name}
+                                : directory.relative_path / name;
+            const auto private_entry_path = *root_handle_path / relative;
+            if (private_entry_path.native().size() >
+                limits.maximum_path_characters) {
+                return std::nullopt;
+            }
+            scan.source_inventory_entries.push_back(PinnedInventoryEntry{
+                std::move(child), *child_snapshot, relative});
+            auto& stored = scan.source_inventory_entries.back();
+
+            if (!stored.snapshot.directory &&
+                (stored.snapshot.size > limits.maximum_file_bytes ||
+                 stored.snapshot.size > limits.maximum_total_bytes ||
+                 source_bytes >
+                     limits.maximum_total_bytes - stored.snapshot.size)) {
+                return std::nullopt;
+            }
+            if (!stored.snapshot.directory) source_bytes += stored.snapshot.size;
+
+            std::ostringstream inventory_record;
+            if (!listed_reparse) {
+                const auto entry_ads = named_ads_count_handle(
+                    stored.handle.get(), limits.maximum_streams_per_file);
+                if (!entry_ads) return std::nullopt;
+                scan.alternate_data_stream_count += *entry_ads;
+                if (!stored.snapshot.directory && stored.snapshot.links > 1U) {
+                    ++scan.hardlink_count;
+                }
+                inventory_record << wide_hex(relative) << ':'
+                                 << identity(stored.snapshot);
+                if (!stored.snapshot.directory) {
+                    std::string content;
+                    if (!read_hash(stored.handle.get(), stored.snapshot.size,
+                                   content)) {
+                        return std::nullopt;
+                    }
+                    inventory_record << ':' << content;
+                }
+                const auto entry_after = snapshot(stored.handle.get());
+                if (!entry_after ||
+                    !same_inventory_snapshot(stored.snapshot, *entry_after)) {
+                    return std::nullopt;
+                }
+                source_inventory_records.emplace_back(
+                    relative.native(), inventory_record.str());
+                if (stored.snapshot.directory) {
+                    const auto directory_identity =
+                        stable_directory_identity(stored.snapshot);
+                    if (std::ranges::find(directory.ancestry,
+                                          directory_identity) !=
+                        directory.ancestry.end()) {
+                        return std::nullopt;
+                    }
+                    auto ancestry = directory.ancestry;
+                    ancestry.push_back(directory_identity);
+                    pending.push_back({stored.handle.get(), relative,
+                                       std::move(ancestry)});
+                }
+                continue;
+            }
+
+            ++scan.internal_reparse_count;
+            if (stored.snapshot.reparse_tag == 0U) return std::nullopt;
+            const auto observed = observe_windows_reparse_target(
+                private_entry_path, reparse_limits);
+            const auto link_after = snapshot(stored.handle.get());
+            if (!observed || !observed.value->observation_complete ||
+                !link_after ||
+                !same_inventory_snapshot(stored.snapshot, *link_after) ||
+                observed.value->provenance.tag.raw_tag !=
+                    stored.snapshot.reparse_tag ||
+                observed.value->provenance.tag.directory !=
+                    stored.snapshot.directory) {
+                return std::nullopt;
+            }
+
+            const auto& observation = *observed.value;
+            std::optional<Snapshot> target_snapshot;
+            std::optional<std::filesystem::path> target_path;
+            HANDLE target_handle = INVALID_HANDLE_VALUE;
+            if (observation.reachability ==
+                    WindowsReparseTargetReachability::reachable &&
+                observation.target_identity) {
+                target_handle = static_cast<HANDLE>(
+                    windows_reparse_target_native_final_handle(observation));
+                target_snapshot = snapshot(target_handle);
+                target_path = final_path(target_handle);
+                if (!target_snapshot || !target_path ||
+                    target_snapshot->volume !=
+                        observation.target_identity->volume_serial ||
+                    target_snapshot->id != observation.target_identity->file_id ||
+                    target_snapshot->directory !=
+                        observation.target_identity->directory) {
+                    return std::nullopt;
+                }
+            }
+
+            bool outside = true;
+            if (target_path) {
+                outside = !lexical_path_is_within(*target_path, *root_final);
+            }
+            if (!outside) ++scan.contained_target_count;
+
+            inventory_record << wide_hex(relative) << ':'
+                             << identity(stored.snapshot);
             source_inventory_records.emplace_back(
-                logical->native(), inventory_record.str());
-            continue;
-        }
-        auto link = std::move(entry);
-        auto target = open_path(it->path(), false, directory);
-        const auto link_snapshot = link.valid() ? snapshot(link.get()) : std::nullopt;
-        const auto target_snapshot = target.valid() ? snapshot(target.get()) : std::nullopt;
-        const auto target_path = target.valid() ? final_path(target.get()) : std::nullopt;
-        if (!link_snapshot || !target_snapshot || !target_path) return std::nullopt;
-        auto relative = std::filesystem::relative(*target_path, *root_final, ec);
-        const bool outside = ec || relative.empty() || relative.native().starts_with(L"..");
-        ec.clear();
-        if (!directory || outside) it.disable_recursion_pending();
-        StockExternalTargetReview review{};
-        if (outside) {
-            review.source_link_relative_path = *logical;
-            review.target_root = *target_path;
-            if (!scan_target(
-                    source, *target_path, *target_snapshot, limits, review)) {
-                return std::nullopt;
+                relative.native(), inventory_record.str());
+
+            StockExternalTargetReview review{};
+            PinnedTargetInventory pinned_inventory{};
+            if (outside) {
+                if (scan.targets.size() >=
+                    reparse_limits.maximum_diagnostic_targets) {
+                    return std::nullopt;
+                }
+                review.source_link_relative_path = relative;
+                review.reparse_observation = observation;
+                review.diagnostic_complete = observation.observation_complete;
+                if (target_path && target_snapshot) {
+                    review.target_root = *target_path;
+                    if (!scan_target(source, *target_path, *target_snapshot,
+                                     target_handle, limits, reparse_limits,
+                                     review, pinned_inventory)) {
+                        return std::nullopt;
+                    }
+                    pinned_inventory.source_link_relative_path = relative;
+                    review.inventory_available =
+                        !review.target_inventory_sha256.empty();
+                } else {
+                    review.inventory_available = false;
+                    review.classification = diagnostic_classification(
+                        observation.diagnostic_classification);
+                    review.failure_witness = make_failure_witness(
+                        private_entry_path, observation);
+                }
+                if (review.failure_witness &&
+                    ++failure_witness_count >
+                        reparse_limits.maximum_failure_witnesses) {
+                    return std::nullopt;
+                }
+                review.link_identity_sha256 = identity(stored.snapshot);
+                if (target_snapshot) {
+                    review.target_identity_sha256 = identity(*target_snapshot);
+                }
+                scan.eligible = scan.eligible && review.eligible;
+                scan.targets.push_back(std::move(review));
+                if (target_path && target_snapshot) {
+                    scan.pinned_target_inventories.push_back(
+                        std::move(pinned_inventory));
+                }
+                continue;
+            }
+
+            scan.contained_target_pins.push_back(observation);
+            if (stored.snapshot.directory && target_snapshot &&
+                target_snapshot->directory) {
+                const auto target_directory_identity =
+                    stable_directory_identity(*target_snapshot);
+                if (std::ranges::find(directory.ancestry,
+                                      target_directory_identity) !=
+                    directory.ancestry.end()) {
+                    return std::nullopt;
+                }
+                auto ancestry = directory.ancestry;
+                ancestry.push_back(target_directory_identity);
+                const auto retained_target_handle = static_cast<HANDLE>(
+                    windows_reparse_target_native_final_handle(
+                        scan.contained_target_pins.back()));
+                pending.push_back({retained_target_handle, relative,
+                                   std::move(ancestry)});
             }
         }
-
-        link = Handle{};
-        target = Handle{};
-        auto settled_link = open_path(it->path(), true, directory);
-        auto settled_target = open_path(it->path(), false, directory);
-        const auto settled_link_snapshot =
-            settled_link.valid() ? snapshot(settled_link.get()) : std::nullopt;
-        const auto settled_target_snapshot = settled_target.valid()
-                                                 ? snapshot(settled_target.get())
-                                                 : std::nullopt;
-        const auto settled_target_path =
-            settled_target.valid() ? final_path(settled_target.get())
-                                   : std::nullopt;
-        if (!settled_link_snapshot || !settled_target_snapshot ||
-            !settled_target_path ||
-            !same_object_shape(*link_snapshot, *settled_link_snapshot) ||
-            !same_object_shape(*target_snapshot, *settled_target_snapshot) ||
-            lowercase(settled_target_path->native()) !=
-                lowercase(target_path->native()) ||
-            identity(*target_snapshot) != identity(*settled_target_snapshot) ||
-            settled_link_snapshot->reparse_tag == 0U) {
-            return std::nullopt;
-        }
-        inventory_record << wide_hex(*logical) << ':'
-                         << identity(*settled_link_snapshot);
-        source_inventory_records.emplace_back(
-            logical->native(), inventory_record.str());
-        if (!outside) continue;
-
-        review.link_identity_sha256 = identity(*settled_link_snapshot);
-        review.target_identity_sha256 = identity(*settled_target_snapshot);
-        if (review.target_inventory_sha256.empty()) {
-            std::ostringstream bounded_classification;
-            bounded_classification << "hlclient.external-target-incomplete.v1|"
-                                   << review.target_identity_sha256 << '|'
-                                   << to_string(review.classification) << '|'
-                                   << review.entry_count << '|'
-                                   << review.byte_count;
-            review.target_inventory_sha256 =
-                hash_text(bounded_classification.str());
-        }
-        scan.eligible = scan.eligible && review.eligible;
-        scan.targets.push_back(std::move(review));
     }
-    if (ec) return std::nullopt;
 
     for (auto& target_review : scan.targets) {
-        const auto link_path = source / target_review.source_link_relative_path;
-        auto link_before = open_path(link_path, true, true);
-        const auto link_before_snapshot =
-            link_before.valid() ? snapshot(link_before.get()) : std::nullopt;
-        if (!link_before_snapshot ||
-            link_before_snapshot->reparse_tag == 0U) {
-            return std::nullopt;
-        }
-        link_before = Handle{};
-        auto followed = open_path(link_path, false, true);
-        const auto followed_snapshot =
-            followed.valid() ? snapshot(followed.get()) : std::nullopt;
-        const auto followed_path =
-            followed.valid() ? final_path(followed.get()) : std::nullopt;
-        if (!followed_snapshot || !followed_path ||
-            lowercase(followed_path->native()) !=
-                lowercase(target_review.target_root.native()) ||
-            identity(*followed_snapshot) !=
-                target_review.target_identity_sha256) {
-            return std::nullopt;
-        }
-        followed = Handle{};
-        auto link = open_path(link_path, true, true);
-        const auto link_snapshot =
-            link.valid() ? snapshot(link.get()) : std::nullopt;
-        if (!link_snapshot || link_snapshot->reparse_tag == 0U ||
-            !same_object_shape(*link_before_snapshot, *link_snapshot)) {
-            return std::nullopt;
-        }
-        target_review.link_identity_sha256 = identity(*link_snapshot);
-        const auto record = std::ranges::find_if(
-            source_inventory_records, [&](const auto& candidate) {
-                return candidate.first ==
-                       target_review.source_link_relative_path.native();
+        const auto link = std::ranges::find_if(
+            scan.source_inventory_entries, [&](const auto& candidate) {
+                return candidate.relative_path ==
+                       target_review.source_link_relative_path;
             });
-        if (record == source_inventory_records.end()) return std::nullopt;
-        record->second =
-            wide_hex(target_review.source_link_relative_path) + ':' +
-            target_review.link_identity_sha256;
+        if (link == scan.source_inventory_entries.end() ||
+            link->snapshot.reparse_tag == 0U ||
+            identity(link->snapshot) != target_review.link_identity_sha256) {
+            return std::nullopt;
+        }
+        const auto link_after = snapshot(link->handle.get());
+        if (!link_after ||
+            !same_inventory_snapshot(link->snapshot, *link_after) ||
+            !target_review.reparse_observation) {
+            return std::nullopt;
+        }
+        if (target_review.inventory_available) {
+            const auto pinned = std::ranges::find_if(
+                scan.pinned_target_inventories,
+                [&](const auto& candidate) {
+                    return candidate.source_link_relative_path ==
+                           target_review.source_link_relative_path;
+                });
+            if (pinned == scan.pinned_target_inventories.end() ||
+                !target_review.reparse_observation) {
+                return std::nullopt;
+            }
+            const auto followed_handle = static_cast<HANDLE>(
+                windows_reparse_target_native_final_handle(
+                    *target_review.reparse_observation));
+            const auto followed_snapshot = snapshot(followed_handle);
+            const auto followed_path = final_path(followed_handle);
+            if (!followed_snapshot || !followed_path ||
+                lowercase(followed_path->native()) !=
+                    lowercase(target_review.target_root.native()) ||
+                identity(*followed_snapshot) !=
+                    target_review.target_identity_sha256 ||
+                !revalidate_pinned_target_inventory(*pinned)) {
+                return std::nullopt;
+            }
+        }
     }
 
     std::ranges::sort(source_inventory_records, {},
@@ -1976,11 +2717,15 @@ private:
     for (const auto& record : source_inventory_records) {
         source_inventory << record.second << '\n';
     }
-    const auto root_after = snapshot(root.get());
-    if (!root_after || identity(*root_snapshot) != identity(*root_after)) {
+    if (!revalidate_pinned_source_inventory(scan)) {
         return std::nullopt;
     }
     std::ranges::sort(scan.targets, {}, [](const auto& t) { return t.source_link_relative_path.native(); });
+    for (std::size_t index = 0U; index < scan.targets.size(); ++index) {
+        if (scan.targets[index].failure_witness) {
+            scan.targets[index].failure_witness->target_ordinal = index + 1U;
+        }
+    }
     scan.source_inventory_sha256 = hash_text(source_inventory.str());
     scan.source_entry_count = source_entries;
     scan.source_byte_count = source_bytes;
@@ -1997,6 +2742,11 @@ private:
             after.source_inventory_sha256 ||
         before.source_entry_count != after.source_entry_count ||
         before.source_byte_count != after.source_byte_count ||
+        before.internal_reparse_count != after.internal_reparse_count ||
+        before.contained_target_count != after.contained_target_count ||
+        before.hardlink_count != after.hardlink_count ||
+        before.alternate_data_stream_count !=
+            after.alternate_data_stream_count ||
         before.eligible != after.eligible ||
         before.targets.size() != after.targets.size()) {
         return false;
@@ -2019,7 +2769,45 @@ private:
                 right.script_or_command_count ||
             left.mutable_state_count != right.mutable_state_count ||
             left.nested_link_count != right.nested_link_count ||
+            left.inventory_available != right.inventory_available ||
+            left.diagnostic_complete != right.diagnostic_complete ||
+            left.reparse_observation.has_value() !=
+                right.reparse_observation.has_value() ||
+            (left.reparse_observation &&
+             observation_binding(*left.reparse_observation) !=
+                 observation_binding(*right.reparse_observation)) ||
+            left.failure_witness.has_value() !=
+                right.failure_witness.has_value() ||
+            (left.failure_witness &&
+             left.failure_witness->private_witness_sha256 !=
+                 right.failure_witness->private_witness_sha256) ||
             left.eligible != right.eligible) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool revalidate_scan_target_pins(const Scan& scan) noexcept
+{
+    for (const auto& target : scan.targets) {
+        if (!target.inventory_available) continue;
+        const auto inventory = std::ranges::find_if(
+            scan.pinned_target_inventories, [&](const auto& candidate) {
+                return candidate.source_link_relative_path ==
+                       target.source_link_relative_path;
+            });
+        if (inventory == scan.pinned_target_inventories.end() ||
+            !target.reparse_observation ||
+            !revalidate_pinned_target_inventory(*inventory)) {
+            return false;
+        }
+        const auto target_handle = static_cast<HANDLE>(
+            windows_reparse_target_native_final_handle(
+                *target.reparse_observation));
+        const auto target_snapshot = snapshot(target_handle);
+        if (!target_snapshot ||
+            identity(*target_snapshot) != target.target_identity_sha256) {
             return false;
         }
     }
@@ -2052,6 +2840,81 @@ private:
     });
 }
 
+// Keeps every exact pre-commit review artifact pinned until the summary
+// manifest is accepted. Failure removes those exact identities first; after
+// the output capability releases its private lock, this guard removes the now
+// empty random review root. It deliberately never deletes unowned children.
+class UncommittedReviewPublication final {
+public:
+    explicit UncommittedReviewPublication(
+        const std::filesystem::path& review_root) noexcept
+        : review_root_{&review_root}
+    {
+    }
+
+    UncommittedReviewPublication(
+        const UncommittedReviewPublication&) = delete;
+    UncommittedReviewPublication& operator=(
+        const UncommittedReviewPublication&) = delete;
+
+    ~UncommittedReviewPublication()
+    {
+        if (committed_) return;
+        for (auto iterator = published_files_.rbegin();
+             iterator != published_files_.rend(); ++iterator) {
+            if (iterator->valid()) {
+                static_cast<void>(iterator->remove_on_close());
+            }
+        }
+        published_files_.clear();
+        if (review_root_ != nullptr) {
+            static_cast<void>(::RemoveDirectoryW(review_root_->c_str()));
+        }
+    }
+
+    [[nodiscard]] bool reserve(const std::size_t count) noexcept
+    {
+        try {
+            published_files_.reserve(count);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    [[nodiscard]] bool retain(SecureOutputPublishedFile&& file) noexcept
+    {
+        if (!file.valid()) {
+            return false;
+        }
+        if (published_files_.size() == published_files_.capacity()) {
+            static_cast<void>(file.remove_on_close());
+            return false;
+        }
+        try {
+            published_files_.push_back(std::move(file));
+            return true;
+        } catch (...) {
+            if (file.valid()) {
+                static_cast<void>(file.remove_on_close());
+            }
+            return false;
+        }
+    }
+
+    void commit() noexcept
+    {
+        for (auto& file : published_files_) file.close();
+        published_files_.clear();
+        committed_ = true;
+    }
+
+private:
+    const std::filesystem::path* review_root_{nullptr};
+    std::vector<SecureOutputPublishedFile> published_files_;
+    bool committed_{false};
+};
+
 [[nodiscard]] bool review_root_layout(
     const std::filesystem::path& root) noexcept
 {
@@ -2070,15 +2933,22 @@ private:
                L"manual-artifacts";
 }
 
-[[nodiscard]] bool exact_review_artifact_set(
+[[nodiscard]] bool exact_review_artifact_set_for_phase(
     const std::filesystem::path& review_root,
     const std::size_t target_count,
+    const bool summary_expected,
     const bool approval_expected) noexcept
 {
+    // Known limitation: this is a point-in-time directory enumeration, not a
+    // retained directory oplock or USN-journal witness. Every observed extra
+    // entry fails closed, but a brand-new child inserted after enumeration can
+    // still race the manifest-last commit boundary.
     try {
         std::set<std::wstring> expected{
-            std::wstring{kStockExternalReviewRequestLeaf},
-            std::wstring{kStockExternalReviewSummaryLeaf}};
+            std::wstring{kStockExternalReviewRequestLeaf}};
+        if (summary_expected) {
+            expected.insert(std::wstring{kStockExternalReviewSummaryLeaf});
+        }
         for (std::size_t index = 0U; index < target_count; ++index) {
             const auto leaf = stock_external_private_target_leaf(index + 1U);
             if (!leaf || !expected.insert(*leaf).second) return false;
@@ -2093,14 +2963,18 @@ private:
             nullptr, FIND_FIRST_EX_LARGE_FETCH);
         if (raw == INVALID_HANDLE_VALUE) return false;
         std::set<std::wstring> observed;
+        std::size_t capability_lock_count = 0U;
         bool valid = true;
         for (;;) {
             const std::wstring_view name{data.cFileName};
-            if (name != L"." && name != L".." &&
-                !capability_lock_leaf(name)) {
-                if (!expected.contains(std::wstring{name}) ||
-                    !observed.insert(std::wstring{name}).second) {
-                    valid = false;
+            if (name != L"." && name != L"..") {
+                if (capability_lock_leaf(name)) {
+                    if (++capability_lock_count != 1U) valid = false;
+                } else {
+                    if (!expected.contains(std::wstring{name}) ||
+                        !observed.insert(std::wstring{name}).second) {
+                        valid = false;
+                    }
                 }
             }
             if (::FindNextFileW(raw, &data) == FALSE) {
@@ -2109,10 +2983,19 @@ private:
             }
         }
         static_cast<void>(::FindClose(raw));
-        return valid && observed == expected;
+        return valid && capability_lock_count == 1U && observed == expected;
     } catch (...) {
         return false;
     }
+}
+
+[[nodiscard]] bool exact_review_artifact_set(
+    const std::filesystem::path& review_root,
+    const std::size_t target_count,
+    const bool approval_expected) noexcept
+{
+    return exact_review_artifact_set_for_phase(
+        review_root, target_count, true, approval_expected);
 }
 
 [[nodiscard]] std::uint64_t unix_now() noexcept
@@ -2126,7 +3009,112 @@ private:
     return {reinterpret_cast<const std::byte*>(value.data()), value.size()};
 }
 
+struct NormalizedReviewArtifacts final {
+    StockExternalReviewRequestArtifact request;
+    StockExternalReviewSummaryArtifact summary;
+    bool version2{false};
+    std::optional<StockExternalReviewSummaryArtifactV2> summary_v2;
+};
+
+[[nodiscard]] std::optional<NormalizedReviewArtifacts>
+parse_normalized_review_artifacts(
+    const std::string_view request_json,
+    const std::string_view summary_json) noexcept
+{
+    const auto request_v1 =
+        parse_stock_external_review_request(request_json);
+    const auto summary_v1 =
+        parse_stock_external_review_summary(summary_json);
+    if (request_v1 && summary_v1) {
+        return NormalizedReviewArtifacts{
+            *request_v1.value, *summary_v1.value, false, std::nullopt};
+    }
+    const auto request_v2 =
+        parse_stock_external_review_request_v2(request_json);
+    const auto summary_v2 =
+        parse_stock_external_review_summary_v2(summary_json);
+    if (!request_v2 || !summary_v2) return std::nullopt;
+    StockExternalReviewSummaryArtifact normalized{};
+    normalized.review_root_fingerprint =
+        summary_v2.value->review_root_fingerprint;
+    normalized.source_root_fingerprint =
+        summary_v2.value->source_root_fingerprint;
+    normalized.source_inventory = summary_v2.value->source_inventory;
+    normalized.review_nonce = summary_v2.value->review_nonce;
+    normalized.review_timestamp_unix_seconds =
+        summary_v2.value->review_timestamp_unix_seconds;
+    normalized.implementation_profile =
+        summary_v2.value->implementation_profile;
+    normalized.eligible_count = summary_v2.value->eligible_count;
+    normalized.ineligible_count =
+        summary_v2.value->ineligible_count +
+        summary_v2.value->incomplete_count;
+    normalized.all_targets_eligible =
+        summary_v2.value->all_targets_eligible;
+    normalized.targets.reserve(summary_v2.value->targets.size());
+    for (const auto& target : summary_v2.value->targets) {
+        normalized.targets.push_back(
+            StockExternalReviewTargetBindingArtifact{
+                target.ordinal,
+                target.private_record_sha256,
+                target.link_identity_sha256,
+                target.target_identity_sha256.value_or(std::string{}),
+                target.target_inventory_sha256.value_or(std::string{}),
+                target.classification,
+                target.eligible});
+    }
+    return NormalizedReviewArtifacts{
+        *request_v2.value, std::move(normalized), true,
+        *summary_v2.value};
+}
+
+[[nodiscard]] std::optional<StockExternalPrivateTargetArtifact>
+parse_normalized_private_target(
+    const std::string_view json,
+    const bool version2) noexcept
+{
+    if (!version2) {
+        const auto parsed = parse_stock_external_private_target(json);
+        return parsed ? parsed.value : std::nullopt;
+    }
+    const auto parsed = parse_stock_external_private_target_v2(json);
+    if (!parsed || !parsed.value->target_canonical_path ||
+        !parsed.value->target_identity ||
+        !parsed.value->target_inventory ||
+        !parsed.value->witness_sha256.empty() ||
+        parsed.value->reachability != "reachable" ||
+        !parsed.value->diagnostic_complete || !parsed.value->eligible) {
+        return std::nullopt;
+    }
+    StockExternalPrivateTargetArtifact normalized{};
+    normalized.ordinal = parsed.value->ordinal;
+    normalized.review_nonce = parsed.value->review_nonce;
+    normalized.source_root_fingerprint =
+        parsed.value->source_root_fingerprint;
+    normalized.source_link_relative_path =
+        parsed.value->source_link_relative_path;
+    normalized.source_link_identity = parsed.value->source_link_identity;
+    normalized.target_canonical_path =
+        *parsed.value->target_canonical_path;
+    normalized.target_identity = *parsed.value->target_identity;
+    normalized.target_inventory = *parsed.value->target_inventory;
+    normalized.classification = parsed.value->classification;
+    normalized.eligible = parsed.value->eligible;
+    return normalized;
+}
+
 } // namespace
+
+class StockExternalSourceDiagnosticSessionPin final {
+public:
+    explicit StockExternalSourceDiagnosticSessionPin(Scan&& scan) noexcept
+        : scan_{std::move(scan)}
+    {
+    }
+
+private:
+    Scan scan_;
+};
 
 std::string_view to_string(const StockExternalTargetClassification v) noexcept
 {
@@ -2171,9 +3159,83 @@ std::string_view to_string(const StockExternalReviewErrorCode v) noexcept
     return "unknown";
 }
 
+StockExternalReviewResult<StockExternalSourceDiagnostic>
+diagnose_stock_external_targets(
+    const std::filesystem::path& source,
+    const StockResearchCopyLimits& limits) noexcept
+{
+    try {
+        if (!source.is_absolute()) {
+            return {{}, StockExternalReviewErrorCode::invalid_argument, 0U};
+        }
+        auto source_preflight = open_path(source, true, true);
+        const auto source_preflight_snapshot =
+            source_preflight.valid() ? snapshot(source_preflight.get())
+                                     : std::nullopt;
+        if (!source_preflight_snapshot ||
+            !source_preflight_snapshot->directory ||
+            (source_preflight_snapshot->attributes &
+             FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+            return {{}, StockExternalReviewErrorCode::source_invalid,
+                    source_preflight.valid() ? ERROR_FILE_INVALID
+                                             : ::GetLastError()};
+        }
+        const auto initial = scan_source(source, limits);
+        if (!initial) {
+            return {{}, StockExternalReviewErrorCode::topology_read_failed,
+                    ::GetLastError()};
+        }
+        auto confirmed = scan_source(source, limits);
+        if (!confirmed || !same_scan(*initial, *confirmed) ||
+            !revalidate_pinned_source_inventory(*initial) ||
+            !revalidate_pinned_source_inventory(*confirmed) ||
+            !revalidate_scan_target_pins(*initial) ||
+            !revalidate_scan_target_pins(*confirmed)) {
+            return {{}, StockExternalReviewErrorCode::target_changed,
+                    ERROR_FILE_INVALID};
+        }
+        StockExternalSourceDiagnostic diagnostic{};
+        diagnostic.source_identity_sha256 = confirmed->source_identity;
+        diagnostic.source_inventory_sha256 =
+            confirmed->source_inventory_sha256;
+        diagnostic.source_entry_count = confirmed->source_entry_count;
+        diagnostic.source_byte_count = confirmed->source_byte_count;
+        diagnostic.internal_reparse_count =
+            confirmed->internal_reparse_count;
+        diagnostic.contained_target_count =
+            confirmed->contained_target_count;
+        diagnostic.hardlink_count = confirmed->hardlink_count;
+        diagnostic.alternate_data_stream_count =
+            confirmed->alternate_data_stream_count;
+        diagnostic.targets = confirmed->targets;
+        // This scan proves the opened source node is an ordinary directory on
+        // a fixed-volume drive, but it does not independently attest every
+        // requested-path ancestor or SUBST semantics.  The source validator
+        // must combine this with its exact-root topology proof.
+        diagnostic.exact_local_fixed_root = false;
+        diagnostic.root_reparse = false;
+        diagnostic.source_inventory_complete = true;
+        diagnostic.all_targets_diagnostic_complete = std::ranges::all_of(
+            diagnostic.targets, [](const auto& target) {
+                return target.diagnostic_complete;
+            });
+        diagnostic.all_targets_eligible =
+            !diagnostic.targets.empty() && confirmed->eligible &&
+            diagnostic.all_targets_diagnostic_complete;
+        diagnostic.private_session_pin =
+            std::make_shared<StockExternalSourceDiagnosticSessionPin>(
+                std::move(*confirmed));
+        return {std::move(diagnostic), StockExternalReviewErrorCode::none,
+                0U};
+    } catch (...) {
+        return {{}, StockExternalReviewErrorCode::topology_read_failed, 0U};
+    }
+}
+
 StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targets(
     const std::filesystem::path& source, const std::filesystem::path& parent,
-    const StockResearchCopyLimits& limits) noexcept
+    const StockResearchCopyLimits& limits,
+    const StockExternalPublicationTestHook* const publication_test_hook) noexcept
 {
     try {
         if (!source.is_absolute() || !parent.is_absolute() ||
@@ -2204,7 +3266,11 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
             return {{}, StockExternalReviewErrorCode::no_external_targets, 0U};
         }
         const auto scan = scan_source(source, limits);
-        if (!scan || !same_scan(*initial_scan, *scan)) {
+        if (!scan || !same_scan(*initial_scan, *scan) ||
+            !revalidate_pinned_source_inventory(*initial_scan) ||
+            !revalidate_pinned_source_inventory(*scan) ||
+            !revalidate_scan_target_pins(*initial_scan) ||
+            !revalidate_scan_target_pins(*scan)) {
             return {{}, StockExternalReviewErrorCode::target_changed,
                     ERROR_FILE_INVALID};
         }
@@ -2277,17 +3343,18 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
             return {{}, StockExternalReviewErrorCode::output_parent_invalid,
                     ERROR_INVALID_PARAMETER};
         }
-        std::vector<Handle> overlap_targets;
-        overlap_targets.reserve(scan->targets.size());
         for (const auto& target : scan->targets) {
-            auto target_handle =
-                open_path_rename_guard(target.target_root, true, true);
-            const auto target_snapshot =
-                target_handle.valid() ? snapshot(target_handle.get())
-                                      : std::nullopt;
-            const auto target_path =
-                target_handle.valid() ? physical_path(target_handle.get())
-                                      : std::nullopt;
+            if (!target.inventory_available) continue;
+            if (!target.reparse_observation) {
+                return {{},
+                        StockExternalReviewErrorCode::output_parent_invalid,
+                        ERROR_INVALID_PARAMETER};
+            }
+            const auto target_handle = static_cast<HANDLE>(
+                windows_reparse_target_native_final_handle(
+                    *target.reparse_observation));
+            const auto target_snapshot = snapshot(target_handle);
+            const auto target_path = physical_path(target_handle);
             if (!target_snapshot || !target_path ||
                 identity(*target_snapshot) != target.target_identity_sha256 ||
                 (target_snapshot->attributes &
@@ -2299,7 +3366,6 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
                         StockExternalReviewErrorCode::output_parent_invalid,
                         ERROR_INVALID_PARAMETER};
             }
-            overlap_targets.push_back(std::move(target_handle));
         }
 
         if (manual_artifacts_missing &&
@@ -2384,6 +3450,13 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
         const auto review_root = parent / *leaf;
         if (!::CreateDirectoryW(review_root.c_str(), nullptr))
             return {{}, StockExternalReviewErrorCode::publication_failed, ::GetLastError()};
+        UncommittedReviewPublication publication{review_root};
+        if (scan->targets.size() >
+                (std::numeric_limits<std::size_t>::max)() - 2U ||
+            !publication.reserve(scan->targets.size() + 2U)) {
+            return {{}, StockExternalReviewErrorCode::publication_failed,
+                    ERROR_NOT_ENOUGH_MEMORY};
+        }
         auto review_output = open_secure_output_directory(review_root);
         if (!review_output) return {{}, StockExternalReviewErrorCode::publication_failed,
                                    review_output.error ? review_output.error->operating_system_error : 0U};
@@ -2428,24 +3501,29 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
             stable_directory_identity(*review_root_snapshot);
         request.review_nonce = review_nonce;
         request.review_timestamp_unix_seconds = review_timestamp;
-        request.implementation_profile = kExternalReviewImplementationProfile;
+        request.implementation_profile = kExternalReviewImplementationProfileV2;
         request.target_count = scan->targets.size();
         const auto request_json =
-            serialize_stock_external_review_request(request);
+            serialize_stock_external_review_request_v2(request);
         if (!request_json) {
             return {{}, StockExternalReviewErrorCode::publication_failed, 0U};
         }
+        SecureOutputPublishedFile retained_request;
         const auto request_write = secure_atomic_write_new(
             *review_output.directory, kStockExternalReviewRequestLeaf,
-            as_bytes(*request_json.value));
+            as_bytes(*request_json.value), retained_request);
         if (!request_write) {
             return {{}, StockExternalReviewErrorCode::publication_failed,
                     request_write.error
                         ? request_write.error->operating_system_error
                         : 0U};
         }
+        if (!publication.retain(std::move(retained_request))) {
+            return {{}, StockExternalReviewErrorCode::publication_failed,
+                    ERROR_NOT_ENOUGH_MEMORY};
+        }
 
-        StockExternalReviewSummaryArtifact summary_artifact{};
+        StockExternalReviewSummaryArtifactV2 summary_artifact{};
         summary_artifact.review_root_fingerprint =
             request.review_root_fingerprint;
         summary_artifact.source_root_fingerprint = scan->source_identity;
@@ -2453,56 +3531,116 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
         summary_artifact.review_nonce = review_nonce;
         summary_artifact.review_timestamp_unix_seconds = review_timestamp;
         summary_artifact.implementation_profile =
-            kExternalReviewImplementationProfile;
+            kExternalReviewImplementationProfileV2;
         for (std::size_t index = 0U; index < scan->targets.size(); ++index) {
             const auto& target = scan->targets[index];
+            if (!target.reparse_observation ||
+                !target.reparse_observation->observation_complete) {
+                return {{}, StockExternalReviewErrorCode::publication_failed,
+                        ERROR_INVALID_DATA};
+            }
+            const auto& observation = *target.reparse_observation;
             const auto link_path = source / target.source_link_relative_path;
-            auto link = open_path(link_path, true, true);
-            auto target_root = open_path(target.target_root, true, true);
+            auto link = open_path(
+                link_path, true, observation.provenance.tag.directory);
+            const auto target_root = target.target_root.empty()
+                                         ? INVALID_HANDLE_VALUE
+                                         : static_cast<HANDLE>(
+                                               windows_reparse_target_native_final_handle(
+                                                   observation));
             const auto link_snapshot =
                 link.valid() ? snapshot(link.get()) : std::nullopt;
             const auto target_snapshot =
-                target_root.valid() ? snapshot(target_root.get())
-                                    : std::nullopt;
+                target_root != nullptr && target_root != INVALID_HANDLE_VALUE
+                    ? snapshot(target_root)
+                    : std::nullopt;
             const auto link_identity =
                 link_snapshot ? artifact_identity(link.get(), *link_snapshot)
                               : std::nullopt;
             const auto target_identity = target_snapshot
                                              ? artifact_identity(
-                                                   target_root.get(),
+                                                   target_root,
                                                    *target_snapshot)
                                              : std::nullopt;
             const auto relative_utf8 =
                 utf8(target.source_link_relative_path.generic_wstring());
-            const auto target_utf8 = utf8(target.target_root.native());
-            if (!link_snapshot || !target_snapshot || !link_identity ||
-                !target_identity || !relative_utf8 || !target_utf8 ||
+            const auto target_utf8 = target.target_root.empty()
+                                         ? std::optional<std::string>{}
+                                         : utf8(target.target_root.native());
+            const auto substitute_utf8 =
+                utf8(observation.provenance.private_substitute_name);
+            const auto print_utf8 =
+                utf8(observation.provenance.private_print_name);
+            const auto normalized_expression_utf8 = utf8(
+                observation.provenance.target_expression.
+                    private_normalized_expression);
+            if (!link_snapshot || !link_identity || !relative_utf8 ||
+                !substitute_utf8 || !print_utf8 ||
+                !normalized_expression_utf8 ||
                 link_identity->identity_sha256 !=
                     target.link_identity_sha256 ||
-                target_identity->identity_sha256 !=
-                    target.target_identity_sha256 ||
-                link_snapshot->reparse_tag == 0U) {
+                link_snapshot->reparse_tag == 0U ||
+                (target.inventory_available &&
+                 (!target_snapshot || !target_identity || !target_utf8 ||
+                  target_identity->identity_sha256 !=
+                      target.target_identity_sha256))) {
                 return {{}, StockExternalReviewErrorCode::target_changed,
                         ERROR_FILE_INVALID};
             }
-            StockExternalPrivateTargetArtifact private_target{};
+            StockExternalPrivateTargetArtifactV2 private_target{};
             private_target.ordinal = index + 1U;
             private_target.review_nonce = review_nonce;
             private_target.source_root_fingerprint = scan->source_identity;
             private_target.source_link_relative_path = *relative_utf8;
             private_target.source_link_identity = *link_identity;
-            private_target.target_canonical_path = *target_utf8;
-            private_target.target_identity = *target_identity;
-            private_target.target_inventory = artifact_inventory(
-                target.entry_count, target.byte_count,
-                target.target_inventory_sha256, target.executable_count,
-                target.script_or_command_count, target.mutable_state_count,
-                target.nested_link_count);
+            private_target.raw_reparse_tag =
+                observation.provenance.tag.raw_tag;
+            private_target.microsoft_tag =
+                observation.provenance.tag.microsoft;
+            private_target.name_surrogate_tag =
+                observation.provenance.tag.name_surrogate;
+            private_target.directory = observation.provenance.tag.directory;
+            private_target.payload_byte_count =
+                observation.provenance.tag.payload_byte_count;
+            private_target.payload_sha256 =
+                observation.provenance.private_payload_sha256;
+            private_target.tag_category =
+                to_string(observation.provenance.tag.category);
+            private_target.substitute_name = *substitute_utf8;
+            private_target.print_name = *print_utf8;
+            private_target.normalized_target_expression =
+                *normalized_expression_utf8;
+            private_target.expression_kind = to_string(
+                observation.provenance.target_expression.kind);
+            private_target.reachability = to_string(observation.reachability);
+            private_target.failure_phase = to_string(
+                target.failure_witness
+                    ? target.failure_witness->failure_phase
+                    : observation.failure_phase);
+            private_target.native_error_category =
+                to_string(observation.native_error_category);
+            private_target.native_error = observation.native_error;
+            private_target.witness_sha256 = target.failure_witness
+                                                ? target.failure_witness
+                                                      ->private_witness_sha256
+                                                : std::string{};
+            if (target_identity && target_utf8) {
+                private_target.target_canonical_path = *target_utf8;
+                private_target.target_identity = *target_identity;
+            }
+            if (target.inventory_available) {
+                private_target.target_inventory = artifact_inventory(
+                    target.entry_count, target.byte_count,
+                    target.target_inventory_sha256, target.executable_count,
+                    target.script_or_command_count,
+                    target.mutable_state_count, target.nested_link_count);
+            }
             private_target.classification =
                 artifact_classification(target.classification);
+            private_target.diagnostic_complete = target.diagnostic_complete;
             private_target.eligible = target.eligible;
             const auto private_json =
-                serialize_stock_external_private_target(private_target);
+                serialize_stock_external_private_target_v2(private_target);
             if (!private_json) {
                 return {{}, StockExternalReviewErrorCode::publication_failed,
                         0U};
@@ -2515,42 +3653,70 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
                 return {{}, StockExternalReviewErrorCode::publication_failed,
                         0U};
             }
+            SecureOutputPublishedFile retained_private;
             const auto private_write = secure_atomic_write_new(
                 *review_output.directory, *private_leaf,
-                as_bytes(*private_json.value));
+                as_bytes(*private_json.value), retained_private);
             if (!private_write) {
                 return {{}, StockExternalReviewErrorCode::publication_failed,
                         private_write.error
                             ? private_write.error->operating_system_error
                             : 0U};
             }
+            if (!publication.retain(std::move(retained_private))) {
+                return {{}, StockExternalReviewErrorCode::publication_failed,
+                        ERROR_NOT_ENOUGH_MEMORY};
+            }
             summary_artifact.targets.push_back(
-                StockExternalReviewTargetBindingArtifact{
-                    index + 1U, *private_digest.value,
+                StockExternalReviewTargetBindingArtifactV2{
+                    index + 1U,
+                    *private_digest.value,
                     target.link_identity_sha256,
-                    target.target_identity_sha256,
-                    target.target_inventory_sha256,
+                    target.target_identity_sha256.empty()
+                        ? std::optional<std::string>{}
+                        : std::optional<std::string>{
+                              target.target_identity_sha256},
+                    target.inventory_available
+                        ? std::optional<std::string>{
+                              target.target_inventory_sha256}
+                        : std::optional<std::string>{},
                     artifact_classification(target.classification),
+                    std::string{to_string(
+                        observation.provenance.tag.category)},
+                    std::string{to_string(
+                        observation.provenance.target_expression.kind)},
+                    std::string{to_string(observation.reachability)},
+                    std::string{to_string(
+                        target.failure_witness
+                            ? target.failure_witness->failure_phase
+                            : observation.failure_phase)},
+                    std::string{to_string(
+                        observation.native_error_category)},
+                    target.diagnostic_complete,
+                    target.inventory_available,
                     target.eligible});
+            if (target.diagnostic_complete) {
+                ++summary_artifact.completed_count;
+            } else {
+                ++summary_artifact.incomplete_count;
+            }
             if (target.eligible) {
                 ++summary_artifact.eligible_count;
-            } else {
+            } else if (target.diagnostic_complete) {
                 ++summary_artifact.ineligible_count;
             }
-            if (target.classification ==
-                StockExternalTargetClassification::unknown) {
-                ++summary_artifact.unknown_count;
-            }
-            if (target.executable_count != 0U) {
-                ++summary_artifact.executable_target_count;
-            }
-            if (target.mutable_state_count != 0U) {
-                ++summary_artifact.mutable_state_target_count;
-            }
         }
-        summary_artifact.all_targets_eligible = scan->eligible;
+        if (publication_test_hook != nullptr &&
+            publication_test_hook->callback != nullptr) {
+            publication_test_hook->callback(
+                StockExternalPublicationTestPhase::
+                    review_private_records_published,
+                publication_test_hook->context);
+        }
+        summary_artifact.all_targets_eligible =
+            scan->eligible && summary_artifact.incomplete_count == 0U;
         const auto summary_json =
-            serialize_stock_external_review_summary(summary_artifact);
+            serialize_stock_external_review_summary_v2(summary_artifact);
         if (!summary_json) {
             return {{}, StockExternalReviewErrorCode::publication_failed, 0U};
         }
@@ -2559,14 +3725,32 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
         if (!summary_digest) {
             return {{}, StockExternalReviewErrorCode::publication_failed, 0U};
         }
+        if (!revalidate_pinned_source_inventory(*scan) ||
+            !revalidate_scan_target_pins(*scan) ||
+            !exact_review_artifact_set_for_phase(
+                review_root, scan->targets.size(), false, false)) {
+            return {{}, StockExternalReviewErrorCode::target_changed,
+                    ERROR_FILE_INVALID};
+        }
+        SecureOutputPublishedFile retained_summary;
         const auto summary_write = secure_atomic_write_new(
             *review_output.directory, kStockExternalReviewSummaryLeaf,
-            as_bytes(*summary_json.value));
+            as_bytes(*summary_json.value), retained_summary);
         if (!summary_write) {
             return {{}, StockExternalReviewErrorCode::publication_failed,
                     summary_write.error
                         ? summary_write.error->operating_system_error
                         : 0U};
+        }
+        if (!publication.retain(std::move(retained_summary))) {
+            return {{}, StockExternalReviewErrorCode::publication_failed,
+                    ERROR_NOT_ENOUGH_MEMORY};
+        }
+        if (publication_test_hook != nullptr &&
+            publication_test_hook->callback != nullptr) {
+            publication_test_hook->callback(
+                StockExternalPublicationTestPhase::review_summary_published,
+                publication_test_hook->context);
         }
         if (!exact_review_artifact_set(
                 review_root, scan->targets.size(), false)) {
@@ -2578,19 +3762,31 @@ StockExternalReviewResult<StockExternalReviewSummary> review_stock_external_targ
         summary.review_set_sha256 = *summary_digest.value;
         summary.targets = scan->targets;
         for (const auto& target : summary.targets) {
-            summary.executable_count += target.executable_count;
-            summary.script_or_command_count += target.script_or_command_count;
-            summary.mutable_state_count += target.mutable_state_count;
-            summary.nested_link_count += target.nested_link_count;
+            if (target.inventory_available) {
+                summary.executable_count += target.executable_count;
+                summary.script_or_command_count +=
+                    target.script_or_command_count;
+                summary.mutable_state_count += target.mutable_state_count;
+                summary.nested_link_count += target.nested_link_count;
+            }
+            if (target.diagnostic_complete) {
+                ++summary.completed_target_count;
+                if (!target.eligible) ++summary.ineligible_target_count;
+            } else {
+                ++summary.incomplete_target_count;
+            }
         }
-        summary.all_targets_eligible = scan->eligible;
+        summary.all_targets_eligible =
+            scan->eligible && summary.incomplete_target_count == 0U;
+        publication.commit();
         return {std::move(summary), StockExternalReviewErrorCode::none, 0U};
     } catch (...) { return {{}, StockExternalReviewErrorCode::topology_read_failed, 0U}; }
 }
 
 StockExternalReviewResult<StockExternalApproval> approve_stock_external_target_review(
     const std::filesystem::path& root, const std::string_view phrase,
-    const std::chrono::hours lifetime) noexcept
+    const std::chrono::hours lifetime,
+    const StockExternalPublicationTestHook* const publication_test_hook) noexcept
 {
     try {
         if (!root.is_absolute() || !review_root_layout(root) ||
@@ -2611,57 +3807,59 @@ StockExternalReviewResult<StockExternalApproval> approve_stock_external_target_r
                         ? request_text.native_error
                         : summary_text.native_error};
         }
-        const auto request =
-            parse_stock_external_review_request(*request_text.value);
-        const auto summary =
-            parse_stock_external_review_summary(*summary_text.value);
+        const auto artifacts = parse_normalized_review_artifacts(
+            *request_text.value, *summary_text.value);
         const auto summary_digest =
             stock_external_artifact_sha256(*summary_text.value);
-        if (!request || !summary || !summary_digest ||
-            request.value->review_root_fingerprint !=
-                summary.value->review_root_fingerprint ||
-            request.value->source_root_identity.identity_sha256 !=
-                summary.value->source_root_fingerprint ||
-            request.value->source_inventory !=
-                summary.value->source_inventory ||
-            request.value->review_nonce != summary.value->review_nonce ||
-            request.value->review_timestamp_unix_seconds !=
-                summary.value->review_timestamp_unix_seconds ||
-            request.value->implementation_profile !=
-                summary.value->implementation_profile ||
-            request.value->target_count != summary.value->targets.size() ||
-            !summary.value->all_targets_eligible ||
-            summary.value->targets.empty()) {
-            return {{}, summary && !summary.value->all_targets_eligible
+        if (!artifacts || !summary_digest ||
+            artifacts->request.review_root_fingerprint !=
+                artifacts->summary.review_root_fingerprint ||
+            artifacts->request.source_root_identity.identity_sha256 !=
+                artifacts->summary.source_root_fingerprint ||
+            artifacts->request.source_inventory !=
+                artifacts->summary.source_inventory ||
+            artifacts->request.review_nonce !=
+                artifacts->summary.review_nonce ||
+            artifacts->request.review_timestamp_unix_seconds !=
+                artifacts->summary.review_timestamp_unix_seconds ||
+            artifacts->request.implementation_profile !=
+                artifacts->summary.implementation_profile ||
+            artifacts->request.target_count !=
+                artifacts->summary.targets.size() ||
+            !artifacts->summary.all_targets_eligible ||
+            artifacts->summary.targets.empty()) {
+            return {{}, artifacts && !artifacts->summary.all_targets_eligible
                             ? StockExternalReviewErrorCode::target_ineligible
                             : StockExternalReviewErrorCode::
                                   review_manifest_invalid,
                     0U};
         }
+        const auto& summary = artifacts->summary;
         if (!exact_review_artifact_set(
-                root, summary.value->targets.size(), false)) {
+                root, summary.targets.size(), false)) {
             return {{}, StockExternalReviewErrorCode::review_manifest_invalid,
                     ERROR_INVALID_DATA};
         }
 
         StockExternalApprovalArtifact approval_artifact{};
         approval_artifact.review_schema =
-            kStockExternalReviewSummarySchemaV1;
-        approval_artifact.review_version = 1U;
+            artifacts->version2 ? kStockExternalReviewSummarySchemaV2
+                                : kStockExternalReviewSummarySchemaV1;
+        approval_artifact.review_version = artifacts->version2 ? 2U : 1U;
         approval_artifact.review_root_fingerprint =
-            summary.value->review_root_fingerprint;
+            summary.review_root_fingerprint;
         approval_artifact.review_digest_sha256 = *summary_digest.value;
         approval_artifact.source_root_fingerprint =
-            summary.value->source_root_fingerprint;
-        approval_artifact.source_inventory = summary.value->source_inventory;
-        approval_artifact.review_nonce = summary.value->review_nonce;
+            summary.source_root_fingerprint;
+        approval_artifact.source_inventory = summary.source_inventory;
+        approval_artifact.review_nonce = summary.review_nonce;
         approval_artifact.confirmation_profile =
             kStockExternalApprovalConfirmationProfileV1;
         approval_artifact.implementation_profile =
-            summary.value->implementation_profile;
+            summary.implementation_profile;
         for (std::size_t index = 0U;
-             index < summary.value->targets.size(); ++index) {
-            const auto& binding = summary.value->targets[index];
+             index < summary.targets.size(); ++index) {
+            const auto& binding = summary.targets[index];
             if (binding.ordinal != index + 1U || !binding.eligible ||
                 binding.classification !=
                     StockExternalArtifactClassification::
@@ -2683,26 +3881,60 @@ StockExternalReviewResult<StockExternalApproval> approve_stock_external_target_r
                                                   *private_text.value)
                                             : StockExternalArtifactTextResult{};
             const auto private_target = private_text
-                                            ? parse_stock_external_private_target(
-                                                  *private_text.value)
-                                            : StockExternalArtifactResult<
+                                            ? parse_normalized_private_target(
+                                                  *private_text.value,
+                                                  artifacts->version2)
+                                            : std::optional<
                                                   StockExternalPrivateTargetArtifact>{};
+            std::optional<StockExternalPrivateTargetArtifactV2>
+                private_target_v2;
+            if (private_text && artifacts->version2) {
+                const auto parsed_v2 =
+                    parse_stock_external_private_target_v2(
+                        *private_text.value);
+                if (parsed_v2) private_target_v2 = *parsed_v2.value;
+            }
+            const StockExternalReviewTargetBindingArtifactV2* binding_v2 =
+                artifacts->version2 && artifacts->summary_v2 &&
+                        index < artifacts->summary_v2->targets.size()
+                    ? &artifacts->summary_v2->targets[index]
+                    : nullptr;
             if (!private_text || !private_digest || !private_target ||
                 *private_digest.value != binding.private_record_sha256 ||
-                private_target.value->ordinal != binding.ordinal ||
-                private_target.value->review_nonce !=
-                    summary.value->review_nonce ||
-                private_target.value->source_root_fingerprint !=
-                    summary.value->source_root_fingerprint ||
-                private_target.value->source_link_identity.identity_sha256 !=
+                private_target->ordinal != binding.ordinal ||
+                private_target->review_nonce != summary.review_nonce ||
+                private_target->source_root_fingerprint !=
+                    summary.source_root_fingerprint ||
+                private_target->source_link_identity.identity_sha256 !=
                     binding.link_identity_sha256 ||
-                private_target.value->target_identity.identity_sha256 !=
+                private_target->target_identity.identity_sha256 !=
                     binding.target_identity_sha256 ||
-                private_target.value->target_inventory.inventory_sha256 !=
+                private_target->target_inventory.inventory_sha256 !=
                     binding.target_inventory_sha256 ||
-                private_target.value->classification !=
+                private_target->classification !=
                     binding.classification ||
-                !private_target.value->eligible) {
+                (artifacts->version2 &&
+                 (!private_target_v2 || binding_v2 == nullptr ||
+                  private_target_v2->tag_category !=
+                      binding_v2->tag_category ||
+                  private_target_v2->expression_kind !=
+                      binding_v2->expression_kind ||
+                  private_target_v2->reachability !=
+                      binding_v2->reachability ||
+                  private_target_v2->failure_phase !=
+                      binding_v2->failure_phase ||
+                  private_target_v2->native_error_category !=
+                      binding_v2->native_error_category ||
+                  private_target_v2->target_identity.has_value() !=
+                      binding_v2->target_identity_sha256.has_value() ||
+                  private_target_v2->target_inventory.has_value() !=
+                      binding_v2->inventory_available ||
+                  binding_v2->target_inventory_sha256.has_value() !=
+                      binding_v2->inventory_available ||
+                  private_target_v2->diagnostic_complete !=
+                      binding_v2->diagnostic_complete ||
+                  private_target_v2->eligible != binding_v2->eligible)) ||
+                !private_target->eligible) {
                 return {{}, StockExternalReviewErrorCode::
                                 review_manifest_invalid,
                         private_text.native_error};
@@ -2739,16 +3971,33 @@ StockExternalReviewResult<StockExternalApproval> approve_stock_external_target_r
             return {{}, StockExternalReviewErrorCode::review_manifest_invalid,
                     0U};
         }
-        const auto written = secure_atomic_write_new(
-            *output.directory, kStockExternalApprovalLeaf,
-            as_bytes(*serialized.value));
-        if (!written) return {{}, StockExternalReviewErrorCode::publication_failed,
-                             written.error ? written.error->operating_system_error : 0U};
         if (!exact_review_artifact_set(
-                root, summary.value->targets.size(), true)) {
-            return {{}, StockExternalReviewErrorCode::publication_failed,
+                root, summary.targets.size(), false)) {
+            return {{}, StockExternalReviewErrorCode::review_manifest_invalid,
                     ERROR_INVALID_DATA};
         }
+        SecureOutputPublishedFile retained_approval;
+        const auto written = secure_atomic_write_new(
+            *output.directory, kStockExternalApprovalLeaf,
+            as_bytes(*serialized.value), retained_approval);
+        if (!written) return {{}, StockExternalReviewErrorCode::publication_failed,
+                             written.error ? written.error->operating_system_error : 0U};
+        if (publication_test_hook != nullptr &&
+            publication_test_hook->callback != nullptr) {
+            publication_test_hook->callback(
+                StockExternalPublicationTestPhase::
+                    approval_manifest_published,
+                publication_test_hook->context);
+        }
+        if (!exact_review_artifact_set(
+                root, summary.targets.size(), true)) {
+            const auto removed = retained_approval.remove_on_close();
+            return {{}, StockExternalReviewErrorCode::publication_failed,
+                    removed.error
+                        ? removed.error->operating_system_error
+                        : ERROR_INVALID_DATA};
+        }
+        retained_approval.close();
         StockExternalApproval approval{};
         approval.approval_manifest = root / kStockExternalApprovalLeaf;
         approval.review_set_sha256 = *summary_digest.value;
@@ -2787,10 +4036,8 @@ StockExternalReviewResult<StockExternalApprovalValidation> validate_stock_extern
                                ? summary_text.native_error
                                : approval_text.native_error)};
         }
-        const auto request =
-            parse_stock_external_review_request(*request_text.value);
-        const auto summary =
-            parse_stock_external_review_summary(*summary_text.value);
+        const auto artifacts = parse_normalized_review_artifacts(
+            *request_text.value, *summary_text.value);
         const auto approved =
             parse_stock_external_approval(*approval_text.value);
         const auto summary_digest =
@@ -2798,42 +4045,52 @@ StockExternalReviewResult<StockExternalApprovalValidation> validate_stock_extern
         const auto approval_digest =
             stock_external_artifact_sha256(*approval_text.value);
         const auto now = unix_now();
-        if (!request || !summary || !approved || !summary_digest ||
+        if (!artifacts || !approved || !summary_digest ||
             !approval_digest ||
-            request.value->review_root_fingerprint !=
-                summary.value->review_root_fingerprint ||
-            request.value->review_root_fingerprint !=
+            artifacts->request.review_root_fingerprint !=
+                artifacts->summary.review_root_fingerprint ||
+            artifacts->request.review_root_fingerprint !=
                 approved.value->review_root_fingerprint ||
-            request.value->source_root_identity.identity_sha256 !=
-                summary.value->source_root_fingerprint ||
-            summary.value->source_root_fingerprint !=
+            artifacts->request.source_root_identity.identity_sha256 !=
+                artifacts->summary.source_root_fingerprint ||
+            artifacts->summary.source_root_fingerprint !=
                 approved.value->source_root_fingerprint ||
-            request.value->source_inventory !=
-                summary.value->source_inventory ||
-            summary.value->source_inventory !=
+            artifacts->request.source_inventory !=
+                artifacts->summary.source_inventory ||
+            artifacts->summary.source_inventory !=
                 approved.value->source_inventory ||
-            request.value->review_nonce != summary.value->review_nonce ||
-            summary.value->review_nonce != approved.value->review_nonce ||
-            request.value->implementation_profile !=
-                summary.value->implementation_profile ||
-            summary.value->implementation_profile !=
+            artifacts->request.review_nonce !=
+                artifacts->summary.review_nonce ||
+            artifacts->summary.review_nonce !=
+                approved.value->review_nonce ||
+            artifacts->request.implementation_profile !=
+                artifacts->summary.implementation_profile ||
+            artifacts->summary.implementation_profile !=
                 approved.value->implementation_profile ||
+            approved.value->review_schema !=
+                (artifacts->version2
+                     ? kStockExternalReviewSummarySchemaV2
+                     : kStockExternalReviewSummarySchemaV1) ||
+            approved.value->review_version !=
+                (artifacts->version2 ? 2U : 1U) ||
             approved.value->review_digest_sha256 !=
                 *summary_digest.value ||
             approved.value->approval_timestamp_unix_seconds <
-                request.value->review_timestamp_unix_seconds ||
+                artifacts->request.review_timestamp_unix_seconds ||
             approved.value->approval_timestamp_unix_seconds > now + 300U ||
-            request.value->target_count != summary.value->targets.size() ||
-            summary.value->targets.size() !=
+            artifacts->request.target_count !=
+                artifacts->summary.targets.size() ||
+            artifacts->summary.targets.size() !=
                 approved.value->approved_targets.size() ||
-            !summary.value->all_targets_eligible ||
+            !artifacts->summary.all_targets_eligible ||
             !exact_review_artifact_set(
-                root, summary.value->targets.size(), true)) {
+                root, artifacts->summary.targets.size(), true)) {
             return {{}, StockExternalReviewErrorCode::approval_mismatch, 0U};
         }
         if (approved.value->expiration_unix_seconds <= now) {
             return {{}, StockExternalReviewErrorCode::approval_expired, 0U};
         }
+        const auto& summary = artifacts->summary;
         auto review_root_handle = open_path(root, true, true);
         const auto review_root_snapshot = review_root_handle.valid()
                                               ? snapshot(review_root_handle.get())
@@ -2846,7 +4103,9 @@ StockExternalReviewResult<StockExternalApprovalValidation> validate_stock_extern
         }
         const auto fresh = scan_source(source, limits);
         if (!fresh || !fresh->eligible ||
-            fresh->targets.size() != summary.value->targets.size() ||
+            !revalidate_pinned_source_inventory(*fresh) ||
+            !revalidate_scan_target_pins(*fresh) ||
+            fresh->targets.size() != summary.targets.size() ||
             fresh->source_identity !=
                 approved.value->source_root_fingerprint ||
             artifact_inventory(
@@ -2854,7 +4113,9 @@ StockExternalReviewResult<StockExternalApprovalValidation> validate_stock_extern
                 fresh->source_inventory_sha256) !=
                 approved.value->source_inventory ||
             approved.value->implementation_profile !=
-                kExternalReviewImplementationProfile) {
+                (artifacts->version2
+                     ? kExternalReviewImplementationProfileV2
+                     : kExternalReviewImplementationProfileV1)) {
             return {{}, StockExternalReviewErrorCode::approval_mismatch, 0U};
         }
 
@@ -2866,7 +4127,7 @@ StockExternalReviewResult<StockExternalApprovalValidation> validate_stock_extern
                 approved.value->expiration_unix_seconds}};
         for (std::size_t index = 0U; index < fresh->targets.size(); ++index) {
             const auto& target = fresh->targets[index];
-            const auto& summary_binding = summary.value->targets[index];
+            const auto& summary_binding = summary.targets[index];
             const auto& approval_binding =
                 approved.value->approved_targets[index];
             const auto leaf =
@@ -2880,9 +4141,10 @@ StockExternalReviewResult<StockExternalApprovalValidation> validate_stock_extern
                                                   *private_text.value)
                                             : StockExternalArtifactTextResult{};
             const auto private_target = private_text
-                                            ? parse_stock_external_private_target(
-                                                  *private_text.value)
-                                            : StockExternalArtifactResult<
+                                            ? parse_normalized_private_target(
+                                                  *private_text.value,
+                                                  artifacts->version2)
+                                            : std::optional<
                                                   StockExternalPrivateTargetArtifact>{};
             const auto relative_utf8 =
                 utf8(target.source_link_relative_path.generic_wstring());
@@ -2900,21 +4162,21 @@ StockExternalReviewResult<StockExternalApprovalValidation> validate_stock_extern
                 approval_binding.ordinal != index + 1U ||
                 *private_digest.value !=
                     summary_binding.private_record_sha256 ||
-                private_target.value->ordinal != index + 1U ||
-                private_target.value->review_nonce !=
+                private_target->ordinal != index + 1U ||
+                private_target->review_nonce !=
                     approved.value->review_nonce ||
-                private_target.value->source_root_fingerprint !=
+                private_target->source_root_fingerprint !=
                     approved.value->source_root_fingerprint ||
-                private_target.value->source_link_relative_path !=
+                private_target->source_link_relative_path !=
                     *relative_utf8 ||
-                private_target.value->target_canonical_path != *target_utf8 ||
-                private_target.value->source_link_identity.identity_sha256 !=
+                private_target->target_canonical_path != *target_utf8 ||
+                private_target->source_link_identity.identity_sha256 !=
                     target.link_identity_sha256 ||
-                private_target.value->target_identity.identity_sha256 !=
+                private_target->target_identity.identity_sha256 !=
                     target.target_identity_sha256 ||
-                private_target.value->target_inventory != target_inventory ||
-                private_target.value->classification != classification ||
-                !private_target.value->eligible ||
+                private_target->target_inventory != target_inventory ||
+                private_target->classification != classification ||
+                !private_target->eligible ||
                 summary_binding.link_identity_sha256 !=
                     target.link_identity_sha256 ||
                 summary_binding.target_identity_sha256 !=
@@ -2939,6 +4201,11 @@ StockExternalReviewResult<StockExternalApprovalValidation> validate_stock_extern
             result.script_or_command_count += target.script_or_command_count;
             result.mutable_state_count += target.mutable_state_count;
             result.nested_link_count += target.nested_link_count;
+        }
+        if (!revalidate_pinned_source_inventory(*fresh) ||
+            !revalidate_scan_target_pins(*fresh)) {
+            return {{}, StockExternalReviewErrorCode::target_changed,
+                    ERROR_FILE_INVALID};
         }
         return {std::move(result), StockExternalReviewErrorCode::none, 0U};
     } catch (...) { return {{}, StockExternalReviewErrorCode::review_manifest_invalid, 0U}; }

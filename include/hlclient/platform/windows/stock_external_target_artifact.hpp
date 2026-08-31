@@ -20,6 +20,12 @@ inline constexpr std::string_view kStockExternalPrivateTargetSchemaV1 =
     "hlclient.stock-runtime-external-target-private.v1";
 inline constexpr std::string_view kStockExternalReviewSummarySchemaV1 =
     "hlclient.stock-runtime-external-target-review-summary.v1";
+inline constexpr std::string_view kStockExternalReviewRequestSchemaV2 =
+    "hlclient.stock-runtime-external-target-review-request.v2";
+inline constexpr std::string_view kStockExternalPrivateTargetSchemaV2 =
+    "hlclient.stock-runtime-external-target-private.v2";
+inline constexpr std::string_view kStockExternalReviewSummarySchemaV2 =
+    "hlclient.stock-runtime-external-target-review-summary.v2";
 inline constexpr std::string_view kStockExternalApprovalArtifactSchemaV1 =
     "hlclient.stock-runtime-external-target-approval.v1";
 inline constexpr std::string_view kStockExternalApprovalConfirmationProfileV1 =
@@ -190,6 +196,85 @@ struct StockExternalReviewSummaryArtifact final {
         default;
 };
 
+// V2 is intentionally represented by distinct types and entry points.  The
+// V1 JSON protocol is closed, and must continue to reject every V2-only
+// property instead of silently accepting a widened approval contract.
+struct StockExternalPrivateTargetArtifactV2 final {
+    std::uint64_t ordinal{0U};
+    std::string review_nonce;
+    std::string source_root_fingerprint;
+    std::string source_link_relative_path;
+    StockExternalArtifactFileIdentity source_link_identity;
+    std::uint32_t raw_reparse_tag{0U};
+    bool microsoft_tag{false};
+    bool name_surrogate_tag{false};
+    bool directory{false};
+    std::uint64_t payload_byte_count{0U};
+    std::string payload_sha256;
+    std::string tag_category;
+    std::string substitute_name;
+    std::string print_name;
+    std::string normalized_target_expression;
+    std::string expression_kind;
+    std::string reachability;
+    std::string failure_phase;
+    std::string native_error_category;
+    std::uint32_t native_error{0U};
+    std::string witness_sha256;
+    std::optional<std::string> target_canonical_path;
+    std::optional<StockExternalArtifactFileIdentity> target_identity;
+    std::optional<StockExternalArtifactInventory> target_inventory;
+    StockExternalArtifactClassification classification{
+        StockExternalArtifactClassification::unknown};
+    bool diagnostic_complete{false};
+    bool eligible{false};
+
+    friend bool operator==(const StockExternalPrivateTargetArtifactV2&,
+                           const StockExternalPrivateTargetArtifactV2&)
+        noexcept = default;
+};
+
+struct StockExternalReviewTargetBindingArtifactV2 final {
+    std::uint64_t ordinal{0U};
+    std::string private_record_sha256;
+    std::string link_identity_sha256;
+    std::optional<std::string> target_identity_sha256;
+    std::optional<std::string> target_inventory_sha256;
+    StockExternalArtifactClassification classification{
+        StockExternalArtifactClassification::unknown};
+    std::string tag_category;
+    std::string expression_kind;
+    std::string reachability;
+    std::string failure_phase;
+    std::string native_error_category;
+    bool diagnostic_complete{false};
+    bool inventory_available{false};
+    bool eligible{false};
+
+    friend bool operator==(
+        const StockExternalReviewTargetBindingArtifactV2&,
+        const StockExternalReviewTargetBindingArtifactV2&) noexcept = default;
+};
+
+struct StockExternalReviewSummaryArtifactV2 final {
+    std::string review_root_fingerprint;
+    std::string source_root_fingerprint;
+    StockExternalArtifactInventory source_inventory;
+    std::string review_nonce;
+    std::uint64_t review_timestamp_unix_seconds{0U};
+    std::string implementation_profile;
+    std::vector<StockExternalReviewTargetBindingArtifactV2> targets;
+    std::uint64_t completed_count{0U};
+    std::uint64_t eligible_count{0U};
+    std::uint64_t ineligible_count{0U};
+    std::uint64_t incomplete_count{0U};
+    bool all_targets_eligible{false};
+
+    friend bool operator==(const StockExternalReviewSummaryArtifactV2&,
+                           const StockExternalReviewSummaryArtifactV2&)
+        noexcept = default;
+};
+
 struct StockExternalApprovedTargetBindingArtifact final {
     std::uint64_t ordinal{0U};
     std::string link_identity_sha256;
@@ -249,6 +334,24 @@ serialize_stock_external_review_summary(
     const StockExternalReviewSummaryArtifact& artifact) noexcept;
 [[nodiscard]] StockExternalArtifactResult<StockExternalReviewSummaryArtifact>
 parse_stock_external_review_summary(std::string_view json) noexcept;
+
+[[nodiscard]] StockExternalArtifactTextResult
+serialize_stock_external_review_request_v2(
+    const StockExternalReviewRequestArtifact& artifact) noexcept;
+[[nodiscard]] StockExternalArtifactResult<StockExternalReviewRequestArtifact>
+parse_stock_external_review_request_v2(std::string_view json) noexcept;
+
+[[nodiscard]] StockExternalArtifactTextResult
+serialize_stock_external_private_target_v2(
+    const StockExternalPrivateTargetArtifactV2& artifact) noexcept;
+[[nodiscard]] StockExternalArtifactResult<StockExternalPrivateTargetArtifactV2>
+parse_stock_external_private_target_v2(std::string_view json) noexcept;
+
+[[nodiscard]] StockExternalArtifactTextResult
+serialize_stock_external_review_summary_v2(
+    const StockExternalReviewSummaryArtifactV2& artifact) noexcept;
+[[nodiscard]] StockExternalArtifactResult<StockExternalReviewSummaryArtifactV2>
+parse_stock_external_review_summary_v2(std::string_view json) noexcept;
 
 [[nodiscard]] StockExternalArtifactTextResult
 serialize_stock_external_approval(

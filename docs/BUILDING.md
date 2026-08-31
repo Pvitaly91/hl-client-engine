@@ -503,15 +503,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   .\scripts\test_stock_runtime_active_preflight.ps1
 ```
 
-Prepare a new isolated copy with the project helper. The destination must not
-exist. The helper screens fixed-drive/Steam overlap and aliases before mutation,
+After the candidate source returns `research-copy-eligible=true`, prepare a new
+isolated copy with the project helper. The destination must not exist. The
+helper screens fixed-drive/Steam overlap and aliases before mutation,
 copies through a bounded GUID staging sibling, verifies the complete inventory
 and launchers, and atomically publishes the marker. It never changes the source
 tree:
 
 ```powershell
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
-  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
 ```
 
@@ -522,7 +523,7 @@ the following separate command surfaces:
 ```powershell
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
   -ReviewExternalTargets `
-  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
   -ReviewOutputRoot ".\manual-artifacts\stock-runtime-source-review"
 
 .\scripts\approve_stock_runtime_external_targets.ps1 `
@@ -532,7 +533,7 @@ the following separate command surfaces:
     HLCLIENT_APPROVE_REVIEWED_EXTERNAL_TARGETS_V1
 
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
-  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life" `
   -ExternalTargetApprovalManifest `
     ".\manual-artifacts\stock-runtime-source-review\<review-id>\external-target-approval.json"
@@ -557,6 +558,36 @@ again to match v3 `external_approval_sha256` before WFP/process work.
 The commands document the M4.7.1.1.3 interface; do not infer that a real review,
 canary or campaign has succeeded.
 
+Build the M4.7.1.1.4 provenance and candidate-source tools with:
+
+```powershell
+cmake --build build --config Debug --target `
+  hlclient_windows_reparse_provenance `
+  hlclient_stock_external_target_review `
+  hlclient_stock_source_eligibility_check `
+  hlclient_stock_research_copy `
+  hlclient_tests
+```
+
+Before materializing a different installation, validate it read-only:
+
+```powershell
+.\scripts\validate_stock_runtime_candidate_source.ps1 `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
+  -AppManifestPath "F:\SteamLibrary\steamapps\appmanifest_70.acf" `
+  -ExpectedAppBuild 15961492
+```
+
+Only `research-copy-eligible=true`, `result=success`, exit code 0 permits the
+next materialization attempt. A completed ineligible diagnosis exits 1 and
+creates no destination or approval. `ERROR_PATH_NOT_FOUND` is not eligibility;
+dangling targets remain ineligible, opaque tags are not followed, and
+unavailable inventory values are not zeros. A clean secondary installation is
+recommended when the primary source fails. These checks launch no process,
+configure no WFP policy and infer no runtime grammar. The later preflight and
+capture examples retain the matching `F:` AppID-70 manifest from that same
+eligible source installation.
+
 From an elevated PowerShell, validate the active environment without launching
 stock processes or creating a capture directory:
 
@@ -569,7 +600,7 @@ stock processes or creating a capture directory:
   -CaptureToolPath ".\build\bin\Debug\hlclient_stock_runtime_capture.exe" `
   -NetworkIsolationGuardPath `
     ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
-  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf"
+  -AppManifestPath "F:\SteamLibrary\steamapps\appmanifest_70.acf"
 ```
 
 Success reports exactly `active-environment=valid`,
@@ -605,7 +636,7 @@ pre-campaign canary transaction is:
   -CaptureToolPath ".\build\bin\Debug\hlclient_stock_runtime_capture.exe" `
   -NetworkIsolationGuardPath `
     ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
-  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf" `
+  -AppManifestPath "F:\SteamLibrary\steamapps\appmanifest_70.acf" `
   -PreCampaignCanary `
   -OutputRoot ".\manual-artifacts\stock-runtime-canary" `
   -Game valve -Map boot_camp -Scenario baseline `
@@ -702,7 +733,7 @@ already completed its owned Job, guard, restoration and external-drift checks.
   -NetworkIsolationGuardPath `
     ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
   -CheckerPath ".\build\bin\Debug\hlclient_stock_runtime_check.exe" `
-  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf" `
+  -AppManifestPath "F:\SteamLibrary\steamapps\appmanifest_70.acf" `
   -OutputRoot ".\manual-artifacts\stock-runtime"
 ```
 

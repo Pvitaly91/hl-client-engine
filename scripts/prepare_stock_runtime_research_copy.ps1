@@ -345,7 +345,7 @@ function Resolve-ExternalTargetReviewTool {
     throw 'Build hlclient_stock_external_target_review before reviewing external targets.'
 }
 
-function Assert-ExternalTargetReviewSuccessContract {
+function Assert-ExternalTargetReviewV1SuccessContract {
     param([Parameter(Mandatory = $true)][string[]]$Lines)
 
     $summaryKeys = @(
@@ -520,13 +520,257 @@ function Assert-ExternalTargetReviewSuccessContract {
     }
 }
 
+function Assert-ExternalTargetReviewV2SuccessContract {
+    param([Parameter(Mandatory = $true)][string[]]$Lines)
+
+    $summaryKeys = @(
+        'schema', 'escaped-targets', 'completed-targets', 'eligible',
+        'ineligible', 'incomplete', 'unknown', 'executable-targets',
+        'mutable-data-targets', 'target-count', 'eligible-target-count',
+        'all-targets-eligible', 'review-id', 'result')
+    $targetKeys = @(
+        'classification', 'tag-category', 'expression-kind', 'reachability',
+        'failure-phase', 'native-error-category', 'inventory', 'entry-count',
+        'byte-count', 'executable-count', 'script-count',
+        'mutable-state-count', 'nested-link-count', 'eligible')
+    $classifications = @(
+        'eligible_non_executable_asset_tree', 'contains_executable_code',
+        'contains_script_or_command', 'contains_mutable_user_state',
+        'another_application_tree', 'operating_system_tree',
+        'temporary_or_cache_tree', 'remote_or_device_target',
+        'nested_external_link', 'unsupported_reparse_topology',
+        'content_limit_exceeded', 'changed_during_review', 'unknown')
+    $tagCategories = @(
+        'none', 'mount_point', 'symbolic_link', 'app_exec_link',
+        'cloud_placeholder', 'cloud_placeholder_variant', 'wci',
+        'wci_tombstone', 'wof', 'dedup', 'hsm', 'dfs', 'sis',
+        'projected_file_system', 'microsoft_name_surrogate_other',
+        'microsoft_non_name_surrogate_other', 'third_party_name_surrogate',
+        'third_party_other', 'malformed_or_unreadable')
+    $expressionKinds = @(
+        'none', 'relative_path', 'drive_absolute_path', 'volume_guid_path',
+        'nt_object_manager_path', 'unc_path', 'device_path',
+        'app_execution_alias', 'opaque_non_path_payload', 'malformed')
+    $reachabilityValues = @(
+        'reachable', 'target_path_not_found', 'target_component_not_found',
+        'target_volume_not_found', 'target_access_denied',
+        'target_not_directory', 'target_remote_or_device', 'target_cycle',
+        'target_depth_exceeded', 'target_changed',
+        'target_open_failed_other', 'not_applicable')
+    $failurePhases = @(
+        'none', 'source_link_open', 'reparse_payload_read',
+        'reparse_payload_decode', 'target_expression_parse', 'target_open',
+        'target_identity', 'target_inventory', 'nested_entry_open',
+        'nested_reparse_decode', 'post_inventory_revalidation')
+    $nativeCategories = @(
+        'none', 'file_not_found', 'path_not_found', 'invalid_name',
+        'bad_pathname', 'bad_network_path', 'bad_network_name',
+        'volume_not_ready', 'device_not_exist', 'device_not_connected',
+        'access_denied', 'cannot_access_file', 'not_directory',
+        'reparse_tag_invalid', 'reparse_tag_mismatch',
+        'reparse_point_encountered', 'circular_dependency',
+        'too_many_links', 'other')
+
+    $summary = @{}
+    $targets = @{}
+    foreach ($line in $Lines) {
+        if ($line -cmatch '^\[source-review\] target-([1-9][0-9]*)-([a-z][a-z0-9-]*)=([A-Za-z0-9_.-]+)$') {
+            $ordinal = ConvertFrom-CanonicalUnsignedDecimal `
+                $Matches[1] 'target ordinal' 4096
+            $name = $Matches[2]
+            if ($targetKeys -cnotcontains $name) {
+                throw 'The v2 external-target review helper returned an extra per-target record.'
+            }
+            $key = "$ordinal/$name"
+            if ($targets.ContainsKey($key)) {
+                throw 'The v2 external-target review helper duplicated a per-target record.'
+            }
+            $targets[$key] = $Matches[3]
+            continue
+        }
+        if ($line -cmatch '^\[source-review\] ([a-z][a-z0-9-]*)=([A-Za-z0-9_.-]+)$') {
+            $name = $Matches[1]
+            if ($summaryKeys -cnotcontains $name -or $summary.ContainsKey($name)) {
+                throw 'The v2 external-target review helper returned an extra or duplicate summary record.'
+            }
+            $summary[$name] = $Matches[2]
+            continue
+        }
+        throw 'The v2 external-target review helper emitted a malformed success record.'
+    }
+    foreach ($key in $summaryKeys) {
+        [void](Get-RequiredRecord -Records $summary -Key $key)
+    }
+    if ($summary.Count -ne $summaryKeys.Count -or
+        (Get-RequiredRecord $summary 'schema') -cne
+            'hlclient.stock-runtime-external-target-review.v2' -or
+        (Get-RequiredRecord $summary 'review-id') -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'The v2 external-target review helper returned an invalid summary identity.'
+    }
+
+    $targetCount = ConvertFrom-CanonicalUnsignedDecimal `
+        (Get-RequiredRecord $summary 'target-count') 'target-count' 4096
+    $escapedCount = ConvertFrom-CanonicalUnsignedDecimal `
+        (Get-RequiredRecord $summary 'escaped-targets') 'escaped-targets' 4096
+    $completedCount = ConvertFrom-CanonicalUnsignedDecimal `
+        (Get-RequiredRecord $summary 'completed-targets') 'completed-targets' 4096
+    $eligibleCount = ConvertFrom-CanonicalUnsignedDecimal `
+        (Get-RequiredRecord $summary 'eligible') 'eligible' 4096
+    $eligibleTargetCount = ConvertFrom-CanonicalUnsignedDecimal `
+        (Get-RequiredRecord $summary 'eligible-target-count') `
+        'eligible-target-count' 4096
+    $ineligibleCount = ConvertFrom-CanonicalUnsignedDecimal `
+        (Get-RequiredRecord $summary 'ineligible') 'ineligible' 4096
+    $incompleteCount = ConvertFrom-CanonicalUnsignedDecimal `
+        (Get-RequiredRecord $summary 'incomplete') 'incomplete' 4096
+    $unknownCount = ConvertFrom-CanonicalUnsignedDecimal `
+        (Get-RequiredRecord $summary 'unknown') 'unknown' 4096
+    if ($targetCount -lt 1 -or $escapedCount -ne $targetCount -or
+        $completedCount -ne $targetCount -or $incompleteCount -ne 0 -or
+        $eligibleCount -ne $eligibleTargetCount -or
+        ([Decimal]$eligibleCount + [Decimal]$ineligibleCount) -ne
+            [Decimal]$targetCount -or $unknownCount -gt $ineligibleCount) {
+        throw 'The v2 external-target review helper returned inconsistent summary counts.'
+    }
+
+    [UInt64]$observedEligible = 0
+    [UInt64]$observedUnknown = 0
+    [Decimal]$observedExecutable = 0
+    [Decimal]$observedMutable = 0
+    $allInventoriesAvailable = $true
+    for ([UInt64]$ordinal = 1; $ordinal -le $targetCount; ++$ordinal) {
+        foreach ($name in $targetKeys) {
+            [void](Get-RequiredRecord -Records $targets -Key "$ordinal/$name")
+        }
+        $classification = Get-RequiredRecord $targets "$ordinal/classification"
+        $tagCategory = Get-RequiredRecord $targets "$ordinal/tag-category"
+        $expressionKind = Get-RequiredRecord $targets "$ordinal/expression-kind"
+        $reachability = Get-RequiredRecord $targets "$ordinal/reachability"
+        $failurePhase = Get-RequiredRecord $targets "$ordinal/failure-phase"
+        $nativeCategory = Get-RequiredRecord $targets "$ordinal/native-error-category"
+        $inventory = Get-RequiredRecord $targets "$ordinal/inventory"
+        $targetEligible = Get-RequiredRecord $targets "$ordinal/eligible"
+        if ($classifications -cnotcontains $classification -or
+            $tagCategories -cnotcontains $tagCategory -or
+            $expressionKinds -cnotcontains $expressionKind -or
+            $reachabilityValues -cnotcontains $reachability -or
+            $failurePhases -cnotcontains $failurePhase -or
+            $nativeCategories -cnotcontains $nativeCategory -or
+            $inventory -cnotin @('available', 'unavailable') -or
+            $targetEligible -cnotin @('true', 'false')) {
+            throw 'The v2 external-target review helper returned an invalid typed target record.'
+        }
+        $isEligibleClassification = $classification -ceq
+            'eligible_non_executable_asset_tree'
+        $isReachable = $reachability -ceq 'reachable'
+        $isNonPathExpression = $expressionKind -cin @(
+            'none', 'app_execution_alias', 'opaque_non_path_payload',
+            'malformed')
+        if (($targetEligible -ceq 'true') -ne $isEligibleClassification -or
+            $tagCategory -ceq 'none' -or
+            ($inventory -ceq 'available' -and -not $isReachable) -or
+            (-not $isReachable -and $inventory -ne 'unavailable') -or
+            ($isNonPathExpression -and
+                ($isReachable -or $nativeCategory -cne 'none')) -or
+            ($targetEligible -ceq 'true' -and
+                ($inventory -cne 'available' -or $reachability -cne 'reachable' -or
+                    $failurePhase -cne 'none' -or $nativeCategory -cne 'none'))) {
+            throw 'The v2 external-target review helper returned an inconsistent eligibility record.'
+        }
+        $numericNames = @(
+            'entry-count', 'byte-count', 'executable-count', 'script-count',
+            'mutable-state-count', 'nested-link-count')
+        if ($inventory -ceq 'unavailable') {
+            $allInventoriesAvailable = $false
+            foreach ($name in $numericNames) {
+                if ((Get-RequiredRecord $targets "$ordinal/$name") -cne 'unavailable') {
+                    throw 'The v2 external-target review helper substituted a numeric unavailable inventory value.'
+                }
+            }
+        } else {
+            foreach ($name in $numericNames) {
+                [void](ConvertFrom-CanonicalUnsignedDecimal `
+                        (Get-RequiredRecord $targets "$ordinal/$name") `
+                        "target $name")
+            }
+            $targetExecutable = ConvertFrom-CanonicalUnsignedDecimal `
+                (Get-RequiredRecord $targets "$ordinal/executable-count") `
+                'target executable-count'
+            $targetScript = ConvertFrom-CanonicalUnsignedDecimal `
+                (Get-RequiredRecord $targets "$ordinal/script-count") `
+                'target script-count'
+            $targetMutable = ConvertFrom-CanonicalUnsignedDecimal `
+                (Get-RequiredRecord $targets "$ordinal/mutable-state-count") `
+                'target mutable-state-count'
+            $targetNested = ConvertFrom-CanonicalUnsignedDecimal `
+                (Get-RequiredRecord $targets "$ordinal/nested-link-count") `
+                'target nested-link-count'
+            if ($targetEligible -ceq 'true' -and
+                ($targetExecutable -ne 0 -or $targetScript -ne 0 -or
+                    $targetMutable -ne 0 -or $targetNested -ne 0)) {
+                throw 'The v2 external-target review helper returned executable or mutable eligible content.'
+            }
+            $observedExecutable += [Decimal]$targetExecutable
+            $observedMutable += [Decimal]$targetMutable
+        }
+        if ($targetEligible -ceq 'true') { ++$observedEligible }
+        if ($classification -ceq 'unknown') { ++$observedUnknown }
+    }
+    if ($targets.Count -ne ([int]$targetCount * $targetKeys.Count) -or
+        $observedEligible -ne $eligibleCount -or
+        $observedUnknown -ne $unknownCount) {
+        throw 'The v2 external-target review helper returned inconsistent target totals.'
+    }
+
+    $summaryExecutable = Get-RequiredRecord $summary 'executable-targets'
+    $summaryMutable = Get-RequiredRecord $summary 'mutable-data-targets'
+    if ($allInventoriesAvailable) {
+        if ((ConvertFrom-CanonicalUnsignedDecimal $summaryExecutable `
+                    'executable-targets') -ne $observedExecutable -or
+            (ConvertFrom-CanonicalUnsignedDecimal $summaryMutable `
+                    'mutable-data-targets') -ne $observedMutable) {
+            throw 'The v2 external-target review helper returned inconsistent inventory totals.'
+        }
+    } elseif ($summaryExecutable -cne 'unavailable' -or
+        $summaryMutable -cne 'unavailable') {
+        throw 'The v2 external-target review helper substituted zero for unavailable summary inventory.'
+    }
+
+    $allEligible = Get-RequiredRecord $summary 'all-targets-eligible'
+    $result = Get-RequiredRecord $summary 'result'
+    $expectedAllEligible = $eligibleCount -eq $targetCount
+    if ($allEligible -cnotin @('true', 'false') -or
+        (($allEligible -ceq 'true') -ne $expectedAllEligible) -or
+        ($expectedAllEligible -and $result -cne 'success') -or
+        (-not $expectedAllEligible -and $result -cne 'ineligible')) {
+        throw 'The v2 external-target review helper returned an inconsistent final result.'
+    }
+}
+
+function Assert-ExternalTargetReviewSuccessContract {
+    param([Parameter(Mandatory = $true)][string[]]$Lines)
+
+    $schemas = @($Lines | Where-Object {
+            $_ -cmatch '^\[source-review\] schema=hlclient\.stock-runtime-external-target-review\.v[12]$'
+        })
+    if ($schemas.Count -ne 1) {
+        throw 'The external-target review helper omitted or duplicated its schema.'
+    }
+    if ($schemas[0] -ceq
+            '[source-review] schema=hlclient.stock-runtime-external-target-review.v1') {
+        Assert-ExternalTargetReviewV1SuccessContract -Lines $Lines
+    } else {
+        Assert-ExternalTargetReviewV2SuccessContract -Lines $Lines
+    }
+}
+
 function Invoke-BoundedExternalTargetReviewTool {
     param([string[]]$Arguments)
 
     $tool = Resolve-ExternalTargetReviewTool
     $lines = @(& $tool @Arguments 2>&1 | ForEach-Object { $_.ToString() })
     $exitCode = $LASTEXITCODE
-    $maximumReviewLines = 12 + (8 * 4096)
+    $maximumReviewLines = 14 + (14 * 4096)
     if ($lines.Count -gt $maximumReviewLines) {
         throw 'The external-target review helper exceeded its public output line bound.'
     }

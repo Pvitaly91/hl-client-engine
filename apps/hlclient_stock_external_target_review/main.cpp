@@ -7,6 +7,8 @@
 #include <optional>
 #include <string_view>
 
+#include <Windows.h>
+
 namespace {
 namespace windows = hlclient::platform::windows;
 
@@ -66,7 +68,10 @@ struct Options final {
 void failure(const windows::StockExternalReviewErrorCode code, const std::uint32_t native)
 {
     std::cerr << "[source-review] result=" << windows::to_string(code) << '\n'
-              << "[source-review] native-error=" << native << '\n';
+              << "[source-review] native-error-category="
+              << windows::to_string(
+                     windows::classify_windows_reparse_native_error(native))
+              << '\n';
 }
 } // namespace
 
@@ -81,27 +86,53 @@ int wmain(const int argc, wchar_t** argv)
         const auto& review = *result.value;
         std::size_t eligible = 0U;
         std::size_t unknown = 0U;
+        std::size_t completed = 0U;
+        bool all_inventories_available = true;
         for (const auto& target : review.targets) {
             if (target.eligible) ++eligible;
+            if (target.diagnostic_complete) ++completed;
+            all_inventories_available =
+                all_inventories_available && target.inventory_available;
             if (target.classification ==
                 windows::StockExternalTargetClassification::unknown) {
                 ++unknown;
             }
         }
+        if (eligible > completed || completed > review.targets.size() ||
+            review.all_targets_eligible !=
+                (!review.targets.empty() &&
+                 eligible == review.targets.size() &&
+                 completed == review.targets.size())) {
+            failure(
+                windows::StockExternalReviewErrorCode::topology_read_failed,
+                ERROR_INVALID_DATA);
+            return 1;
+        }
         std::cout << "[source-review] schema="
-                  << windows::kStockExternalTargetReviewSchemaV1 << '\n'
+                  << windows::kStockExternalTargetReviewSchemaV2 << '\n'
                   << "[source-review] escaped-targets="
                   << review.targets.size() << '\n'
+                  << "[source-review] completed-targets=" << completed << '\n'
                   << "[source-review] eligible=" << eligible << '\n'
                   << "[source-review] ineligible="
-                  << (review.targets.size() - eligible - unknown) << '\n'
+                  << (completed - eligible) << '\n'
+                  << "[source-review] incomplete="
+                  << (review.targets.size() - completed) << '\n'
                   << "[source-review] unknown=" << unknown << '\n'
-                  << "[source-review] executable-targets="
-                  << review.executable_count << '\n'
-                  << "[source-review] mutable-data-targets="
-                  << review.mutable_state_count << '\n'
-                  << "[source-review] target-count=" << review.targets.size()
-                  << '\n'
+                  << "[source-review] executable-targets=";
+        if (all_inventories_available) {
+            std::cout << review.executable_count;
+        } else {
+            std::cout << "unavailable";
+        }
+        std::cout << '\n' << "[source-review] mutable-data-targets=";
+        if (all_inventories_available) {
+            std::cout << review.mutable_state_count;
+        } else {
+            std::cout << "unavailable";
+        }
+        std::cout << '\n' << "[source-review] target-count="
+                  << review.targets.size() << '\n'
                   << "[source-review] eligible-target-count=" << eligible
                   << '\n'
                   << "[source-review] all-targets-eligible="
@@ -112,24 +143,68 @@ int wmain(const int argc, wchar_t** argv)
             const auto ordinal = index + 1U;
             std::cout << "[source-review] target-" << ordinal
                       << "-classification="
-                      << windows::to_string(target.classification) << '\n'
-                      << "[source-review] target-" << ordinal
-                      << "-entry-count=" << target.entry_count << '\n'
-                      << "[source-review] target-" << ordinal
-                      << "-byte-count=" << target.byte_count << '\n'
-                      << "[source-review] target-" << ordinal
-                      << "-executable-count=" << target.executable_count
-                      << '\n'
-                      << "[source-review] target-" << ordinal
-                      << "-script-count=" << target.script_or_command_count
-                      << '\n'
-                      << "[source-review] target-" << ordinal
-                      << "-mutable-state-count=" << target.mutable_state_count
-                      << '\n'
-                      << "[source-review] target-" << ordinal
-                      << "-nested-link-count=" << target.nested_link_count
-                      << '\n'
-                      << "[source-review] target-" << ordinal
+                      << windows::to_string(target.classification) << '\n';
+            if (target.reparse_observation) {
+                const auto& observation = *target.reparse_observation;
+                std::cout << "[source-review] target-" << ordinal
+                          << "-tag-category="
+                          << windows::to_string(
+                                 observation.provenance.tag.category)
+                          << '\n'
+                          << "[source-review] target-" << ordinal
+                          << "-expression-kind="
+                          << windows::to_string(
+                                 observation.provenance.target_expression.kind)
+                          << '\n'
+                          << "[source-review] target-" << ordinal
+                          << "-reachability="
+                          << windows::to_string(observation.reachability) << '\n'
+                          << "[source-review] target-" << ordinal
+                          << "-native-error-category="
+                          << windows::to_string(
+                                 observation.native_error_category)
+                          << '\n';
+            } else {
+                std::cout << "[source-review] target-" << ordinal
+                          << "-tag-category=none\n"
+                          << "[source-review] target-" << ordinal
+                          << "-expression-kind=none\n"
+                          << "[source-review] target-" << ordinal
+                          << "-reachability=not_applicable\n"
+                          << "[source-review] target-" << ordinal
+                          << "-native-error-category=none\n";
+            }
+            std::cout << "[source-review] target-" << ordinal
+                      << "-failure-phase=";
+            if (target.failure_witness) {
+                std::cout << windows::to_string(
+                    target.failure_witness->failure_phase);
+            } else {
+                std::cout << "none";
+            }
+            std::cout << '\n' << "[source-review] target-" << ordinal
+                      << "-inventory="
+                      << (target.inventory_available ? "available"
+                                                     : "unavailable")
+                      << '\n';
+            const auto count = [&](const std::string_view name,
+                                   const auto value) {
+                std::cout << "[source-review] target-" << ordinal << '-'
+                          << name << '=';
+                if (target.inventory_available) {
+                    std::cout << value;
+                } else {
+                    std::cout << "unavailable";
+                }
+                std::cout << '\n';
+            };
+            count("entry-count", target.entry_count);
+            count("byte-count", target.byte_count);
+            count("executable-count", target.executable_count);
+            count("script-count", target.script_or_command_count);
+            count("mutable-state-count", target.mutable_state_count);
+            count("nested-link-count", target.nested_link_count);
+            std::cout << "[source-review] target-" << ordinal
                       << "-eligible=" << (target.eligible ? "true" : "false")
                       << '\n';
         }

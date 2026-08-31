@@ -48,9 +48,21 @@ The canonical approval JSON has the exact top-level properties `schema`,
 `implementation-profile` and `approved-targets`. Each approved-target binding
 contains only `ordinal`, `link-identity-sha256`, `target-identity-sha256`,
 `target-inventory-sha256` and the exact eligible `classification`. Unknown,
-duplicate or missing JSON properties are rejected. `review-schema` is exactly
-`hlclient.stock-runtime-external-target-review-summary.v1` and
-`review-version` is exactly `1`.
+duplicate or missing JSON properties are rejected. A retained eligible v1
+review binds
+`review-schema=hlclient.stock-runtime-external-target-review-summary.v1` and
+`review-version=1`; a newly published eligible v2 review binds the exact v2
+summary schema and `review-version=2`. Cross-version or unknown combinations
+are rejected.
+
+M4.7.1.1.4 retains that complete eligible v1 contract and adds strict v2
+diagnostic review artifacts. A v2 review can be approved only when every target
+is reachable, has a complete inventory, has exactly
+`eligible_non_executable_asset_tree`, and has no failure witness or unavailable
+counter. Dangling, missing-volume, inaccessible, malformed and unsupported-tag
+diagnostics cannot produce an approval artifact. Diagnostic completion is not
+approval; `ERROR_PATH_NOT_FOUND` is not eligibility and unavailable inventory
+is not zero. Opaque tags remain unfollowed and fail closed.
 
 ## Approved materialization
 
@@ -58,7 +70,7 @@ After explicit approval, the only permitted materialization surface is:
 
 ```powershell
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
-  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life" `
   -ExternalTargetApprovalManifest `
     ".\manual-artifacts\stock-runtime-source-review\<review-id>\external-target-approval.json"

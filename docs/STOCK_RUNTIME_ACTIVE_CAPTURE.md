@@ -58,11 +58,24 @@ ordinary, single-link and no-ADS, then requires its freshly computed SHA-256 to
 equal the v3 `external_approval_sha256`; absence or ambiguity blocks WFP and
 process launch.
 
+M4.7.1.1.4 adds an earlier candidate-source gate and exact reparse provenance.
+A completed dangling or unsupported-target diagnostic is still ineligible and
+cannot reach this active-capture boundary. `ERROR_PATH_NOT_FOUND` is not an
+empty-directory interpretation or eligibility signal; unavailable inventory
+is not zero. If the current source fails, validate a clean secondary Steam
+installation before materialization. No source link is repaired or opaque tag
+followed, and no runtime semantics are inferred by this gate.
+
 ```powershell
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
-  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
 ```
+
+The `F:` example denotes a source that already returned
+`research-copy-eligible=true`; do not substitute the current ineligible `D:`
+source. Subsequent preflight and capture commands keep the matching `F:`
+AppID-70 manifest from that same source installation.
 
 Run environment validation from an elevated PowerShell. There is no automatic
 self-elevation or weaker firewall fallback.
@@ -76,7 +89,7 @@ self-elevation or weaker firewall fallback.
   -CaptureToolPath ".\build\bin\Debug\hlclient_stock_runtime_capture.exe" `
   -NetworkIsolationGuardPath `
     ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
-  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf"
+  -AppManifestPath "F:\SteamLibrary\steamapps\appmanifest_70.acf"
 ```
 
 Success is exactly a read-only stock-process result:
@@ -110,7 +123,7 @@ Run active capture only after the elevated preflight succeeds:
   -CaptureToolPath ".\build\bin\Debug\hlclient_stock_runtime_capture.exe" `
   -NetworkIsolationGuardPath `
     ".\build\bin\Debug\hlclient_stock_runtime_isolation_guard.exe" `
-  -AppManifestPath "D:\Steam\steamapps\appmanifest_70.acf" `
+  -AppManifestPath "F:\SteamLibrary\steamapps\appmanifest_70.acf" `
   -PreCampaignCanary `
   -OutputRoot ".\manual-artifacts\stock-runtime-canary" `
   -Game valve -Map boot_camp -Scenario baseline `

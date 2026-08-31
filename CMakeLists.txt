@@ -1021,6 +1021,21 @@ if(WIN32)
         PRIVATE fwpuclnt rpcrt4 iphlpapi ws2_32 hlclient::core)
 
     hlclient_add_library(
+        hlclient_windows_reparse_provenance
+        include/hlclient/platform/windows/windows_reparse_provenance.hpp
+        src/platform/windows/windows_reparse_provenance.cpp
+    )
+    add_library(
+        hlclient::windows_reparse_provenance ALIAS
+        hlclient_windows_reparse_provenance)
+    target_compile_definitions(
+        hlclient_windows_reparse_provenance
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_windows_reparse_provenance
+        PRIVATE ntdll hlclient::hash_sha256 hlclient::core)
+
+    hlclient_add_library(
         hlclient_windows_stock_research_copy
         include/hlclient/platform/windows/stock_research_copy.hpp
         src/platform/windows/stock_research_copy.cpp
@@ -1054,11 +1069,31 @@ if(WIN32)
         PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(
         hlclient_windows_stock_external_target_api
+        PUBLIC hlclient::windows_reparse_provenance
         PRIVATE
             bcrypt
             hlclient::hash_sha256
             hlclient::windows_secure_output
             hlclient::core)
+
+    hlclient_add_library(
+        hlclient_windows_stock_source_eligibility
+        include/hlclient/platform/windows/stock_source_eligibility.hpp
+        src/platform/windows/stock_source_eligibility.cpp
+    )
+    add_library(
+        hlclient::windows_stock_source_eligibility ALIAS
+        hlclient_windows_stock_source_eligibility)
+    target_compile_definitions(
+        hlclient_windows_stock_source_eligibility
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_windows_stock_source_eligibility
+        PUBLIC
+            hlclient::windows_binary_identity
+            hlclient::windows_stock_external_target_api
+            hlclient::windows_stock_research_copy
+        PRIVATE hlclient::core)
 
     foreach(
         _hlclient_windows_isolation_target
@@ -1073,7 +1108,9 @@ if(WIN32)
     endforeach()
     set_property(
         TARGET
+            hlclient_windows_reparse_provenance
             hlclient_windows_stock_external_target_api
+            hlclient_windows_stock_source_eligibility
             hlclient_windows_stock_research_copy
         PROPERTY FOLDER "Engine/Platform/Windows/Research Copy")
 endif()
@@ -2122,6 +2159,17 @@ if(WIN32)
         PRIVATE hlclient::windows_stock_research_copy)
 
     add_executable(
+        hlclient_stock_source_eligibility_check
+        apps/hlclient_stock_source_eligibility_check/main.cpp)
+    hlclient_enable_warnings(hlclient_stock_source_eligibility_check)
+    target_compile_definitions(
+        hlclient_stock_source_eligibility_check
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(
+        hlclient_stock_source_eligibility_check
+        PRIVATE hlclient::windows_stock_source_eligibility)
+
+    add_executable(
         hlclient_stock_binary_observer
         apps/hlclient_stock_binary_observer/main.cpp)
     hlclient_enable_warnings(hlclient_stock_binary_observer)
@@ -2190,6 +2238,7 @@ if(WIN32)
         IN ITEMS
             hlclient_stock_external_target_review
             hlclient_stock_research_copy
+            hlclient_stock_source_eligibility_check
             hlclient_stock_binary_observer
             hlclient_stock_runtime_isolation_guard
             hlclient_network_isolation_probe
@@ -2270,6 +2319,36 @@ if(BUILD_TESTING)
                 hlclient_stock_external_target_${_hlclient_external_target_script_test}
                 PROPERTIES TIMEOUT 120)
         endforeach()
+
+        add_test(
+            NAME hlclient_stock_external_reparse_diagnostics
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_external_reparse_diagnostics.ps1")
+        set_tests_properties(
+            hlclient_stock_external_reparse_diagnostics
+            PROPERTIES TIMEOUT 120)
+
+        add_test(
+            NAME hlclient_stock_source_eligibility
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_source_eligibility.ps1"
+                -EligibilityToolPath
+                    $<TARGET_FILE:hlclient_stock_source_eligibility_check>)
+        set_tests_properties(
+            hlclient_stock_source_eligibility
+            PROPERTIES TIMEOUT 120)
 
         add_test(
             NAME hlclient_stock_research_copy_topology
@@ -2670,11 +2749,15 @@ foreach(
 endforeach()
 
 if(WIN32)
+    hlclient_enable_address_sanitizer(hlclient_windows_reparse_provenance)
     hlclient_enable_address_sanitizer(
         hlclient_windows_stock_external_target_api)
+    hlclient_enable_address_sanitizer(
+        hlclient_windows_stock_source_eligibility)
     hlclient_enable_address_sanitizer(hlclient_windows_stock_research_copy)
     hlclient_enable_address_sanitizer(hlclient_stock_external_target_review)
     hlclient_enable_address_sanitizer(hlclient_stock_research_copy)
+    hlclient_enable_address_sanitizer(hlclient_stock_source_eligibility_check)
 endif()
 
 if(BUILD_TESTING)

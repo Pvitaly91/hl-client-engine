@@ -1014,6 +1014,27 @@ SHA-256 matches the reviewed v3 digest. Downstream provenance carries only a
 path-free external-target profile/count. Private review paths remain ignored
 and local. Review/approval adds no runtime semantic interpretation or evidence
 and cannot satisfy any campaign threshold.
+
+### M4.7.1.1.4 — Exact reparse provenance and clean-source eligibility
+
+**Status: implementation boundary present; real stock evidence remains
+pending.** A bounded no-follow `FSCTL_GET_REPARSE_POINT` reader classifies the
+exact tag and validates mount-point/symbolic-link payloads before any supported
+target-open attempt. Public diagnostics disclose only typed tag, expression,
+reachability, failure-phase and native-error categories; raw tags, expressions,
+paths, identities and payload digests remain private ignored review data.
+
+Readable dangling, missing-volume, inaccessible, malformed or unsupported
+targets may complete a diagnostic v2 review as ineligible. Diagnostic
+completion is not approval: unavailable inventory is not zero, dangling links
+cannot be materialized, opaque tags are not followed, and existing complete
+eligible v1 review/approval contracts remain supported. A separate read-only
+candidate-source validator requires complete safe local topology, exact signed
+x86 stock binaries and exact AppID 70/build provenance before materialization.
+`ERROR_PATH_NOT_FOUND` is not eligibility. A clean secondary Steam installation
+is the recommended next step when the primary source remains ineligible. No
+runtime semantics are inferred.
+
 M4.7.2 retains the stock usercmd envelope/checksum, exact acknowledgement
 correlation and project-to-stock command acceptance. M4.7.3 retains the live
 connected runtime/render loop. M3.3 retains download/cache.

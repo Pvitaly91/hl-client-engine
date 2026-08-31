@@ -29,6 +29,26 @@ jobs:
       - name: Test Debug
         run: ctest --preset vs2022-win32-debug
 
+      - name: Verify reparse and source gates with PowerShell 7
+        shell: pwsh
+        run: |
+          & .\scripts\test_stock_external_reparse_diagnostics.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test_stock_source_eligibility.ps1 `
+            -EligibilityToolPath `
+              .\build\bin\Debug\hlclient_stock_source_eligibility_check.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify reparse and source gates with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          & .\scripts\test_stock_external_reparse_diagnostics.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test_stock_source_eligibility.ps1 `
+            -EligibilityToolPath `
+              .\build\bin\Debug\hlclient_stock_source_eligibility_check.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify fake stock-runtime campaign resume and evidence gates
         shell: pwsh
         run: |
@@ -120,7 +140,9 @@ jobs:
         run: >-
           cmake --build build-asan --config Debug --target
           hlclient_tests
+          hlclient_stock_external_target_review
           hlclient_stock_research_copy
+          hlclient_stock_source_eligibility_check
           hlclient_stock_runtime_check
           hlclient_collision_fixture_writer
           hlclient_prediction_check
@@ -157,6 +179,18 @@ jobs:
             throw 'AddressSanitizer stock-runtime checker usage smoke returned an unexpected exit code'
           }
           & .\build-asan\bin\Debug\hlclient_tests.exe '[stock-runtime]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[stock-runtime][reparse]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[stock-runtime][external-target]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[stock-runtime][source-eligibility]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test_stock_external_reparse_diagnostics.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test_stock_source_eligibility.ps1 `
+            -EligibilityToolPath `
+              .\build-asan\bin\Debug\hlclient_stock_source_eligibility_check.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\scripts\test_stock_research_copy_topology.ps1 `
             -ResearchCopyToolPath `

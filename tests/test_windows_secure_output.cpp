@@ -173,6 +173,33 @@ TEST_CASE("Secure output never replaces an existing hardlink destination",
     CHECK(read_text(destination) == "do-not-change");
 }
 
+TEST_CASE("Secure output retains and removes the exact published file",
+          "[windows][stock-runtime][secure-output][retained-file]")
+{
+    ExactTemporaryDirectory temporary;
+    REQUIRE(temporary.valid());
+    const auto output = temporary.path() / L"run";
+    REQUIRE(::CreateDirectoryW(output.c_str(), nullptr) != FALSE);
+
+    const auto opened = windows::open_secure_output_directory(output);
+    REQUIRE(opened);
+    REQUIRE(opened.directory);
+    windows::SecureOutputPublishedFile published;
+    const auto payload = bytes("manifest-last");
+    const auto written = windows::secure_atomic_write_new(
+        *opened.directory, L"manifest.json", payload, published);
+    REQUIRE(written);
+    REQUIRE(published.valid());
+    CHECK(fs::exists(output / L"manifest.json"));
+
+    CHECK_FALSE(::DeleteFileW((output / L"manifest.json").c_str()));
+    CHECK(::GetLastError() == ERROR_SHARING_VIOLATION);
+    const auto removed = published.remove_on_close();
+    REQUIRE(removed);
+    CHECK_FALSE(published.valid());
+    CHECK_FALSE(fs::exists(output / L"manifest.json"));
+}
+
 TEST_CASE("Held secure output directory blocks replacement and rejects unsafe leaves",
           "[windows][stock-runtime][secure-output][directory-capability]")
 {

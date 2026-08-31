@@ -50,6 +50,16 @@ remains non-overridable. See
 [external-target review](STOCK_RUNTIME_EXTERNAL_TARGET_REVIEW.md) and
 [external-target approval](STOCK_RUNTIME_EXTERNAL_TARGET_APPROVAL.md).
 
+M4.7.1.1.4 places an exact no-follow provenance layer before the exceptional
+review path. Mount-point and symbolic-link payloads are validated literally;
+other tags stay bounded opaque observations and are not followed. A readable
+dangling or unsupported link can complete a diagnostic review as ineligible,
+but it cannot be approved or materialized. `ERROR_PATH_NOT_FOUND` is not
+eligibility, and counts unavailable because no complete target inventory was
+possible are reported as unavailable rather than zero. See
+[Windows reparse provenance](WINDOWS_REPARSE_PROVENANCE.md) and
+[source eligibility](STOCK_RUNTIME_SOURCE_ELIGIBILITY.md).
+
 ## Verified materialization
 
 The complete source inventory is measured before mutation. Each regular file
@@ -169,13 +179,18 @@ reviewed external target.
   -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
 
+.\scripts\validate_stock_runtime_candidate_source.ps1 `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
+  -AppManifestPath "F:\SteamLibrary\steamapps\appmanifest_70.acf" `
+  -ExpectedAppBuild 15961492
+
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
-  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life"
 
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
   -ReviewExternalTargets `
-  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
   -ReviewOutputRoot ".\manual-artifacts\stock-runtime-source-review"
 
 .\scripts\approve_stock_runtime_external_targets.ps1 `
@@ -185,11 +200,16 @@ reviewed external target.
     HLCLIENT_APPROVE_REVIEWED_EXTERNAL_TARGETS_V1
 
 .\scripts\prepare_stock_runtime_research_copy.ps1 `
-  -SourceHalfLifeRoot "D:\Steam\steamapps\common\Half-Life" `
+  -SourceHalfLifeRoot "F:\SteamLibrary\steamapps\common\Half-Life" `
   -DestinationHalfLifeRoot "D:\DEV\HLCLIENT-RESEARCH\Half-Life" `
   -ExternalTargetApprovalManifest `
     ".\manual-artifacts\stock-runtime-source-review\<review-id>\external-target-approval.json"
 ```
+
+The validation, approval, and both materialization examples use one source that
+already passed the candidate gate. The current ineligible `D:` source is shown
+only in the read-only topology command here (and in the separate diagnostic
+review guide) and must not be approved or materialized.
 
 Inspection exits zero after a complete safe or unsafe diagnostic. External
 review also exits zero after a complete ineligible diagnostic; that does not

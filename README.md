@@ -116,6 +116,8 @@ single-session run is accepted as reconnect. See
 [first observations](docs/STOCK_RUNTIME_FIRST_OBSERVATIONS.md),
 [external-target review](docs/STOCK_RUNTIME_EXTERNAL_TARGET_REVIEW.md),
 [external-target approval](docs/STOCK_RUNTIME_EXTERNAL_TARGET_APPROVAL.md),
+[Windows reparse provenance](docs/WINDOWS_REPARSE_PROVENANCE.md),
+[source eligibility](docs/STOCK_RUNTIME_SOURCE_ELIGIBILITY.md),
 [stock runtime transcript](docs/GOLDSRC_STOCK_RUNTIME_TRANSCRIPT.md),
 [local-player identity](docs/GOLDSRC_LOCAL_PLAYER_IDENTITY.md),
 [authoritative projection](docs/GOLDSRC_AUTHORITATIVE_STATE_PROJECTION.md) and
@@ -127,6 +129,15 @@ external links still fail closed. Approval is not runtime evidence and does not
 claim that a real review, canary or campaign has succeeded; approved copies use
 the reviewed v3 profile, all new copies use preparation manifest v3, and every
 copy must pass the same stock-free preflight.
+
+M4.7.1.1.4 adds exact no-follow reparse payload diagnostics and a read-only
+candidate-source gate. A readable dangling, missing-volume or unsupported
+target can now produce a completed, path-free ineligible diagnostic without
+being repaired, followed, approved or materialized. `ERROR_PATH_NOT_FOUND` is
+not eligibility, and unavailable target inventory is not reported as zero. If
+the primary installation fails this gate, use a clean secondary Steam
+installation and validate it before creating a research copy. This work adds
+no runtime-message semantics; M4.7.1.2 and stock usercmd remain pending.
 
 The CPU-only production boundary is `--stop-after collision-world`. The
 network-free `hlclient_collision_check` and

@@ -23,6 +23,7 @@ enum class SecureOutputErrorCode {
     destination_exists,
     publish_failed,
     published_file_identity_invalid,
+    published_file_delete_failed,
 };
 
 struct SecureOutputError final {
@@ -32,6 +33,7 @@ struct SecureOutputError final {
 
 struct SecureOutputDirectoryOpenResult;
 struct SecureOutputWriteResult;
+class SecureOutputPublishedFile;
 
 // Keeps the exact output directory and a private delete-on-close child lock
 // open without FILE_SHARE_DELETE. The child prevents replacement/rename of the
@@ -57,6 +59,11 @@ private:
         const SecureOutputDirectory&,
         std::wstring_view,
         std::span<const std::byte>) noexcept;
+    friend SecureOutputWriteResult secure_atomic_write_new(
+        const SecureOutputDirectory&,
+        std::wstring_view,
+        std::span<const std::byte>,
+        SecureOutputPublishedFile&) noexcept;
 
     SecureOutputDirectory(
         std::vector<void*> native_handles,
@@ -69,6 +76,36 @@ private:
     // published to the caller.
     std::vector<void*> native_handles_;
     std::filesystem::path canonical_path_;
+};
+
+// Retains the exact newly published file handle with DELETE access and without
+// FILE_SHARE_DELETE. Callers that need to validate a manifest-last directory
+// shape can therefore keep the published identity pinned through validation,
+// then either close it as committed or mark that exact file delete-on-close.
+class SecureOutputPublishedFile final {
+public:
+    SecureOutputPublishedFile() noexcept = default;
+    SecureOutputPublishedFile(const SecureOutputPublishedFile&) = delete;
+    SecureOutputPublishedFile& operator=(
+        const SecureOutputPublishedFile&) = delete;
+    SecureOutputPublishedFile(SecureOutputPublishedFile&& other) noexcept;
+    SecureOutputPublishedFile& operator=(
+        SecureOutputPublishedFile&& other) noexcept;
+    ~SecureOutputPublishedFile();
+
+    [[nodiscard]] bool valid() const noexcept;
+    void close() noexcept;
+    [[nodiscard]] SecureOutputWriteResult remove_on_close() noexcept;
+
+private:
+    friend SecureOutputWriteResult secure_atomic_write_new(
+        const SecureOutputDirectory&,
+        std::wstring_view,
+        std::span<const std::byte>,
+        SecureOutputPublishedFile&) noexcept;
+
+    explicit SecureOutputPublishedFile(void* native_handle) noexcept;
+    void* native_handle_{nullptr};
 };
 
 struct SecureOutputDirectoryOpenResult final {
@@ -102,6 +139,14 @@ struct SecureOutputWriteResult final {
     std::wstring_view leaf_name,
     std::span<const std::byte> bytes) noexcept;
 
+// Retained-handle overload. `published_file` must be empty. On success it owns
+// the exact renamed handle until close() or remove_on_close().
+[[nodiscard]] SecureOutputWriteResult secure_atomic_write_new(
+    const SecureOutputDirectory& directory,
+    std::wstring_view leaf_name,
+    std::span<const std::byte> bytes,
+    SecureOutputPublishedFile& published_file) noexcept;
+
 [[nodiscard]] constexpr std::string_view to_string(
     const SecureOutputErrorCode code) noexcept
 {
@@ -132,6 +177,8 @@ struct SecureOutputWriteResult final {
         return "publish_failed";
     case SecureOutputErrorCode::published_file_identity_invalid:
         return "published_file_identity_invalid";
+    case SecureOutputErrorCode::published_file_delete_failed:
+        return "published_file_delete_failed";
     }
     return "unknown";
 }
