@@ -563,6 +563,16 @@ function New-FakeCampaignManifest {
     }
 }
 
+function Copy-OrderedFixtureMetadata {
+    param([Collections.Specialized.OrderedDictionary]$Metadata)
+
+    $copy = [ordered]@{}
+    foreach ($entry in $Metadata.GetEnumerator()) {
+        $copy.Add($entry.Key, $entry.Value)
+    }
+    return $copy
+}
+
 function Assert-PendingCampaignSummary {
     param([object]$Values, [string]$ImplementationCommit)
     $expected = [ordered]@{
@@ -822,7 +832,7 @@ if ($beforeManual -ceq 'absent') {
         throw 'Walker capability changed rejected/incomplete classification.'
     }
     $mixedBindingRejections = 0
-    $mixedProfile = $fakeRuns[1].Clone()
+    $mixedProfile = Copy-OrderedFixtureMetadata $fakeRuns[1]
     $mixedProfile.schema = 'hlclient.stock-runtime-research-run.v1'
     $mixedProfile.accepted_transport_run = $false
     $mixedProfile.external_target_profile = 'none'
@@ -831,14 +841,14 @@ if ($beforeManual -ceq 'absent') {
     if ((Invoke-CampaignSummary $fixtureRoot $fixtureCommit).ExitCode -ne 0) {
         $mixedBindingRejections++
     }
-    $mixedCount = $mixedProfile.Clone()
+    $mixedCount = Copy-OrderedFixtureMetadata $mixedProfile
     $mixedCount.external_target_profile = 'reviewed-non-executable-v1'
     $mixedCount.external_target_count = 2
     Write-RetainedJson $fixtureMetadataHandles[1] $mixedCount
     if ((Invoke-CampaignSummary $fixtureRoot $fixtureCommit).ExitCode -ne 0) {
         $mixedBindingRejections++
     }
-    $restoredMetadata = $mixedProfile.Clone()
+    $restoredMetadata = Copy-OrderedFixtureMetadata $mixedProfile
     $restoredMetadata.external_target_profile = 'reviewed-non-executable-v1'
     $restoredMetadata.external_target_count = 1
     Write-RetainedJson $fixtureMetadataHandles[1] $restoredMetadata
