@@ -48,7 +48,7 @@ struct MountPointBuffer final {
     REQUIRE(size > 0U);
     REQUIRE(size < module.size());
     return fs::path{std::wstring_view{module.data(), size}}.parent_path() /
-           (L"hlclient-external-target-approval-test-" +
+           (L"hlclient-extapproval-test-" +
             std::to_wstring(::GetCurrentProcessId()) + L"-" +
             std::to_wstring(
                 std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -162,6 +162,12 @@ void write_libraryfolders70(const fs::path& steamapps_root)
 struct Fixture final {
     Fixture() : root{unique_root()}
     {
+        const auto deepest_secure_output_path =
+            root / L"manual-artifacts" / L"stock-runtime-source-review" /
+            std::wstring(32U, L'0') /
+            (L".hlclient-output-capability-" +
+             std::wstring(32U, L'0') + L".lock");
+        REQUIRE(deepest_secure_output_path.native().size() < MAX_PATH);
         fs::create_directories(source_root());
         fs::create_directories(external_root());
         fs::create_directories(root / L"manual-artifacts");
