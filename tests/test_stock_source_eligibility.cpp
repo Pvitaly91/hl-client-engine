@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -29,12 +30,22 @@ class ExactTemporaryDirectory final {
 public:
     ExactTemporaryDirectory()
     {
-        std::wstring buffer(32'768U, L'\0');
-        const DWORD length = ::GetTempPathW(
-            static_cast<DWORD>(buffer.size()), buffer.data());
-        if (length == 0U || length >= buffer.size()) return;
-        buffer.resize(length);
-        parent_ = fs::path{std::move(buffer)}.lexically_normal();
+        // Hosted TEMP can be expressed through a short-name or reparse
+        // ancestor.  That is correctly rejected by the production exact-root
+        // gate, so keep this profile fixture below the canonical test binary
+        // directory instead of weakening the gate or skipping the assertion.
+        std::array<wchar_t, 32'768U> module{};
+        const DWORD length = ::GetModuleFileNameW(
+            nullptr, module.data(), static_cast<DWORD>(module.size()));
+        if (length == 0U || length >= module.size()) return;
+        std::error_code canonical_error;
+        parent_ = fs::canonical(
+            fs::path{std::wstring_view{module.data(), length}}.parent_path(),
+            canonical_error);
+        if (canonical_error) {
+            parent_.clear();
+            return;
+        }
         static std::atomic_uint32_t ordinal{0U};
         for (std::uint32_t attempt = 0U; attempt < 32U; ++attempt) {
             const auto name = L"hlclient-source-eligibility-test-" +
