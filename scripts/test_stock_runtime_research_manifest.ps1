@@ -453,11 +453,16 @@ try {
     Write-Manifest $v1
     Invoke-ExpectedManifestResult '^Research preparation manifest v1 inventory disagrees'
 
-    $v2Records = @(
+    [string[]]$v2Paths = @('valve', 'hl.exe', 'hlds.exe')
+    [string[]]$v2Records = @(
         'd|valve',
         ('f|hl.exe|1|{0}' -f $clientHash.ToLowerInvariant()),
         ('f|hlds.exe|1|{0}' -f $serverHash.ToLowerInvariant()))
-    [Array]::Sort($v2Records, [StringComparer]::Ordinal)
+    [string[]]$legacyGroupedV2Records = @($v2Records)
+    [Array]::Sort($legacyGroupedV2Records, [StringComparer]::Ordinal)
+    [Array]::Sort($v2Paths, $v2Records, [StringComparer]::Ordinal)
+    $legacyGroupedV2Sha256 = Get-TextSha256 `
+        ((@($legacyGroupedV2Records) -join "`n") + "`n") -Lower
     $v2 = [ordered]@{
         schema = 'hlclient.stock-runtime-research-preparation.v2'
         marker = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
@@ -489,6 +494,14 @@ try {
     Write-Manifest $v2
     Invoke-ExpectedRootAdsRejection 'v2'
     Invoke-ExpectedManifestResult '^stock client version is not accepted'
+
+    $v2.inventory_sha256 = $legacyGroupedV2Sha256
+    Write-Manifest $v2
+    Invoke-ExpectedManifestResult `
+        '^Research preparation manifest v2 inventory disagrees'
+    $v2.inventory_sha256 = Get-TextSha256 `
+        ((@($v2Records) -join "`n") + "`n") -Lower
+    Write-Manifest $v2
 
     [IO.File]::Delete($pendingPath)
     Invoke-ExpectedManifestResult `
@@ -542,6 +555,20 @@ try {
     Write-Manifest $v3
     Invoke-ExpectedRootAdsRejection 'v3'
     Invoke-ExpectedManifestResult '^stock client version is not accepted'
+
+    $v3.source_inventory_sha256 = $legacyGroupedV2Sha256
+    $v3.destination_inventory_sha256 = $legacyGroupedV2Sha256
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^Research preparation manifest v3 inventory disagrees with the tree'
+    $v3.source_inventory_sha256 = $v3InventorySha256
+    $v3.destination_inventory_sha256 = $v3InventorySha256
+
+    $v3.source_inventory_sha256 = '8' * 64
+    Write-Manifest $v3
+    Invoke-ExpectedManifestResult `
+        '^Research preparation manifest v3 inventory disagrees with the tree'
+    $v3.source_inventory_sha256 = $v3InventorySha256
 
     $v3.preparation_profile = 'reviewed-external-targets-v1'
     $v3.approved_external_materialized_link_count = 1

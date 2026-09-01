@@ -12,8 +12,12 @@ Set-StrictMode -Version Latest
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $prepareScript = Join-Path $PSScriptRoot 'prepare_stock_runtime_research_copy.ps1'
+$captureScript = Join-Path $PSScriptRoot 'capture_stock_runtime_state.ps1'
 if (-not (Test-Path -LiteralPath $ResearchCopyToolPath -PathType Leaf)) {
     throw 'Research-copy helper is unavailable.'
+}
+if (-not (Test-Path -LiteralPath $captureScript -PathType Leaf)) {
+    throw 'Stock-runtime capture wrapper is unavailable.'
 }
 
 $temporaryBase = [IO.Path]::GetFullPath((
@@ -34,6 +38,12 @@ if (-not $fixture.StartsWith(
 }
 [IO.Directory]::CreateDirectory($fixture) | Out-Null
 $junctions = [Collections.Generic.List[string]]::new()
+$contractHarness = Join-Path $fixture 'producer-consumer-contract'
+$contractRepository = Join-Path $contractHarness 'repository'
+$contractScripts = Join-Path $contractRepository 'scripts'
+$contractCaptureScript = Join-Path $contractScripts `
+    'capture_stock_runtime_state.ps1'
+$contractCopy = Join-Path $contractHarness 'research-copy'
 
 function New-StockFixture {
     param([string]$Root)
@@ -109,6 +119,32 @@ try {
         throw 'Preparation manifest v3 is invalid.'
     }
 
+    # Exercise the native producer and PowerShell consumer as one contract.
+    # Run an exact copy of the consumer from a synthetic repository so its
+    # sibling research root is disjoint while the fixture stays inside the
+    # writable test-artifact sandbox. Fake launchers ensure the read-only
+    # preflight stops at its version gate without starting stock.
+    [IO.Directory]::CreateDirectory($contractScripts) | Out-Null
+    Copy-Item -LiteralPath $captureScript `
+        -Destination $contractCaptureScript
+    $contractCopyOutput = @(& $prepareScript `
+            -SourceHalfLifeRoot $ordinary `
+            -DestinationHalfLifeRoot $contractCopy `
+            -ResearchCopyToolPath $ResearchCopyToolPath)
+    Assert-Contains $contractCopyOutput '[stock-runtime-prepare] result=success'
+    $contractMessage = ''
+    try {
+        & $contractCaptureScript -ValidateResearchRoot `
+            -ResearchHalfLifeRoot $contractCopy `
+            -ClientPath (Join-Path $contractCopy 'hl.exe') `
+            -HldsPath (Join-Path $contractCopy 'hlds.exe') | Out-Null
+    } catch {
+        $contractMessage = $_.Exception.Message
+    }
+    if ($contractMessage -cnotmatch '^stock client version is not accepted\.$') {
+        throw 'Native preparation manifest did not pass the PowerShell inventory gate.'
+    }
+
     $physicalParent = Join-Path $fixture 'physical-parent'
     $physicalSource = Join-Path $physicalParent 'Half-Life'
     New-StockFixture $physicalSource
@@ -159,6 +195,7 @@ try {
     Write-Output '[research-copy-test] root-junction=passed'
     Write-Output '[research-copy-test] external-target=passed'
     Write-Output '[research-copy-test] v1-marker-v3-manifest=passed'
+    Write-Output '[research-copy-test] producer-consumer-inventory=passed'
     Write-Output '[research-copy-test] result=success'
 } finally {
     foreach ($junction in @($junctions)) {

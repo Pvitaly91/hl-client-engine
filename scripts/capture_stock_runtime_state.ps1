@@ -2132,6 +2132,7 @@ function Assert-LowerSha256Reference {
 function Get-ResearchPreparationInventory {
     param([string]$Root, [object[]]$Items)
     $v1Records = [Collections.Generic.List[string]]::new()
+    $v2Paths = [Collections.Generic.List[string]]::new()
     $v2Records = [Collections.Generic.List[string]]::new()
     [Int64]$totalBytes = 0
     $clientSha256 = $null
@@ -2143,6 +2144,7 @@ function Get-ResearchPreparationInventory {
             $relative -ceq $preparationManifestName) {
             continue
         }
+        [void]$v2Paths.Add($relative)
         $isDirectory =
             ($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0
         if ($isDirectory) {
@@ -2169,8 +2171,15 @@ function Get-ResearchPreparationInventory {
         throw 'Research preparation inventory lacks required launchers.'
     }
     $v1Canonical = @($v1Records | Sort-Object) -join "`n"
+    $v2OrderedPaths = $v2Paths.ToArray()
     $v2Ordered = $v2Records.ToArray()
-    [Array]::Sort($v2Ordered, [StringComparer]::Ordinal)
+    # The native materializer orders structured inventory entries by their
+    # relative path before adding the d|/f| record prefix. Sort parallel keys
+    # and values here so the live-tree verifier consumes that exact contract;
+    # sorting the finished records would incorrectly group every directory
+    # ahead of every file.
+    [Array]::Sort(
+        $v2OrderedPaths, $v2Ordered, [StringComparer]::Ordinal)
     $v2Canonical = if ($v2Ordered.Count -eq 0) { '' } else {
         (@($v2Ordered) -join "`n") + "`n"
     }
