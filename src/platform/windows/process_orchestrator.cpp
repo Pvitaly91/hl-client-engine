@@ -850,16 +850,17 @@ KillOnCloseProcessJob::launch(const OwnedProcessLaunchSpec& spec) noexcept
         SECURITY_ATTRIBUTES null_security{};
         null_security.nLength = sizeof(null_security);
         null_security.bInheritHandle = TRUE;
-        UniqueHandle null_input{::CreateFileW(
-            L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        UniqueHandle null_stream{::CreateFileW(
+            L"NUL", GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             &null_security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-        if (!null_input) {
+        if (!null_stream) {
             return std::pair<OwnedProcess, OwnedProcessLaunchResult>{
                 OwnedProcess{}, OwnedProcessLaunchResult{
                     OwnedProcessErrorCode::startup_attribute_failed,
                     ::GetLastError(), 0U}};
         }
-        std::vector<HANDLE> inherited{null_input.get()};
+        std::vector<HANDLE> inherited{null_stream.get()};
         if (spec.stdout_handle != nullptr &&
             spec.stdout_handle != INVALID_HANDLE_VALUE) {
             inherited.push_back(static_cast<HANDLE>(spec.stdout_handle));
@@ -950,18 +951,18 @@ KillOnCloseProcessJob::launch(const OwnedProcessLaunchSpec& spec) noexcept
         STARTUPINFOEXW startup{};
         startup.StartupInfo.cb = sizeof(startup);
         startup.lpAttributeList = attributes;
-        if (spec.stdout_handle != nullptr || spec.stderr_handle != nullptr) {
-            startup.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-            startup.StartupInfo.hStdOutput =
-                spec.stdout_handle != nullptr
-                    ? static_cast<HANDLE>(spec.stdout_handle)
-                    : static_cast<HANDLE>(spec.stderr_handle);
-            startup.StartupInfo.hStdError =
-                spec.stderr_handle != nullptr
+        startup.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdOutput =
+            spec.stdout_handle != nullptr
+                ? static_cast<HANDLE>(spec.stdout_handle)
+                : spec.stderr_handle != nullptr
                     ? static_cast<HANDLE>(spec.stderr_handle)
-                    : startup.StartupInfo.hStdOutput;
-            startup.StartupInfo.hStdInput = null_input.get();
-        }
+                    : null_stream.get();
+        startup.StartupInfo.hStdError =
+            spec.stderr_handle != nullptr
+                ? static_cast<HANDLE>(spec.stderr_handle)
+                : startup.StartupInfo.hStdOutput;
+        startup.StartupInfo.hStdInput = null_stream.get();
 
         // Allocate the returned owner before creating any OS process. Once an
         // exact suspended child exists, every remaining failure path is

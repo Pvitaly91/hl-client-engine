@@ -52,6 +52,41 @@ private:
     HANDLE value_{nullptr};
 };
 
+class ScopedStandardOutputHandles final {
+public:
+    explicit ScopedStandardOutputHandles(const HANDLE replacement) noexcept
+        : stdout_{::GetStdHandle(STD_OUTPUT_HANDLE)},
+          stderr_{::GetStdHandle(STD_ERROR_HANDLE)}
+    {
+        if (::SetStdHandle(STD_OUTPUT_HANDLE, replacement) != FALSE &&
+            ::SetStdHandle(STD_ERROR_HANDLE, replacement) != FALSE) {
+            active_ = true;
+            return;
+        }
+        static_cast<void>(::SetStdHandle(STD_OUTPUT_HANDLE, stdout_));
+        static_cast<void>(::SetStdHandle(STD_ERROR_HANDLE, stderr_));
+    }
+
+    ~ScopedStandardOutputHandles()
+    {
+        if (active_) {
+            static_cast<void>(::SetStdHandle(STD_OUTPUT_HANDLE, stdout_));
+            static_cast<void>(::SetStdHandle(STD_ERROR_HANDLE, stderr_));
+        }
+    }
+
+    ScopedStandardOutputHandles(const ScopedStandardOutputHandles&) = delete;
+    ScopedStandardOutputHandles& operator=(
+        const ScopedStandardOutputHandles&) = delete;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return active_; }
+
+private:
+    HANDLE stdout_{INVALID_HANDLE_VALUE};
+    HANDLE stderr_{INVALID_HANDLE_VALUE};
+    bool active_{false};
+};
+
 [[nodiscard]] std::filesystem::path sibling(const wchar_t* name)
 {
     std::wstring module(32'768U, L'\0');
@@ -237,6 +272,34 @@ TEST_CASE("Windows command-line quoting follows CreateProcess argv rules",
           L"\"a\\\\\\\"b\"");
     CHECK(windows::quote_windows_command_line_argument(L"ends \\") ==
           L"\"ends \\\\\"" );
+}
+
+TEST_CASE("Owned children without log handles cannot leak status to wrapper stdout",
+          "[platform][windows][stock-runtime][orchestrator][stdout-containment]")
+{
+    const auto server = observe_fake_server();
+    auto leaked_output = windows::BoundedProcessLogCapture::create({});
+    REQUIRE(leaked_output);
+    auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+    REQUIRE(created);
+
+    {
+        ScopedStandardOutputHandles wrapper_output{
+            static_cast<HANDLE>(leaked_output->inherited_write_handle())};
+        REQUIRE(wrapper_output);
+        auto [child, launched] = job.launch(fake_server_spec(
+            server, reserve_then_release_loopback_port(), 25U));
+        REQUIRE(launched);
+        const auto exit_code = child.wait(std::chrono::seconds{2});
+        REQUIRE(exit_code);
+        CHECK(*exit_code == 0U);
+    }
+
+    leaked_output->close_parent_write_handle();
+    const auto captured = leaked_output->finish();
+    REQUIRE(windows::bounded_process_log_snapshot_complete(captured));
+    CHECK(captured.bytes.empty());
+    CHECK(job.active_process_count() == 0U);
 }
 
 TEST_CASE("Bounded log read errors are clean only for EOF or local cancellation",
