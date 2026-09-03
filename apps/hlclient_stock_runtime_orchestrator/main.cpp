@@ -78,7 +78,7 @@ private:
 struct Options final {
     bool validate_config{false};
     bool validate_environment{false};
-    bool pre_campaign_canary{false};
+    std::optional<goldsrc::StockRuntimeCaptureOutputRole> output_role;
     bool confirmation_seen{false};
     HANDLE wrapper_capability_handle{INVALID_HANDLE_VALUE};
     HANDLE wrapper_cleanup_capability_handle{INVALID_HANDLE_VALUE};
@@ -164,15 +164,11 @@ template<typename Integer>
             options.validate_environment = true;
             continue;
         }
-        if (name == L"--pre-campaign-canary") {
-            if (!mark(1U)) return std::nullopt;
-            options.pre_campaign_canary = true;
-            continue;
-        }
         if (index + 1 >= argc) return std::nullopt;
         const std::wstring_view value{argv[++index]};
         std::size_t option = 0U;
-        if (name == L"--confirmation-token") option = 2U;
+        if (name == L"--output-role") option = 1U;
+        else if (name == L"--confirmation-token") option = 2U;
         else if (name == L"--run-root") option = 3U;
         else if (name == L"--research-root") option = 4U;
         else if (name == L"--client") option = 5U;
@@ -207,6 +203,14 @@ template<typename Integer>
         if (!mark(option)) return std::nullopt;
 
         switch (option) {
+        case 1U: {
+            const auto token = narrow_safe_token(value);
+            if (!token) return std::nullopt;
+            options.output_role =
+                goldsrc::parse_stock_runtime_capture_output_role(*token);
+            if (!options.output_role) return std::nullopt;
+            break;
+        }
         case 2U:
             options.confirmation_seen = value == kConfirmationToken;
             if (!options.confirmation_seen) return std::nullopt;
@@ -325,7 +329,7 @@ template<typename Integer>
         return std::nullopt;
     }
     if (options.validate_environment) {
-        if (options.pre_campaign_canary || options.confirmation_seen ||
+        if (options.output_role || options.confirmation_seen ||
             !options.run_root.empty() ||
             !options.scenario.empty() ||
             options.wrapper_capability_handle != INVALID_HANDLE_VALUE ||
@@ -336,7 +340,8 @@ template<typename Integer>
             options.wrapper_process_id != 0U ||
             (!options.game.empty() && options.game != "valve") ||
             options.relay_port == options.server_port) return std::nullopt;
-    } else if (!options.confirmation_seen || options.run_root.empty() ||
+    } else if (!options.output_role || !options.confirmation_seen ||
+               options.run_root.empty() ||
                options.game != "valve" || options.map.empty() ||
                !goldsrc::parse_stock_runtime_capture_scenario(options.scenario) ||
                options.relay_port == 0U || options.server_port == 0U ||
@@ -345,7 +350,8 @@ template<typename Integer>
                options.perturbation.server_packet_ordinal == 0U) {
         return std::nullopt;
     }
-    if (options.pre_campaign_canary &&
+    if (options.output_role ==
+            goldsrc::StockRuntimeCaptureOutputRole::pre_campaign_canary &&
         (options.map != "boot_camp" || options.scenario != "baseline")) {
         return std::nullopt;
     }
@@ -598,7 +604,7 @@ struct EnvironmentResult final {
 
 [[nodiscard]] bool validate_new_run_root(
     const fs::path& run_root,
-    const bool pre_campaign_canary)
+    const goldsrc::StockRuntimeCaptureOutputRole output_role)
 {
     std::error_code error;
     const auto repository = fs::weakly_canonical(fs::current_path(), error);
@@ -607,8 +613,8 @@ struct EnvironmentResult final {
         repository / L"manual-artifacts", error);
     if (error || !fs::is_directory(manual_root, error) || error ||
         has_reparse_component(manual_root)) return false;
-    const auto parent = (manual_root /
-        (pre_campaign_canary ? L"stock-runtime-canary" : L"stock-runtime"))
+    const auto parent = (manual_root / fs::path{std::string{
+        goldsrc::stock_runtime_capture_output_parent_directory(output_role)}})
                             .lexically_normal();
     return !has_reparse_component(parent) && run_root.is_absolute() &&
            run_root.lexically_normal() == run_root &&
@@ -963,7 +969,7 @@ private:
                 std::chrono::steady_clock::now() - started_at).count());
     };
     if (!validate_new_run_root(
-            options.run_root, options.pre_campaign_canary)) {
+            options.run_root, *options.output_role)) {
         summary.failure = "unsafe-run-root";
         finalize_duration();
         return summary;
@@ -1261,6 +1267,7 @@ private:
         L"--server-port", std::to_wstring(options.server_port),
         L"--output-run-root", options.run_root.wstring(),
         L"--precreated-empty-run-root",
+        L"--output-role", to_wide_ascii(goldsrc::to_string(*options.output_role)),
         L"--scenario", to_wide_ascii(options.scenario),
         L"--private-ipv4-loopback-only", L"--one-upstream-socket",
         L"--byte-preserving", L"--no-payload-rewrite",
@@ -2111,7 +2118,8 @@ int wmain(const int argc, wchar_t** argv)
         std::cerr << "Usage: hlclient_stock_runtime_orchestrator "
                       "--validate-environment <static paths> OR "
                       "--confirmation-token HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1 "
-                      "[--pre-campaign-canary] <active options>\n";
+                      "--output-role <normal-campaign-run|pre-campaign-canary> "
+                      "<active options>\n";
         return 2;
     }
     if (options->validate_config) {

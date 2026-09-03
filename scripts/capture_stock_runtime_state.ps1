@@ -4705,6 +4705,11 @@ try {
         '--client', $research.Client, '--server', $research.Server,
         '--relay', $tool, '--isolation-guard', $guardPath,
         '--app-manifest', $manifestPath, '--game', $Game, '--map', $Map,
+        '--output-role', $(if ($PreCampaignCanary) {
+                'pre-campaign-canary'
+            } else {
+                'normal-campaign-run'
+            }),
         '--scenario', $orchestratorScenario, '--relay-port', [string]$RelayPort,
         '--server-port', [string]$ServerPort,
         '--max-duration-seconds', [string]$MaximumDurationSeconds,
@@ -4719,9 +4724,6 @@ try {
         '--max-server-packets', [string]$MaximumServerPackets,
         '--mutation-after-client-packets', [string]$MutationAfterClientPackets,
         '--mutation-after-server-packets', [string]$MutationAfterServerPackets)
-    if ($PreCampaignCanary) {
-        $arguments += '--pre-campaign-canary'
-    }
     $orchestratorResult = Invoke-BoundedOrchestrator $orchestratorPath $arguments `
         ($MaximumDurationSeconds + 90) $wrapperCapability `
         $wrapperCleanupCapability $wrapperJob $wrapperGuardJob `

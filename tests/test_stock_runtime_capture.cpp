@@ -33,6 +33,32 @@ TEST_CASE("Stock runtime capture limits are bounded and cross-validated",
     CHECK_FALSE(goldsrc::validate_stock_runtime_capture_limits(limits));
 }
 
+TEST_CASE("Stock runtime output roles bind only their exact ignored roots",
+          "[goldsrc][stock-runtime][capture][output-role]")
+{
+    const auto normal =
+        goldsrc::parse_stock_runtime_capture_output_role("normal-campaign-run");
+    const auto canary =
+        goldsrc::parse_stock_runtime_capture_output_role("pre-campaign-canary");
+    REQUIRE(normal);
+    REQUIRE(canary);
+    CHECK(*normal ==
+          goldsrc::StockRuntimeCaptureOutputRole::normal_campaign_run);
+    CHECK(*canary ==
+          goldsrc::StockRuntimeCaptureOutputRole::pre_campaign_canary);
+    CHECK(goldsrc::to_string(*normal) == "normal-campaign-run");
+    CHECK(goldsrc::to_string(*canary) == "pre-campaign-canary");
+    CHECK(goldsrc::stock_runtime_capture_output_parent_directory(*normal) ==
+          "stock-runtime");
+    CHECK(goldsrc::stock_runtime_capture_output_parent_directory(*canary) ==
+          "stock-runtime-canary");
+    CHECK_FALSE(
+        goldsrc::parse_stock_runtime_capture_output_role("stock-runtime"));
+    CHECK_FALSE(goldsrc::parse_stock_runtime_capture_output_role(
+        "manual-artifacts/stock-runtime-canary"));
+    CHECK_FALSE(goldsrc::parse_stock_runtime_capture_output_role("canary"));
+}
+
 TEST_CASE("Stock runtime capture counter failures are transactional",
           "[goldsrc][stock-runtime][capture][transactional]")
 {

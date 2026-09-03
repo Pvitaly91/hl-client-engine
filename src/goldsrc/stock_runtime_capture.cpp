@@ -308,6 +308,41 @@ StockRuntimeCaptureLimitValidation validate_stock_runtime_capture_limits(
     return {};
 }
 
+std::optional<StockRuntimeCaptureOutputRole>
+parse_stock_runtime_capture_output_role(const std::string_view value) noexcept
+{
+    if (value == "normal-campaign-run") {
+        return StockRuntimeCaptureOutputRole::normal_campaign_run;
+    }
+    if (value == "pre-campaign-canary") {
+        return StockRuntimeCaptureOutputRole::pre_campaign_canary;
+    }
+    return std::nullopt;
+}
+
+std::string_view to_string(const StockRuntimeCaptureOutputRole role) noexcept
+{
+    switch (role) {
+    case StockRuntimeCaptureOutputRole::normal_campaign_run:
+        return "normal-campaign-run";
+    case StockRuntimeCaptureOutputRole::pre_campaign_canary:
+        return "pre-campaign-canary";
+    }
+    return "unknown";
+}
+
+std::string_view stock_runtime_capture_output_parent_directory(
+    const StockRuntimeCaptureOutputRole role) noexcept
+{
+    switch (role) {
+    case StockRuntimeCaptureOutputRole::normal_campaign_run:
+        return "stock-runtime";
+    case StockRuntimeCaptureOutputRole::pre_campaign_canary:
+        return "stock-runtime-canary";
+    }
+    return {};
+}
+
 std::optional<StockRuntimeCaptureScenario> parse_stock_runtime_capture_scenario(
     const std::string_view value) noexcept
 {

@@ -65,6 +65,18 @@ struct StockRuntimeCaptureLimitValidation final {
 validate_stock_runtime_capture_limits(
     const StockRuntimeCaptureLimits& limits) noexcept;
 
+enum class StockRuntimeCaptureOutputRole {
+    normal_campaign_run,
+    pre_campaign_canary,
+};
+
+[[nodiscard]] std::optional<StockRuntimeCaptureOutputRole>
+parse_stock_runtime_capture_output_role(std::string_view value) noexcept;
+[[nodiscard]] std::string_view to_string(
+    StockRuntimeCaptureOutputRole role) noexcept;
+[[nodiscard]] std::string_view stock_runtime_capture_output_parent_directory(
+    StockRuntimeCaptureOutputRole role) noexcept;
+
 enum class StockRuntimeCaptureScenario {
     baseline,
     idle_runtime,

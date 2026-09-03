@@ -355,6 +355,7 @@ TEST_CASE("Raw stock capture rejects a non-orchestrator parent before side effec
     spec.arguments = {
         L"--listen-port", L"27140", L"--server-port", L"27141",
         L"--output-run-root", output.wstring(), L"--scenario", L"baseline",
+        L"--output-role", L"normal-campaign-run",
         L"--private-ipv4-loopback-only", L"--one-upstream-socket",
         L"--byte-preserving", L"--no-payload-rewrite",
         L"--precreated-empty-run-root", L"--stop-handle",
@@ -400,6 +401,7 @@ TEST_CASE("Active orchestrator rejects direct invocation before side effects",
     spec.stderr_handle = log->inherited_write_handle();
     spec.arguments = {
         L"--confirmation-token", L"HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1",
+        L"--output-role", L"normal-campaign-run",
         L"--run-root", output.wstring(),
         L"--research-root", L"Z:\\hlclient-absent-research",
         L"--client", L"Z:\\hlclient-absent-research\\hl.exe",
@@ -470,6 +472,7 @@ TEST_CASE("Wrapper cleanup capability attests exact exit independently of stdout
         wrapper_guard_job.get(), isolation_release.get()};
     spec.arguments = {
         L"--confirmation-token", L"HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1",
+        L"--output-role", L"normal-campaign-run",
         L"--wrapper-capability-handle", handle_decimal(startup_capability.get()),
         L"--wrapper-cleanup-capability-handle",
         handle_decimal(cleanup_capability.get()),

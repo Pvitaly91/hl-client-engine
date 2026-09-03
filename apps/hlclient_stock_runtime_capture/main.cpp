@@ -53,6 +53,7 @@ constexpr std::string_view kUsage =
     "Usage: hlclient_stock_runtime_capture --validate-config [limit options]\n"
     "   or: hlclient_stock_runtime_capture --listen-port <port> "
     "--server-port <port> --output-run-root <ignored run directory> "
+    "--output-role <normal-campaign-run|pre-campaign-canary> "
     "--scenario <name> [limit options] "
     "--private-ipv4-loopback-only --one-upstream-socket "
     "--byte-preserving --no-payload-rewrite "
@@ -68,6 +69,7 @@ struct Options final {
     std::optional<std::uint16_t> listen_port;
     std::optional<std::uint16_t> server_port;
     std::optional<fs::path> output_run_root;
+    std::optional<goldsrc::StockRuntimeCaptureOutputRole> output_role;
     std::optional<goldsrc::StockRuntimeCaptureScenario> scenario;
     goldsrc::StockRuntimeCaptureLimits limits{};
     goldsrc::StockRuntimeCapturePerturbation perturbation{};
@@ -112,7 +114,7 @@ template<typename Integer>
     const std::span<const std::string_view> arguments)
 {
     Options options;
-    std::array<bool, 27U> seen{};
+    std::array<bool, 28U> seen{};
     const auto mark = [&seen](const std::size_t index) {
         if (seen[index]) {
             return false;
@@ -171,6 +173,7 @@ template<typename Integer>
         else if (argument == "--orchestrator-process-id") option_index = 24U;
         else if (argument == "--reconnect-transition-handle") option_index = 25U;
         else if (argument == "--reconnect-transition-ack-handle") option_index = 26U;
+        else if (argument == "--output-role") option_index = 27U;
         else return std::nullopt;
 
         if (!mark(option_index)) return std::nullopt;
@@ -191,6 +194,10 @@ template<typename Integer>
         } else if (argument == "--scenario") {
             options.scenario = goldsrc::parse_stock_runtime_capture_scenario(value);
             if (!options.scenario) return std::nullopt;
+        } else if (argument == "--output-role") {
+            options.output_role =
+                goldsrc::parse_stock_runtime_capture_output_role(value);
+            if (!options.output_role) return std::nullopt;
         } else if (argument == "--max-duration-ms") {
             std::int64_t parsed{};
             if (!parse_integer(value, parsed)) return std::nullopt;
@@ -261,7 +268,8 @@ template<typename Integer>
     }
     if (options.validate_config) {
         return options.listen_port || options.server_port || options.output_run_root ||
-                       options.scenario || options.private_loopback_only ||
+                       options.output_role || options.scenario ||
+                        options.private_loopback_only ||
                         options.one_upstream_socket || options.byte_preserving ||
                         options.no_payload_rewrite ||
                         options.precreated_empty_run_root ||
@@ -282,9 +290,10 @@ template<typename Integer>
     }
     if (!options.listen_port || !options.server_port ||
         *options.listen_port == *options.server_port || !options.output_run_root ||
-        !options.scenario || !options.private_loopback_only ||
-        !options.one_upstream_socket || !options.byte_preserving ||
-        !options.no_payload_rewrite || !options.precreated_empty_run_root) {
+        !options.output_role || !options.scenario ||
+        !options.private_loopback_only || !options.one_upstream_socket ||
+        !options.byte_preserving || !options.no_payload_rewrite ||
+        !options.precreated_empty_run_root) {
         return std::nullopt;
     }
 #ifdef _WIN32
@@ -469,6 +478,7 @@ template<typename Integer>
 [[nodiscard]] std::optional<fs::path> validate_output_run_root(
     const fs::path& requested,
     const bool precreated_empty_run_root,
+    const goldsrc::StockRuntimeCaptureOutputRole output_role,
     std::string& error)
 {
     std::error_code path_error;
@@ -478,7 +488,9 @@ template<typename Integer>
         return std::nullopt;
     }
     const auto approved = fs::weakly_canonical(
-        repository / "manual-artifacts" / "stock-runtime", path_error);
+        repository / "manual-artifacts" /
+            goldsrc::stock_runtime_capture_output_parent_directory(output_role),
+        path_error);
     if (path_error || !fs::is_directory(approved, path_error) || path_error ||
         has_symlink_component(approved)) {
         error = "approved ignored stock-runtime root is absent or unsafe";
@@ -1075,7 +1087,8 @@ void observe_reconnect_transport(
     return 18;
 #endif
     const auto run_root = validate_output_run_root(
-        *options.output_run_root, options.precreated_empty_run_root, error);
+        *options.output_run_root, options.precreated_empty_run_root,
+        *options.output_role, error);
     if (!run_root) {
         std::cerr << "[stock-runtime-capture] result=unsafe-output-root\n";
         return 3;
