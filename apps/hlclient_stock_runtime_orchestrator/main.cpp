@@ -78,6 +78,7 @@ private:
 struct Options final {
     bool validate_config{false};
     bool validate_environment{false};
+    bool diagnose_server_profile{false};
     std::optional<goldsrc::StockRuntimeCaptureOutputRole> output_role;
     bool confirmation_seen{false};
     HANDLE wrapper_capability_handle{INVALID_HANDLE_VALUE};
@@ -162,6 +163,11 @@ template<typename Integer>
         if (name == L"--validate-environment") {
             if (!mark(0U)) return std::nullopt;
             options.validate_environment = true;
+            continue;
+        }
+        if (name == L"--diagnose-server-profile") {
+            if (!mark(33U)) return std::nullopt;
+            options.diagnose_server_profile = true;
             continue;
         }
         if (index + 1 >= argc) return std::nullopt;
@@ -329,7 +335,8 @@ template<typename Integer>
         return std::nullopt;
     }
     if (options.validate_environment) {
-        if (options.output_role || options.confirmation_seen ||
+        if (options.diagnose_server_profile || options.output_role ||
+            options.confirmation_seen ||
             !options.run_root.empty() ||
             !options.scenario.empty() ||
             options.wrapper_capability_handle != INVALID_HANDLE_VALUE ||
@@ -340,15 +347,28 @@ template<typename Integer>
             options.wrapper_process_id != 0U ||
             (!options.game.empty() && options.game != "valve") ||
             options.relay_port == options.server_port) return std::nullopt;
-    } else if (!options.output_role || !options.confirmation_seen ||
-               options.run_root.empty() ||
-               options.game != "valve" || options.map.empty() ||
-               !goldsrc::parse_stock_runtime_capture_scenario(options.scenario) ||
-               options.relay_port == 0U || options.server_port == 0U ||
-               options.relay_port == options.server_port ||
-               options.perturbation.client_packet_ordinal == 0U ||
-               options.perturbation.server_packet_ordinal == 0U) {
-        return std::nullopt;
+    } else {
+        if (!options.output_role || !options.confirmation_seen ||
+            options.run_root.empty() || options.game != "valve" ||
+            options.map.empty() || options.relay_port == 0U ||
+            options.server_port == 0U ||
+            options.relay_port == options.server_port) {
+            return std::nullopt;
+        }
+        if (options.diagnose_server_profile) {
+            if (*options.output_role != goldsrc::
+                    StockRuntimeCaptureOutputRole::server_profile_diagnostic ||
+                !options.scenario.empty()) {
+                return std::nullopt;
+            }
+        } else if (*options.output_role == goldsrc::
+                       StockRuntimeCaptureOutputRole::server_profile_diagnostic ||
+                   !goldsrc::parse_stock_runtime_capture_scenario(
+                       options.scenario) ||
+                   options.perturbation.client_packet_ordinal == 0U ||
+                   options.perturbation.server_packet_ordinal == 0U) {
+            return std::nullopt;
+        }
     }
     if (options.output_role ==
             goldsrc::StockRuntimeCaptureOutputRole::pre_campaign_canary &&
@@ -877,6 +897,61 @@ struct EnvironmentResult final {
     return output.str();
 }
 
+[[nodiscard]] std::string server_profile_diagnostic_json(
+    const windows::HldsRuntimeProfileDiagnostic& diagnostic)
+{
+    std::ostringstream output;
+    output << "{\n"
+           << "  \"schema\": \"hlclient.stock-runtime-server-profile-diagnostic-staged.v1\",\n"
+           << "  \"parse_status\": \""
+           << windows::to_string(diagnostic.parse_status) << "\",\n"
+           << "  \"mismatch_field\": \""
+           << windows::to_string(diagnostic.mismatch_field) << "\",\n"
+           << "  \"engine_version_status\": \""
+           << windows::to_string(diagnostic.engine_version.status) << "\",\n"
+           << "  \"runtime_mode_status\": \""
+           << windows::to_string(diagnostic.runtime_mode.status) << "\",\n"
+           << "  \"runtime_mode_category\": \""
+           << windows::to_string(diagnostic.runtime_mode_category) << "\",\n"
+           << "  \"game_status\": \""
+           << windows::to_string(diagnostic.game.status) << "\",\n"
+           << "  \"protocol_status\": \""
+           << windows::to_string(diagnostic.protocol.status) << "\",\n"
+           << "  \"build_status\": \""
+           << windows::to_string(diagnostic.build.status) << "\",\n"
+           << "  \"endpoint_address_status\": \""
+           << windows::to_string(diagnostic.endpoint_address.status) << "\",\n"
+           << "  \"endpoint_address_category\": \""
+           << windows::to_string(diagnostic.endpoint_address_category) << "\",\n"
+           << "  \"endpoint_port_status\": \""
+           << windows::to_string(diagnostic.endpoint_port.status) << "\",\n"
+           << "  \"map_status\": \""
+           << windows::to_string(diagnostic.map.status) << "\",\n"
+           << "  \"duplicate_field_count\": "
+           << diagnostic.duplicate_field_count << ",\n"
+           << "  \"process_log_truncated\": "
+           << (diagnostic.process_log_truncated ? "true" : "false") << ",\n"
+           << "  \"observed_byte_count\": "
+           << diagnostic.observed_byte_count << ",\n"
+           << "  \"observed_line_count\": "
+           << diagnostic.observed_line_count;
+    if (diagnostic.observed_engine_version) {
+        output << ",\n  \"observed_engine_version\": \""
+               << windows::to_string(*diagnostic.observed_engine_version)
+               << '"';
+    }
+    if (diagnostic.observed_protocol) {
+        output << ",\n  \"observed_protocol\": "
+               << *diagnostic.observed_protocol;
+    }
+    if (diagnostic.observed_build) {
+        output << ",\n  \"observed_build\": "
+               << *diagnostic.observed_build;
+    }
+    output << "\n}\n";
+    return output.str();
+}
+
 struct ActiveSummary final {
     bool success{false};
     std::string failure{"unknown"};
@@ -889,6 +964,8 @@ struct ActiveSummary final {
     std::size_t connection_generations{1U};
     bool generation_distinct{false};
     std::uint64_t duration_ms{0U};
+    std::optional<windows::HldsRuntimeProfileDiagnostic>
+        server_profile_diagnostic;
 };
 
 class OwnedJobExitBarrier final {
@@ -1212,6 +1289,114 @@ private:
         return summary;
     }
 
+    if (options.diagnose_server_profile) {
+        auto server_log = windows::BoundedProcessLogCapture::create(
+            {64U * 1'024U, 4'096U, 1'024U});
+        if (!server_log) {
+            summary.failure = "server-log-capture-failed";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        windows::OwnedProcessLaunchSpec server_spec;
+        server_spec.executable = environment.server.canonical_path;
+        server_spec.working_directory = options.research_root;
+        server_spec.expected_identity = environment.server;
+        server_spec.stdout_handle = server_log->inherited_write_handle();
+        server_spec.stderr_handle = server_log->inherited_write_handle();
+        server_spec.arguments = {
+            L"-console", L"-game", L"valve", L"-port",
+            std::to_wstring(options.server_port), L"+ip", L"127.0.0.1",
+            L"+map", to_wide_ascii(options.map), L"+maxplayers", L"8",
+            L"+sv_lan", L"1", L"-nomaster", L"+status"};
+        if (!exact_process_snapshot_matches(
+                environment.client, std::span<const std::uint32_t>{},
+                summary.failure) ||
+            !exact_process_snapshot_matches(
+                environment.server, std::span<const std::uint32_t>{},
+                summary.failure)) {
+            finalize_duration();
+            return summary;
+        }
+        auto [server, server_result] = campaign_job.launch(server_spec);
+        if (!server_result) {
+            summary.failure = "server-" +
+                std::string{windows::to_string(server_result.code)};
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        ++summary.processes_started;
+        const std::array<std::uint32_t, 1U> expected_server{
+            server.process_id()};
+        if (!exact_process_snapshot_matches(
+                environment.client, std::span<const std::uint32_t>{},
+                summary.failure) ||
+            !exact_process_snapshot_matches(
+                environment.server, expected_server, summary.failure)) {
+            finalize_duration();
+            return summary;
+        }
+        server_log->close_parent_write_handle();
+        windows::HldsBannerParseResult observation;
+        const auto terminal = [](const windows::HldsBannerParseResult& value) {
+            return value || value.diagnostic.parse_status ==
+                                windows::HldsRuntimeProfileParseStatus::
+                                    profile_mismatch ||
+                   value.diagnostic.parse_status ==
+                       windows::HldsRuntimeProfileParseStatus::malformed ||
+                   value.diagnostic.parse_status ==
+                       windows::HldsRuntimeProfileParseStatus::duplicate_field ||
+                   value.diagnostic.parse_status == windows::
+                       HldsRuntimeProfileParseStatus::process_log_truncated;
+        };
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds{15};
+        while (std::chrono::steady_clock::now() < deadline &&
+               server.running() && guard.running()) {
+            observation = windows::diagnose_required_hlds_runtime_banner(
+                server_log->snapshot(), options.map, options.server_port);
+            if (terminal(observation)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        }
+        summary.server_profile_diagnostic = observation.diagnostic;
+        summary.server_ready = static_cast<bool>(observation);
+        if (!terminal(observation)) {
+            summary.failure = !server.running()
+                ? "server-early-exit" : "server-readiness-timeout";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        auto diagnostic_output =
+            windows::open_secure_output_directory(options.run_root);
+        if (!diagnostic_output || !diagnostic_output.directory ||
+            !write_bounded_file(
+                *diagnostic_output.directory,
+                L"server-profile-diagnostic.staged.json",
+                server_profile_diagnostic_json(observation.diagnostic))) {
+            summary.failure = "server-profile-diagnostic-stage-failed";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        if (observation.code ==
+            windows::HldsBannerParseErrorCode::process_log_truncated) {
+            summary.failure = "server-profile-process-log-truncated";
+            campaign_job.terminate(120U);
+            finalize_duration();
+            return summary;
+        }
+        // A completed diagnostic is operationally successful even when the
+        // strict expected profile is unsupported. The typed profile result is
+        // published separately and the client-launch branch is unreachable.
+        summary.success = true;
+        summary.failure = "none";
+        campaign_job.terminate(120U);
+        finalize_duration();
+        return summary;
+    }
+
     auto relay_log = windows::BoundedProcessLogCapture::create({});
     if (!relay_log) {
         summary.failure = "relay-log-capture-failed";
@@ -1415,11 +1600,18 @@ private:
     while (std::chrono::steady_clock::now() < server_deadline && server.running() &&
            relay.running() && guard.running()) {
         const auto snapshot = server_log->snapshot();
-        if (snapshot.capture_failed || snapshot.byte_truncated ||
-            snapshot.line_count_truncated || snapshot.line_length_truncated) break;
-        server_profile = windows::parse_required_hlds_runtime_banner(
-            snapshot.bytes, options.map, options.server_port);
-        if (server_profile) break;
+        server_profile = windows::diagnose_required_hlds_runtime_banner(
+            snapshot, options.map, options.server_port);
+        if (server_profile ||
+            server_profile.code ==
+                windows::HldsBannerParseErrorCode::profile_mismatch ||
+            server_profile.code == windows::HldsBannerParseErrorCode::malformed ||
+            server_profile.code ==
+                windows::HldsBannerParseErrorCode::duplicate_field ||
+            server_profile.code ==
+                windows::HldsBannerParseErrorCode::process_log_truncated) {
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds{50});
     }
     summary.server_ready = static_cast<bool>(server_profile);
@@ -1428,13 +1620,18 @@ private:
             ? windows::StockRuntimeStartupEvent::server_early_exit
             : server_profile.code == windows::HldsBannerParseErrorCode::profile_mismatch ||
                     server_profile.code == windows::HldsBannerParseErrorCode::malformed ||
-                    server_profile.code == windows::HldsBannerParseErrorCode::duplicate_field
+                    server_profile.code == windows::HldsBannerParseErrorCode::duplicate_field ||
+                    server_profile.code == windows::HldsBannerParseErrorCode::process_log_truncated
                 ? windows::StockRuntimeStartupEvent::server_banner_mismatch
                 : windows::StockRuntimeStartupEvent::server_readiness_timeout;
         static_cast<void>(windows::apply_stock_runtime_startup_event(
             startup, event));
-        summary.failure = "server-profile-" +
-            std::string{windows::to_string(server_profile.code)};
+        summary.failure = server_profile.code ==
+                windows::HldsBannerParseErrorCode::profile_mismatch
+            ? "server-profile-" + std::string{windows::to_string(
+                  server_profile.diagnostic.mismatch_field)} + "-mismatch"
+            : "server-profile-" +
+                  std::string{windows::to_string(server_profile.code)};
         campaign_job.terminate(120U);
         finalize_duration();
         return summary;
@@ -2117,8 +2314,9 @@ int wmain(const int argc, wchar_t** argv)
     if (!options) {
         std::cerr << "Usage: hlclient_stock_runtime_orchestrator "
                       "--validate-environment <static paths> OR "
+                      "--diagnose-server-profile "
                       "--confirmation-token HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1 "
-                      "--output-role <normal-campaign-run|pre-campaign-canary> "
+                      "--output-role <normal-campaign-run|pre-campaign-canary|server-profile-diagnostic> "
                       "<active options>\n";
         return 2;
     }
@@ -2226,6 +2424,62 @@ int wmain(const int argc, wchar_t** argv)
                     options->scenario == "reconnect"
                         ? "evidence-pending" : "not-applicable");
     print_key_value("job-cleanup", summary.cleanup_exact ? "exact" : "incomplete");
+    if (options->diagnose_server_profile &&
+        summary.server_profile_diagnostic) {
+        const auto& diagnostic = *summary.server_profile_diagnostic;
+        print_key_value("server-profile-parse-status", std::string{
+            windows::to_string(diagnostic.parse_status)});
+        print_key_value("server-profile-mismatch-field", std::string{
+            windows::to_string(diagnostic.mismatch_field)});
+        print_key_value("server-profile-engine-version-status", std::string{
+            windows::to_string(diagnostic.engine_version.status)});
+        print_key_value("server-profile-runtime-mode-status", std::string{
+            windows::to_string(diagnostic.runtime_mode.status)});
+        print_key_value("server-profile-game-status", std::string{
+            windows::to_string(diagnostic.game.status)});
+        print_key_value("server-profile-protocol-status", std::string{
+            windows::to_string(diagnostic.protocol.status)});
+        print_key_value("server-profile-build-status", std::string{
+            windows::to_string(diagnostic.build.status)});
+        print_key_value("server-profile-endpoint-address-status", std::string{
+            windows::to_string(diagnostic.endpoint_address.status)});
+        print_key_value("server-profile-endpoint-port-status", std::string{
+            windows::to_string(diagnostic.endpoint_port.status)});
+        print_key_value("server-profile-map-status", std::string{
+            windows::to_string(diagnostic.map.status)});
+        print_key_value("server-profile-duplicate-fields",
+                        std::to_string(diagnostic.duplicate_field_count));
+        print_key_value("server-profile-process-log-truncated",
+                        diagnostic.process_log_truncated ? "true" : "false");
+        print_key_value("server-profile-endpoint-address-category", std::string{
+            windows::to_string(diagnostic.endpoint_address_category)});
+        print_key_value("server-profile-runtime-mode-category", std::string{
+            windows::to_string(diagnostic.runtime_mode_category)});
+        print_key_value("server-profile-observed-byte-count",
+                        std::to_string(diagnostic.observed_byte_count));
+        print_key_value("server-profile-observed-line-count",
+                        std::to_string(diagnostic.observed_line_count));
+        if (diagnostic.observed_engine_version) {
+            print_key_value("server-profile-observed-engine-version",
+                windows::to_string(*diagnostic.observed_engine_version));
+        }
+        if (diagnostic.observed_protocol) {
+            print_key_value("server-profile-observed-protocol",
+                            std::to_string(*diagnostic.observed_protocol));
+        }
+        if (diagnostic.observed_build) {
+            print_key_value("server-profile-observed-build",
+                            std::to_string(*diagnostic.observed_build));
+        }
+        const auto diagnostic_result = diagnostic.parse_status ==
+                windows::HldsRuntimeProfileParseStatus::valid
+            ? "supported"
+            : diagnostic.parse_status == windows::
+                    HldsRuntimeProfileParseStatus::profile_mismatch
+                ? "stock_server_profile_not_supported"
+                : windows::to_string(diagnostic.parse_status);
+        print_key_value("server-profile-result", diagnostic_result);
+    }
     print_key_value("result", summary.success ? "success" : "failed");
     return summary.success ? 0 : 1;
 }

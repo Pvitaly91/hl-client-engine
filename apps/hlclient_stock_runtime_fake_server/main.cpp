@@ -39,7 +39,9 @@ struct Options final {
     std::uint32_t emit_bytes{0U};
     std::uint32_t exit_code{0U};
     std::uint32_t ready_delay_ms{0U};
+    std::uint32_t profile_chunk_delay_ms{25U};
     bool suppress_ready{false};
+    std::optional<std::string> profile_variant;
     std::optional<std::filesystem::path> create_file;
     std::optional<std::filesystem::path> attempt_child_create_file;
 };
@@ -76,6 +78,21 @@ struct Options final {
         } else if (name == "--ready-delay-ms") {
             if (!parse_integer(value, options.ready_delay_ms) ||
                 options.ready_delay_ms > 30'000U) return std::nullopt;
+        } else if (name == "--profile-chunk-delay-ms") {
+            if (!parse_integer(value, options.profile_chunk_delay_ms) ||
+                options.profile_chunk_delay_ms > 30'000U) return std::nullopt;
+        } else if (name == "--hlds-profile-variant" &&
+                   !options.profile_variant) {
+            constexpr std::array<std::string_view, 14U> variants{
+                "valid", "engine-version-mismatch", "runtime-mode-mismatch",
+                "game-mismatch", "protocol-mismatch", "build-mismatch",
+                "endpoint-address-mismatch", "endpoint-port-mismatch",
+                "map-mismatch", "partial-chunks", "late-completion",
+                "duplicate-field", "exit-before-profile", "log-truncation"};
+            if (std::ranges::find(variants, value) == variants.end()) {
+                return std::nullopt;
+            }
+            options.profile_variant = std::string{value};
         } else if (name == "--create-file" && !options.create_file) {
             options.create_file = std::filesystem::path{value};
         } else if (name == "--attempt-child-create-file" &&
@@ -137,6 +154,57 @@ int main(const int argc, char** argv)
         }
         return true;
     };
+    const auto write_profile = [&]() {
+        if (!options->profile_variant) return true;
+        const auto& variant = *options->profile_variant;
+        if (variant == "exit-before-profile") return true;
+        const std::string engine = variant == "engine-version-mismatch"
+            ? "1.1.2.3" : "1.1.2.2";
+        const std::string mode = variant == "runtime-mode-mismatch"
+            ? "Steam" : "Stdio";
+        const std::string game = variant == "game-mismatch"
+            ? "gearbox" : "valve";
+        const std::string protocol = variant == "protocol-mismatch"
+            ? "47" : "48";
+        const std::string build = variant == "build-mismatch"
+            ? "10211" : "10210";
+        const std::string address = variant == "endpoint-address-mismatch"
+            ? "127.0.0.2" : "127.0.0.1";
+        const auto endpoint_port = variant == "endpoint-port-mismatch"
+            ? static_cast<std::uint16_t>(options->port == 65'535U
+                  ? options->port - 1U : options->port + 1U)
+            : options->port;
+        const std::string map = variant == "map-mismatch"
+            ? "crossfire" : "boot_camp";
+        std::string banner = "Protocol version " + protocol + "\r\n" +
+            "Exe version " + engine + "/" + mode + " (" + game + ")\r\n" +
+            "Exe build: 00:00:00 Jan 1 2026 (" + build + ")\r\n" +
+            "Server IP address " + address + ":" +
+            std::to_string(endpoint_port) + "\r\n" +
+            "map     : " + map + " at: 0 x, 0 y, 0 z\r\n";
+        if (variant == "duplicate-field") {
+            banner += "Protocol version 48\r\n";
+        }
+        if (variant == "log-truncation") {
+            banner.insert(0U, 128U * 1'024U, 'T');
+            banner.insert(128U * 1'024U, "\n");
+        }
+        if (variant == "partial-chunks") {
+            const auto split = banner.find(".2/Stdio");
+            if (split == std::string::npos ||
+                !write_all(std::string_view{banner}.substr(0U, split))) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{
+                options->profile_chunk_delay_ms});
+            return write_all(std::string_view{banner}.substr(split));
+        }
+        if (variant == "late-completion") {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds{options->ready_delay_ms});
+        }
+        return write_all(banner);
+    };
     if (options->attempt_child_create_file) {
         std::wstring executable(32'768U, L'\0');
         const DWORD executable_size = ::GetModuleFileNameW(
@@ -188,7 +256,18 @@ int main(const int argc, char** argv)
         static_cast<void>(::WSACleanup());
         return 5;
     }
-    if (!options->suppress_ready) {
+    if (options->profile_variant) {
+        if (!write_profile()) {
+            static_cast<void>(::closesocket(socket));
+            static_cast<void>(::WSACleanup());
+            return 5;
+        }
+        if (*options->profile_variant == "exit-before-profile") {
+            static_cast<void>(::closesocket(socket));
+            static_cast<void>(::WSACleanup());
+            return 7;
+        }
+    } else if (!options->suppress_ready) {
         std::this_thread::sleep_for(
             std::chrono::milliseconds{options->ready_delay_ms});
         if (!write_all(

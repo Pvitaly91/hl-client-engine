@@ -30,26 +30,36 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [switch]$ValidateActiveCaptureEnvironment,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [switch]$DiagnoseServerProfile,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnosticSelfTest')]
+    [switch]$ValidateServerProfileDiagnosticPolicy,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$ResearchHalfLifeRoot,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$ClientPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$HldsPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$CaptureToolPath,
 
@@ -57,16 +67,19 @@ param(
     [switch]$EnableActiveCapture,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [AllowEmptyString()]
     [string]$ConfirmActiveCapture,
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$NetworkIsolationGuardPath,
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$AppManifestPath,
 
@@ -76,10 +89,12 @@ param(
     [string]$ExpectedCaptureToolSha256,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateSet('valve')]
     [string]$Game,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateSet('boot_camp', 'crossfire', 'stalkyard')]
     [string]$Map,
 
@@ -100,15 +115,18 @@ param(
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(ParameterSetName = 'ActivePreflight')]
+    [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateRange(1024, 65534)]
     [int]$RelayPort = 27140,
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(ParameterSetName = 'ActivePreflight')]
+    [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateRange(1024, 65534)]
     [int]$ServerPort = 27141,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$OutputRoot = '.\manual-artifacts\stock-runtime',
 
@@ -116,6 +134,7 @@ param(
     [switch]$PreCampaignCanary,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
     [ValidateRange(5, 300)]
     [int]$MaximumDurationSeconds = 45,
 
@@ -172,12 +191,16 @@ $manualRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot 'manual-artifact
 $requiredOutputRoot = [IO.Path]::GetFullPath((Join-Path $manualRoot 'stock-runtime')).TrimEnd('\', '/')
 $requiredCanaryOutputRoot = [IO.Path]::GetFullPath(
     (Join-Path $manualRoot 'stock-runtime-canary')).TrimEnd('\', '/')
+$requiredServerProfileDiagnosticRoot = [IO.Path]::GetFullPath(
+    (Join-Path $manualRoot 'stock-runtime-server-profile-diagnostic')).TrimEnd('\', '/')
 $markerName = '.hlclient-research-isolated'
 $markerText = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
 $pendingMarkerName = '.hlclient-research-pending'
 $preparationManifestName = '.hlclient-research-preparation.json'
 $externalApprovalName = 'external-target-approval.json'
 $activeCaptureToken = 'HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1'
+$serverProfileDiagnosticMode =
+    $PSCmdlet.ParameterSetName -ceq 'ServerProfileDiagnostic'
 $maximumEntries = 199999
 $maximumResearchBytes = [Int64]17179869184
 $maximumSteamManifestBytes = 1048576
@@ -193,8 +216,11 @@ $protectedRoots = @(
 # inspect any caller-supplied path and occurs before output, backup, socket,
 # process or WFP mutation. The confirmation value has no environment/config
 # fallback and Ordinal comparison is case-sensitive.
-if ($PSCmdlet.ParameterSetName -eq 'Capture' -and
-    (-not $EnableActiveCapture -or $ConfirmActiveCapture -cne $activeCaptureToken)) {
+if (($PSCmdlet.ParameterSetName -eq 'Capture' -and
+        (-not $EnableActiveCapture -or
+         $ConfirmActiveCapture -cne $activeCaptureToken)) -or
+    ($PSCmdlet.ParameterSetName -eq 'ServerProfileDiagnostic' -and
+        $ConfirmActiveCapture -cne $activeCaptureToken)) {
     Write-Output '[stock-runtime-capture] active-capture=explicit-opt-in-required'
     Write-Output '[stock-runtime-capture] processes-started=0'
     Write-Output '[stock-runtime-capture] files-written=0'
@@ -1899,7 +1925,8 @@ function Close-RestorationGuardCapabilities {
 function New-RunDirectoryCapability {
     param([string]$RunRoot)
     foreach ($leaf in @('raw', 'logs', 'version-observation.staged.json',
-            'isolation-attestation.staged.json')) {
+            'isolation-attestation.staged.json',
+            'server-profile-diagnostic.staged.json')) {
         $anchor = Join-Path $RunRoot $leaf
         if (Test-Path -LiteralPath $anchor) {
             Assert-NoReparsePointInExistingPath $anchor 'capture run identity anchor'
@@ -3111,7 +3138,22 @@ function Invoke-BoundedOrchestrator {
             'raw-datagrams', 'sequenced-c2s', 'sequenced-s2c', 'duration-ms',
             'preflight-schema', 'elevation-status', 'app-manifest',
             'wfp-session', 'timestamp-category', 'connection-generations',
-            'generation-distinct', 'candidate-conflict')
+            'generation-distinct', 'candidate-conflict',
+            'server-profile-parse-status', 'server-profile-mismatch-field',
+            'server-profile-engine-version-status',
+            'server-profile-runtime-mode-status', 'server-profile-game-status',
+            'server-profile-protocol-status', 'server-profile-build-status',
+            'server-profile-endpoint-address-status',
+            'server-profile-endpoint-port-status', 'server-profile-map-status',
+            'server-profile-duplicate-fields',
+            'server-profile-process-log-truncated',
+            'server-profile-endpoint-address-category',
+            'server-profile-runtime-mode-category',
+            'server-profile-observed-byte-count',
+            'server-profile-observed-line-count',
+            'server-profile-observed-engine-version',
+            'server-profile-observed-protocol',
+            'server-profile-observed-build', 'server-profile-result')
         $values = [Collections.Generic.Dictionary[string, string]]::new(
             [StringComparer]::Ordinal)
         foreach ($line in $stdoutLines) {
@@ -3263,6 +3305,36 @@ function Assert-OrchestratorValue {
         $Result.Values[$Name] -cne $Expected) {
         throw "Project orchestrator did not attest $Name=$Expected."
     }
+}
+
+function Write-StockServerProfileDiagnosticPublicOutput {
+    param([Collections.Generic.Dictionary[string, string]]$Values)
+    Write-Output ("[stock-server-profile] parse-status={0}" -f
+        $Values['server-profile-parse-status'])
+    Write-Output ("[stock-server-profile] mismatch-field={0}" -f
+        $Values['server-profile-mismatch-field'])
+    foreach ($field in @(
+            'engine-version', 'runtime-mode', 'game', 'protocol', 'build',
+            'endpoint-address', 'endpoint-port', 'map')) {
+        Write-Output ("[stock-server-profile] {0}-status={1}" -f $field,
+            $Values['server-profile-' + $field + '-status'])
+    }
+    Write-Output ("[stock-server-profile] duplicate-fields={0}" -f
+        $Values['server-profile-duplicate-fields'])
+    if ($Values.ContainsKey('server-profile-observed-engine-version')) {
+        Write-Output ("[stock-server-profile] observed-engine-version={0}" -f
+            $Values['server-profile-observed-engine-version'])
+    }
+    if ($Values.ContainsKey('server-profile-observed-protocol')) {
+        Write-Output ("[stock-server-profile] observed-protocol={0}" -f
+            $Values['server-profile-observed-protocol'])
+    }
+    if ($Values.ContainsKey('server-profile-observed-build')) {
+        Write-Output ("[stock-server-profile] observed-build={0}" -f
+            $Values['server-profile-observed-build'])
+    }
+    Write-Output ("[stock-server-profile] result={0}" -f
+        $Values['server-profile-result'])
 }
 
 function Get-ExternalSteamStateSnapshot {
@@ -4373,6 +4445,81 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
     return
 }
 
+if ($PSCmdlet.ParameterSetName -eq 'ServerProfileDiagnosticSelfTest') {
+    $values = [Collections.Generic.Dictionary[string, string]]::new(
+        [StringComparer]::Ordinal)
+    foreach ($entry in @(
+            @('server-profile-parse-status', 'profile-mismatch'),
+            @('server-profile-mismatch-field', 'build'),
+            @('server-profile-engine-version-status', 'match'),
+            @('server-profile-runtime-mode-status', 'match'),
+            @('server-profile-game-status', 'match'),
+            @('server-profile-protocol-status', 'match'),
+            @('server-profile-build-status', 'mismatch'),
+            @('server-profile-endpoint-address-status', 'absent'),
+            @('server-profile-endpoint-port-status', 'absent'),
+            @('server-profile-map-status', 'absent'),
+            @('server-profile-duplicate-fields', '0'),
+            @('server-profile-observed-engine-version', '1.1.2.2'),
+            @('server-profile-observed-protocol', '48'),
+            @('server-profile-observed-build', '10211'),
+            @('server-profile-result', 'stock_server_profile_not_supported'))) {
+        $values.Add($entry[0], $entry[1])
+    }
+    $lines = @(Write-StockServerProfileDiagnosticPublicOutput $values)
+    $expectedKeys = @(
+        'parse-status', 'mismatch-field', 'engine-version-status',
+        'runtime-mode-status', 'game-status', 'protocol-status',
+        'build-status', 'endpoint-address-status', 'endpoint-port-status',
+        'map-status', 'duplicate-fields', 'observed-engine-version',
+        'observed-protocol', 'observed-build', 'result')
+    $seen = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal)
+    foreach ($line in $lines) {
+        if ($line -cnotmatch
+            '^\[stock-server-profile\] (?<key>[a-z-]+)=(?<value>[A-Za-z0-9_.-]+)$' -or
+            $expectedKeys -cnotcontains $Matches.key -or
+            -not $seen.Add($Matches.key)) {
+            throw 'Server profile public diagnostic output escaped its allowlist.'
+        }
+    }
+    if ($seen.Count -ne $expectedKeys.Count -or
+        $lines -contains
+            '[stock-server-profile] mismatch-field=profile-mismatch' -or
+        $lines -contains
+            '[stock-server-profile] result=server-profile-profile-mismatch' -or
+        $lines -notcontains '[stock-server-profile] mismatch-field=build' -or
+        $lines -notcontains
+            '[stock-server-profile] result=stock_server_profile_not_supported' -or
+        ($lines -join "`n") -match
+            '(?i)Exe version|Server IP address|map     :|Jan [0-9]|:\\') {
+        throw 'Server profile public diagnostic contract is incomplete or leaked raw output.'
+    }
+    $failureValues = [Collections.Generic.Dictionary[string, string]]::new(
+        $values, [StringComparer]::Ordinal)
+    $failureValues['server-profile-result'] = 'external_steam_state_changed'
+    $failureLines = @(
+        Write-StockServerProfileDiagnosticPublicOutput $failureValues)
+    if ($failureLines -notcontains
+            '[stock-server-profile] result=external_steam_state_changed' -or
+        $failureLines -contains
+            '[stock-server-profile] result=stock_server_profile_not_supported') {
+        throw 'Server profile transaction failure did not replace the profile result.'
+    }
+    if ($requiredServerProfileDiagnosticRoot -ieq $requiredOutputRoot -or
+        $requiredServerProfileDiagnosticRoot -ieq $requiredCanaryOutputRoot -or
+        [IO.Path]::GetFileName($requiredServerProfileDiagnosticRoot) -cne
+            'stock-runtime-server-profile-diagnostic') {
+        throw 'Server profile diagnostic root is campaign/evidence eligible.'
+    }
+    Write-Output '[stock-server-profile-test] typed-mismatch=propagated'
+    Write-Output '[stock-server-profile-test] redundant-category=absent'
+    Write-Output '[stock-server-profile-test] raw-output=contained'
+    Write-Output '[stock-server-profile-test] diagnostic-root=separate'
+    Write-Output '[stock-server-profile-test] result=success'
+    return
+}
+
 if ($PSCmdlet.ParameterSetName -eq 'Preflight') {
     $research = Resolve-IsolatedResearchRoot
     [void](Get-ResearchSnapshot $research.Root)
@@ -4495,7 +4642,9 @@ $scenarioAliases = @{
     'duplicate-server-runtime' = 'duplicate-server-to-client-transport-ordinal'
     'reorder-server-runtime' = 'reorder-server-to-client-transport-ordinal'
 }
-$canonicalScenario = if ($scenarioAliases.ContainsKey($Scenario)) {
+$canonicalScenario = if ($serverProfileDiagnosticMode) {
+    'server-profile-diagnostic'
+} elseif ($scenarioAliases.ContainsKey($Scenario)) {
     $scenarioAliases[$Scenario]
 } else { $Scenario }
 $orchestratorScenario = switch ($canonicalScenario) {
@@ -4505,7 +4654,8 @@ $orchestratorScenario = switch ($canonicalScenario) {
     default { $canonicalScenario }
 }
 
-if (($canonicalScenario -ceq 'baseline' -or
+if (-not $serverProfileDiagnosticMode -and
+    ($canonicalScenario -ceq 'baseline' -or
         $canonicalScenario -ceq 'idle-runtime') -and
     $MaximumDurationSeconds -lt 30) {
     Write-Output '[stock-runtime-capture] active-capture=blocked'
@@ -4515,7 +4665,8 @@ if (($canonicalScenario -ceq 'baseline' -or
     throw 'Accepted baseline and idle-runtime observations require a requested duration of at least 30 seconds.'
 }
 
-if ($canonicalScenario -ceq 'reconnect' -and
+if (-not $serverProfileDiagnosticMode -and
+    $canonicalScenario -ceq 'reconnect' -and
     $MaximumDurationSeconds -lt 60) {
     Write-Output '[stock-runtime-capture] active-capture=blocked'
     Write-Output '[stock-runtime-capture] failure-category=minimum_reconnect_duration_required'
@@ -4545,7 +4696,8 @@ $activeScenarios = @(
     'drop-server-to-client-transport-ordinal',
     'duplicate-server-to-client-transport-ordinal',
     'reorder-server-to-client-transport-ordinal')
-if ($activeScenarios -cnotcontains $canonicalScenario) {
+if (-not $serverProfileDiagnosticMode -and
+    $activeScenarios -cnotcontains $canonicalScenario) {
     throw 'The requested scenario is outside the M4.7.1.1 active-capture allowlist; no run was started.'
 }
 try {
@@ -4572,7 +4724,11 @@ Write-Output ("[stock-runtime-capture] external-target-profile={0}" -f
 Write-Output ("[stock-runtime-capture] external-target-count={0}" -f
     $research.ExternalTargetCount)
 $output = [IO.Path]::GetFullPath($OutputRoot).TrimEnd('\', '/')
-if ($PreCampaignCanary) {
+if ($serverProfileDiagnosticMode) {
+    if ($output -ine $requiredServerProfileDiagnosticRoot) {
+        throw 'ServerProfileDiagnostic requires the exact repository manual-artifacts/stock-runtime-server-profile-diagnostic root.'
+    }
+} elseif ($PreCampaignCanary) {
     if ($canonicalScenario -cne 'baseline' -or $Map -cne 'boot_camp' -or
         $output -ine $requiredCanaryOutputRoot) {
         throw 'PreCampaignCanary requires exact boot_camp/baseline and the repository manual-artifacts/stock-runtime-canary root.'
@@ -4705,12 +4861,14 @@ try {
         '--client', $research.Client, '--server', $research.Server,
         '--relay', $tool, '--isolation-guard', $guardPath,
         '--app-manifest', $manifestPath, '--game', $Game, '--map', $Map,
-        '--output-role', $(if ($PreCampaignCanary) {
+        '--output-role', $(if ($serverProfileDiagnosticMode) {
+                'server-profile-diagnostic'
+            } elseif ($PreCampaignCanary) {
                 'pre-campaign-canary'
             } else {
                 'normal-campaign-run'
             }),
-        '--scenario', $orchestratorScenario, '--relay-port', [string]$RelayPort,
+        '--relay-port', [string]$RelayPort,
         '--server-port', [string]$ServerPort,
         '--max-duration-seconds', [string]$MaximumDurationSeconds,
         '--max-datagrams', [string]$MaximumDatagrams,
@@ -4724,6 +4882,11 @@ try {
         '--max-server-packets', [string]$MaximumServerPackets,
         '--mutation-after-client-packets', [string]$MutationAfterClientPackets,
         '--mutation-after-server-packets', [string]$MutationAfterServerPackets)
+    if ($serverProfileDiagnosticMode) {
+        $arguments += '--diagnose-server-profile'
+    } else {
+        $arguments += @('--scenario', $orchestratorScenario)
+    }
     $orchestratorResult = Invoke-BoundedOrchestrator $orchestratorPath $arguments `
         ($MaximumDurationSeconds + 90) $wrapperCapability `
         $wrapperCleanupCapability $wrapperJob $wrapperGuardJob `
@@ -4739,16 +4902,64 @@ try {
     Assert-OrchestratorValue $orchestratorResult orchestrator success
     Assert-OrchestratorValue $orchestratorResult failure-category none
     Assert-OrchestratorValue $orchestratorResult result success
-    Assert-OrchestratorValue $orchestratorResult relay-ready true
-    Assert-OrchestratorValue $orchestratorResult server-ready true
-    Assert-OrchestratorValue $orchestratorResult client-ready true
     Assert-OrchestratorValue $orchestratorResult job-cleanup exact
-    Assert-OrchestratorValue $orchestratorResult bounded-transport-complete true
-    if ($canonicalScenario -ceq 'reconnect') {
+    if ($serverProfileDiagnosticMode) {
+        Assert-OrchestratorValue $orchestratorResult relay-ready false
+        Assert-OrchestratorValue $orchestratorResult client-ready false
+        Assert-OrchestratorValue $orchestratorResult bounded-transport-complete false
+        $requiredProfileKeys = @(
+            'server-profile-parse-status', 'server-profile-mismatch-field',
+            'server-profile-engine-version-status',
+            'server-profile-runtime-mode-status', 'server-profile-game-status',
+            'server-profile-protocol-status', 'server-profile-build-status',
+            'server-profile-endpoint-address-status',
+            'server-profile-endpoint-port-status', 'server-profile-map-status',
+            'server-profile-duplicate-fields',
+            'server-profile-process-log-truncated',
+            'server-profile-endpoint-address-category',
+            'server-profile-runtime-mode-category',
+            'server-profile-observed-byte-count',
+            'server-profile-observed-line-count', 'server-profile-result')
+        foreach ($profileKey in $requiredProfileKeys) {
+            if (-not $orchestratorResult.Values.ContainsKey($profileKey)) {
+                throw "Server profile diagnostic omitted $profileKey."
+            }
+        }
+        if (@('valid', 'profile-mismatch', 'malformed', 'duplicate-field') -cnotcontains
+                $orchestratorResult.Values['server-profile-parse-status'] -or
+            @('match', 'mismatch', 'absent', 'malformed') -cnotcontains
+                $orchestratorResult.Values['server-profile-engine-version-status'] -or
+            @('match', 'mismatch', 'absent', 'malformed') -cnotcontains
+                $orchestratorResult.Values['server-profile-runtime-mode-status'] -or
+            @('match', 'mismatch', 'absent', 'malformed') -cnotcontains
+                $orchestratorResult.Values['server-profile-game-status'] -or
+            @('match', 'mismatch', 'absent', 'malformed') -cnotcontains
+                $orchestratorResult.Values['server-profile-protocol-status'] -or
+            @('match', 'mismatch', 'absent', 'malformed') -cnotcontains
+                $orchestratorResult.Values['server-profile-build-status'] -or
+            @('match', 'mismatch', 'absent', 'malformed') -cnotcontains
+                $orchestratorResult.Values['server-profile-endpoint-address-status'] -or
+            @('match', 'mismatch', 'absent', 'malformed') -cnotcontains
+                $orchestratorResult.Values['server-profile-endpoint-port-status'] -or
+            @('match', 'mismatch', 'absent', 'malformed') -cnotcontains
+                $orchestratorResult.Values['server-profile-map-status'] -or
+            @('supported', 'stock_server_profile_not_supported', 'malformed',
+                'duplicate-field') -cnotcontains
+                $orchestratorResult.Values['server-profile-result']) {
+            throw 'Server profile diagnostic emitted an invalid typed status.'
+        }
+    } else {
+        Assert-OrchestratorValue $orchestratorResult relay-ready true
+        Assert-OrchestratorValue $orchestratorResult server-ready true
+        Assert-OrchestratorValue $orchestratorResult client-ready true
+        Assert-OrchestratorValue $orchestratorResult bounded-transport-complete true
+    }
+    if (-not $serverProfileDiagnosticMode -and
+        $canonicalScenario -ceq 'reconnect') {
         Assert-OrchestratorValue $orchestratorResult connection-generations 2
         Assert-OrchestratorValue $orchestratorResult generation-distinct true
         Assert-OrchestratorValue $orchestratorResult candidate-conflict evidence-pending
-    } else {
+    } elseif (-not $serverProfileDiagnosticMode) {
         Assert-OrchestratorValue $orchestratorResult connection-generations 1
         Assert-OrchestratorValue $orchestratorResult generation-distinct false
         Assert-OrchestratorValue $orchestratorResult candidate-conflict not-applicable
@@ -4868,6 +5079,194 @@ if ($runExists -and $restorationExact -and $null -ne $externalAfter) {
     } catch {
         [void]$cleanupErrors.Add($_.Exception.Message)
     }
+}
+
+if ($serverProfileDiagnosticMode) {
+    if ($null -ne $primaryError -or $cleanupErrors.Count -ne 0 -or
+        -not $runExists -or -not $ownedStopped -or -not $restorationExact -or
+        -not $externalExact -or $null -eq $restoration -or
+        $null -eq $orchestratorResult) {
+        if ($null -ne $runDirectoryCapability) {
+            $runDirectoryCapability.Dispose()
+            $runDirectoryCapability = $null
+        }
+        $category = if ($null -ne $primaryError -and
+            $null -ne $orchestratorResult -and
+            $orchestratorResult.Values.ContainsKey('failure-category')) {
+            $orchestratorResult.Values['failure-category']
+        } elseif (-not $ownedStopped) {
+            'owned_process_cleanup_not_exact'
+        } elseif (-not $restorationExact) {
+            'research_restoration_failed'
+        } elseif (-not $externalExact) {
+            'external_steam_state_changed'
+        } elseif ($cleanupErrors.Count -ne 0) {
+            'transaction_cleanup_failed'
+        } elseif (-not $runExists) {
+            'diagnostic_run_not_created'
+        } else { 'server_profile_diagnostic_transaction_failed' }
+        if ($null -ne $orchestratorResult -and
+            $orchestratorResult.Values.ContainsKey(
+                'server-profile-parse-status')) {
+            $failureValues = [Collections.Generic.Dictionary[string, string]]::new(
+                $orchestratorResult.Values, [StringComparer]::Ordinal)
+            $failureValues['server-profile-result'] = $category
+            Write-StockServerProfileDiagnosticPublicOutput $failureValues
+        } else {
+            Write-Output "[stock-server-profile] result=$category"
+        }
+        if ($null -ne $primaryError) { throw $primaryError }
+        throw 'Server profile diagnostic cleanup/restoration transaction was not exact.'
+    }
+    Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+    $prepublicationItems = @(Get-ChildItem -LiteralPath $runRoot -Force)
+    $prepublicationNames = @($prepublicationItems | Select-Object -ExpandProperty Name)
+    if ($prepublicationItems.Count -ne 2 -or
+        $prepublicationNames -cnotcontains
+            'restoration-attestation.staged.json' -or
+        $prepublicationNames -cnotcontains
+            'server-profile-diagnostic.staged.json' -or
+        @($prepublicationItems | Where-Object PSIsContainer).Count -ne 0) {
+        throw 'Server profile diagnostic root contains non-metadata publication material.'
+    }
+    $stagedDiagnostic = Read-BoundedJsonWithRetainedBytes `
+        (Join-Path $runRoot 'server-profile-diagnostic.staged.json') `
+        65536 'staged server profile diagnostic' $runDirectoryCapability
+    $staged = $stagedDiagnostic.Value
+    $fieldMappings = [ordered]@{
+        parse_status = 'server-profile-parse-status'
+        mismatch_field = 'server-profile-mismatch-field'
+        engine_version_status = 'server-profile-engine-version-status'
+        runtime_mode_status = 'server-profile-runtime-mode-status'
+        runtime_mode_category = 'server-profile-runtime-mode-category'
+        game_status = 'server-profile-game-status'
+        protocol_status = 'server-profile-protocol-status'
+        build_status = 'server-profile-build-status'
+        endpoint_address_status = 'server-profile-endpoint-address-status'
+        endpoint_address_category = 'server-profile-endpoint-address-category'
+        endpoint_port_status = 'server-profile-endpoint-port-status'
+        map_status = 'server-profile-map-status'
+    }
+    if ([string]$staged.schema -cne
+            'hlclient.stock-runtime-server-profile-diagnostic-staged.v1') {
+        throw 'Staged server profile diagnostic schema is invalid.'
+    }
+    foreach ($property in $fieldMappings.Keys) {
+        if ([string]$staged.$property -cne
+            $orchestratorResult.Values[$fieldMappings[$property]]) {
+            throw "Staged server profile diagnostic field $property disagrees with the bounded process result."
+        }
+    }
+    foreach ($mapping in @(
+            @('duplicate_field_count', 'server-profile-duplicate-fields'),
+            @('observed_byte_count', 'server-profile-observed-byte-count'),
+            @('observed_line_count', 'server-profile-observed-line-count'))) {
+        if ([Int64]$staged.($mapping[0]) -ne
+            [Int64]$orchestratorResult.Values[$mapping[1]]) {
+            throw "Staged server profile diagnostic count $($mapping[0]) disagrees with the bounded process result."
+        }
+    }
+    if ([bool]$staged.process_log_truncated -ne
+        ($orchestratorResult.Values['server-profile-process-log-truncated'] -ceq
+            'true')) {
+        throw 'Staged server profile truncation state disagrees with the bounded process result.'
+    }
+    foreach ($mapping in @(
+            @('observed_engine_version',
+                'server-profile-observed-engine-version'),
+            @('observed_protocol', 'server-profile-observed-protocol'),
+            @('observed_build', 'server-profile-observed-build'))) {
+        $propertyPresent = $null -ne $staged.PSObject.Properties[$mapping[0]]
+        $valuePresent = $orchestratorResult.Values.ContainsKey($mapping[1])
+        if ($propertyPresent -ne $valuePresent -or
+            ($propertyPresent -and
+             [string]$staged.($mapping[0]) -cne
+                $orchestratorResult.Values[$mapping[1]])) {
+            throw "Staged server profile diagnostic public value $($mapping[0]) disagrees with the bounded process result."
+        }
+    }
+    foreach ($countKey in @(
+            'server-profile-duplicate-fields',
+            'server-profile-observed-byte-count',
+            'server-profile-observed-line-count')) {
+        [Int64]$count = 0
+        if (-not [Int64]::TryParse(
+                $orchestratorResult.Values[$countKey], [ref]$count) -or
+            $count -lt 0 -or $count -gt 1048576) {
+            throw "Server profile diagnostic count $countKey is invalid."
+        }
+    }
+    if ($orchestratorResult.Values.ContainsKey(
+            'server-profile-observed-engine-version') -and
+        $orchestratorResult.Values['server-profile-observed-engine-version'] -cnotmatch
+            '^[0-9]{1,5}(?:\.[0-9]{1,5}){3}$') {
+        throw 'Observed server engine version is malformed.'
+    }
+    foreach ($numericKey in @(
+            'server-profile-observed-protocol',
+            'server-profile-observed-build')) {
+        if ($orchestratorResult.Values.ContainsKey($numericKey)) {
+            [Int64]$number = 0
+            if (-not [Int64]::TryParse(
+                    $orchestratorResult.Values[$numericKey], [ref]$number) -or
+                $number -lt 0 -or $number -gt [UInt32]::MaxValue) {
+                throw "Observed server value $numericKey is malformed."
+            }
+        }
+    }
+    $diagnosticManifest = [ordered]@{
+        schema = 'hlclient.stock-runtime-server-profile-diagnostic.v1'
+        run_id = $runId
+        role = 'server-profile-diagnostic'
+        evidence_eligible = $false
+        parse_status = $orchestratorResult.Values['server-profile-parse-status']
+        mismatch_field = $orchestratorResult.Values['server-profile-mismatch-field']
+        engine_version_status = $orchestratorResult.Values['server-profile-engine-version-status']
+        runtime_mode_status = $orchestratorResult.Values['server-profile-runtime-mode-status']
+        runtime_mode_category = $orchestratorResult.Values['server-profile-runtime-mode-category']
+        game_status = $orchestratorResult.Values['server-profile-game-status']
+        protocol_status = $orchestratorResult.Values['server-profile-protocol-status']
+        build_status = $orchestratorResult.Values['server-profile-build-status']
+        endpoint_address_status = $orchestratorResult.Values['server-profile-endpoint-address-status']
+        endpoint_address_category = $orchestratorResult.Values['server-profile-endpoint-address-category']
+        endpoint_port_status = $orchestratorResult.Values['server-profile-endpoint-port-status']
+        map_status = $orchestratorResult.Values['server-profile-map-status']
+        duplicate_field_count = [Int64]$orchestratorResult.Values['server-profile-duplicate-fields']
+        process_log_truncated =
+            $orchestratorResult.Values['server-profile-process-log-truncated'] -ceq 'true'
+        observed_byte_count = [Int64]$orchestratorResult.Values['server-profile-observed-byte-count']
+        observed_line_count = [Int64]$orchestratorResult.Values['server-profile-observed-line-count']
+        stock_client_launched = $false
+        udp_corpus_created = $false
+        restoration_status = 'exact'
+        external_file_drift = 'none'
+        process_cleanup = 'exact'
+        result = $orchestratorResult.Values['server-profile-result']
+    }
+    if ($orchestratorResult.Values.ContainsKey(
+            'server-profile-observed-engine-version')) {
+        $diagnosticManifest['observed_engine_version'] =
+            $orchestratorResult.Values['server-profile-observed-engine-version']
+    }
+    if ($orchestratorResult.Values.ContainsKey(
+            'server-profile-observed-protocol')) {
+        $diagnosticManifest['observed_protocol'] =
+            [Int64]$orchestratorResult.Values['server-profile-observed-protocol']
+    }
+    if ($orchestratorResult.Values.ContainsKey('server-profile-observed-build')) {
+        $diagnosticManifest['observed_build'] =
+            [Int64]$orchestratorResult.Values['server-profile-observed-build']
+    }
+    Write-AtomicJsonNoOverwrite `
+        (Join-Path $runRoot 'server-profile-diagnostic-manifest.json') `
+        ([pscustomobject]$diagnosticManifest) `
+        'server profile diagnostic manifest' $runDirectoryCapability
+    Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+    $runDirectoryCapability.Dispose()
+    $runDirectoryCapability = $null
+    Write-Output "[stock-runtime-capture] run-id=$runId"
+    Write-StockServerProfileDiagnosticPublicOutput $orchestratorResult.Values
+    return
 }
 
 $publicationReady = $false

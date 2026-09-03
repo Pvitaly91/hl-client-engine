@@ -123,26 +123,44 @@ template<typename Integer>
     return true;
 }
 
-[[nodiscard]] std::vector<std::string_view> split_lines(
+[[nodiscard]] std::vector<std::string_view> split_complete_lines(
     const std::string_view output)
 {
     std::vector<std::string_view> lines;
     std::size_t begin = 0U;
-    while (begin <= output.size() && lines.size() < 8'192U) {
+    while (begin < output.size() && lines.size() < 8'192U) {
         const auto end = output.find('\n', begin);
-        auto line = output.substr(
-            begin, end == std::string_view::npos ? output.size() - begin
-                                                 : end - begin);
+        // A final unterminated span is still being written. Never classify it
+        // as a complete field while the owning process can append more bytes.
+        if (end == std::string_view::npos) break;
+        auto line = output.substr(begin, end - begin);
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1U);
         }
         lines.push_back(line);
-        if (end == std::string_view::npos) {
-            break;
-        }
         begin = end + 1U;
     }
     return lines;
+}
+
+[[nodiscard]] bool parse_engine_version(
+    const std::string_view value,
+    WindowsFileVersion& version) noexcept
+{
+    std::array<std::uint16_t, 4U> components{};
+    std::size_t begin = 0U;
+    for (std::size_t index = 0U; index < components.size(); ++index) {
+        const auto end = index + 1U == components.size()
+            ? value.size() : value.find('.', begin);
+        if (end == std::string_view::npos || end == begin ||
+            !parse_decimal(value.substr(begin, end - begin), components[index])) {
+            return false;
+        }
+        begin = end + 1U;
+    }
+    if (begin != value.size() + 1U) return false;
+    version = {components[0], components[1], components[2], components[3]};
+    return true;
 }
 
 [[nodiscard]] bool safe_profile_token(const std::string_view value) noexcept
@@ -1297,9 +1315,15 @@ HldsBannerParseResult parse_required_hlds_runtime_banner(
     const std::uint16_t requested_port) noexcept
 {
     try {
+        HldsBannerParseResult result;
+        auto& diagnostic = result.diagnostic;
+        diagnostic.observed_byte_count = output.size();
         if (output.size() > 1U * 1'024U * 1'024U ||
             !safe_profile_token(requested_map) || requested_port == 0U) {
-            return {std::nullopt, HldsBannerParseErrorCode::too_large};
+            result.code = HldsBannerParseErrorCode::too_large;
+            diagnostic.parse_status = HldsRuntimeProfileParseStatus::malformed;
+            diagnostic.mismatch_field = HldsRuntimeProfileField::malformed_field;
+            return result;
         }
         HldsRuntimeProfile profile;
         std::size_t engine_count = 0U;
@@ -1307,25 +1331,104 @@ HldsBannerParseResult parse_required_hlds_runtime_banner(
         std::size_t build_count = 0U;
         std::size_t endpoint_count = 0U;
         std::size_t map_count = 0U;
-        for (const auto line : split_lines(output)) {
+        const auto lines = split_complete_lines(output);
+        diagnostic.observed_line_count = lines.size();
+        const auto set_field = [](
+            HldsRuntimeProfileFieldDiagnostic& field,
+            const HldsRuntimeProfileFieldStatus status) {
+            field.present = true;
+            field.syntax_valid = status != HldsRuntimeProfileFieldStatus::malformed;
+            field.matches = status == HldsRuntimeProfileFieldStatus::match;
+            field.status = status;
+        };
+        for (const auto line : lines) {
             if (line.size() > 4'096U) {
-                return {std::nullopt, HldsBannerParseErrorCode::line_too_long};
+                result.code = HldsBannerParseErrorCode::line_too_long;
+                diagnostic.parse_status = HldsRuntimeProfileParseStatus::malformed;
+                diagnostic.mismatch_field =
+                    HldsRuntimeProfileField::malformed_field;
+                return result;
             }
             if (line.starts_with("Exe version ")) {
                 ++engine_count;
-                constexpr std::string_view expected =
-                    "Exe version 1.1.2.2/Stdio (valve)";
-                if (line != expected) {
-                    return {std::nullopt,
-                            HldsBannerParseErrorCode::profile_mismatch};
+                constexpr std::string_view prefix{"Exe version "};
+                const auto slash = line.find('/', prefix.size());
+                const auto game_open = slash == std::string_view::npos
+                    ? std::string_view::npos : line.find(" (", slash + 1U);
+                const bool shape_valid = slash != std::string_view::npos &&
+                    slash > prefix.size() && game_open != std::string_view::npos &&
+                    game_open > slash + 1U && line.size() > game_open + 3U &&
+                    line.back() == ')' &&
+                    line.find('/', slash + 1U) == std::string_view::npos &&
+                    line.find(" (", game_open + 2U) == std::string_view::npos;
+                if (!shape_valid) {
+                    set_field(diagnostic.engine_version,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                    set_field(diagnostic.runtime_mode,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                    set_field(diagnostic.game,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                    continue;
                 }
-                profile.engine_version = {1U, 1U, 2U, 2U};
-                profile.game = "valve";
+                const auto version_text =
+                    line.substr(prefix.size(), slash - prefix.size());
+                const auto mode = line.substr(
+                    slash + 1U, game_open - slash - 1U);
+                const auto game = line.substr(
+                    game_open + 2U, line.size() - game_open - 3U);
+                WindowsFileVersion observed_version{};
+                if (parse_engine_version(version_text, observed_version)) {
+                    diagnostic.observed_engine_version = observed_version;
+                    profile.engine_version = observed_version;
+                    set_field(
+                        diagnostic.engine_version,
+                        observed_version == WindowsFileVersion{1U, 1U, 2U, 2U}
+                            ? HldsRuntimeProfileFieldStatus::match
+                            : HldsRuntimeProfileFieldStatus::mismatch);
+                } else {
+                    set_field(diagnostic.engine_version,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                }
+                if (safe_profile_token(mode)) {
+                    diagnostic.runtime_mode_category = mode == "Stdio"
+                        ? HldsRuntimeModeCategory::stdio
+                        : HldsRuntimeModeCategory::other;
+                    set_field(
+                        diagnostic.runtime_mode,
+                        mode == "Stdio"
+                            ? HldsRuntimeProfileFieldStatus::match
+                            : HldsRuntimeProfileFieldStatus::mismatch);
+                } else {
+                    diagnostic.runtime_mode_category =
+                        HldsRuntimeModeCategory::malformed;
+                    set_field(diagnostic.runtime_mode,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                }
+                if (safe_profile_token(game)) {
+                    profile.game = std::string{game};
+                    diagnostic.game_matches = game == "valve";
+                    set_field(
+                        diagnostic.game,
+                        diagnostic.game_matches
+                            ? HldsRuntimeProfileFieldStatus::match
+                            : HldsRuntimeProfileFieldStatus::mismatch);
+                } else {
+                    set_field(diagnostic.game,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                }
             } else if (line.starts_with("Protocol version ")) {
                 ++protocol_count;
                 if (!parse_decimal(line.substr(std::string_view{"Protocol version "}.size()),
                                    profile.protocol)) {
-                    return {std::nullopt, HldsBannerParseErrorCode::malformed};
+                    set_field(diagnostic.protocol,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                } else {
+                    diagnostic.observed_protocol = profile.protocol;
+                    set_field(
+                        diagnostic.protocol,
+                        profile.protocol == 48U
+                            ? HldsRuntimeProfileFieldStatus::match
+                            : HldsRuntimeProfileFieldStatus::mismatch);
                 }
             } else if (line.starts_with("Exe build:")) {
                 ++build_count;
@@ -1334,57 +1437,210 @@ HldsBannerParseResult parse_required_hlds_runtime_banner(
                     !parse_decimal(line.substr(open + 1U,
                                                line.size() - open - 2U),
                                    profile.build)) {
-                    return {std::nullopt, HldsBannerParseErrorCode::malformed};
+                    set_field(diagnostic.build,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                } else {
+                    diagnostic.observed_build = profile.build;
+                    set_field(
+                        diagnostic.build,
+                        profile.build == 10'210U
+                            ? HldsRuntimeProfileFieldStatus::match
+                            : HldsRuntimeProfileFieldStatus::mismatch);
                 }
             } else if (line.starts_with("Server IP address ")) {
                 ++endpoint_count;
+                constexpr std::string_view prefix{"Server IP address "};
                 const auto colon = line.rfind(':');
                 unsigned int parsed_port = 0U;
-                if (colon == std::string_view::npos ||
-                    line.substr(std::string_view{"Server IP address "}.size(),
-                                colon - std::string_view{"Server IP address "}.size()) !=
-                        "127.0.0.1" ||
+                if (colon == std::string_view::npos || colon <= prefix.size() ||
                     !parse_decimal(line.substr(colon + 1U), parsed_port) ||
                     parsed_port > 65'535U) {
-                    return {std::nullopt, HldsBannerParseErrorCode::malformed};
+                    diagnostic.endpoint_address_category =
+                        HldsRuntimeEndpointAddressCategory::malformed;
+                    set_field(diagnostic.endpoint_address,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                    set_field(diagnostic.endpoint_port,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                } else {
+                    const auto address =
+                        line.substr(prefix.size(), colon - prefix.size());
+                    if (address == "127.0.0.1") {
+                        diagnostic.endpoint_address_category =
+                            HldsRuntimeEndpointAddressCategory::loopback_ipv4;
+                    } else if (address == "::1") {
+                        diagnostic.endpoint_address_category =
+                            HldsRuntimeEndpointAddressCategory::loopback_ipv6;
+                    } else if (!address.empty() &&
+                               std::ranges::all_of(address, [](const char value) {
+                                   return (value >= '0' && value <= '9') ||
+                                          (value >= 'a' && value <= 'f') ||
+                                          (value >= 'A' && value <= 'F') ||
+                                          value == '.' || value == ':';
+                               })) {
+                        diagnostic.endpoint_address_category =
+                            HldsRuntimeEndpointAddressCategory::non_loopback;
+                    } else {
+                        diagnostic.endpoint_address_category =
+                            HldsRuntimeEndpointAddressCategory::malformed;
+                    }
+                    const bool address_valid =
+                        diagnostic.endpoint_address_category !=
+                        HldsRuntimeEndpointAddressCategory::malformed;
+                    set_field(
+                        diagnostic.endpoint_address,
+                        !address_valid
+                            ? HldsRuntimeProfileFieldStatus::malformed
+                            : address == "127.0.0.1"
+                                ? HldsRuntimeProfileFieldStatus::match
+                                : HldsRuntimeProfileFieldStatus::mismatch);
+                    profile.port = static_cast<std::uint16_t>(parsed_port);
+                    diagnostic.endpoint_port_matches =
+                        profile.port == requested_port;
+                    set_field(
+                        diagnostic.endpoint_port,
+                        diagnostic.endpoint_port_matches
+                            ? HldsRuntimeProfileFieldStatus::match
+                            : HldsRuntimeProfileFieldStatus::mismatch);
                 }
-                profile.port = static_cast<std::uint16_t>(parsed_port);
             } else if (line.starts_with("map     : ")) {
                 ++map_count;
                 constexpr std::string_view prefix{"map     : "};
                 const auto map_end = line.find(" at: ", prefix.size());
                 if (map_end == std::string_view::npos ||
                     map_end == prefix.size()) {
-                    return {std::nullopt,
-                            HldsBannerParseErrorCode::malformed};
+                    set_field(diagnostic.map,
+                              HldsRuntimeProfileFieldStatus::malformed);
+                } else {
+                    const auto map_name =
+                        line.substr(prefix.size(), map_end - prefix.size());
+                    if (!safe_profile_token(map_name)) {
+                        set_field(diagnostic.map,
+                                  HldsRuntimeProfileFieldStatus::malformed);
+                    } else {
+                        profile.map = std::string{map_name};
+                        diagnostic.map_matches = map_name == requested_map;
+                        set_field(
+                            diagnostic.map,
+                            diagnostic.map_matches
+                                ? HldsRuntimeProfileFieldStatus::match
+                                : HldsRuntimeProfileFieldStatus::mismatch);
+                    }
                 }
-                const auto map_name =
-                    line.substr(prefix.size(), map_end - prefix.size());
-                if (!safe_profile_token(map_name)) {
-                    return {std::nullopt,
-                            HldsBannerParseErrorCode::malformed};
-                }
-                profile.map = std::string{map_name};
             }
         }
+        const auto apply_duplicate = [&diagnostic](
+            HldsRuntimeProfileFieldDiagnostic& field,
+            const std::size_t count,
+            const std::size_t logical_field_count = 1U) {
+            if (count <= 1U) return;
+            field.duplicate = true;
+            diagnostic.duplicate_field_count +=
+                (count - 1U) * logical_field_count;
+        };
+        apply_duplicate(diagnostic.engine_version, engine_count, 3U);
+        if (engine_count > 1U) {
+            diagnostic.runtime_mode.duplicate = true;
+            diagnostic.game.duplicate = true;
+        }
+        apply_duplicate(diagnostic.protocol, protocol_count);
+        apply_duplicate(diagnostic.build, build_count);
+        apply_duplicate(diagnostic.endpoint_address, endpoint_count, 2U);
+        if (endpoint_count > 1U) diagnostic.endpoint_port.duplicate = true;
+        apply_duplicate(diagnostic.map, map_count);
         if (engine_count > 1U || protocol_count > 1U || build_count > 1U ||
             endpoint_count > 1U || map_count > 1U) {
-            return {std::nullopt, HldsBannerParseErrorCode::duplicate_field};
+            result.code = HldsBannerParseErrorCode::duplicate_field;
+            diagnostic.parse_status =
+                HldsRuntimeProfileParseStatus::duplicate_field;
+            diagnostic.mismatch_field =
+                HldsRuntimeProfileField::duplicate_field;
+            return result;
         }
-        if (engine_count != 1U || protocol_count != 1U || build_count != 1U ||
-            endpoint_count != 1U || map_count != 1U) {
-            return {std::nullopt, HldsBannerParseErrorCode::missing_field};
+        const std::array<std::pair<HldsRuntimeProfileField,
+                                   HldsRuntimeProfileFieldDiagnostic*>, 8U>
+            fields{{
+                {HldsRuntimeProfileField::engine_version,
+                 &diagnostic.engine_version},
+                {HldsRuntimeProfileField::runtime_mode,
+                 &diagnostic.runtime_mode},
+                {HldsRuntimeProfileField::game, &diagnostic.game},
+                {HldsRuntimeProfileField::protocol, &diagnostic.protocol},
+                {HldsRuntimeProfileField::build, &diagnostic.build},
+                {HldsRuntimeProfileField::endpoint_address,
+                 &diagnostic.endpoint_address},
+                {HldsRuntimeProfileField::endpoint_port,
+                 &diagnostic.endpoint_port},
+                {HldsRuntimeProfileField::map, &diagnostic.map},
+            }};
+        for (const auto& [field, observation] : fields) {
+            if (observation->status ==
+                HldsRuntimeProfileFieldStatus::malformed) {
+                result.code = HldsBannerParseErrorCode::malformed;
+                diagnostic.parse_status =
+                    HldsRuntimeProfileParseStatus::malformed;
+                diagnostic.mismatch_field =
+                    HldsRuntimeProfileField::malformed_field;
+                return result;
+            }
         }
-        if (profile.protocol != 48U || profile.build != 10'210U ||
-            profile.game != "valve" || profile.map != requested_map ||
-            profile.port != requested_port) {
-            return {std::nullopt, HldsBannerParseErrorCode::profile_mismatch};
+        for (const auto& [field, observation] : fields) {
+            if (observation->status ==
+                HldsRuntimeProfileFieldStatus::mismatch) {
+                result.code = HldsBannerParseErrorCode::profile_mismatch;
+                diagnostic.parse_status =
+                    HldsRuntimeProfileParseStatus::profile_mismatch;
+                diagnostic.mismatch_field = field;
+                return result;
+            }
+        }
+        for (const auto& [field, observation] : fields) {
+            static_cast<void>(field);
+            if (!observation->present) {
+                result.code = HldsBannerParseErrorCode::missing_field;
+                diagnostic.parse_status =
+                    HldsRuntimeProfileParseStatus::incomplete;
+                diagnostic.mismatch_field =
+                    HldsRuntimeProfileField::missing_field;
+                return result;
+            }
         }
         profile.ready = true;
-        return {std::move(profile), HldsBannerParseErrorCode::none};
+        result.profile = std::move(profile);
+        result.code = HldsBannerParseErrorCode::none;
+        diagnostic.parse_status = HldsRuntimeProfileParseStatus::valid;
+        diagnostic.mismatch_field = HldsRuntimeProfileField::none;
+        return result;
     } catch (...) {
-        return {std::nullopt, HldsBannerParseErrorCode::malformed};
+        HldsBannerParseResult result;
+        result.code = HldsBannerParseErrorCode::malformed;
+        result.diagnostic.parse_status =
+            HldsRuntimeProfileParseStatus::malformed;
+        result.diagnostic.mismatch_field =
+            HldsRuntimeProfileField::malformed_field;
+        return result;
     }
+}
+
+HldsBannerParseResult diagnose_required_hlds_runtime_banner(
+    const BoundedProcessLogSnapshot& snapshot,
+    const std::string_view requested_map,
+    const std::uint16_t requested_port) noexcept
+{
+    auto result = parse_required_hlds_runtime_banner(
+        snapshot.bytes, requested_map, requested_port);
+    result.diagnostic.observed_byte_count = snapshot.observed_bytes;
+    result.diagnostic.observed_line_count = snapshot.observed_line_count;
+    if (snapshot.capture_failed || snapshot.byte_truncated ||
+        snapshot.line_count_truncated || snapshot.line_length_truncated) {
+        result.profile.reset();
+        result.code = HldsBannerParseErrorCode::process_log_truncated;
+        result.diagnostic.parse_status =
+            HldsRuntimeProfileParseStatus::process_log_truncated;
+        result.diagnostic.mismatch_field =
+            HldsRuntimeProfileField::process_log_truncated;
+        result.diagnostic.process_log_truncated = true;
+    }
+    return result;
 }
 
 std::string_view to_string(const OwnedProcessErrorCode code) noexcept
@@ -1455,6 +1711,83 @@ std::string_view to_string(const HldsBannerParseErrorCode code) noexcept
     case HldsBannerParseErrorCode::malformed: return "malformed";
     case HldsBannerParseErrorCode::missing_field: return "missing-field";
     case HldsBannerParseErrorCode::profile_mismatch: return "profile-mismatch";
+    case HldsBannerParseErrorCode::process_log_truncated:
+        return "process-log-truncated";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(const HldsRuntimeProfileField field) noexcept
+{
+    switch (field) {
+    case HldsRuntimeProfileField::none: return "none";
+    case HldsRuntimeProfileField::engine_version: return "engine-version";
+    case HldsRuntimeProfileField::runtime_mode: return "runtime-mode";
+    case HldsRuntimeProfileField::game: return "game";
+    case HldsRuntimeProfileField::protocol: return "protocol";
+    case HldsRuntimeProfileField::build: return "build";
+    case HldsRuntimeProfileField::endpoint_address: return "endpoint-address";
+    case HldsRuntimeProfileField::endpoint_port: return "endpoint-port";
+    case HldsRuntimeProfileField::map: return "map";
+    case HldsRuntimeProfileField::duplicate_field: return "duplicate-field";
+    case HldsRuntimeProfileField::missing_field: return "missing-field";
+    case HldsRuntimeProfileField::malformed_field: return "malformed-field";
+    case HldsRuntimeProfileField::process_log_truncated:
+        return "process-log-truncated";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(const HldsRuntimeProfileParseStatus status) noexcept
+{
+    switch (status) {
+    case HldsRuntimeProfileParseStatus::incomplete: return "incomplete";
+    case HldsRuntimeProfileParseStatus::valid: return "valid";
+    case HldsRuntimeProfileParseStatus::profile_mismatch:
+        return "profile-mismatch";
+    case HldsRuntimeProfileParseStatus::malformed: return "malformed";
+    case HldsRuntimeProfileParseStatus::duplicate_field:
+        return "duplicate-field";
+    case HldsRuntimeProfileParseStatus::process_log_truncated:
+        return "process-log-truncated";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(const HldsRuntimeProfileFieldStatus status) noexcept
+{
+    switch (status) {
+    case HldsRuntimeProfileFieldStatus::match: return "match";
+    case HldsRuntimeProfileFieldStatus::mismatch: return "mismatch";
+    case HldsRuntimeProfileFieldStatus::absent: return "absent";
+    case HldsRuntimeProfileFieldStatus::malformed: return "malformed";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(
+    const HldsRuntimeEndpointAddressCategory category) noexcept
+{
+    switch (category) {
+    case HldsRuntimeEndpointAddressCategory::loopback_ipv4:
+        return "loopback-ipv4";
+    case HldsRuntimeEndpointAddressCategory::loopback_ipv6:
+        return "loopback-ipv6";
+    case HldsRuntimeEndpointAddressCategory::non_loopback:
+        return "non-loopback";
+    case HldsRuntimeEndpointAddressCategory::malformed: return "malformed";
+    case HldsRuntimeEndpointAddressCategory::absent: return "absent";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(const HldsRuntimeModeCategory category) noexcept
+{
+    switch (category) {
+    case HldsRuntimeModeCategory::stdio: return "stdio";
+    case HldsRuntimeModeCategory::other: return "other";
+    case HldsRuntimeModeCategory::malformed: return "malformed";
+    case HldsRuntimeModeCategory::absent: return "absent";
     }
     return "unknown";
 }

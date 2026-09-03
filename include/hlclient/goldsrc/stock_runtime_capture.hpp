@@ -68,6 +68,7 @@ validate_stock_runtime_capture_limits(
 enum class StockRuntimeCaptureOutputRole {
     normal_campaign_run,
     pre_campaign_canary,
+    server_profile_diagnostic,
 };
 
 [[nodiscard]] std::optional<StockRuntimeCaptureOutputRole>

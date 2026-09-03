@@ -324,6 +324,93 @@ struct HldsRuntimeProfile final {
     bool ready{false};
 };
 
+enum class HldsRuntimeProfileField {
+    none,
+    engine_version,
+    runtime_mode,
+    game,
+    protocol,
+    build,
+    endpoint_address,
+    endpoint_port,
+    map,
+    duplicate_field,
+    missing_field,
+    malformed_field,
+    process_log_truncated,
+};
+
+enum class HldsRuntimeProfileParseStatus {
+    incomplete,
+    valid,
+    profile_mismatch,
+    malformed,
+    duplicate_field,
+    process_log_truncated,
+};
+
+enum class HldsRuntimeProfileFieldStatus {
+    match,
+    mismatch,
+    absent,
+    malformed,
+};
+
+enum class HldsRuntimeEndpointAddressCategory {
+    loopback_ipv4,
+    loopback_ipv6,
+    non_loopback,
+    malformed,
+    absent,
+};
+
+enum class HldsRuntimeModeCategory {
+    stdio,
+    other,
+    malformed,
+    absent,
+};
+
+struct HldsRuntimeProfileFieldDiagnostic final {
+    HldsRuntimeProfileFieldStatus status{
+        HldsRuntimeProfileFieldStatus::absent};
+    bool present{false};
+    bool duplicate{false};
+    bool syntax_valid{false};
+    bool matches{false};
+};
+
+// A value-only, bounded diagnostic. It deliberately cannot retain source
+// lines, banner suffixes, paths, hostnames, or arbitrary process output.
+struct HldsRuntimeProfileDiagnostic final {
+    HldsRuntimeProfileParseStatus parse_status{
+        HldsRuntimeProfileParseStatus::incomplete};
+    HldsRuntimeProfileField mismatch_field{
+        HldsRuntimeProfileField::missing_field};
+    HldsRuntimeProfileFieldDiagnostic engine_version;
+    HldsRuntimeProfileFieldDiagnostic runtime_mode;
+    HldsRuntimeProfileFieldDiagnostic game;
+    HldsRuntimeProfileFieldDiagnostic protocol;
+    HldsRuntimeProfileFieldDiagnostic build;
+    HldsRuntimeProfileFieldDiagnostic endpoint_address;
+    HldsRuntimeProfileFieldDiagnostic endpoint_port;
+    HldsRuntimeProfileFieldDiagnostic map;
+    std::optional<WindowsFileVersion> observed_engine_version;
+    std::optional<std::uint32_t> observed_protocol;
+    std::optional<std::uint32_t> observed_build;
+    HldsRuntimeEndpointAddressCategory endpoint_address_category{
+        HldsRuntimeEndpointAddressCategory::absent};
+    HldsRuntimeModeCategory runtime_mode_category{
+        HldsRuntimeModeCategory::absent};
+    bool endpoint_port_matches{false};
+    bool map_matches{false};
+    bool game_matches{false};
+    std::size_t duplicate_field_count{0U};
+    std::size_t observed_byte_count{0U};
+    std::size_t observed_line_count{0U};
+    bool process_log_truncated{false};
+};
+
 enum class HldsBannerParseErrorCode {
     none,
     too_large,
@@ -332,11 +419,13 @@ enum class HldsBannerParseErrorCode {
     malformed,
     missing_field,
     profile_mismatch,
+    process_log_truncated,
 };
 
 struct HldsBannerParseResult final {
     std::optional<HldsRuntimeProfile> profile;
     HldsBannerParseErrorCode code{HldsBannerParseErrorCode::none};
+    HldsRuntimeProfileDiagnostic diagnostic;
 
     [[nodiscard]] explicit operator bool() const noexcept
     {
@@ -350,11 +439,24 @@ struct HldsBannerParseResult final {
     std::string_view output,
     std::string_view requested_map,
     std::uint16_t requested_port) noexcept;
+[[nodiscard]] HldsBannerParseResult diagnose_required_hlds_runtime_banner(
+    const BoundedProcessLogSnapshot& snapshot,
+    std::string_view requested_map,
+    std::uint16_t requested_port) noexcept;
 
 [[nodiscard]] std::string_view to_string(OwnedProcessErrorCode code) noexcept;
 [[nodiscard]] std::string_view to_string(OwnedJobCleanupErrorCode code) noexcept;
 [[nodiscard]] std::string_view to_string(
     ExactImageProcessScanErrorCode code) noexcept;
 [[nodiscard]] std::string_view to_string(HldsBannerParseErrorCode code) noexcept;
+[[nodiscard]] std::string_view to_string(HldsRuntimeProfileField field) noexcept;
+[[nodiscard]] std::string_view to_string(
+    HldsRuntimeProfileParseStatus status) noexcept;
+[[nodiscard]] std::string_view to_string(
+    HldsRuntimeProfileFieldStatus status) noexcept;
+[[nodiscard]] std::string_view to_string(
+    HldsRuntimeEndpointAddressCategory category) noexcept;
+[[nodiscard]] std::string_view to_string(
+    HldsRuntimeModeCategory category) noexcept;
 
 } // namespace hlclient::platform::windows

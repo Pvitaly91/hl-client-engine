@@ -186,7 +186,9 @@ private:
     windows::BoundedProcessLogCapture* log = nullptr,
     const std::uint32_t emit_bytes = 0U,
     const bool suppress_ready = false,
-    const std::uint32_t ready_delay_ms = 0U)
+    const std::uint32_t ready_delay_ms = 0U,
+    const std::string_view profile_variant = {},
+    const std::uint32_t profile_chunk_delay_ms = 25U)
 {
     windows::OwnedProcessLaunchSpec spec;
     spec.executable = identity.canonical_path;
@@ -198,6 +200,13 @@ private:
         L"--emit-bytes", std::to_wstring(emit_bytes),
         L"--ready-delay-ms", std::to_wstring(ready_delay_ms)};
     if (suppress_ready) spec.arguments.push_back(L"--suppress-ready");
+    if (!profile_variant.empty()) {
+        spec.arguments.push_back(L"--hlds-profile-variant");
+        spec.arguments.emplace_back(
+            profile_variant.begin(), profile_variant.end());
+        spec.arguments.push_back(L"--profile-chunk-delay-ms");
+        spec.arguments.push_back(std::to_wstring(profile_chunk_delay_ms));
+    }
     if (log != nullptr) {
         spec.stdout_handle = log->inherited_write_handle();
         spec.stderr_handle = log->inherited_write_handle();
@@ -374,6 +383,46 @@ TEST_CASE("Raw stock capture rejects a non-orchestrator parent before side effec
     CHECK(captured.bytes.find(
               "[stock-runtime-capture] result="
               "orchestrator-capability-required") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(output));
+    CHECK(job.active_process_count() == 0U);
+}
+
+TEST_CASE("UDP relay rejects the server profile diagnostic output role",
+          "[platform][windows][stock-runtime][orchestrator][capture]"
+          "[server-profile-diagnostic][output-role]")
+{
+    const auto capture = observe_capture_relay();
+    auto log = windows::BoundedProcessLogCapture::create({});
+    REQUIRE(log);
+    auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+    REQUIRE(created);
+    const auto output = std::filesystem::temp_directory_path() /
+        (L"hlclient-stock-profile-relay-reject-" +
+         std::to_wstring(::GetCurrentProcessId()) + L"-" +
+         std::to_wstring(::GetTickCount64()));
+    REQUIRE_FALSE(std::filesystem::exists(output));
+
+    windows::OwnedProcessLaunchSpec spec;
+    spec.executable = capture.canonical_path;
+    spec.working_directory = capture.canonical_path.parent_path();
+    spec.expected_identity = capture;
+    spec.stdout_handle = log->inherited_write_handle();
+    spec.stderr_handle = log->inherited_write_handle();
+    spec.arguments = {
+        L"--listen-port", L"27140", L"--server-port", L"27141",
+        L"--output-run-root", output.wstring(), L"--scenario", L"baseline",
+        L"--output-role", L"server-profile-diagnostic",
+        L"--private-ipv4-loopback-only", L"--one-upstream-socket",
+        L"--byte-preserving", L"--no-payload-rewrite",
+        L"--precreated-empty-run-root"};
+    auto [child, launched] = job.launch(spec);
+    REQUIRE(launched);
+    log->close_parent_write_handle();
+    REQUIRE(child.wait(std::chrono::seconds{5}) == 2U);
+    const auto captured = log->finish();
+    REQUIRE(windows::bounded_process_log_snapshot_complete(captured));
+    CHECK(captured.bytes.find("Usage: hlclient_stock_runtime_capture") !=
+          std::string::npos);
     CHECK_FALSE(std::filesystem::exists(output));
     CHECK(job.active_process_count() == 0U);
 }
@@ -643,6 +692,319 @@ TEST_CASE("HLDS banner parser requires every exact stock profile field",
               "map     : crossfire at: 0 x, 0 y, 0 z\n",
               "boot_camp", 27'141U).code ==
           windows::HldsBannerParseErrorCode::profile_mismatch);
+}
+
+TEST_CASE("HLDS profile diagnostics identify one bounded mismatch field",
+          "[platform][windows][stock-runtime][orchestrator][banner]"
+          "[server-profile-diagnostic]")
+{
+    const auto banner = [](
+        const std::string_view engine = "1.1.2.2",
+        const std::string_view mode = "Stdio",
+        const std::string_view game = "valve",
+        const std::string_view protocol = "48",
+        const std::string_view build = "10210",
+        const std::string_view address = "127.0.0.1",
+        const std::string_view port = "27141",
+        const std::string_view map = "boot_camp",
+        const std::string_view newline = "\r\n") {
+        return std::string{"Protocol version "} + std::string{protocol} +
+            std::string{newline} + "Exe version " + std::string{engine} +
+            "/" + std::string{mode} + " (" + std::string{game} + ")" +
+            std::string{newline} +
+            "Exe build: 00:00:00 Jan 1 2026 (" + std::string{build} + ")" +
+            std::string{newline} + "Server IP address " +
+            std::string{address} + ":" + std::string{port} +
+            std::string{newline} + "map     : " + std::string{map} +
+            " at: 0 x, 0 y, 0 z" + std::string{newline};
+    };
+    using Field = windows::HldsRuntimeProfileField;
+    using ParseStatus = windows::HldsRuntimeProfileParseStatus;
+    using Status = windows::HldsRuntimeProfileFieldStatus;
+
+    SECTION("exact CRLF and LF profiles remain equivalent") {
+        const auto crlf = windows::parse_required_hlds_runtime_banner(
+            banner(), "boot_camp", 27'141U);
+        const auto lf = windows::parse_required_hlds_runtime_banner(
+            banner("1.1.2.2", "Stdio", "valve", "48", "10210",
+                   "127.0.0.1", "27141", "boot_camp", "\n"),
+            "boot_camp", 27'141U);
+        REQUIRE(crlf);
+        REQUIRE(lf);
+        CHECK(crlf.diagnostic.parse_status == ParseStatus::valid);
+        CHECK(crlf.diagnostic.mismatch_field == Field::none);
+        CHECK(crlf.diagnostic.engine_version.status == Status::match);
+        CHECK(crlf.diagnostic.runtime_mode.status == Status::match);
+        CHECK(crlf.diagnostic.game.status == Status::match);
+        CHECK(crlf.diagnostic.protocol.status == Status::match);
+        CHECK(crlf.diagnostic.build.status == Status::match);
+        CHECK(crlf.diagnostic.endpoint_address.status == Status::match);
+        CHECK(crlf.diagnostic.endpoint_port.status == Status::match);
+        CHECK(crlf.diagnostic.map.status == Status::match);
+    }
+
+    const auto require_mismatch = [&](
+        const std::string& value,
+        const Field field) -> windows::HldsBannerParseResult {
+        auto result = windows::parse_required_hlds_runtime_banner(
+            value, "boot_camp", 27'141U);
+        REQUIRE_FALSE(result);
+        REQUIRE(result.code ==
+                windows::HldsBannerParseErrorCode::profile_mismatch);
+        REQUIRE(result.diagnostic.parse_status ==
+                ParseStatus::profile_mismatch);
+        REQUIRE(result.diagnostic.mismatch_field == field);
+        return result;
+    };
+
+    SECTION("each public expected field is distinguished") {
+        const auto engine = require_mismatch(
+            banner("1.1.2.3"), Field::engine_version);
+        REQUIRE(engine.diagnostic.observed_engine_version);
+        CHECK(*engine.diagnostic.observed_engine_version ==
+              windows::WindowsFileVersion{1U, 1U, 2U, 3U});
+        CHECK(engine.diagnostic.protocol.status == Status::match);
+
+        const auto mode = require_mismatch(
+            banner("1.1.2.2", "Steam"), Field::runtime_mode);
+        CHECK(mode.diagnostic.engine_version.status == Status::match);
+        CHECK(mode.diagnostic.runtime_mode.status == Status::mismatch);
+
+        const auto game = require_mismatch(
+            banner("1.1.2.2", "Stdio", "gearbox"), Field::game);
+        CHECK_FALSE(game.diagnostic.game_matches);
+
+        const auto protocol = require_mismatch(
+            banner("1.1.2.2", "Stdio", "valve", "47"),
+            Field::protocol);
+        CHECK(protocol.diagnostic.observed_protocol == 47U);
+
+        const auto build = require_mismatch(
+            banner("1.1.2.2", "Stdio", "valve", "48", "10211"),
+            Field::build);
+        CHECK(build.diagnostic.observed_build == 10'211U);
+
+        const auto address = require_mismatch(
+            banner("1.1.2.2", "Stdio", "valve", "48", "10210",
+                   "127.0.0.2"),
+            Field::endpoint_address);
+        CHECK(address.diagnostic.endpoint_address_category ==
+              windows::HldsRuntimeEndpointAddressCategory::non_loopback);
+
+        const auto port = require_mismatch(
+            banner("1.1.2.2", "Stdio", "valve", "48", "10210",
+                   "127.0.0.1", "27142"),
+            Field::endpoint_port);
+        CHECK_FALSE(port.diagnostic.endpoint_port_matches);
+
+        const auto map = require_mismatch(
+            banner("1.1.2.2", "Stdio", "valve", "48", "10210",
+                   "127.0.0.1", "27141", "crossfire"),
+            Field::map);
+        CHECK_FALSE(map.diagnostic.map_matches);
+    }
+
+    SECTION("missing duplicate malformed and partial states stay typed") {
+        auto missing_text = banner();
+        missing_text.erase(missing_text.find("map     : "));
+        const auto missing = windows::parse_required_hlds_runtime_banner(
+            missing_text, "boot_camp", 27'141U);
+        CHECK(missing.code ==
+              windows::HldsBannerParseErrorCode::missing_field);
+        CHECK(missing.diagnostic.parse_status == ParseStatus::incomplete);
+        CHECK(missing.diagnostic.mismatch_field == Field::missing_field);
+        CHECK(missing.diagnostic.map.status == Status::absent);
+
+        const auto duplicate = windows::parse_required_hlds_runtime_banner(
+            banner() + "Protocol version 48\n",
+            "boot_camp", 27'141U);
+        CHECK(duplicate.code ==
+              windows::HldsBannerParseErrorCode::duplicate_field);
+        CHECK(duplicate.diagnostic.mismatch_field == Field::duplicate_field);
+        CHECK(duplicate.diagnostic.duplicate_field_count == 1U);
+
+        const auto malformed = windows::parse_required_hlds_runtime_banner(
+            banner("1.1.2"), "boot_camp", 27'141U);
+        CHECK(malformed.code ==
+              windows::HldsBannerParseErrorCode::malformed);
+        CHECK(malformed.diagnostic.mismatch_field == Field::malformed_field);
+        CHECK(malformed.diagnostic.engine_version.status == Status::malformed);
+        CHECK_FALSE(malformed.diagnostic.observed_engine_version);
+
+        auto partial = banner();
+        partial.pop_back();
+        const auto partial_result =
+            windows::parse_required_hlds_runtime_banner(
+                partial, "boot_camp", 27'141U);
+        CHECK(partial_result.code ==
+              windows::HldsBannerParseErrorCode::missing_field);
+        CHECK(partial_result.diagnostic.map.status == Status::absent);
+
+        auto completed_mismatch = banner("1.1.2.3");
+        completed_mismatch += "unrelated bounded output\n";
+        CHECK(require_mismatch(completed_mismatch, Field::engine_version)
+                  .diagnostic.observed_line_count == 6U);
+    }
+
+    SECTION("source lifetime and process-log bounds cannot leak raw lines") {
+        std::string transient = banner("1.1.2.3");
+        auto result = windows::parse_required_hlds_runtime_banner(
+            transient, "boot_camp", 27'141U);
+        transient.assign(transient.size(), 'X');
+        REQUIRE(result.diagnostic.observed_engine_version);
+        CHECK(*result.diagnostic.observed_engine_version ==
+              windows::WindowsFileVersion{1U, 1U, 2U, 3U});
+        CHECK(result.diagnostic.observed_byte_count == transient.size());
+
+        windows::BoundedProcessLogSnapshot truncated;
+        truncated.bytes = banner();
+        truncated.observed_bytes = truncated.bytes.size() + 1U;
+        truncated.observed_line_count = 5U;
+        truncated.byte_truncated = true;
+        const auto bounded = windows::diagnose_required_hlds_runtime_banner(
+            truncated, "boot_camp", 27'141U);
+        CHECK(bounded.code ==
+              windows::HldsBannerParseErrorCode::process_log_truncated);
+        CHECK(bounded.diagnostic.mismatch_field ==
+              Field::process_log_truncated);
+        CHECK(bounded.diagnostic.process_log_truncated);
+
+        const std::string long_line(4'097U, 'X');
+        CHECK(windows::parse_required_hlds_runtime_banner(
+                  long_line + "\n", "boot_camp", 27'141U).code ==
+              windows::HldsBannerParseErrorCode::line_too_long);
+        const std::string too_large(1U * 1'024U * 1'024U + 1U, 'X');
+        CHECK(windows::parse_required_hlds_runtime_banner(
+                  too_large, "boot_camp", 27'141U).code ==
+              windows::HldsBannerParseErrorCode::too_large);
+    }
+}
+
+TEST_CASE("Fake HLDS profile variants stay server-only and bounded",
+          "[platform][windows][stock-runtime][orchestrator]"
+          "[server-profile-diagnostic][fake-integration]")
+{
+    using Field = windows::HldsRuntimeProfileField;
+    using ParseStatus = windows::HldsRuntimeProfileParseStatus;
+    struct Fixture final {
+        std::string_view variant;
+        Field field;
+    };
+    constexpr std::array<Fixture, 8U> mismatches{{
+        {"engine-version-mismatch", Field::engine_version},
+        {"runtime-mode-mismatch", Field::runtime_mode},
+        {"game-mismatch", Field::game},
+        {"protocol-mismatch", Field::protocol},
+        {"build-mismatch", Field::build},
+        {"endpoint-address-mismatch", Field::endpoint_address},
+        {"endpoint-port-mismatch", Field::endpoint_port},
+        {"map-mismatch", Field::map},
+    }};
+    const auto server_identity = observe_fake_server();
+    const auto client_identity = observe_fake_client();
+    const auto require_no_client = [&]() {
+        const auto clients =
+            windows::find_processes_with_exact_image_identity(client_identity);
+        REQUIRE(clients);
+        CHECK(clients.process_ids.empty());
+    };
+    const auto run_variant = [&server_identity, &require_no_client](
+        const std::string_view variant,
+        const windows::BoundedProcessLogLimits limits = {},
+        const std::uint32_t ready_delay_ms = 0U,
+        bool* incomplete_observed = nullptr) {
+        auto log = windows::BoundedProcessLogCapture::create(limits);
+        REQUIRE(log);
+        auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+        REQUIRE(created);
+        const auto port = reserve_then_release_loopback_port();
+        auto [server, launched] = job.launch(fake_server_spec(
+            server_identity, port, 5'000U, &*log, 0U, false,
+            ready_delay_ms, variant, 75U));
+        REQUIRE(launched);
+        log->close_parent_write_handle();
+        windows::HldsBannerParseResult result;
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds{3};
+        do {
+            result = windows::diagnose_required_hlds_runtime_banner(
+                log->snapshot(), "boot_camp", port);
+            if (incomplete_observed != nullptr &&
+                result.diagnostic.parse_status == ParseStatus::incomplete) {
+                *incomplete_observed = true;
+            }
+            if (result || result.diagnostic.parse_status !=
+                              ParseStatus::incomplete) {
+                break;
+            }
+            if (!server.running()) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        } while (std::chrono::steady_clock::now() < deadline);
+        require_no_client();
+        const auto cleanup =
+            job.terminate_and_wait(120U, std::chrono::seconds{5});
+        REQUIRE(cleanup);
+        static_cast<void>(log->finish());
+        require_no_client();
+        return result;
+    };
+
+    for (const auto& fixture : mismatches) {
+        INFO("variant=" << fixture.variant);
+        const auto result = run_variant(fixture.variant);
+        CHECK(result.diagnostic.parse_status == ParseStatus::profile_mismatch);
+        CHECK(result.diagnostic.mismatch_field == fixture.field);
+    }
+
+    SECTION("valid, chunked and late profiles complete without early mismatch") {
+        CHECK(run_variant("valid"));
+        bool partial_incomplete = false;
+        CHECK(run_variant("partial-chunks", {}, 0U, &partial_incomplete));
+        CHECK(partial_incomplete);
+        bool late_incomplete = false;
+        CHECK(run_variant("late-completion", {}, 100U, &late_incomplete));
+        CHECK(late_incomplete);
+    }
+
+    SECTION("duplicate, early exit, timeout and truncation remain typed") {
+        CHECK(run_variant("duplicate-field").diagnostic.parse_status ==
+              ParseStatus::duplicate_field);
+        const auto early = run_variant("exit-before-profile");
+        CHECK(early.diagnostic.parse_status == ParseStatus::incomplete);
+        CHECK(early.diagnostic.mismatch_field == Field::missing_field);
+
+        auto timeout_log = windows::BoundedProcessLogCapture::create({});
+        REQUIRE(timeout_log);
+        auto [timeout_job, timeout_created] =
+            windows::KillOnCloseProcessJob::create(1U);
+        REQUIRE(timeout_created);
+        const auto timeout_port = reserve_then_release_loopback_port();
+        auto [timeout_server, timeout_started] = timeout_job.launch(
+            fake_server_spec(server_identity, timeout_port, 5'000U,
+                             &*timeout_log, 0U, true));
+        REQUIRE(timeout_started);
+        timeout_log->close_parent_write_handle();
+        std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        const auto timeout = windows::diagnose_required_hlds_runtime_banner(
+            timeout_log->snapshot(), "boot_camp", timeout_port);
+        CHECK(timeout.diagnostic.parse_status == ParseStatus::incomplete);
+        CHECK(timeout_server.running());
+        REQUIRE(timeout_job.terminate_and_wait(
+            120U, std::chrono::seconds{5}));
+        static_cast<void>(timeout_log->finish());
+        require_no_client();
+
+        windows::BoundedProcessLogLimits truncation_limits;
+        truncation_limits.maximum_bytes = 1'024U;
+        truncation_limits.maximum_line_length = 4'096U;
+        truncation_limits.maximum_line_count = 1'024U;
+        const auto truncated = run_variant(
+            "log-truncation", truncation_limits);
+        CHECK(truncated.diagnostic.parse_status ==
+              ParseStatus::process_log_truncated);
+        CHECK(truncated.diagnostic.mismatch_field ==
+              Field::process_log_truncated);
+    }
 }
 
 TEST_CASE("Exact image scan exposes enumeration failure instead of an empty set",
