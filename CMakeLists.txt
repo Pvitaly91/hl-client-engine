@@ -2416,6 +2416,41 @@ if(BUILD_TESTING)
             hlclient_stock_runtime_campaign_resume
             PROPERTIES TIMEOUT 30)
 
+        find_program(
+            HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE
+            NAMES pwsh pwsh.exe
+            REQUIRED)
+        find_program(
+            HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE
+            NAMES powershell powershell.exe
+            REQUIRED)
+        add_test(
+            NAME hlclient_stock_runtime_unbound_canary_recovery_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/run_stock_runtime_first_observations.ps1"
+                -ValidateUnboundCanaryRecoveryPolicy)
+        add_test(
+            NAME hlclient_stock_runtime_unbound_canary_recovery_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/run_stock_runtime_first_observations.ps1"
+                -ValidateUnboundCanaryRecoveryPolicy)
+        set_tests_properties(
+            hlclient_stock_runtime_unbound_canary_recovery_pwsh7
+            hlclient_stock_runtime_unbound_canary_recovery_powershell51
+            PROPERTIES TIMEOUT 30)
+
         add_test(
             NAME hlclient_stock_runtime_evidence_threshold
             COMMAND

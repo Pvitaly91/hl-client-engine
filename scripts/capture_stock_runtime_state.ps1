@@ -745,6 +745,104 @@ namespace Hlclient
             }
         }
 
+        // Removes only one exact, empty, lowercase-GUID child directory from
+        // an otherwise empty retained parent. Both identities are opened with
+        // FILE_FLAG_OPEN_REPARSE_POINT and without FILE_SHARE_DELETE before
+        // the child is marked delete-on-close. Any content, alternate stream,
+        // reparse identity, sibling or inaccessible inventory fails closed.
+        public static void DeleteExactEmptyChildDirectory(
+            string parentPath, string childLeaf)
+        {
+            if (String.IsNullOrWhiteSpace(parentPath) ||
+                !ValidLowerHexRunId(childLeaf))
+                throw new InvalidOperationException(
+                    "Exact empty-child cleanup parameters are invalid.");
+            string parent = Path.GetFullPath(parentPath).TrimEnd('\\', '/');
+            if (String.IsNullOrEmpty(Path.GetPathRoot(parent)))
+                throw new InvalidOperationException(
+                    "Exact empty-child cleanup parent must be absolute.");
+            DriveInfo drive = new DriveInfo(Path.GetPathRoot(parent));
+            if (drive.DriveType != DriveType.Fixed)
+                throw new InvalidOperationException(
+                    "Exact empty-child cleanup requires a fixed local drive.");
+            string child = Path.Combine(parent, childLeaf);
+            if (!String.Equals(Path.GetDirectoryName(child), parent,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "Exact empty-child cleanup child is not direct.");
+
+            IntPtr parentHandle = InvalidHandle;
+            IntPtr childHandle = InvalidHandle;
+            try
+            {
+                parentHandle = CreateFile(
+                    parent, GenericRead | FileReadAttributes,
+                    FileShareRead | FileShareWrite,
+                    IntPtr.Zero, OpenExisting,
+                    FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                    IntPtr.Zero);
+                if (parentHandle == InvalidHandle)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Exact empty-child cleanup parent open failed.");
+                StockRuntimeByHandleFileInformation parentBefore =
+                    Information(parentHandle);
+                RequireOrdinaryExactDirectory(
+                    parentHandle, parent, parentBefore);
+                RequireOnlyDirectoryDataStreams(parentHandle);
+                RequireExactSingleChild(parent, child);
+
+                childHandle = CreateFile(
+                    child,
+                    GenericRead | DeleteAccess | FileReadAttributes,
+                    FileShareRead | FileShareWrite,
+                    IntPtr.Zero, OpenExisting,
+                    FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                    IntPtr.Zero);
+                if (childHandle == InvalidHandle)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Exact empty-child cleanup child open failed.");
+                StockRuntimeByHandleFileInformation childBefore =
+                    Information(childHandle);
+                RequireOrdinaryExactDirectory(
+                    childHandle, child, childBefore);
+                RequireOnlyDirectoryDataStreams(childHandle);
+                RequireEmptyDirectory(child);
+
+                RequireOrdinaryExactDirectory(
+                    parentHandle, parent, parentBefore);
+                RequireOnlyDirectoryDataStreams(parentHandle);
+                RequireExactSingleChild(parent, child);
+                RequireOrdinaryExactDirectory(
+                    childHandle, child, childBefore);
+                RequireOnlyDirectoryDataStreams(childHandle);
+                RequireEmptyDirectory(child);
+
+                if (!MarkDeleteOnClose(childHandle))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Exact empty-child cleanup disposition failed.");
+                if (!CloseHandle(childHandle))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Exact empty-child cleanup close failed.");
+                childHandle = IntPtr.Zero;
+                if (GetFileAttributes(child) != UInt32.MaxValue)
+                    throw new InvalidOperationException(
+                        "Exact empty-child cleanup target remains present.");
+                RequireOrdinaryExactDirectory(
+                    parentHandle, parent, parentBefore);
+                RequireOnlyDirectoryDataStreams(parentHandle);
+                RequireEmptyDirectory(parent);
+            }
+            finally
+            {
+                if (childHandle != IntPtr.Zero &&
+                    childHandle != InvalidHandle)
+                    CloseHandle(childHandle);
+                if (parentHandle != IntPtr.Zero &&
+                    parentHandle != InvalidHandle)
+                    CloseHandle(parentHandle);
+            }
+        }
+
         public bool Revalidate()
         {
             if (disposed || handles.Count == 0) return false;
@@ -1449,6 +1547,57 @@ namespace Hlclient
                     return false;
             }
             return true;
+        }
+
+        private static bool ValidLowerHexRunId(string value)
+        {
+            if (String.IsNullOrEmpty(value) || value.Length != 32)
+                return false;
+            for (int index = 0; index < value.Length; ++index)
+            {
+                char character = value[index];
+                if (!((character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f')))
+                    return false;
+            }
+            return true;
+        }
+
+        private static void RequireOrdinaryExactDirectory(
+            IntPtr handle, string expectedPath,
+            StockRuntimeByHandleFileInformation expectedInformation)
+        {
+            StockRuntimeByHandleFileInformation observed =
+                Information(handle);
+            if ((observed.FileAttributes & FileAttributeDirectory) == 0 ||
+                (observed.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                observed.VolumeSerialNumber !=
+                    expectedInformation.VolumeSerialNumber ||
+                observed.FileIndexHigh != expectedInformation.FileIndexHigh ||
+                observed.FileIndexLow != expectedInformation.FileIndexLow ||
+                !String.Equals(FinalPath(handle),
+                    Path.GetFullPath(expectedPath).TrimEnd('\\', '/'),
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "Exact empty-child cleanup directory identity is invalid.");
+        }
+
+        private static void RequireExactSingleChild(
+            string parent, string expectedChild)
+        {
+            string[] entries = Directory.GetFileSystemEntries(parent);
+            if (entries.Length != 1 ||
+                !String.Equals(Path.GetFullPath(entries[0]), expectedChild,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "Exact empty-child cleanup parent inventory is ambiguous.");
+        }
+
+        private static void RequireEmptyDirectory(string path)
+        {
+            if (Directory.GetFileSystemEntries(path).Length != 0)
+                throw new InvalidOperationException(
+                    "Exact empty-child cleanup refuses nonempty content.");
         }
 
         private static void RequireOrdinaryExactFile(

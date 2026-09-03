@@ -50,7 +50,10 @@ param(
     [int]$IdleDurationSeconds = 60,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Policy')]
-    [switch]$ValidateCampaignAggregationPolicy
+    [switch]$ValidateCampaignAggregationPolicy,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'UnboundRecoveryPolicy')]
+    [switch]$ValidateUnboundCanaryRecoveryPolicy
 )
 
 $ErrorActionPreference = 'Stop'
@@ -315,6 +318,125 @@ function Get-CanaryResumeDisposition {
     if ($CampaignHasState) { return 'campaign-without-canary' }
     if ($RunCount -eq 1) { return 'unbound-quarantine' }
     return 'fresh-capture'
+}
+
+function Get-PreCampaignCanaryFailureCategory {
+    param([string[]]$CaptureOutput)
+    $failure = @($CaptureOutput | Where-Object {
+            $_ -match '^\[stock-runtime-capture\] failure-category=[A-Za-z0-9_.:-]+$' } |
+        Select-Object -Last 1)
+    if ($failure.Count -eq 1) {
+        return $failure[0].Substring(
+            '[stock-runtime-capture] failure-category='.Length)
+    }
+    return 'pre_campaign_canary_failed'
+}
+
+function Remove-NewEmptyUnboundCanaryRun {
+    param([string]$CanaryRoot, [string]$RunId)
+    if ($RunId -cnotmatch '^[0-9a-f]{32}$') { return $false }
+    try {
+        [Hlclient.StockRuntimeDirectoryCapability]::DeleteExactEmptyChildDirectory(
+            $CanaryRoot, $RunId)
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Write-PreCampaignCanaryFailureContract {
+    param(
+        [string]$FailureCategory,
+        [ValidateSet('exact', 'preserved', 'not-created')]
+        [string]$EmptyUnboundCleanup)
+    Write-Output "[stock-runtime-campaign] canary-failure-category=$FailureCategory"
+    Write-Output "[stock-runtime-campaign] empty-unbound-cleanup=$EmptyUnboundCleanup"
+    Write-Output '[stock-runtime-campaign] canary-accepted=false'
+    Write-Output '[stock-runtime-campaign] campaign-runs-started=0'
+}
+
+if ($PSCmdlet.ParameterSetName -ceq 'UnboundRecoveryPolicy') {
+    $captureScriptForFixture = Join-Path $PSScriptRoot 'capture_stock_runtime_state.ps1'
+    $bootstrap = @(& $captureScriptForFixture -InitializeDirectoryCapability |
+        ForEach-Object { $_.ToString() })
+    if ($bootstrap -cnotcontains
+            '[stock-runtime-capture] directory-capability=initialized' -or
+        $null -eq ('Hlclient.StockRuntimeDirectoryCapability' -as [type])) {
+        throw 'Unbound-canary fixture capability bootstrap failed.'
+    }
+
+    $temporaryParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+    $fixtureRoot = Join-Path $temporaryParent `
+        ('hlclient-stock-runtime-unbound-fixture-' + [guid]::NewGuid().ToString('N'))
+    $emptyRunId = '11111111111111111111111111111111'
+    $nonemptyRunId = '22222222222222222222222222222222'
+    $emptyRun = Join-Path $fixtureRoot $emptyRunId
+    $nonemptyRun = Join-Path $fixtureRoot $nonemptyRunId
+    $marker = Join-Path $nonemptyRun 'diagnostic.marker'
+    if (-not $fixtureRoot.StartsWith(
+            $temporaryParent + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase) -or
+        (Test-Path -LiteralPath $fixtureRoot)) {
+        throw 'Unbound-canary fixture root is unsafe.'
+    }
+
+    $emptyCleanup = $false
+    $nonemptyPreserved = $false
+    try {
+        [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        [IO.Directory]::CreateDirectory($emptyRun) | Out-Null
+        $fakeCaptureOutput = @(
+            '[stock-runtime-capture] active-capture=failed',
+            '[stock-runtime-capture] failure-category=client-ready-not-observed',
+            '[stock-runtime-capture] accepted-evidence-run=false',
+            '[stock-runtime-capture] result=failed')
+        $category = Get-PreCampaignCanaryFailureCategory $fakeCaptureOutput
+        $emptyCleanup = Remove-NewEmptyUnboundCanaryRun $fixtureRoot $emptyRunId
+        $contract = @(Write-PreCampaignCanaryFailureContract $category `
+                $(if ($emptyCleanup) { 'exact' } else { 'preserved' }))
+        if ($category -cne 'client-ready-not-observed' -or
+            -not $emptyCleanup -or (Test-Path -LiteralPath $emptyRun) -or
+            $contract -cnotcontains
+                '[stock-runtime-campaign] canary-failure-category=client-ready-not-observed' -or
+            $contract -cnotcontains
+                '[stock-runtime-campaign] empty-unbound-cleanup=exact') {
+            throw 'Empty unbound canary fixture did not surface and clean exactly.'
+        }
+
+        [IO.Directory]::CreateDirectory($nonemptyRun) | Out-Null
+        [IO.File]::WriteAllBytes($marker, [byte[]]@(0x5a))
+        $nonemptyRemoved = Remove-NewEmptyUnboundCanaryRun `
+            $fixtureRoot $nonemptyRunId
+        $nonemptyPreserved = -not $nonemptyRemoved -and
+            (Test-Path -LiteralPath $marker -PathType Leaf)
+        if (-not $nonemptyPreserved) {
+            throw 'Nonempty unbound canary fixture was not preserved.'
+        }
+    } finally {
+        if (Test-Path -LiteralPath $marker -PathType Leaf) {
+            [IO.File]::Delete($marker)
+        }
+        foreach ($knownRun in @($emptyRun, $nonemptyRun)) {
+            if (Test-Path -LiteralPath $knownRun -PathType Container) {
+                if (@(Get-ChildItem -LiteralPath $knownRun -Force).Count -ne 0) {
+                    throw 'Unbound-canary fixture cleanup encountered drift.'
+                }
+                [IO.Directory]::Delete($knownRun, $false)
+            }
+        }
+        if (Test-Path -LiteralPath $fixtureRoot -PathType Container) {
+            if (@(Get-ChildItem -LiteralPath $fixtureRoot -Force).Count -ne 0) {
+                throw 'Unbound-canary fixture root cleanup encountered drift.'
+            }
+            [IO.Directory]::Delete($fixtureRoot, $false)
+        }
+    }
+    Write-Output '[stock-runtime-unbound-canary-test] failure-category=client-ready-not-observed'
+    Write-Output "[stock-runtime-unbound-canary-test] empty-cleanup=$($emptyCleanup.ToString().ToLowerInvariant())"
+    Write-Output "[stock-runtime-unbound-canary-test] nonempty-preserved=$($nonemptyPreserved.ToString().ToLowerInvariant())"
+    Write-Output '[stock-runtime-unbound-canary-test] accepted-run-rebound=false'
+    Write-Output '[stock-runtime-unbound-canary-test] result=success'
+    return
 }
 
 if ($PSCmdlet.ParameterSetName -ceq 'Policy') {
@@ -1099,10 +1221,11 @@ function Confirm-PreCampaignCanary {
         throw 'Campaign state exists without a bound pre-campaign canary.'
     }
     if ($disposition -ceq 'unbound-quarantine') {
-        Write-Output '[stock-runtime-campaign] canary-failure-category=unbound_canary_state'
-        Write-Output '[stock-runtime-campaign] canary-accepted=false'
-        Write-Output '[stock-runtime-campaign] campaign-runs-started=0'
-        throw 'An unbound pre-campaign canary run is quarantined and is never recovered or rebound. Preserve it for diagnosis, then remove the ignored stock-runtime-canary root and rerun the campaign command to capture a fresh bound canary.'
+        $exception = [InvalidOperationException]::new(
+            'An unbound pre-campaign canary run is quarantined and is never recovered or rebound. Preserve it for diagnosis, then remove the ignored stock-runtime-canary root and rerun the campaign command to capture a fresh bound canary.')
+        $exception.Data['CanaryFailureCategory'] = 'unbound_canary_state'
+        $exception.Data['EmptyUnboundCleanup'] = 'preserved'
+        throw $exception
     }
     if ($disposition -cne 'fresh-capture') {
         throw 'Pre-campaign canary resume state is invalid.'
@@ -1135,21 +1258,25 @@ function Confirm-PreCampaignCanary {
             ForEach-Object { [void]$captureOutput.Add($_.ToString()) }
     } catch {
         $failedState = Get-CanaryRootState
-        if ($failedState.Runs.Count -gt 1 -or
-            $failedState.Manifests.Count -ne 0) {
-            throw 'Pre-campaign canary failure left an ambiguous publication.'
+        $typed = Get-PreCampaignCanaryFailureCategory $captureOutput
+        $cleanup = 'preserved'
+        $message = 'Pre-campaign canary failed; the 24-slot campaign was not started.'
+        if ($failedState.Runs.Count -eq 0 -and
+            $failedState.Manifests.Count -eq 0) {
+            $cleanup = 'not-created'
+        } elseif ($failedState.Runs.Count -eq 1 -and
+            $failedState.Manifests.Count -eq 0) {
+            if (Remove-NewEmptyUnboundCanaryRun `
+                    $canaryOutput $failedState.Runs[0].Name) {
+                $cleanup = 'exact'
+            }
+        } else {
+            $message = 'Pre-campaign canary failure left an ambiguous publication.'
         }
-        $failure = @($captureOutput | Where-Object {
-                $_ -match '^\[stock-runtime-capture\] failure-category=[A-Za-z0-9_.:-]+$' } |
-            Select-Object -Last 1)
-        $typed = if ($failure.Count -eq 1) {
-            $failure[0].Substring(
-                '[stock-runtime-capture] failure-category='.Length)
-        } else { 'pre_campaign_canary_failed' }
-        Write-Output "[stock-runtime-campaign] canary-failure-category=$typed"
-        Write-Output '[stock-runtime-campaign] canary-accepted=false'
-        Write-Output '[stock-runtime-campaign] campaign-runs-started=0'
-        throw 'Pre-campaign canary failed; the 24-slot campaign was not started.'
+        $exception = [InvalidOperationException]::new($message, $_.Exception)
+        $exception.Data['CanaryFailureCategory'] = $typed
+        $exception.Data['EmptyUnboundCleanup'] = $cleanup
+        throw $exception
     }
     $completedState = Get-CanaryRootState
     $runLines = @($captureOutput | Where-Object {
@@ -1694,7 +1821,21 @@ function Test-LoopbackUdpPortPairAvailable {
 }
 
 $implementationCommit = Resolve-CampaignImplementationCommit
-$canaryBinding = Confirm-PreCampaignCanary $implementationCommit
+try {
+    $canaryBinding = Confirm-PreCampaignCanary $implementationCommit
+} catch {
+    $failureCategory = 'pre_campaign_canary_failed'
+    $emptyUnboundCleanup = 'preserved'
+    if ($_.Exception.Data.Contains('CanaryFailureCategory')) {
+        $failureCategory = [string]$_.Exception.Data['CanaryFailureCategory']
+    }
+    if ($_.Exception.Data.Contains('EmptyUnboundCleanup')) {
+        $emptyUnboundCleanup = [string]$_.Exception.Data['EmptyUnboundCleanup']
+    }
+    Write-PreCampaignCanaryFailureContract `
+        $failureCategory $emptyUnboundCleanup
+    throw
+}
 Write-Output "[stock-runtime-campaign] canary-run-id=$($canaryBinding.RunId)"
 Write-Output '[stock-runtime-campaign] canary-accepted=true'
 Write-Output '[stock-runtime-campaign] canary-counted-in-matrix=false'
