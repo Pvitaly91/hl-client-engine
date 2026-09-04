@@ -33,6 +33,12 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [switch]$DiagnoseServerProfile,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [switch]$PrivateDiagnoseServerProfile,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
+    [switch]$MeasureExternalDriftControl,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnosticSelfTest')]
     [switch]$ValidateServerProfileDiagnosticPolicy,
 
@@ -40,6 +46,8 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
     [ValidateNotNullOrEmpty()]
     [string]$ResearchHalfLifeRoot,
 
@@ -47,6 +55,8 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
     [ValidateNotNullOrEmpty()]
     [string]$ClientPath,
 
@@ -54,12 +64,15 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
     [ValidateNotNullOrEmpty()]
     [string]$HldsPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$CaptureToolPath,
 
@@ -71,17 +84,32 @@ param(
     [AllowEmptyString()]
     [string]$ConfirmActiveCapture,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [AllowEmptyString()]
+    [string]$ConfirmPrivateDiagnostic,
+
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$NetworkIsolationGuardPath,
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
     [ValidateNotNullOrEmpty()]
     [string]$AppManifestPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
+    [ValidateSet('idle_control', 'post_cleanup_settle')]
+    [string]$DriftPhase,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
+    [ValidateRange(0, 60)]
+    [int]$DriftDelaySeconds,
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(ParameterSetName = 'ActivePreflight')]
@@ -90,11 +118,13 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [ValidateSet('valve')]
     [string]$Game,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [ValidateSet('boot_camp', 'crossfire', 'stalkyard')]
     [string]$Map,
 
@@ -116,17 +146,20 @@ param(
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(ParameterSetName = 'ActivePreflight')]
     [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [ValidateRange(1024, 65534)]
     [int]$RelayPort = 27140,
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(ParameterSetName = 'ActivePreflight')]
     [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [ValidateRange(1024, 65534)]
     [int]$ServerPort = 27141,
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [ValidateNotNullOrEmpty()]
     [string]$OutputRoot = '.\manual-artifacts\stock-runtime',
 
@@ -135,6 +168,7 @@ param(
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [ValidateRange(5, 300)]
     [int]$MaximumDurationSeconds = 45,
 
@@ -193,14 +227,26 @@ $requiredCanaryOutputRoot = [IO.Path]::GetFullPath(
     (Join-Path $manualRoot 'stock-runtime-canary')).TrimEnd('\', '/')
 $requiredServerProfileDiagnosticRoot = [IO.Path]::GetFullPath(
     (Join-Path $manualRoot 'stock-runtime-server-profile-diagnostic')).TrimEnd('\', '/')
+$requiredPrivateServerProfileDiagnosticRoot = [IO.Path]::GetFullPath(
+    (Join-Path $manualRoot 'stock-runtime-server-profile-private')).TrimEnd('\', '/')
 $markerName = '.hlclient-research-isolated'
 $markerText = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
 $pendingMarkerName = '.hlclient-research-pending'
 $preparationManifestName = '.hlclient-research-preparation.json'
 $externalApprovalName = 'external-target-approval.json'
 $activeCaptureToken = 'HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1'
+$privateDiagnosticToken = 'HLCLIENT_PRIVATE_HLDS_BANNER_DIAGNOSTIC_V1'
 $serverProfileDiagnosticMode =
     $PSCmdlet.ParameterSetName -ceq 'ServerProfileDiagnostic'
+$privateServerProfileDiagnosticMode =
+    $PSCmdlet.ParameterSetName -ceq 'PrivateServerProfileDiagnostic'
+$anyServerProfileDiagnosticMode =
+    $serverProfileDiagnosticMode -or $privateServerProfileDiagnosticMode
+$externalDriftImplementation = Join-Path $PSScriptRoot 'stock_external_drift.ps1'
+if (-not (Test-Path -LiteralPath $externalDriftImplementation -PathType Leaf)) {
+    throw 'Stock external drift implementation is absent.'
+}
+. $externalDriftImplementation
 $maximumEntries = 199999
 $maximumResearchBytes = [Int64]17179869184
 $maximumSteamManifestBytes = 1048576
@@ -220,7 +266,9 @@ if (($PSCmdlet.ParameterSetName -eq 'Capture' -and
         (-not $EnableActiveCapture -or
          $ConfirmActiveCapture -cne $activeCaptureToken)) -or
     ($PSCmdlet.ParameterSetName -eq 'ServerProfileDiagnostic' -and
-        $ConfirmActiveCapture -cne $activeCaptureToken)) {
+        $ConfirmActiveCapture -cne $activeCaptureToken) -or
+    ($PSCmdlet.ParameterSetName -eq 'PrivateServerProfileDiagnostic' -and
+        $ConfirmPrivateDiagnostic -cne $privateDiagnosticToken)) {
     Write-Output '[stock-runtime-capture] active-capture=explicit-opt-in-required'
     Write-Output '[stock-runtime-capture] processes-started=0'
     Write-Output '[stock-runtime-capture] files-written=0'
@@ -3337,91 +3385,96 @@ function Write-StockServerProfileDiagnosticPublicOutput {
         $Values['server-profile-result'])
 }
 
-function Get-ExternalSteamStateSnapshot {
-    param([string]$ManifestPath)
-    $records = [Collections.Generic.List[string]]::new()
-    $manifestItem = Get-Item -LiteralPath $ManifestPath -Force
-    [void]$records.Add(('manifest|{0}|{1}|{2}|{3}|{4}' -f $manifestItem.Length,
-            $manifestItem.CreationTimeUtc.Ticks, $manifestItem.LastWriteTimeUtc.Ticks,
-            [Int64]$manifestItem.Attributes, (Get-FileSha256 $ManifestPath)))
+function Add-ExternalStateTree {
+    param(
+        [Collections.Generic.List[object]]$Entries,
+        [string]$Scope,
+        [string]$Root,
+        [string]$RelativePrefix)
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return }
+    Assert-NoReparsePointInExistingPath $Root 'external state tree'
+    [void]$Entries.Add((New-StockExternalStateEntry $Scope $RelativePrefix $Root))
+    $queue = [Collections.Generic.Queue[IO.DirectoryInfo]]::new()
+    $queue.Enqueue([IO.DirectoryInfo](Get-Item -LiteralPath $Root -Force))
+    $rootPrefix = $Root.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    while ($queue.Count -ne 0) {
+        $directory = $queue.Dequeue()
+        [string[]]$children = @($directory.GetFileSystemInfos() |
+            ForEach-Object FullName)
+        [Array]::Sort($children, [StringComparer]::OrdinalIgnoreCase)
+        foreach ($childPath in $children) {
+            if ($Entries.Count -ge 50000) {
+                throw 'External state snapshot exceeds its entry bound.'
+            }
+            $item = Get-Item -LiteralPath $childPath -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'External state snapshot contains a reparse point.'
+            }
+            $relative = $item.FullName.Substring($rootPrefix.Length).Replace('\', '/')
+            if ($RelativePrefix -cne '.') {
+                $relative = $RelativePrefix.TrimEnd('/') + '/' + $relative
+            }
+            [void]$Entries.Add((New-StockExternalStateEntry `
+                    $Scope $relative $item.FullName))
+            if (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                $queue.Enqueue([IO.DirectoryInfo]$item)
+            }
+        }
+    }
+}
 
+function Get-ExternalSteamStateSnapshot {
+    param(
+        [string]$ManifestPath,
+        [string]$ResearchRoot,
+        [string]$Phase = 'standard_server_diagnostic')
+    $entries = [Collections.Generic.List[object]]::new()
+    [void]$entries.Add((New-StockExternalStateEntry `
+            'app_manifest' '.' $ManifestPath))
     $steamApps = Split-Path -Parent $ManifestPath
     $steamRoot = Split-Path -Parent $steamApps
-    $targets = [Collections.Generic.List[object]]::new()
     $primary = Join-Path $steamApps 'common\Half-Life'
     if (Test-Path -LiteralPath $primary -PathType Container) {
-        [void]$targets.Add([pscustomobject]@{
-                Category = 'primary-half-life-root'; Path = $primary; Recursive = $false })
+        [void]$entries.Add((New-StockExternalStateEntry `
+                'steam_other_monitored_entry' '.' $primary))
+        foreach ($exact in @(
+                [pscustomobject]@{ Scope = 'steam_half_life_launcher'; Relative = 'hl.exe'; Path = (Join-Path $primary 'hl.exe') },
+                [pscustomobject]@{ Scope = 'steam_hlds_launcher'; Relative = 'hlds.exe'; Path = (Join-Path $primary 'hlds.exe') },
+                [pscustomobject]@{ Scope = 'steam_valve_client_dll'; Relative = 'valve/cl_dlls/client.dll'; Path = (Join-Path $primary 'valve\cl_dlls\client.dll') },
+                [pscustomobject]@{ Scope = 'steam_valve_server_dll'; Relative = 'valve/dlls/hl.dll'; Path = (Join-Path $primary 'valve\dlls\hl.dll') })) {
+            if (Test-Path -LiteralPath $exact.Path -PathType Leaf) {
+                [void]$entries.Add((New-StockExternalStateEntry `
+                        $exact.Scope $exact.Relative $exact.Path))
+            }
+        }
+        Add-ExternalStateTree $entries 'steam_hlfx_tree' `
+            (Join-Path $primary 'hlfxmp') '.'
     }
     $userdata = Join-Path $steamRoot 'userdata'
     if (Test-Path -LiteralPath $userdata -PathType Container) {
         Assert-NoReparsePointInExistingPath $userdata 'Steam userdata root'
-        foreach ($account in @(Get-ChildItem -LiteralPath $userdata -Force -Directory |
-                Sort-Object Name)) {
+        [string[]]$accountPaths = @(Get-ChildItem -LiteralPath $userdata -Force `
+                -Directory | ForEach-Object FullName)
+        [Array]::Sort($accountPaths, [StringComparer]::OrdinalIgnoreCase)
+        foreach ($accountPath in $accountPaths) {
+            $account = Get-Item -LiteralPath $accountPath -Force
             if ($account.Name -cnotmatch '^[0-9]{1,20}$' -or
-                ($account.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                ($account.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                continue
+            }
             foreach ($relative in @('70', 'config')) {
                 $candidate = Join-Path $account.FullName $relative
-                if (Test-Path -LiteralPath $candidate -PathType Container) {
-                    [void]$targets.Add([pscustomobject]@{
-                            Category = 'userdata-' + $relative; Path = $candidate; Recursive = $true })
-                }
+                Add-ExternalStateTree $entries 'steam_library_metadata' `
+                    $candidate ($account.Name + '/' + $relative)
             }
         }
     }
-
-    $entryCount = 1
-    [Int64]$totalBytes = $manifestItem.Length
-    foreach ($target in @($targets)) {
-        Assert-NoReparsePointInExistingPath $target.Path 'external Steam state'
-        $rootItem = Get-Item -LiteralPath $target.Path -Force
-        [void]$records.Add(('{0}|root|{1}|{2}|{3}' -f $target.Category,
-                $rootItem.CreationTimeUtc.Ticks, $rootItem.LastWriteTimeUtc.Ticks,
-                [Int64]$rootItem.Attributes))
-        $entryCount++
-        if (-not $target.Recursive) { continue }
-        $queue = [Collections.Generic.Queue[IO.DirectoryInfo]]::new()
-        $queue.Enqueue([IO.DirectoryInfo]$rootItem)
-        while ($queue.Count -ne 0) {
-            $directory = $queue.Dequeue()
-            foreach ($item in @($directory.GetFileSystemInfos() | Sort-Object Name)) {
-                if ($entryCount -ge 50000) { throw 'External Steam state exceeds its entry bound.' }
-                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw 'External Steam state contains a reparse point.'
-                }
-                $prefix = $target.Path.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-                $relative = $item.FullName.Substring($prefix.Length).Replace('\', '/')
-                if (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
-                    [void]$records.Add(('{0}|d|{1}|{2}|{3}|{4}' -f $target.Category,
-                            $relative, $item.CreationTimeUtc.Ticks,
-                            $item.LastWriteTimeUtc.Ticks, [Int64]$item.Attributes))
-                    $queue.Enqueue([IO.DirectoryInfo]$item)
-                } else {
-                    Assert-OnlyDefaultDataStream $item.FullName 'external Steam file'
-                    if ($item.Length -lt 0 -or $totalBytes -gt ([Int64]1073741824 - $item.Length)) {
-                        throw 'External Steam state exceeds its byte bound.'
-                    }
-                    $totalBytes += $item.Length
-                    [void]$records.Add(('{0}|f|{1}|{2}|{3}|{4}|{5}|{6}' -f
-                            $target.Category, $relative, $item.Length,
-                            $item.CreationTimeUtc.Ticks, $item.LastWriteTimeUtc.Ticks,
-                            [Int64]$item.Attributes, (Get-FileSha256 $item.FullName)))
-                }
-                $entryCount++
-            }
-        }
-    }
-    $canonical = @($records | Sort-Object) -join "`n"
-    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonical)
-    $algorithm = [Security.Cryptography.SHA256]::Create()
-    try {
-        $digest = ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '')
-    } finally {
-        $algorithm.Dispose()
-    }
-    return [pscustomobject]@{
-        EntryCount = $entryCount; TotalBytes = $totalBytes; ManifestSha256 = $digest
-    }
+    # Research is a distinct transactional scope: Get-ResearchSnapshot and
+    # Restore-ResearchState compare its complete deterministic inventory.
+    # Including restored files here would mislabel the deliberate copy-back
+    # identity replacement as Steam/source drift.
+    [void]$ResearchRoot
+    return New-StockExternalStateSnapshot @($entries) $Phase
 }
 
 function Write-AtomicJsonNoOverwrite {
@@ -3627,6 +3680,7 @@ function Write-StagedRestorationAttestation {
         [object]$After,
         [object]$ExternalBefore,
         [object]$ExternalAfter,
+        [object]$ExternalDifference,
         [int]$ExitCode,
         [bool]$OwnedProcessesStopped,
         [object]$DirectoryCapability
@@ -3642,6 +3696,14 @@ function Write-StagedRestorationAttestation {
         external_snapshot_entry_count = $ExternalBefore.EntryCount
         external_pre_manifest_sha256 = $ExternalBefore.ManifestSha256
         external_post_manifest_sha256 = $ExternalAfter.ManifestSha256
+        external_drift_phase = $ExternalDifference.phase
+        external_changed_scope_count = $ExternalDifference.changed_scopes
+        external_content_change_count = $ExternalDifference.content_changes
+        external_metadata_only_count = $ExternalDifference.metadata_only_changes
+        external_identity_replacement_count = $ExternalDifference.identity_replacements
+        external_created_count = $ExternalDifference.created
+        external_removed_count = $ExternalDifference.removed
+        external_unreadable_count = $ExternalDifference.unreadable
         created_files_removed = $true
         protected_paths_included = $true
         owned_processes_stopped = $OwnedProcessesStopped
@@ -4512,11 +4574,45 @@ if ($PSCmdlet.ParameterSetName -eq 'ServerProfileDiagnosticSelfTest') {
             'stock-runtime-server-profile-diagnostic') {
         throw 'Server profile diagnostic root is campaign/evidence eligible.'
     }
+    if ($requiredPrivateServerProfileDiagnosticRoot -ieq $requiredOutputRoot -or
+        $requiredPrivateServerProfileDiagnosticRoot -ieq
+            $requiredCanaryOutputRoot -or
+        $requiredPrivateServerProfileDiagnosticRoot -ieq
+            $requiredServerProfileDiagnosticRoot -or
+        [IO.Path]::GetFileName($requiredPrivateServerProfileDiagnosticRoot) -cne
+            'stock-runtime-server-profile-private') {
+        throw 'Private server profile diagnostic root is campaign/evidence eligible.'
+    }
     Write-Output '[stock-server-profile-test] typed-mismatch=propagated'
     Write-Output '[stock-server-profile-test] redundant-category=absent'
     Write-Output '[stock-server-profile-test] raw-output=contained'
     Write-Output '[stock-server-profile-test] diagnostic-root=separate'
+    Write-Output '[stock-server-profile-test] private-root=separate'
     Write-Output '[stock-server-profile-test] result=success'
+    return
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'ExternalDriftControl') {
+    $research = Resolve-IsolatedResearchRoot
+    [void](Get-ResearchSnapshot $research.Root)
+    $manifestPath = Resolve-AppManifest $AppManifestPath
+    $externalBefore = Get-ExternalSteamStateSnapshot `
+        $manifestPath $research.Root $DriftPhase
+    if ($DriftDelaySeconds -ne 0) {
+        Start-Sleep -Seconds $DriftDelaySeconds
+    }
+    $externalAfter = Get-ExternalSteamStateSnapshot `
+        $manifestPath $research.Root $DriftPhase
+    $externalDifference = Compare-StockExternalStateSnapshot `
+        $externalBefore $externalAfter $DriftPhase
+    Write-StockExternalDriftPublicOutput $externalDifference
+    Write-Output '[stock-runtime-capture] stock-processes-started=0'
+    Write-Output '[stock-runtime-capture] wfp-sessions-started=0'
+    Write-Output '[stock-runtime-capture] capture-files-written=0'
+    if ([string]$externalDifference.result -cne 'none') {
+        throw 'ambient_external_state_drift'
+    }
+    Write-Output '[stock-runtime-capture] result=success'
     return
 }
 
@@ -4579,7 +4675,8 @@ if ($PSCmdlet.ParameterSetName -eq 'ActivePreflight') {
         (Join-Path (Split-Path -Parent $tool) 'hlclient_stock_runtime_orchestrator.exe') `
         'hlclient_stock_runtime_orchestrator.exe' 'stock runtime orchestrator'
     $manifestPath = Resolve-AppManifest $AppManifestPath
-    [void](Get-ExternalSteamStateSnapshot $manifestPath)
+    $externalBefore = Get-ExternalSteamStateSnapshot `
+        $manifestPath $research.Root 'wfp_preflight'
     $arguments = @(
         '--validate-environment', '--research-root', $research.Root,
         '--client', $research.Client, '--server', $research.Server,
@@ -4587,6 +4684,14 @@ if ($PSCmdlet.ParameterSetName -eq 'ActivePreflight') {
         '--app-manifest', $manifestPath, '--game', 'valve', '--map', 'boot_camp',
         '--relay-port', [string]$RelayPort, '--server-port', [string]$ServerPort)
     $result = Invoke-BoundedOrchestrator $orchestratorPath $arguments 90
+    $externalAfter = Get-ExternalSteamStateSnapshot `
+        $manifestPath $research.Root 'wfp_preflight'
+    $externalDifference = Compare-StockExternalStateSnapshot `
+        $externalBefore $externalAfter 'wfp_preflight'
+    Write-StockExternalDriftPublicOutput $externalDifference
+    if ([string]$externalDifference.result -cne 'none') {
+        throw 'external_steam_state_changed'
+    }
     if ($result.ExitCode -ne 0) {
         $category = 'active_environment_validation_failed'
         if ($result.Values.ContainsKey('failure-category')) {
@@ -4642,7 +4747,7 @@ $scenarioAliases = @{
     'duplicate-server-runtime' = 'duplicate-server-to-client-transport-ordinal'
     'reorder-server-runtime' = 'reorder-server-to-client-transport-ordinal'
 }
-$canonicalScenario = if ($serverProfileDiagnosticMode) {
+$canonicalScenario = if ($anyServerProfileDiagnosticMode) {
     'server-profile-diagnostic'
 } elseif ($scenarioAliases.ContainsKey($Scenario)) {
     $scenarioAliases[$Scenario]
@@ -4654,7 +4759,7 @@ $orchestratorScenario = switch ($canonicalScenario) {
     default { $canonicalScenario }
 }
 
-if (-not $serverProfileDiagnosticMode -and
+if (-not $anyServerProfileDiagnosticMode -and
     ($canonicalScenario -ceq 'baseline' -or
         $canonicalScenario -ceq 'idle-runtime') -and
     $MaximumDurationSeconds -lt 30) {
@@ -4665,7 +4770,7 @@ if (-not $serverProfileDiagnosticMode -and
     throw 'Accepted baseline and idle-runtime observations require a requested duration of at least 30 seconds.'
 }
 
-if (-not $serverProfileDiagnosticMode -and
+if (-not $anyServerProfileDiagnosticMode -and
     $canonicalScenario -ceq 'reconnect' -and
     $MaximumDurationSeconds -lt 60) {
     Write-Output '[stock-runtime-capture] active-capture=blocked'
@@ -4696,7 +4801,7 @@ $activeScenarios = @(
     'drop-server-to-client-transport-ordinal',
     'duplicate-server-to-client-transport-ordinal',
     'reorder-server-to-client-transport-ordinal')
-if (-not $serverProfileDiagnosticMode -and
+if (-not $anyServerProfileDiagnosticMode -and
     $activeScenarios -cnotcontains $canonicalScenario) {
     throw 'The requested scenario is outside the M4.7.1.1 active-capture allowlist; no run was started.'
 }
@@ -4727,6 +4832,10 @@ $output = [IO.Path]::GetFullPath($OutputRoot).TrimEnd('\', '/')
 if ($serverProfileDiagnosticMode) {
     if ($output -ine $requiredServerProfileDiagnosticRoot) {
         throw 'ServerProfileDiagnostic requires the exact repository manual-artifacts/stock-runtime-server-profile-diagnostic root.'
+    }
+} elseif ($privateServerProfileDiagnosticMode) {
+    if ($output -ine $requiredPrivateServerProfileDiagnosticRoot) {
+        throw 'PrivateServerProfileDiagnostic requires the exact repository manual-artifacts/stock-runtime-server-profile-private root.'
     }
 } elseif ($PreCampaignCanary) {
     if ($canonicalScenario -cne 'baseline' -or $Map -cne 'boot_camp' -or
@@ -4804,7 +4913,13 @@ Assert-OrchestratorValue $activeValidation capture-files-written 0
 Assert-OrchestratorValue $activeValidation result success
 
 $before = Get-ResearchSnapshot $research.Root
-$externalBefore = Get-ExternalSteamStateSnapshot $manifestPath
+$externalDriftPhase = if ($privateServerProfileDiagnosticMode) {
+    'private_server_diagnostic'
+} elseif ($serverProfileDiagnosticMode) {
+    'standard_server_diagnostic'
+} else { 'standard_server_diagnostic' }
+$externalBefore = Get-ExternalSteamStateSnapshot `
+    $manifestPath $research.Root $externalDriftPhase
 $guard = New-RestorationGuard $research.Root $before
 $runId = [Guid]::NewGuid().ToString('N')
 $runRoot = Join-Path $output $runId
@@ -4843,7 +4958,12 @@ try {
     $wrapperGuardJob = New-OrchestratorProcessJobCapability
     $isolationReleaseCapability = New-OrchestratorTransactionCapability
     $arguments = @(
-        '--confirmation-token', $activeCaptureToken,
+        $(if ($privateServerProfileDiagnosticMode) {
+                '--private-diagnostic-token'
+            } else { '--confirmation-token' }),
+        $(if ($privateServerProfileDiagnosticMode) {
+                $privateDiagnosticToken
+            } else { $activeCaptureToken }),
         '--wrapper-capability-handle', $wrapperCapability.ToInt64().ToString(
             [Globalization.CultureInfo]::InvariantCulture),
         '--wrapper-cleanup-capability-handle',
@@ -4861,7 +4981,9 @@ try {
         '--client', $research.Client, '--server', $research.Server,
         '--relay', $tool, '--isolation-guard', $guardPath,
         '--app-manifest', $manifestPath, '--game', $Game, '--map', $Map,
-        '--output-role', $(if ($serverProfileDiagnosticMode) {
+        '--output-role', $(if ($privateServerProfileDiagnosticMode) {
+                'server-profile-private-diagnostic'
+            } elseif ($serverProfileDiagnosticMode) {
                 'server-profile-diagnostic'
             } elseif ($PreCampaignCanary) {
                 'pre-campaign-canary'
@@ -4882,8 +5004,10 @@ try {
         '--max-server-packets', [string]$MaximumServerPackets,
         '--mutation-after-client-packets', [string]$MutationAfterClientPackets,
         '--mutation-after-server-packets', [string]$MutationAfterServerPackets)
-    if ($serverProfileDiagnosticMode) {
-        $arguments += '--diagnose-server-profile'
+    if ($anyServerProfileDiagnosticMode) {
+        $arguments += $(if ($privateServerProfileDiagnosticMode) {
+                '--private-diagnose-server-profile'
+            } else { '--diagnose-server-profile' })
     } else {
         $arguments += @('--scenario', $orchestratorScenario)
     }
@@ -4903,7 +5027,7 @@ try {
     Assert-OrchestratorValue $orchestratorResult failure-category none
     Assert-OrchestratorValue $orchestratorResult result success
     Assert-OrchestratorValue $orchestratorResult job-cleanup exact
-    if ($serverProfileDiagnosticMode) {
+    if ($anyServerProfileDiagnosticMode) {
         Assert-OrchestratorValue $orchestratorResult relay-ready false
         Assert-OrchestratorValue $orchestratorResult client-ready false
         Assert-OrchestratorValue $orchestratorResult bounded-transport-complete false
@@ -4954,12 +5078,12 @@ try {
         Assert-OrchestratorValue $orchestratorResult client-ready true
         Assert-OrchestratorValue $orchestratorResult bounded-transport-complete true
     }
-    if (-not $serverProfileDiagnosticMode -and
+    if (-not $anyServerProfileDiagnosticMode -and
         $canonicalScenario -ceq 'reconnect') {
         Assert-OrchestratorValue $orchestratorResult connection-generations 2
         Assert-OrchestratorValue $orchestratorResult generation-distinct true
         Assert-OrchestratorValue $orchestratorResult candidate-conflict evidence-pending
-    } elseif (-not $serverProfileDiagnosticMode) {
+    } elseif (-not $anyServerProfileDiagnosticMode) {
         Assert-OrchestratorValue $orchestratorResult connection-generations 1
         Assert-OrchestratorValue $orchestratorResult generation-distinct false
         Assert-OrchestratorValue $orchestratorResult candidate-conflict not-applicable
@@ -5030,7 +5154,10 @@ try {
         [void]$cleanupErrors.Add(
             'Owned process cleanup was not attested; research restoration was not started.')
     }
-    try { $externalAfter = Get-ExternalSteamStateSnapshot $manifestPath }
+    try {
+        $externalAfter = Get-ExternalSteamStateSnapshot `
+            $manifestPath $research.Root $externalDriftPhase
+    }
     catch { [void]$cleanupErrors.Add($_.Exception.Message) }
     if ($null -ne $after) {
         try {
@@ -5062,8 +5189,12 @@ if ($runExists) {
 $ownedStopped = $cleanupAttested
 $restorationExact = $null -ne $after -and
     $after.ManifestSha256 -ceq $before.ManifestSha256
-$externalExact = $null -ne $externalAfter -and
-    $externalAfter.ManifestSha256 -ceq $externalBefore.ManifestSha256
+$externalDifference = if ($null -ne $externalAfter) {
+    Compare-StockExternalStateSnapshot `
+        $externalBefore $externalAfter $externalDriftPhase
+} else { $null }
+$externalExact = $null -ne $externalDifference -and
+    [string]$externalDifference.result -ceq 'none'
 $version = $null
 $isolation = $null
 $restoration = $null
@@ -5071,17 +5202,29 @@ $versionBytes = $null
 $isolationBytes = $null
 $restorationBytes = $null
 
-if ($runExists -and $restorationExact -and $null -ne $externalAfter) {
+if ($runExists -and $restorationExact -and $null -ne $externalAfter -and
+    $null -ne $externalDifference) {
     try {
         $restoration = Write-StagedRestorationAttestation $runRoot $before `
-            $after $externalBefore $externalAfter $orchestratorExitCode `
+            $after $externalBefore $externalAfter $externalDifference `
+            $orchestratorExitCode `
             $ownedStopped $runDirectoryCapability
+        if ($anyServerProfileDiagnosticMode) {
+            Write-AtomicJsonNoOverwrite `
+                (Join-Path $runRoot 'external-drift-private.json') `
+                $externalDifference 'private external drift attribution' `
+                $runDirectoryCapability
+        }
     } catch {
         [void]$cleanupErrors.Add($_.Exception.Message)
     }
 }
 
-if ($serverProfileDiagnosticMode) {
+if ($null -ne $externalDifference) {
+    Write-StockExternalDriftPublicOutput $externalDifference
+}
+
+if ($anyServerProfileDiagnosticMode) {
     if ($null -ne $primaryError -or $cleanupErrors.Count -ne 0 -or
         -not $runExists -or -not $ownedStopped -or -not $restorationExact -or
         -not $externalExact -or $null -eq $restoration -or
@@ -5121,13 +5264,22 @@ if ($serverProfileDiagnosticMode) {
     Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
     $prepublicationItems = @(Get-ChildItem -LiteralPath $runRoot -Force)
     $prepublicationNames = @($prepublicationItems | Select-Object -ExpandProperty Name)
-    if ($prepublicationItems.Count -ne 2 -or
+    $expectedPrepublicationCount = if ($privateServerProfileDiagnosticMode) {
+        6
+    } else { 3 }
+    if ($prepublicationItems.Count -ne $expectedPrepublicationCount -or
         $prepublicationNames -cnotcontains
             'restoration-attestation.staged.json' -or
         $prepublicationNames -cnotcontains
             'server-profile-diagnostic.staged.json' -or
+        $prepublicationNames -cnotcontains 'external-drift-private.json' -or
+        ($privateServerProfileDiagnosticMode -and
+         ($prepublicationNames -cnotcontains 'server-stdout.bin' -or
+          $prepublicationNames -cnotcontains 'server-stderr.bin' -or
+          $prepublicationNames -cnotcontains
+              'server-banner-shape-private.json')) -or
         @($prepublicationItems | Where-Object PSIsContainer).Count -ne 0) {
-        throw 'Server profile diagnostic root contains non-metadata publication material.'
+        throw 'Server profile diagnostic root contains an invalid bounded publication set.'
     }
     $stagedDiagnostic = Read-BoundedJsonWithRetainedBytes `
         (Join-Path $runRoot 'server-profile-diagnostic.staged.json') `
@@ -5215,9 +5367,13 @@ if ($serverProfileDiagnosticMode) {
         }
     }
     $diagnosticManifest = [ordered]@{
-        schema = 'hlclient.stock-runtime-server-profile-diagnostic.v1'
+        schema = if ($privateServerProfileDiagnosticMode) {
+            'hlclient.stock-runtime-server-profile-private-diagnostic.v1'
+        } else { 'hlclient.stock-runtime-server-profile-diagnostic.v1' }
         run_id = $runId
-        role = 'server-profile-diagnostic'
+        role = if ($privateServerProfileDiagnosticMode) {
+            'server-profile-private-diagnostic'
+        } else { 'server-profile-diagnostic' }
         evidence_eligible = $false
         parse_status = $orchestratorResult.Values['server-profile-parse-status']
         mismatch_field = $orchestratorResult.Values['server-profile-mismatch-field']
@@ -5242,6 +5398,14 @@ if ($serverProfileDiagnosticMode) {
         external_file_drift = 'none'
         process_cleanup = 'exact'
         result = $orchestratorResult.Values['server-profile-result']
+        drift_phase = $externalDifference.phase
+        drift_changed_scopes = $externalDifference.changed_scopes
+        drift_content_changes = $externalDifference.content_changes
+        drift_metadata_only_changes = $externalDifference.metadata_only_changes
+        drift_identity_replacements = $externalDifference.identity_replacements
+        drift_created = $externalDifference.created
+        drift_removed = $externalDifference.removed
+        drift_unreadable = $externalDifference.unreadable
     }
     if ($orchestratorResult.Values.ContainsKey(
             'server-profile-observed-engine-version')) {
@@ -5257,14 +5421,74 @@ if ($serverProfileDiagnosticMode) {
         $diagnosticManifest['observed_build'] =
             [Int64]$orchestratorResult.Values['server-profile-observed-build']
     }
+    $privateShape = $null
+    if ($privateServerProfileDiagnosticMode) {
+        $stdoutPath = Join-Path $runRoot 'server-stdout.bin'
+        $stderrPath = Join-Path $runRoot 'server-stderr.bin'
+        $stdoutItem = Get-Item -LiteralPath $stdoutPath -Force
+        $stderrItem = Get-Item -LiteralPath $stderrPath -Force
+        if ($stdoutItem.PSIsContainer -or $stderrItem.PSIsContainer -or
+            $stdoutItem.Length -gt 65536 -or $stderrItem.Length -gt 65536) {
+            throw 'Private server profile streams exceed their exact bounds.'
+        }
+        $privateShape = Read-BoundedJson `
+            (Join-Path $runRoot 'server-banner-shape-private.json') `
+            65536 'private server banner shape'
+        if ([string]$privateShape.schema -cne
+                'hlclient.stock-runtime-server-banner-shape-private.v1' -or
+            [Int64]$privateShape.stdout.byte_count -ne $stdoutItem.Length -or
+            [Int64]$privateShape.stderr.byte_count -ne $stderrItem.Length -or
+            @('stdout', 'stderr', 'split', 'absent') -cnotcontains
+                [string]$privateShape.stream_attribution) {
+            throw 'Private server profile shape metadata is invalid.'
+        }
+        $diagnosticManifest['private_raw_streams'] = $true
+        $diagnosticManifest['stdout_byte_count'] = [Int64]$stdoutItem.Length
+        $diagnosticManifest['stderr_byte_count'] = [Int64]$stderrItem.Length
+        $diagnosticManifest['stream_attribution'] =
+            [string]$privateShape.stream_attribution
+    }
+    $diagnosticManifestName = if ($privateServerProfileDiagnosticMode) {
+        'private-diagnostic-manifest.json'
+    } else { 'server-profile-diagnostic-manifest.json' }
     Write-AtomicJsonNoOverwrite `
-        (Join-Path $runRoot 'server-profile-diagnostic-manifest.json') `
+        (Join-Path $runRoot $diagnosticManifestName) `
         ([pscustomobject]$diagnosticManifest) `
         'server profile diagnostic manifest' $runDirectoryCapability
     Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
     $runDirectoryCapability.Dispose()
     $runDirectoryCapability = $null
     Write-Output "[stock-runtime-capture] run-id=$runId"
+    if ($privateServerProfileDiagnosticMode) {
+        $stdoutShape = $privateShape.stdout
+        $stderrShape = $privateShape.stderr
+        Write-Output "[stock-server-private] run-id=$runId"
+        Write-Output "[stock-server-private] stdout-bytes=$($stdoutShape.byte_count)"
+        Write-Output "[stock-server-private] stderr-bytes=$($stderrShape.byte_count)"
+        Write-Output "[stock-server-private] stdout-complete-lines=$($stdoutShape.complete_line_count)"
+        Write-Output "[stock-server-private] stderr-complete-lines=$($stderrShape.complete_line_count)"
+        Write-Output ("[stock-server-private] trailing-partial-lines={0}" -f
+            ([Int64]$stdoutShape.trailing_partial_line_count +
+             [Int64]$stderrShape.trailing_partial_line_count))
+        Write-Output ("[stock-server-private] nul-bytes={0}" -f
+            ([Int64]$stdoutShape.nul_byte_count + [Int64]$stderrShape.nul_byte_count))
+        Write-Output ("[stock-server-private] escape-bytes={0}" -f
+            ([Int64]$stdoutShape.escape_byte_count + [Int64]$stderrShape.escape_byte_count))
+        Write-Output ("[stock-server-private] backspace-bytes={0}" -f
+            ([Int64]$stdoutShape.backspace_byte_count +
+             [Int64]$stderrShape.backspace_byte_count))
+        Write-Output ("[stock-server-private] high-bit-bytes={0}" -f
+            ([Int64]$stdoutShape.high_bit_byte_count +
+             [Int64]$stderrShape.high_bit_byte_count))
+        Write-Output ("[stock-server-private] utf16-pattern={0}" -f
+            (([bool]$stdoutShape.utf16_like -or
+              [bool]$stderrShape.utf16_like).ToString().ToLowerInvariant()))
+        Write-Output ("[stock-server-private] repeated-carriage-return={0}" -f
+            (([bool]$stdoutShape.repeated_carriage_return -or
+              [bool]$stderrShape.repeated_carriage_return).ToString().ToLowerInvariant()))
+        Write-Output "[stock-server-private] stream-attribution=$($privateShape.stream_attribution)"
+        Write-Output '[stock-server-private] result=success'
+    }
     Write-StockServerProfileDiagnosticPublicOutput $orchestratorResult.Values
     return
 }

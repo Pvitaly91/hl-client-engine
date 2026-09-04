@@ -13,11 +13,15 @@ Set-StrictMode -Version Latest
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $prepareScript = Join-Path $PSScriptRoot 'prepare_stock_runtime_research_copy.ps1'
 $captureScript = Join-Path $PSScriptRoot 'capture_stock_runtime_state.ps1'
+$externalDriftScript = Join-Path $PSScriptRoot 'stock_external_drift.ps1'
 if (-not (Test-Path -LiteralPath $ResearchCopyToolPath -PathType Leaf)) {
     throw 'Research-copy helper is unavailable.'
 }
 if (-not (Test-Path -LiteralPath $captureScript -PathType Leaf)) {
     throw 'Stock-runtime capture wrapper is unavailable.'
+}
+if (-not (Test-Path -LiteralPath $externalDriftScript -PathType Leaf)) {
+    throw 'Stock external-drift implementation is unavailable.'
 }
 
 $temporaryBase = [IO.Path]::GetFullPath((
@@ -127,6 +131,8 @@ try {
     [IO.Directory]::CreateDirectory($contractScripts) | Out-Null
     Copy-Item -LiteralPath $captureScript `
         -Destination $contractCaptureScript
+    Copy-Item -LiteralPath $externalDriftScript `
+        -Destination (Join-Path $contractScripts 'stock_external_drift.ps1')
     $contractCopyOutput = @(& $prepareScript `
             -SourceHalfLifeRoot $ordinary `
             -DestinationHalfLifeRoot $contractCopy `

@@ -1643,6 +1643,116 @@ HldsBannerParseResult diagnose_required_hlds_runtime_banner(
     return result;
 }
 
+HldsPrivateBannerShape analyze_hlds_private_banner_streams(
+    const std::string_view stdout_bytes,
+    const std::string_view stderr_bytes) noexcept
+{
+    try {
+        const auto stream_shape = [](const std::string_view bytes) {
+            HldsPrivateStreamShape shape;
+            shape.byte_count = bytes.size();
+            for (std::size_t index = 0U; index < bytes.size(); ++index) {
+                const auto value = static_cast<unsigned char>(bytes[index]);
+                if (value == 0U) ++shape.nul_byte_count;
+                if (value == 0x1BU) ++shape.escape_byte_count;
+                if (value == 0x08U) ++shape.backspace_byte_count;
+                if (value >= 0x80U) ++shape.high_bit_byte_count;
+                if (value == '\n') ++shape.complete_line_count;
+                if (value == '\r' &&
+                    (index + 1U >= bytes.size() || bytes[index + 1U] != '\n')) {
+                    shape.repeated_carriage_return = true;
+                }
+            }
+            shape.trailing_partial_line_count =
+                !bytes.empty() && bytes.back() != '\n' ? 1U : 0U;
+            if (bytes.size() >= 4U) {
+                std::size_t odd_nuls = 0U;
+                std::size_t even_printable = 0U;
+                for (std::size_t index = 0U; index < bytes.size(); ++index) {
+                    const auto value = static_cast<unsigned char>(bytes[index]);
+                    if ((index & 1U) != 0U && value == 0U) ++odd_nuls;
+                    if ((index & 1U) == 0U && value >= 0x20U && value <= 0x7EU) {
+                        ++even_printable;
+                    }
+                }
+                const auto pairs = bytes.size() / 2U;
+                shape.utf16_like = pairs != 0U &&
+                    odd_nuls * 4U >= pairs * 3U &&
+                    even_printable * 2U >= pairs;
+            }
+            return shape;
+        };
+        const auto field_shape = [](
+            const std::string_view stdout_value,
+            const std::string_view stderr_value,
+            const std::string_view prefix) {
+            HldsPrivateFieldShape shape;
+            const auto inspect = [&](const std::string_view bytes,
+                                     std::size_t& count) {
+                for (const auto line : split_complete_lines(bytes)) {
+                    if (!line.starts_with(prefix)) continue;
+                    ++count;
+                    shape.recognized_prefix = true;
+                    shape.control_contaminated =
+                        shape.control_contaminated ||
+                        std::ranges::any_of(line, [](const char character) {
+                            const auto value =
+                                static_cast<unsigned char>(character);
+                            return value == 0U || value == 0x1BU ||
+                                value == 0x08U || value >= 0x80U ||
+                                value == '\r';
+                        });
+                }
+                const auto last_newline = bytes.rfind('\n');
+                const auto partial = last_newline == std::string_view::npos
+                    ? bytes : bytes.substr(last_newline + 1U);
+                if (!partial.empty() && partial.starts_with(prefix)) {
+                    ++shape.incomplete_candidate_count;
+                }
+            };
+            inspect(stdout_value, shape.stdout_candidate_count);
+            inspect(stderr_value, shape.stderr_candidate_count);
+            return shape;
+        };
+        HldsPrivateBannerShape shape;
+        shape.stdout_shape = stream_shape(stdout_bytes);
+        shape.stderr_shape = stream_shape(stderr_bytes);
+        shape.engine = field_shape(
+            stdout_bytes, stderr_bytes, "Exe version ");
+        // Runtime mode and game are independent semantic fields carried by
+        // the same exact engine-profile line. Preserve separate typed shape
+        // records without retaining or copying that line.
+        shape.runtime_mode = shape.engine;
+        shape.game = shape.engine;
+        shape.protocol = field_shape(
+            stdout_bytes, stderr_bytes, "Protocol version ");
+        shape.build = field_shape(stdout_bytes, stderr_bytes, "Exe build:");
+        shape.endpoint = field_shape(
+            stdout_bytes, stderr_bytes, "Server IP address ");
+        shape.map = field_shape(stdout_bytes, stderr_bytes, "map     : ");
+        const std::array<const HldsPrivateFieldShape*, 7U> fields{
+            &shape.engine, &shape.runtime_mode, &shape.game,
+            &shape.protocol, &shape.build,
+            &shape.endpoint, &shape.map};
+        const bool stdout_fields = std::ranges::any_of(fields, [](const auto* field) {
+            return field->stdout_candidate_count != 0U;
+        });
+        const bool stderr_fields = std::ranges::any_of(fields, [](const auto* field) {
+            return field->stderr_candidate_count != 0U;
+        });
+        shape.attribution = stdout_fields && stderr_fields
+            ? HldsPrivateStreamAttribution::split
+            : stdout_fields
+                ? HldsPrivateStreamAttribution::stdout_stream
+                : stderr_fields
+                    ? HldsPrivateStreamAttribution::stderr_stream
+                    : HldsPrivateStreamAttribution::absent;
+        return shape;
+    } catch (...) {
+        return {};
+    }
+}
+
 std::string_view to_string(const OwnedProcessErrorCode code) noexcept
 {
     switch (code) {
@@ -1777,6 +1887,18 @@ std::string_view to_string(
         return "non-loopback";
     case HldsRuntimeEndpointAddressCategory::malformed: return "malformed";
     case HldsRuntimeEndpointAddressCategory::absent: return "absent";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(
+    const HldsPrivateStreamAttribution attribution) noexcept
+{
+    switch (attribution) {
+    case HldsPrivateStreamAttribution::absent: return "absent";
+    case HldsPrivateStreamAttribution::stdout_stream: return "stdout";
+    case HldsPrivateStreamAttribution::stderr_stream: return "stderr";
+    case HldsPrivateStreamAttribution::split: return "split";
     }
     return "unknown";
 }

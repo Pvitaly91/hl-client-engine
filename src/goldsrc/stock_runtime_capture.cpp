@@ -320,6 +320,9 @@ parse_stock_runtime_capture_output_role(const std::string_view value) noexcept
     if (value == "server-profile-diagnostic") {
         return StockRuntimeCaptureOutputRole::server_profile_diagnostic;
     }
+    if (value == "server-profile-private-diagnostic") {
+        return StockRuntimeCaptureOutputRole::server_profile_private_diagnostic;
+    }
     return std::nullopt;
 }
 
@@ -332,6 +335,8 @@ std::string_view to_string(const StockRuntimeCaptureOutputRole role) noexcept
         return "pre-campaign-canary";
     case StockRuntimeCaptureOutputRole::server_profile_diagnostic:
         return "server-profile-diagnostic";
+    case StockRuntimeCaptureOutputRole::server_profile_private_diagnostic:
+        return "server-profile-private-diagnostic";
     }
     return "unknown";
 }
@@ -346,6 +351,8 @@ std::string_view stock_runtime_capture_output_parent_directory(
         return "stock-runtime-canary";
     case StockRuntimeCaptureOutputRole::server_profile_diagnostic:
         return "stock-runtime-server-profile-diagnostic";
+    case StockRuntimeCaptureOutputRole::server_profile_private_diagnostic:
+        return "stock-runtime-server-profile-private";
     }
     return {};
 }

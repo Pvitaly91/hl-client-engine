@@ -2468,11 +2468,59 @@ if(BUILD_TESTING)
                 -File
                     "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
                 -ValidateServerProfileDiagnosticPolicy)
+        add_test(
+            NAME hlclient_stock_external_drift_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_external_drift.ps1")
+        add_test(
+            NAME hlclient_stock_external_drift_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_external_drift.ps1")
+        add_test(
+            NAME hlclient_stock_private_diagnostic_token_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_private_diagnostic_token.ps1"
+                -CaptureScriptPath
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1")
+        add_test(
+            NAME hlclient_stock_private_diagnostic_token_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_private_diagnostic_token.ps1"
+                -CaptureScriptPath
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1")
         set_tests_properties(
             hlclient_stock_runtime_unbound_canary_recovery_pwsh7
             hlclient_stock_runtime_unbound_canary_recovery_powershell51
             hlclient_stock_server_profile_diagnostic_pwsh7
             hlclient_stock_server_profile_diagnostic_powershell51
+            hlclient_stock_external_drift_pwsh7
+            hlclient_stock_external_drift_powershell51
+            hlclient_stock_private_diagnostic_token_pwsh7
+            hlclient_stock_private_diagnostic_token_powershell51
             PROPERTIES TIMEOUT 30)
 
         add_test(

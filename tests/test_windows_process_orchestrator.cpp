@@ -1007,6 +1007,49 @@ TEST_CASE("Fake HLDS profile variants stay server-only and bounded",
     }
 }
 
+TEST_CASE("Private HLDS witness attributes exact stream and byte shape",
+          "[platform][windows][stock-runtime][orchestrator]"
+          "[server-profile-diagnostic][private-witness]")
+{
+    const std::string stdout_value =
+        "Protocol version 48\r\n"
+        "Exe build: 00:00:00 Jan 1 2026 (10210)\n";
+    const std::string stderr_value =
+        "Exe version 1.1.2.2/Stdio (valve)\r\n"
+        "Server IP address 127.0.0.1:27141\r\n"
+        "map     : boot_camp at: 0 x, 0 y, 0 z\r";
+    const auto split = windows::analyze_hlds_private_banner_streams(
+        stdout_value, stderr_value);
+    CHECK(split.attribution == windows::HldsPrivateStreamAttribution::split);
+    CHECK(split.stdout_shape.byte_count == stdout_value.size());
+    CHECK(split.stderr_shape.byte_count == stderr_value.size());
+    CHECK(split.stdout_shape.complete_line_count == 2U);
+    CHECK(split.stderr_shape.complete_line_count == 2U);
+    CHECK(split.stderr_shape.trailing_partial_line_count == 1U);
+    CHECK(split.stderr_shape.repeated_carriage_return);
+    CHECK(split.protocol.stdout_candidate_count == 1U);
+    CHECK(split.build.stdout_candidate_count == 1U);
+    CHECK(split.engine.stderr_candidate_count == 1U);
+    CHECK(split.runtime_mode.stderr_candidate_count == 1U);
+    CHECK(split.game.stderr_candidate_count == 1U);
+    CHECK(split.endpoint.stderr_candidate_count == 1U);
+    CHECK(split.map.incomplete_candidate_count == 1U);
+    CHECK(windows::to_string(split.attribution) == "split");
+
+    const std::string controls{"A\0B\x1b\x08\x80", 6U};
+    const auto shaped = windows::analyze_hlds_private_banner_streams(
+        controls, std::string{"E\0x\0\n\0", 7U});
+    CHECK(shaped.stdout_shape.nul_byte_count == 1U);
+    CHECK(shaped.stdout_shape.escape_byte_count == 1U);
+    CHECK(shaped.stdout_shape.backspace_byte_count == 1U);
+    CHECK(shaped.stdout_shape.high_bit_byte_count == 1U);
+    CHECK(shaped.stderr_shape.utf16_like);
+
+    const auto absent = windows::analyze_hlds_private_banner_streams({}, {});
+    CHECK(absent.attribution ==
+          windows::HldsPrivateStreamAttribution::absent);
+}
+
 TEST_CASE("Exact image scan exposes enumeration failure instead of an empty set",
           "[platform][windows][stock-runtime][orchestrator][process-scan]")
 {

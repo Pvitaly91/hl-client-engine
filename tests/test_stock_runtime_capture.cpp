@@ -42,9 +42,13 @@ TEST_CASE("Stock runtime output roles bind only their exact ignored roots",
         goldsrc::parse_stock_runtime_capture_output_role("pre-campaign-canary");
     const auto diagnostic = goldsrc::parse_stock_runtime_capture_output_role(
         "server-profile-diagnostic");
+    const auto private_diagnostic =
+        goldsrc::parse_stock_runtime_capture_output_role(
+            "server-profile-private-diagnostic");
     REQUIRE(normal);
     REQUIRE(canary);
     REQUIRE(diagnostic);
+    REQUIRE(private_diagnostic);
     CHECK(*normal ==
           goldsrc::StockRuntimeCaptureOutputRole::normal_campaign_run);
     CHECK(*canary ==
@@ -58,6 +62,11 @@ TEST_CASE("Stock runtime output roles bind only their exact ignored roots",
           "stock-runtime-canary");
     CHECK(goldsrc::stock_runtime_capture_output_parent_directory(*diagnostic) ==
           "stock-runtime-server-profile-diagnostic");
+    CHECK(goldsrc::to_string(*private_diagnostic) ==
+          "server-profile-private-diagnostic");
+    CHECK(goldsrc::stock_runtime_capture_output_parent_directory(
+              *private_diagnostic) ==
+          "stock-runtime-server-profile-private");
     CHECK_FALSE(
         goldsrc::parse_stock_runtime_capture_output_role("stock-runtime"));
     CHECK_FALSE(goldsrc::parse_stock_runtime_capture_output_role(

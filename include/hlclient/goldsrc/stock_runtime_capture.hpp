@@ -69,6 +69,7 @@ enum class StockRuntimeCaptureOutputRole {
     normal_campaign_run,
     pre_campaign_canary,
     server_profile_diagnostic,
+    server_profile_private_diagnostic,
 };
 
 [[nodiscard]] std::optional<StockRuntimeCaptureOutputRole>

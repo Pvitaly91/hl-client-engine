@@ -40,6 +40,8 @@ namespace windows = hlclient::platform::windows;
 
 constexpr std::wstring_view kConfirmationToken =
     L"HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1";
+constexpr std::wstring_view kPrivateDiagnosticToken =
+    L"HLCLIENT_PRIVATE_HLDS_BANNER_DIAGNOSTIC_V1";
 constexpr std::string_view kPrefix = "[stock-runtime-orchestrator] ";
 
 class UniqueHandle final {
@@ -79,8 +81,10 @@ struct Options final {
     bool validate_config{false};
     bool validate_environment{false};
     bool diagnose_server_profile{false};
+    bool private_server_profile_diagnostic{false};
     std::optional<goldsrc::StockRuntimeCaptureOutputRole> output_role;
     bool confirmation_seen{false};
+    bool private_confirmation_seen{false};
     HANDLE wrapper_capability_handle{INVALID_HANDLE_VALUE};
     HANDLE wrapper_cleanup_capability_handle{INVALID_HANDLE_VALUE};
     HANDLE wrapper_job_handle{INVALID_HANDLE_VALUE};
@@ -152,7 +156,7 @@ template<typename Integer>
         return options;
     }
     Options options;
-    std::array<bool, 37U> seen{};
+    std::array<bool, 38U> seen{};
     const auto mark = [&seen](const std::size_t index) {
         if (seen[index]) return false;
         seen[index] = true;
@@ -168,6 +172,12 @@ template<typename Integer>
         if (name == L"--diagnose-server-profile") {
             if (!mark(33U)) return std::nullopt;
             options.diagnose_server_profile = true;
+            continue;
+        }
+        if (name == L"--private-diagnose-server-profile") {
+            if (!mark(34U)) return std::nullopt;
+            options.diagnose_server_profile = true;
+            options.private_server_profile_diagnostic = true;
             continue;
         }
         if (index + 1 >= argc) return std::nullopt;
@@ -205,6 +215,7 @@ template<typename Integer>
         else if (name == L"--wrapper-job-handle") option = 30U;
         else if (name == L"--wrapper-guard-job-handle") option = 31U;
         else if (name == L"--isolation-release-handle") option = 32U;
+        else if (name == L"--private-diagnostic-token") option = 35U;
         else return std::nullopt;
         if (!mark(option)) return std::nullopt;
 
@@ -220,6 +231,10 @@ template<typename Integer>
         case 2U:
             options.confirmation_seen = value == kConfirmationToken;
             if (!options.confirmation_seen) return std::nullopt;
+            break;
+        case 35U:
+            options.private_confirmation_seen = value == kPrivateDiagnosticToken;
+            if (!options.private_confirmation_seen) return std::nullopt;
             break;
         case 3U: options.run_root = value; break;
         case 4U: options.research_root = value; break;
@@ -336,7 +351,7 @@ template<typename Integer>
     }
     if (options.validate_environment) {
         if (options.diagnose_server_profile || options.output_role ||
-            options.confirmation_seen ||
+            options.confirmation_seen || options.private_confirmation_seen ||
             !options.run_root.empty() ||
             !options.scenario.empty() ||
             options.wrapper_capability_handle != INVALID_HANDLE_VALUE ||
@@ -348,7 +363,7 @@ template<typename Integer>
             (!options.game.empty() && options.game != "valve") ||
             options.relay_port == options.server_port) return std::nullopt;
     } else {
-        if (!options.output_role || !options.confirmation_seen ||
+        if (!options.output_role ||
             options.run_root.empty() || options.game != "valve" ||
             options.map.empty() || options.relay_port == 0U ||
             options.server_port == 0U ||
@@ -356,13 +371,27 @@ template<typename Integer>
             return std::nullopt;
         }
         if (options.diagnose_server_profile) {
-            if (*options.output_role != goldsrc::
-                    StockRuntimeCaptureOutputRole::server_profile_diagnostic ||
+            const auto expected_role = options.private_server_profile_diagnostic
+                ? goldsrc::StockRuntimeCaptureOutputRole::
+                      server_profile_private_diagnostic
+                : goldsrc::StockRuntimeCaptureOutputRole::
+                      server_profile_diagnostic;
+            const bool exact_confirmation =
+                options.private_server_profile_diagnostic
+                    ? options.private_confirmation_seen &&
+                          !options.confirmation_seen
+                    : options.confirmation_seen &&
+                          !options.private_confirmation_seen;
+            if (!exact_confirmation || *options.output_role != expected_role ||
                 !options.scenario.empty()) {
                 return std::nullopt;
             }
-        } else if (*options.output_role == goldsrc::
+        } else if (!options.confirmation_seen ||
+                   options.private_confirmation_seen ||
+                   *options.output_role == goldsrc::
                        StockRuntimeCaptureOutputRole::server_profile_diagnostic ||
+                   *options.output_role == goldsrc::StockRuntimeCaptureOutputRole::
+                       server_profile_private_diagnostic ||
                    !goldsrc::parse_stock_runtime_capture_scenario(
                        options.scenario) ||
                    options.perturbation.client_packet_ordinal == 0U ||
@@ -952,6 +981,73 @@ struct EnvironmentResult final {
     return output.str();
 }
 
+[[nodiscard]] std::string private_banner_shape_json(
+    const windows::HldsPrivateBannerShape& shape)
+{
+    const auto stream_json = [](std::ostringstream& output,
+                                const std::string_view name,
+                                const windows::HldsPrivateStreamShape& value) {
+        output << "  \"" << name << "\": {\n"
+               << "    \"byte_count\": " << value.byte_count << ",\n"
+               << "    \"complete_line_count\": "
+               << value.complete_line_count << ",\n"
+               << "    \"trailing_partial_line_count\": "
+               << value.trailing_partial_line_count << ",\n"
+               << "    \"nul_byte_count\": " << value.nul_byte_count << ",\n"
+               << "    \"escape_byte_count\": "
+               << value.escape_byte_count << ",\n"
+               << "    \"backspace_byte_count\": "
+               << value.backspace_byte_count << ",\n"
+               << "    \"high_bit_byte_count\": "
+               << value.high_bit_byte_count << ",\n"
+               << "    \"utf16_like\": "
+               << (value.utf16_like ? "true" : "false") << ",\n"
+               << "    \"repeated_carriage_return\": "
+               << (value.repeated_carriage_return ? "true" : "false")
+               << "\n  }";
+    };
+    const auto field_json = [](std::ostringstream& output,
+                               const std::string_view name,
+                               const windows::HldsPrivateFieldShape& value) {
+        output << "  \"" << name << "\": {\n"
+               << "    \"stdout_candidate_count\": "
+               << value.stdout_candidate_count << ",\n"
+               << "    \"stderr_candidate_count\": "
+               << value.stderr_candidate_count << ",\n"
+               << "    \"incomplete_candidate_count\": "
+               << value.incomplete_candidate_count << ",\n"
+               << "    \"recognized_prefix\": "
+               << (value.recognized_prefix ? "true" : "false") << ",\n"
+               << "    \"control_contaminated\": "
+               << (value.control_contaminated ? "true" : "false")
+               << "\n  }";
+    };
+    std::ostringstream output;
+    output << "{\n"
+           << "  \"schema\": \"hlclient.stock-runtime-server-banner-shape-private.v1\",\n"
+           << "  \"stream_attribution\": \""
+           << windows::to_string(shape.attribution) << "\",\n";
+    stream_json(output, "stdout", shape.stdout_shape);
+    output << ",\n";
+    stream_json(output, "stderr", shape.stderr_shape);
+    output << ",\n";
+    field_json(output, "engine", shape.engine);
+    output << ",\n";
+    field_json(output, "runtime_mode", shape.runtime_mode);
+    output << ",\n";
+    field_json(output, "game", shape.game);
+    output << ",\n";
+    field_json(output, "protocol", shape.protocol);
+    output << ",\n";
+    field_json(output, "build", shape.build);
+    output << ",\n";
+    field_json(output, "endpoint", shape.endpoint);
+    output << ",\n";
+    field_json(output, "map", shape.map);
+    output << "\n}\n";
+    return output.str();
+}
+
 struct ActiveSummary final {
     bool success{false};
     std::string failure{"unknown"};
@@ -1292,7 +1388,12 @@ private:
     if (options.diagnose_server_profile) {
         auto server_log = windows::BoundedProcessLogCapture::create(
             {64U * 1'024U, 4'096U, 1'024U});
-        if (!server_log) {
+        auto server_error_log = options.private_server_profile_diagnostic
+            ? windows::BoundedProcessLogCapture::create(
+                  {64U * 1'024U, 4'096U, 1'024U})
+            : std::optional<windows::BoundedProcessLogCapture>{};
+        if (!server_log ||
+            (options.private_server_profile_diagnostic && !server_error_log)) {
             summary.failure = "server-log-capture-failed";
             campaign_job.terminate(120U);
             finalize_duration();
@@ -1303,7 +1404,9 @@ private:
         server_spec.working_directory = options.research_root;
         server_spec.expected_identity = environment.server;
         server_spec.stdout_handle = server_log->inherited_write_handle();
-        server_spec.stderr_handle = server_log->inherited_write_handle();
+        server_spec.stderr_handle = options.private_server_profile_diagnostic
+            ? server_error_log->inherited_write_handle()
+            : server_log->inherited_write_handle();
         server_spec.arguments = {
             L"-console", L"-game", L"valve", L"-port",
             std::to_wstring(options.server_port), L"+ip", L"127.0.0.1",
@@ -1338,6 +1441,7 @@ private:
             return summary;
         }
         server_log->close_parent_write_handle();
+        if (server_error_log) server_error_log->close_parent_write_handle();
         windows::HldsBannerParseResult observation;
         const auto terminal = [](const windows::HldsBannerParseResult& value) {
             return value || value.diagnostic.parse_status ==
@@ -1352,12 +1456,58 @@ private:
         };
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::seconds{15};
+        std::optional<std::chrono::steady_clock::time_point> terminal_at;
         while (std::chrono::steady_clock::now() < deadline &&
                server.running() && guard.running()) {
-            observation = windows::diagnose_required_hlds_runtime_banner(
-                server_log->snapshot(), options.map, options.server_port);
-            if (terminal(observation)) break;
+            const auto stdout_snapshot = server_log->snapshot();
+            if (options.private_server_profile_diagnostic) {
+                const auto stderr_snapshot = server_error_log->snapshot();
+                const auto stdout_observation =
+                    windows::diagnose_required_hlds_runtime_banner(
+                        stdout_snapshot, options.map, options.server_port);
+                const auto stderr_observation =
+                    windows::diagnose_required_hlds_runtime_banner(
+                        stderr_snapshot, options.map, options.server_port);
+                const auto rank = [](const windows::HldsBannerParseResult& value) {
+                    if (value) return 4;
+                    switch (value.diagnostic.parse_status) {
+                    case windows::HldsRuntimeProfileParseStatus::profile_mismatch:
+                        return 3;
+                    case windows::HldsRuntimeProfileParseStatus::malformed:
+                    case windows::HldsRuntimeProfileParseStatus::duplicate_field:
+                    case windows::HldsRuntimeProfileParseStatus::process_log_truncated:
+                        return 2;
+                    case windows::HldsRuntimeProfileParseStatus::incomplete:
+                        return 1;
+                    case windows::HldsRuntimeProfileParseStatus::valid:
+                        return 4;
+                    }
+                    return 0;
+                };
+                observation = rank(stderr_observation) > rank(stdout_observation)
+                    ? stderr_observation : stdout_observation;
+                if (terminal(observation) && !terminal_at) {
+                    terminal_at = std::chrono::steady_clock::now();
+                }
+                if (terminal_at && std::chrono::steady_clock::now() >=
+                        *terminal_at + std::chrono::seconds{5}) {
+                    break;
+                }
+            } else {
+                observation = windows::diagnose_required_hlds_runtime_banner(
+                    stdout_snapshot, options.map, options.server_port);
+                if (terminal(observation)) break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        }
+        const auto server_output = server_log->snapshot();
+        const auto server_error_output = server_error_log
+            ? server_error_log->snapshot()
+            : windows::BoundedProcessLogSnapshot{};
+        std::optional<windows::HldsPrivateBannerShape> private_shape;
+        if (options.private_server_profile_diagnostic) {
+            private_shape = windows::analyze_hlds_private_banner_streams(
+                server_output.bytes, server_error_output.bytes);
         }
         summary.server_profile_diagnostic = observation.diagnostic;
         summary.server_ready = static_cast<bool>(observation);
@@ -1371,6 +1521,18 @@ private:
         auto diagnostic_output =
             windows::open_secure_output_directory(options.run_root);
         if (!diagnostic_output || !diagnostic_output.directory ||
+            (options.private_server_profile_diagnostic &&
+             (!private_shape ||
+              !write_bounded_file(
+                  *diagnostic_output.directory, L"server-stdout.bin",
+                  server_output.bytes, 64U * 1'024U) ||
+              !write_bounded_file(
+                  *diagnostic_output.directory, L"server-stderr.bin",
+                  server_error_output.bytes, 64U * 1'024U) ||
+              !write_bounded_file(
+                  *diagnostic_output.directory,
+                  L"server-banner-shape-private.json",
+                  private_banner_shape_json(*private_shape), 64U * 1'024U))) ||
             !write_bounded_file(
                 *diagnostic_output.directory,
                 L"server-profile-diagnostic.staged.json",
@@ -1381,7 +1543,10 @@ private:
             return summary;
         }
         if (observation.code ==
-            windows::HldsBannerParseErrorCode::process_log_truncated) {
+                windows::HldsBannerParseErrorCode::process_log_truncated ||
+            (options.private_server_profile_diagnostic &&
+             !windows::bounded_process_log_snapshot_complete(
+                 server_error_output))) {
             summary.failure = "server-profile-process-log-truncated";
             campaign_job.terminate(120U);
             finalize_duration();
@@ -2316,7 +2481,11 @@ int wmain(const int argc, wchar_t** argv)
                       "--validate-environment <static paths> OR "
                       "--diagnose-server-profile "
                       "--confirmation-token HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1 "
-                      "--output-role <normal-campaign-run|pre-campaign-canary|server-profile-diagnostic> "
+                      "OR --private-diagnose-server-profile "
+                      "--private-diagnostic-token "
+                      "HLCLIENT_PRIVATE_HLDS_BANNER_DIAGNOSTIC_V1 "
+                      "--output-role <normal-campaign-run|pre-campaign-canary|"
+                      "server-profile-diagnostic|server-profile-private-diagnostic> "
                       "<active options>\n";
         return 2;
     }

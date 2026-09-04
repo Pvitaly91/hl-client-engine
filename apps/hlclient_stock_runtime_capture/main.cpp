@@ -299,7 +299,9 @@ template<typename Integer>
     // The diagnostic role is consumed only by the server-only orchestrator.
     // The UDP relay must never make that root a capture/evidence corpus.
     if (*options.output_role ==
-        goldsrc::StockRuntimeCaptureOutputRole::server_profile_diagnostic) {
+            goldsrc::StockRuntimeCaptureOutputRole::server_profile_diagnostic ||
+        *options.output_role == goldsrc::StockRuntimeCaptureOutputRole::
+            server_profile_private_diagnostic) {
         return std::nullopt;
     }
 #ifdef _WIN32

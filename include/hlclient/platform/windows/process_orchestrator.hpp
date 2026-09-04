@@ -411,6 +411,49 @@ struct HldsRuntimeProfileDiagnostic final {
     bool process_log_truncated{false};
 };
 
+enum class HldsPrivateStreamAttribution {
+    absent,
+    stdout_stream,
+    stderr_stream,
+    split,
+};
+
+struct HldsPrivateStreamShape final {
+    std::size_t byte_count{0U};
+    std::size_t complete_line_count{0U};
+    std::size_t trailing_partial_line_count{0U};
+    std::size_t nul_byte_count{0U};
+    std::size_t escape_byte_count{0U};
+    std::size_t backspace_byte_count{0U};
+    std::size_t high_bit_byte_count{0U};
+    bool utf16_like{false};
+    bool repeated_carriage_return{false};
+};
+
+struct HldsPrivateFieldShape final {
+    std::size_t stdout_candidate_count{0U};
+    std::size_t stderr_candidate_count{0U};
+    std::size_t incomplete_candidate_count{0U};
+    bool recognized_prefix{false};
+    bool control_contaminated{false};
+};
+
+// Value-only private witness metadata. It cannot retain raw lines, endpoints,
+// paths, banner suffixes, or authentication-bearing output.
+struct HldsPrivateBannerShape final {
+    HldsPrivateStreamShape stdout_shape;
+    HldsPrivateStreamShape stderr_shape;
+    HldsPrivateStreamAttribution attribution{
+        HldsPrivateStreamAttribution::absent};
+    HldsPrivateFieldShape engine;
+    HldsPrivateFieldShape runtime_mode;
+    HldsPrivateFieldShape game;
+    HldsPrivateFieldShape protocol;
+    HldsPrivateFieldShape build;
+    HldsPrivateFieldShape endpoint;
+    HldsPrivateFieldShape map;
+};
+
 enum class HldsBannerParseErrorCode {
     none,
     too_large,
@@ -443,6 +486,9 @@ struct HldsBannerParseResult final {
     const BoundedProcessLogSnapshot& snapshot,
     std::string_view requested_map,
     std::uint16_t requested_port) noexcept;
+[[nodiscard]] HldsPrivateBannerShape analyze_hlds_private_banner_streams(
+    std::string_view stdout_bytes,
+    std::string_view stderr_bytes) noexcept;
 
 [[nodiscard]] std::string_view to_string(OwnedProcessErrorCode code) noexcept;
 [[nodiscard]] std::string_view to_string(OwnedJobCleanupErrorCode code) noexcept;
@@ -458,5 +504,7 @@ struct HldsBannerParseResult final {
     HldsRuntimeEndpointAddressCategory category) noexcept;
 [[nodiscard]] std::string_view to_string(
     HldsRuntimeModeCategory category) noexcept;
+[[nodiscard]] std::string_view to_string(
+    HldsPrivateStreamAttribution attribution) noexcept;
 
 } // namespace hlclient::platform::windows
