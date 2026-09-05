@@ -14,6 +14,8 @@ $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $prepareScript = Join-Path $PSScriptRoot 'prepare_stock_runtime_research_copy.ps1'
 $captureScript = Join-Path $PSScriptRoot 'capture_stock_runtime_state.ps1'
 $externalDriftScript = Join-Path $PSScriptRoot 'stock_external_drift.ps1'
+$steamUserConfigProjectionScript = Join-Path $PSScriptRoot `
+    'stock_steam_user_config_projection.ps1'
 if (-not (Test-Path -LiteralPath $ResearchCopyToolPath -PathType Leaf)) {
     throw 'Research-copy helper is unavailable.'
 }
@@ -22,6 +24,10 @@ if (-not (Test-Path -LiteralPath $captureScript -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $externalDriftScript -PathType Leaf)) {
     throw 'Stock external-drift implementation is unavailable.'
+}
+if (-not (Test-Path -LiteralPath $steamUserConfigProjectionScript `
+        -PathType Leaf)) {
+    throw 'Steam user-config projection implementation is unavailable.'
 }
 
 $temporaryBase = [IO.Path]::GetFullPath((
@@ -133,6 +139,9 @@ try {
         -Destination $contractCaptureScript
     Copy-Item -LiteralPath $externalDriftScript `
         -Destination (Join-Path $contractScripts 'stock_external_drift.ps1')
+    Copy-Item -LiteralPath $steamUserConfigProjectionScript `
+        -Destination (Join-Path $contractScripts `
+            'stock_steam_user_config_projection.ps1')
     $contractCopyOutput = @(& $prepareScript `
             -SourceHalfLifeRoot $ordinary `
             -DestinationHalfLifeRoot $contractCopy `

@@ -87,6 +87,20 @@ $identity = Compare-StockExternalStateSnapshot $before $identityAfter 'wfp_prefl
 Assert-True ($identity.identity_replacements -eq 1) `
     'Identity replacement was not detected.'
 
+$identityAndDigestAfter = New-StockExternalStateSnapshot @(
+    (New-TestEntry 'app_manifest' '.' `
+        -Identity '00000001:0000000000000003' -Sha256 ('D' * 64) `
+        -LastWriteTicks 12), $hlfx) 'wfp_preflight'
+$identityAndDigest = Compare-StockExternalStateSnapshot `
+    $before $identityAndDigestAfter 'wfp_preflight'
+Assert-True ($identityAndDigest.identity_replacements -eq 1 -and
+    $identityAndDigest.digest_changes -eq 1 -and
+    $identityAndDigest.content_changes -eq 1 -and
+    $identityAndDigest.timestamp_changes -eq 1 -and
+    $identityAndDigest.changes[0].identity_changed -and
+    $identityAndDigest.changes[0].content_digest_changed) `
+    'Identity replacement hid an orthogonal digest or timestamp change.'
+
 $presenceAfter = New-StockExternalStateSnapshot @(
     $app, (New-TestEntry 'diagnostic_output' 'ignored/private.json')) `
     'private_server_diagnostic'
@@ -123,6 +137,9 @@ Assert-True ($public -contains '[stock-drift] phase=standard_server_diagnostic')
     'Public drift phase is absent.'
 Assert-True (($public -join "`n") -notmatch 'client\.dll|[A-F0-9]{64}|:\\') `
     'Public drift output leaked a path or digest.'
+Assert-True ($public -contains '[stock-drift] digest-changes=0' -and
+    $public -contains '[stock-drift] timestamp-changes=1') `
+    'Public orthogonal drift counters are absent.'
 
 Write-Output '[stock-drift-test] deterministic-order=success'
 Write-Output '[stock-drift-test] typed-kinds=success'

@@ -242,6 +242,13 @@ $privateServerProfileDiagnosticMode =
     $PSCmdlet.ParameterSetName -ceq 'PrivateServerProfileDiagnostic'
 $anyServerProfileDiagnosticMode =
     $serverProfileDiagnosticMode -or $privateServerProfileDiagnosticMode
+$steamConfigProjectionImplementation = Join-Path $PSScriptRoot `
+    'stock_steam_user_config_projection.ps1'
+if (-not (Test-Path -LiteralPath $steamConfigProjectionImplementation `
+        -PathType Leaf)) {
+    throw 'Stock Steam user-config semantic projection is absent.'
+}
+. $steamConfigProjectionImplementation
 $externalDriftImplementation = Join-Path $PSScriptRoot 'stock_external_drift.ps1'
 if (-not (Test-Path -LiteralPath $externalDriftImplementation -PathType Leaf)) {
     throw 'Stock external drift implementation is absent.'
@@ -5401,11 +5408,25 @@ if ($anyServerProfileDiagnosticMode) {
         drift_phase = $externalDifference.phase
         drift_changed_scopes = $externalDifference.changed_scopes
         drift_content_changes = $externalDifference.content_changes
+        drift_digest_changes = $externalDifference.digest_changes
+        drift_size_changes = $externalDifference.size_changes
         drift_metadata_only_changes = $externalDifference.metadata_only_changes
         drift_identity_replacements = $externalDifference.identity_replacements
+        drift_timestamp_changes = $externalDifference.timestamp_changes
         drift_created = $externalDifference.created
         drift_removed = $externalDifference.removed
         drift_unreadable = $externalDifference.unreadable
+        critical_external_drift = $externalDifference.critical_external_drift
+        steam_user_config_rewrite = $externalDifference.steam_user_config_rewrite
+        steam_user_config_projection = $externalDifference.steam_user_config_projection
+        steam_user_config_volatile_classes =
+            $externalDifference.steam_user_config_volatile_classes
+        steam_user_config_unknown_changes =
+            $externalDifference.steam_user_config_unknown_changes
+        steam_user_config_fatal_changes =
+            $externalDifference.steam_user_config_fatal_changes
+        steam_user_config_non_monotonic_changes =
+            $externalDifference.steam_user_config_non_monotonic_changes
     }
     if ($orchestratorResult.Values.ContainsKey(
             'server-profile-observed-engine-version')) {

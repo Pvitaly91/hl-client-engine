@@ -2489,6 +2489,26 @@ if(BUILD_TESTING)
                 -File
                     "${PROJECT_SOURCE_DIR}/scripts/test_stock_external_drift.ps1")
         add_test(
+            NAME hlclient_stock_steam_user_config_projection_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_steam_user_config_projection.ps1")
+        add_test(
+            NAME hlclient_stock_steam_user_config_projection_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_steam_user_config_projection.ps1")
+        add_test(
             NAME hlclient_stock_private_diagnostic_token_pwsh7
             COMMAND
                 "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
@@ -2519,6 +2539,8 @@ if(BUILD_TESTING)
             hlclient_stock_server_profile_diagnostic_powershell51
             hlclient_stock_external_drift_pwsh7
             hlclient_stock_external_drift_powershell51
+            hlclient_stock_steam_user_config_projection_pwsh7
+            hlclient_stock_steam_user_config_projection_powershell51
             hlclient_stock_private_diagnostic_token_pwsh7
             hlclient_stock_private_diagnostic_token_powershell51
             PROPERTIES TIMEOUT 30)

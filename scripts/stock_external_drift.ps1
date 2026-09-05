@@ -141,6 +141,14 @@ function New-StockExternalStateEntry {
         $sha256 = if ($before.IsDirectory) { '' } else {
             (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
         }
+        $semanticProjection = if (-not $before.IsDirectory -and
+            $Scope -ceq 'steam_library_metadata' -and
+            (Get-Command Get-StockSteamUserConfigProjection `
+                -ErrorAction SilentlyContinue)) {
+            Get-StockSteamUserConfigProjection $Path
+        } else {
+            [pscustomobject]@{ status = 'not-applicable'; entry_class = 'none' }
+        }
         $after = [Hlclient.StockExternalIdentity]::Observe($Path)
         if ($before.Identity -cne $after.Identity -or
             $before.Size -ne $after.Size -or
@@ -163,6 +171,7 @@ function New-StockExternalStateEntry {
             attributes = $before.Attributes
             reparse_status = 'absent'
             ads_status = 'default-only'
+            semantic_projection = $semanticProjection
         }
     } catch {
         return [pscustomobject]@{
@@ -178,6 +187,9 @@ function New-StockExternalStateEntry {
             attributes = $null
             reparse_status = 'unknown'
             ads_status = 'unknown'
+            semantic_projection = [pscustomobject]@{
+                status = 'unavailable'; entry_class = 'none'
+            }
         }
     }
 }
@@ -295,7 +307,17 @@ function Compare-StockExternalStateSnapshot {
                     scope = [string]$entry.scope
                     relative_path = [string]$entry.relative_path
                     kind = $(if ($hasBefore) { 'removed' } else { 'created' })
-                    changed_fields = @('presence') })
+                    changed_fields = @('presence')
+                    identity_changed = $false
+                    content_digest_changed = $false
+                    size_changed = $false
+                    last_write_changed = $false
+                    creation_time_changed = $false
+                    attributes_changed = $false
+                    entry_kind_changed = $false
+                    presence_changed = $true
+                    reparse_changed = $false
+                    ads_changed = $false })
             continue
         }
         $beforeEntry = $beforeByKey[$key]
@@ -306,7 +328,17 @@ function Compare-StockExternalStateSnapshot {
                     scope = [string]$beforeEntry.scope
                     relative_path = [string]$beforeEntry.relative_path
                     kind = 'snapshot_entry_unreadable'
-                    changed_fields = @('read_status') })
+                    changed_fields = @('read_status')
+                    identity_changed = $false
+                    content_digest_changed = $false
+                    size_changed = $false
+                    last_write_changed = $false
+                    creation_time_changed = $false
+                    attributes_changed = $false
+                    entry_kind_changed = $false
+                    presence_changed = $false
+                    reparse_changed = $false
+                    ads_changed = $false })
             continue
         }
         $fields = [Collections.Generic.List[string]]::new()
@@ -330,11 +362,79 @@ function Compare-StockExternalStateSnapshot {
         else { 'snapshot_incomplete' }
         Assert-StockExternalDriftToken $kind $script:StockExternalDriftKinds `
             'External drift kind'
+        $semanticRewrite = 'none'
+        $semanticProjectionStatus = 'not-applicable'
+        $semanticCandidateEligible = $false
+        $semanticAdvisoryEligible = $false
+        $semanticVolatileClasses = @()
+        $semanticUnknownChanges = 0
+        $semanticFatalChanges = 0
+        $semanticNonMonotonicChanges = 0
+        $semanticChangedLeafCount = 0
+        $semanticChangedPathSetSha256 = $null
+        $beforeSemanticProperty = $beforeEntry.PSObject.Properties[
+            'semantic_projection']
+        $afterSemanticProperty = $afterEntry.PSObject.Properties[
+            'semantic_projection']
+        if ([string]$beforeEntry.scope -ceq 'steam_library_metadata' -and
+            ($fields -contains 'sha256' -or $fields -contains 'size' -or
+             $fields -contains 'identity') -and
+            $null -ne $beforeSemanticProperty -and
+            $null -ne $afterSemanticProperty -and
+            (([string]$beforeSemanticProperty.Value.entry_class -ceq
+                    'global_steam_user_config') -or
+             ([string]$afterSemanticProperty.Value.entry_class -ceq
+                    'global_steam_user_config')) -and
+            (Get-Command Compare-StockSteamUserConfigProjection `
+                -ErrorAction SilentlyContinue)) {
+            $semantic = Compare-StockSteamUserConfigProjection `
+                $beforeSemanticProperty.Value $afterSemanticProperty.Value
+            $semanticRewrite = 'observed'
+            $semanticProjectionStatus = [string]$semantic.status
+            $semanticCandidateEligible = [bool]$semantic.candidate_eligible
+            $semanticAdvisoryEligible = [bool]$semantic.eligible
+            $semanticVolatileClasses = @($semantic.volatile_classes)
+            $semanticUnknownChanges = [int]$semantic.unknown_changes
+            $semanticFatalChanges = [int]$semantic.fatal_changes
+            $semanticNonMonotonicChanges =
+                [int]$semantic.non_monotonic_changes
+            $semanticChangedLeafCount = [int]$semantic.changed_leaf_count
+            $semanticChangedPathSetSha256 =
+                [string]$semantic.changed_path_set_sha256
+        }
         [void]$changes.Add([pscustomobject]@{
                 scope = [string]$beforeEntry.scope
                 relative_path = [string]$beforeEntry.relative_path
                 kind = $kind
-                changed_fields = @($fields) })
+                changed_fields = @($fields)
+                identity_changed = $fields -contains 'identity'
+                content_digest_changed = $fields -contains 'sha256'
+                size_changed = $fields -contains 'size'
+                last_write_changed = $fields -contains 'last_write_ticks'
+                creation_time_changed = $fields -contains 'creation_ticks'
+                attributes_changed = $fields -contains 'attributes'
+                entry_kind_changed = $fields -contains 'entry_kind'
+                presence_changed = $false
+                reparse_changed = $fields -contains 'reparse_status'
+                ads_changed = $fields -contains 'ads_status'
+                steam_user_config_rewrite = $semanticRewrite
+                steam_user_config_projection = $semanticProjectionStatus
+                steam_user_config_candidate_eligible =
+                    $semanticCandidateEligible
+                steam_user_config_advisory_eligible =
+                    $semanticAdvisoryEligible
+                steam_user_config_volatile_classes =
+                    $semanticVolatileClasses
+                steam_user_config_unknown_changes =
+                    $semanticUnknownChanges
+                steam_user_config_fatal_changes =
+                    $semanticFatalChanges
+                steam_user_config_non_monotonic_changes =
+                    $semanticNonMonotonicChanges
+                steam_user_config_changed_leaf_count =
+                    $semanticChangedLeafCount
+                steam_user_config_changed_path_set_sha256 =
+                    $semanticChangedPathSetSha256 })
     }
     $scopeSet = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::Ordinal)
@@ -349,11 +449,68 @@ function Compare-StockExternalStateSnapshot {
     $unreadable = @($changes | Where-Object {
             $_.kind -ceq 'snapshot_entry_unreadable' -or
             $_.kind -ceq 'snapshot_incomplete' }).Count
+    # These dimensions are deliberately orthogonal.  A replace-by-rename may
+    # change identity, digest, size, and timestamps in the same observation;
+    # its primary compatibility kind must not hide any of those facts.
+    $digest = @($changes | Where-Object content_digest_changed).Count
+    $size = @($changes | Where-Object size_changed).Count
+    $identity = @($changes | Where-Object {
+            $_.identity_changed -or $_.entry_kind_changed }).Count
+    $timestamp = @($changes | Where-Object {
+            $_.last_write_changed -or $_.creation_time_changed }).Count
     $content = @($changes | Where-Object {
-            $_.kind -ceq 'content_changed' -or $_.kind -ceq 'size_changed' }).Count
+            $_.content_digest_changed -or $_.size_changed }).Count
     $metadata = @($changes | Where-Object {
-            $_.kind -in @('last_write_changed', 'creation_time_changed',
-                'attributes_changed', 'directory_metadata_changed') }).Count
+            $_.last_write_changed -or $_.creation_time_changed -or
+            $_.attributes_changed -or
+            ($_.kind -ceq 'directory_metadata_changed') }).Count
+    $steamRewrites = @($changes | Where-Object {
+            $property = $_.PSObject.Properties['steam_user_config_rewrite']
+            $null -ne $property -and [string]$property.Value -ceq 'observed'
+        })
+    $steamProjection = if ($steamRewrites.Count -eq 0) { 'none' }
+        elseif (@($steamRewrites | Where-Object {
+                    $_.steam_user_config_projection -cne 'match' }).Count -eq 0) {
+            'match'
+        } elseif (@($steamRewrites | Where-Object {
+                    $_.steam_user_config_projection -ceq 'incomplete' }).Count -ne 0) {
+            'incomplete'
+        } else { 'mismatch' }
+    $volatileClassSet = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal)
+    foreach ($rewrite in $steamRewrites) {
+        foreach ($class in @($rewrite.steam_user_config_volatile_classes)) {
+            [void]$volatileClassSet.Add([string]$class)
+        }
+    }
+    $semanticUnknown = 0
+    $semanticFatal = 0
+    $semanticNonMonotonic = 0
+    foreach ($rewrite in $steamRewrites) {
+        $semanticUnknown += [int]$rewrite.steam_user_config_unknown_changes
+        $semanticFatal += [int]$rewrite.steam_user_config_fatal_changes
+        $semanticNonMonotonic +=
+            [int]$rewrite.steam_user_config_non_monotonic_changes
+    }
+    $promotedRewriteCount = @($steamRewrites | Where-Object {
+            [bool]$_.steam_user_config_advisory_eligible }).Count
+    $criticalChanges = [Collections.Generic.List[object]]::new()
+    foreach ($change in $changes) {
+        $isPromotedRewrite = $change.PSObject.Properties[
+                'steam_user_config_advisory_eligible'] -and
+            [bool]$change.steam_user_config_advisory_eligible
+        $isCompanionDirectoryMetadata = $promotedRewriteCount -eq 1 -and
+            [string]$change.scope -ceq 'steam_library_metadata' -and
+            [string]$change.kind -ceq 'directory_metadata_changed' -and
+            -not [bool]$change.presence_changed -and
+            -not [bool]$change.reparse_changed -and
+            -not [bool]$change.ads_changed
+        if (-not $isPromotedRewrite -and -not $isCompanionDirectoryMetadata) {
+            [void]$criticalChanges.Add($change)
+        }
+    }
+    $criticalResult = if ($unreadable -ne 0) { 'incomplete' }
+        elseif ($criticalChanges.Count -eq 0) { 'none' } else { 'changed' }
     return [pscustomobject]@{
         schema = 'hlclient.stock-external-drift.v1'
         phase = $Phase
@@ -362,15 +519,32 @@ function Compare-StockExternalStateSnapshot {
         unchanged_entries = $unchanged
         content_changes = $content
         metadata_only_changes = $metadata
-        identity_replacements = @($changes | Where-Object kind -ceq 'identity_replaced').Count
+        metadata_changes = $metadata
+        digest_changes = $digest
+        size_changes = $size
+        identity_replacements = $identity
+        timestamp_changes = $timestamp
         created = @($changes | Where-Object kind -ceq 'created').Count
         removed = @($changes | Where-Object kind -ceq 'removed').Count
         unreadable = $unreadable
         changed_scopes = $scopeSet.Count
         scope_kinds = $scopeKinds
         changes = @($changes)
-        result = $(if ($unreadable -ne 0) { 'incomplete' }
-            elseif ($changes.Count -eq 0) { 'none' } else { 'changed' })
+        critical_external_drift = $criticalResult
+        steam_user_config_rewrite = $(if ($steamRewrites.Count -eq 0) {
+                'none'
+            } else { 'observed' })
+        steam_user_config_rewrite_count = $steamRewrites.Count
+        steam_user_config_projection = $steamProjection
+        steam_user_config_volatile_classes = $volatileClassSet.Count
+        steam_user_config_unknown_changes = [int]$semanticUnknown
+        steam_user_config_fatal_changes = [int]$semanticFatal
+        steam_user_config_non_monotonic_changes =
+            [int]$semanticNonMonotonic
+        steam_user_config_candidate_count = @($steamRewrites | Where-Object {
+                [bool]$_.steam_user_config_candidate_eligible }).Count
+        steam_user_config_advisory_count = $promotedRewriteCount
+        result = $criticalResult
     }
 }
 
@@ -385,7 +559,24 @@ function Write-StockExternalDriftPublicOutput {
             @('changed-scopes', $Difference.changed_scopes),
             @('content-changes', $Difference.content_changes),
             @('metadata-only-changes', $Difference.metadata_only_changes),
+            @('digest-changes', $Difference.digest_changes),
+            @('size-changes', $Difference.size_changes),
             @('identity-replacements', $Difference.identity_replacements),
+            @('timestamp-changes', $Difference.timestamp_changes),
+            @('critical-external-drift',
+                $Difference.critical_external_drift),
+            @('steam-user-config-rewrite',
+                $Difference.steam_user_config_rewrite),
+            @('steam-user-config-projection',
+                $Difference.steam_user_config_projection),
+            @('steam-user-config-volatile-classes',
+                $Difference.steam_user_config_volatile_classes),
+            @('steam-user-config-unknown-changes',
+                $Difference.steam_user_config_unknown_changes),
+            @('steam-user-config-fatal-changes',
+                $Difference.steam_user_config_fatal_changes),
+            @('steam-user-config-non-monotonic-changes',
+                $Difference.steam_user_config_non_monotonic_changes),
             @('created', $Difference.created),
             @('removed', $Difference.removed),
             @('unreadable', $Difference.unreadable),
