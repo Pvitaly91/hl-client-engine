@@ -354,6 +354,25 @@ unsupported_sprite_reason(
 
 } // namespace
 
+std::optional<StudioEntityMaterialSupportStatus> studio_entity_material_support(
+    const StudioModelRenderAsset& asset, const std::uint32_t body_value,
+    const std::uint32_t skin_family_index)
+{
+    const auto material = classify_studio_materials(asset, body_value, skin_family_index);
+    if (!material.valid || material.has_unsupported) { return std::nullopt; }
+    if (material.has_masked && material.has_opaque) {
+        return StudioEntityMaterialSupportStatus::supported_opaque_and_masked;
+    }
+    return material.has_masked ? StudioEntityMaterialSupportStatus::supported_masked
+                              : StudioEntityMaterialSupportStatus::supported_opaque;
+}
+
+std::optional<assets::WorldBounds> transform_entity_render_bounds(
+    const assets::WorldBounds& bounds, const EntityRenderTransform& transform) noexcept
+{
+    return transformed_bounds(bounds, transform);
+}
+
 std::string_view to_string(
     const EntityRenderFrameComposerErrorCode code) noexcept
 {

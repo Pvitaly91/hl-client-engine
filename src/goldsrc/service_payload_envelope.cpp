@@ -67,9 +67,15 @@ private:
 bool valid_service_payload_envelope_limits(
     const ServicePayloadEnvelopeLimits& limits) noexcept
 {
+    const auto valid_policy =
+        limits.compression_policy ==
+            ServicePayloadCompressionPolicy::require_bzip2_envelope ||
+        limits.compression_policy ==
+            ServicePayloadCompressionPolicy::accept_bzip2_or_uncompressed;
     return limits.maximum_decompressed_payload_size > 0U &&
            limits.maximum_decompressed_payload_size <=
-               kMaximumDecompressedServicePayloadSize;
+               kMaximumDecompressedServicePayloadSize &&
+           valid_policy;
 }
 
 ServicePayloadEnvelopeDecoder::ServicePayloadEnvelopeDecoder(
@@ -103,6 +109,36 @@ ServicePayloadEnvelopeDecodeResult ServicePayloadEnvelopeDecoder::decode(
             0U,
             "Service payload envelope limits are outside project hard caps");
     }
+    const auto accepts_uncompressed =
+        limits_.compression_policy ==
+        ServicePayloadCompressionPolicy::accept_bzip2_or_uncompressed;
+    const auto has_envelope_magic =
+        payload.bytes.size() >= kServicePayloadEnvelopeHeaderSize &&
+        std::ranges::equal(
+            std::span<const std::byte>{payload.bytes}.first(
+                kServicePayloadEnvelopeHeaderSize),
+            kBzip2ServicePayloadEnvelopeMagic);
+    if (accepts_uncompressed && !has_envelope_magic) {
+        if (payload.bytes.size() >
+            limits_.maximum_decompressed_payload_size) {
+            return failure(
+                ServicePayloadEnvelopeErrorCode::
+                    decompressed_payload_too_large,
+                limits_.maximum_decompressed_payload_size,
+                "Uncompressed service payload exceeds the configured bound");
+        }
+        const auto payload_size = payload.bytes.size();
+        payload.decompressed = false;
+        payload.wire_uncompressed = true;
+        return ServicePayloadEnvelopeDecodeResult{
+            DecodedServicePayloadEnvelope{
+                std::move(payload),
+                0U,
+                payload_size,
+            },
+            std::nullopt,
+        };
+    }
     if (payload.bytes.size() < kServicePayloadEnvelopeHeaderSize) {
         return failure(
             ServicePayloadEnvelopeErrorCode::payload_too_short,
@@ -115,10 +151,7 @@ ServicePayloadEnvelopeDecodeResult ServicePayloadEnvelopeDecoder::decode(
             kMaximumCompressedServiceEnvelopeSize,
             "Compressed service payload exceeds the project hard cap");
     }
-    if (!std::ranges::equal(
-            std::span<const std::byte>{payload.bytes}.first(
-                kServicePayloadEnvelopeHeaderSize),
-            kBzip2ServicePayloadEnvelopeMagic)) {
+    if (!has_envelope_magic) {
         return failure(
             ServicePayloadEnvelopeErrorCode::invalid_envelope_magic,
             0U,
@@ -243,6 +276,7 @@ ServicePayloadEnvelopeDecodeResult ServicePayloadEnvelopeDecoder::decode(
     const auto compressed_size = compressed.size();
     payload.bytes = std::move(candidate);
     payload.decompressed = true;
+    payload.wire_uncompressed = false;
     return ServicePayloadEnvelopeDecodeResult{
         DecodedServicePayloadEnvelope{
             std::move(payload),

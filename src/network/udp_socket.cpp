@@ -31,12 +31,15 @@ using NativeSocket = int;
 inline constexpr NativeSocket kInvalidSocket = -1;
 #endif
 
-[[nodiscard]] std::string socket_error(const std::string_view operation)
+[[nodiscard]] std::string socket_error(
+    const std::string_view operation,
+    const int native_error)
 {
 #ifdef _WIN32
-    return std::string{operation} + " failed with Winsock error " + std::to_string(WSAGetLastError());
+    return std::string{operation} + " failed with Winsock error " +
+           std::to_string(native_error);
 #else
-    return std::string{operation} + " failed: " + std::strerror(errno);
+    return std::string{operation} + " failed: " + std::strerror(native_error);
 #endif
 }
 
@@ -63,12 +66,12 @@ void close_socket(const NativeSocket socket) noexcept
     return NetworkAddress{ntohl(address.sin_addr.s_addr), ntohs(address.sin_port)};
 }
 
-[[nodiscard]] bool is_would_block() noexcept
+[[nodiscard]] bool is_would_block(const int native_error) noexcept
 {
 #ifdef _WIN32
-    return WSAGetLastError() == WSAEWOULDBLOCK;
+    return native_error == WSAEWOULDBLOCK;
 #else
-    return errno == EAGAIN || errno == EWOULDBLOCK;
+    return native_error == EAGAIN || native_error == EWOULDBLOCK;
 #endif
 }
 
@@ -113,7 +116,12 @@ std::optional<UdpSocket> UdpSocket::open_ipv4(
     auto implementation = std::make_unique<Impl>(runtime.implementation_);
     const NativeSocket handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (handle == kInvalidSocket) {
-        error = socket_error("socket");
+#ifdef _WIN32
+        const int native_error = ::WSAGetLastError();
+#else
+        const int native_error = errno;
+#endif
+        error = socket_error("socket", native_error);
         return std::nullopt;
     }
     implementation->handle = handle;
@@ -121,13 +129,15 @@ std::optional<UdpSocket> UdpSocket::open_ipv4(
 #ifdef _WIN32
     u_long non_blocking = 1;
     if (ioctlsocket(handle, FIONBIO, &non_blocking) == SOCKET_ERROR) {
-        error = socket_error("ioctlsocket(FIONBIO)");
+        const int native_error = ::WSAGetLastError();
+        error = socket_error("ioctlsocket(FIONBIO)", native_error);
         return std::nullopt;
     }
 #else
     const int current_flags = fcntl(handle, F_GETFL, 0);
     if (current_flags < 0 || fcntl(handle, F_SETFL, current_flags | O_NONBLOCK) < 0) {
-        error = socket_error("fcntl(O_NONBLOCK)");
+        const int native_error = errno;
+        error = socket_error("fcntl(O_NONBLOCK)", native_error);
         return std::nullopt;
     }
 #endif
@@ -147,7 +157,12 @@ bool UdpSocket::bind(const NetworkAddress& local_address, std::string& error)
             implementation_->handle,
             reinterpret_cast<const sockaddr*>(&native),
             static_cast<int>(sizeof(native))) != 0) {
-        error = socket_error("bind");
+#ifdef _WIN32
+        const int native_error = ::WSAGetLastError();
+#else
+        const int native_error = errno;
+#endif
+        error = socket_error("bind", native_error);
         return false;
     }
     return true;
@@ -170,7 +185,12 @@ std::optional<NetworkAddress> UdpSocket::local_address(std::string& error) const
             implementation_->handle,
             reinterpret_cast<sockaddr*>(&native),
             &size) != 0) {
-        error = socket_error("getsockname");
+#ifdef _WIN32
+        const int native_error = ::WSAGetLastError();
+#else
+        const int native_error = errno;
+#endif
+        error = socket_error("getsockname", native_error);
         return std::nullopt;
     }
     return from_native(native);
@@ -179,9 +199,13 @@ std::optional<NetworkAddress> UdpSocket::local_address(std::string& error) const
 bool UdpSocket::send_to(
     const NetworkAddress& destination,
     const std::span<const std::byte> payload,
-    std::string& error)
+    std::string& error,
+    SocketNativeError* const native_error)
 {
     error.clear();
+    if (native_error != nullptr) {
+        *native_error = {};
+    }
     if (!implementation_) {
         error = "Cannot send with a moved-from UDP socket";
         return false;
@@ -211,7 +235,22 @@ bool UdpSocket::send_to(
         sizeof(native));
     if (sent < 0) {
 #endif
-        error = socket_error("sendto");
+#ifdef _WIN32
+        const int captured_native_error = ::WSAGetLastError();
+        if (native_error != nullptr) {
+            *native_error = SocketNativeError{
+                SocketNativeErrorDomain::winsock,
+                static_cast<std::uint32_t>(captured_native_error)};
+        }
+#else
+        const int captured_native_error = errno;
+        if (native_error != nullptr) {
+            *native_error = SocketNativeError{
+                SocketNativeErrorDomain::posix,
+                static_cast<std::uint32_t>(captured_native_error)};
+        }
+#endif
+        error = socket_error("sendto", captured_native_error);
         return false;
     }
 
@@ -256,13 +295,17 @@ ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
         reinterpret_cast<sockaddr*>(&source),
         &source_size);
     if (received == SOCKET_ERROR) {
-        if (WSAGetLastError() == WSAEMSGSIZE) {
+        const int native_error = ::WSAGetLastError();
+        if (native_error == WSAEMSGSIZE) {
             return ReceiveResult{
                 ReceiveStatus::truncated,
                 std::nullopt,
                 "Received datagram exceeds the configured size limit",
                 from_native(source),
                 maximum_size + 1U,
+                SocketNativeError{
+                    SocketNativeErrorDomain::winsock,
+                    static_cast<std::uint32_t>(native_error)},
             };
         }
 #else
@@ -275,31 +318,39 @@ ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
     message.msg_iovlen = 1;
     const auto received = recvmsg(implementation_->handle, &message, 0);
     if (received < 0) {
+        const int native_error = errno;
 #endif
-        if (is_would_block()) {
+        if (is_would_block(native_error)) {
             return ReceiveResult{
                 ReceiveStatus::would_block,
                 std::nullopt,
                 {},
                 std::nullopt,
                 0U,
+                {},
             };
         }
 #ifdef _WIN32
         return ReceiveResult{
             ReceiveStatus::error,
             std::nullopt,
-            socket_error("recvfrom"),
+            socket_error("recvfrom", native_error),
             std::nullopt,
             0U,
+            SocketNativeError{
+                SocketNativeErrorDomain::winsock,
+                static_cast<std::uint32_t>(native_error)},
         };
 #else
         return ReceiveResult{
             ReceiveStatus::error,
             std::nullopt,
-            socket_error("recvmsg"),
+            socket_error("recvmsg", native_error),
             std::nullopt,
             0U,
+            SocketNativeError{
+                SocketNativeErrorDomain::posix,
+                static_cast<std::uint32_t>(native_error)},
         };
 #endif
     }
@@ -312,6 +363,7 @@ ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
             "Received datagram exceeds the configured size limit",
             from_native(source),
             maximum_size + 1U,
+            {},
         };
     }
 #endif
@@ -326,6 +378,7 @@ ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
         {},
         received_source,
         received_size,
+        {},
     };
 }
 

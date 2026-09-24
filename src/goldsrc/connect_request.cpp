@@ -66,6 +66,16 @@ template<class Result>
                kMaximumConnectAuthenticationSuffixSize;
 }
 
+[[nodiscard]] bool valid_binary_authentication_size(
+    const ConnectCompatibilityProfile& profile,
+    const std::size_t size) noexcept
+{
+    return size > 0U &&
+           (profile.variable_binary_authentication_size
+                ? size <= profile.required_binary_authentication_size
+                : size == profile.required_binary_authentication_size);
+}
+
 [[nodiscard]] std::string signed_challenge_text(const ChallengeToken challenge)
 {
     const auto signed_value = std::bit_cast<std::int32_t>(challenge);
@@ -499,8 +509,8 @@ ConnectRequestBuildResult ConnectRequestBuilder::build(
     }
     if (request.authentication_.protected_info_size() !=
             profile.required_protected_authentication_size ||
-        request.authentication_.binary_suffix_size() !=
-            profile.required_binary_authentication_size) {
+        !valid_binary_authentication_size(
+            profile, request.authentication_.binary_suffix_size())) {
         return failure<ConnectRequestBuildResult>(
             ConnectRequestErrorCode::invalid_authentication,
             0U,
@@ -711,11 +721,17 @@ ConnectRequestParseResult parse_connect_request(
     const auto user_text = text.substr(position, user_quote_end - position);
     position = user_quote_end + 1U;
 
-    if (payload.size() - position != profile.required_binary_authentication_size) {
-        return failure<ConnectRequestParseResult>(
-            payload.size() - position < profile.required_binary_authentication_size
+    const auto suffix_size = payload.size() - position;
+    if (!valid_binary_authentication_size(profile, suffix_size)) {
+        const auto code = profile.variable_binary_authentication_size
+            ? suffix_size == 0U
+                ? ConnectRequestErrorCode::missing_authentication
+                : ConnectRequestErrorCode::authentication_too_large
+            : suffix_size < profile.required_binary_authentication_size
                 ? ConnectRequestErrorCode::invalid_terminator
-                : ConnectRequestErrorCode::unexpected_trailing_data,
+                : ConnectRequestErrorCode::unexpected_trailing_data;
+        return failure<ConnectRequestParseResult>(
+            code,
             kConnectionlessPacketHeaderSize + position,
             "Binary authentication suffix length does not match the selected profile");
     }
@@ -773,8 +789,8 @@ ConnectRequestParseResult parse_connect_request(
     }
     if (authentication.value->protected_info_size() !=
             profile.required_protected_authentication_size ||
-        authentication.value->binary_suffix_size() !=
-            profile.required_binary_authentication_size) {
+        !valid_binary_authentication_size(
+            profile, authentication.value->binary_suffix_size())) {
         return failure<ConnectRequestParseResult>(
             ConnectRequestErrorCode::invalid_authentication,
             0U,
@@ -906,7 +922,8 @@ PrepareConnectRequestResult prepare_connect_request(
 {
     if (!valid_profile(profile) ||
         authentication.protected_info_size() != profile.required_protected_authentication_size ||
-        authentication.binary_suffix_size() != profile.required_binary_authentication_size) {
+        !valid_binary_authentication_size(
+            profile, authentication.binary_suffix_size())) {
         return failure<PrepareConnectRequestResult>(
             ConnectRequestErrorCode::invalid_configuration,
             0U,

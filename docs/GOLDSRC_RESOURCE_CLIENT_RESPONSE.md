@@ -131,6 +131,16 @@ compatibility primitive only, not security or trust evidence. The wire name
 remains the existing neutral compatibility-profile constant; M3.2.1 does not
 promote a new opcode semantic claim.
 
+M4.7.2D adds a separate, explicit no-custom-resource compatibility profile for
+the project client. It emits the typed three-byte body `opcode 5` plus a
+little-endian entry count of zero. This does not fabricate a decal or provider
+digest and does not change the historical one-entry profile. The zero-entry
+form is source-backed by ReHLDS `SV_ParseResourceList`, which accepts counts
+through one, and by the GoldSrc-compatible Xash3D client path, which leaves the
+count zero when no custom logo can be opened. The live D composition selects
+this profile because the project client has no custom-logo feature; explicitly
+selecting the local consistency provider with that stop is rejected.
+
 The parser accepts the semantic fragment only plus an explicit evidence
 profile. It validates exact opcode, length, little-endian fields, constants,
 terminator, widths, and end of input; it returns exact bytes consumed and never
@@ -161,8 +171,21 @@ The continuation performs this bounded sequence:
 6. let the driver fragment, transform, sequence, and retransmit;
 7. complete only on the driver's exact covering-ACK event;
 8. retain at most one complete pre-ACK server payload;
-9. reassemble and decode the first following `BZ2\0` service envelope;
+9. reassemble and decode the first following service payload (strict `BZ2\0`
+   by default; the explicit live-runtime profile also accepts a bounded
+   source-backed wire-uncompressed payload);
 10. read byte 0 only and publish `PostResourceResponseBoundary`.
+
+For the explicit M4.7.2D empty-advertisement profile, steps 1–4 are replaced by
+one typed zero-entry build. The same queue, fragment, ACK, retained driver and
+post-response boundary lifecycle is then used. Event capacity is reserved
+before either profile builds or consumes provider material, preserving
+transactional backpressure behavior.
+
+The M4.7.2D live-runtime composition also opts this continuation into the
+bounded `accept_bzip2_or_uncompressed` envelope policy. Historical response
+stops remain strict, and a malformed exact `BZ2\0` prefix is never accepted as
+raw service bytes.
 
 When `--resource-consistency-provider local` is selected for
 `--stop-after resource-response-boundary`, the application validates explicit
@@ -254,3 +277,27 @@ only if sufficient active stock evidence establishes a substantial next-message
 codec. See [local readiness](LOCAL_RESOURCE_READINESS.md) and
 [precache manifest](PRECACHE_MANIFEST.md); M3.2.3 is the next asset-source
 boundary.
+
+## Live response ordering and sign-on continuation
+
+The explicit live-runtime profile keeps receive classification separate from
+response completion. A server payload received before the first successful
+resource-response transmission retains that immutable ordering fact. The
+current live profile decodes such a payload from its exact message cursor and
+admits only codec-proven `svc_nop`; it neither treats the payload as a response
+acknowledgement nor promotes it to a post-response continuation. Unknown or
+truncated framing fails at the established boundary. The historical strict
+profile remains unchanged.
+
+For the zero-entry live response, completion requires the existing driver's
+exact covering reliable generation/toggle/sequence acknowledgement. The next
+typed client action is `spawn`; it is not gated on a server message that the
+server itself sends only after spawn. ReHLDS revision
+`6266cd23faee4a6e9cf3974f9605b2cadd86f0a4` writes `svc_signonnum 1` at the end
+of `SV_WriteSpawn`, leaves `fully_connected` false, and changes that flag in
+`SV_SendEnts_f`. The GoldSrc branch of Xash3D-FWGS revision
+`7500a6b3647e71d9b21691671957a0e06731019e` answers sign-on value 1 with the
+fixed string command `sendents`. Accordingly, the live stage queues exactly
+one typed `sendents` reply only after decoding that current-session control,
+and binds its transmission and completion to its own reliable generation.
+This is sign-on control traffic, not usercmd/movement transmission.

@@ -358,6 +358,9 @@ template<typename Integer>
     if (value == "duplicate") return StockRuntimeCaptureAction::duplicate;
     if (value == "hold_for_delay") return StockRuntimeCaptureAction::hold_for_delay;
     if (value == "hold_for_reorder") return StockRuntimeCaptureAction::hold_for_reorder;
+    if (value == "auxiliary_observation") {
+        return StockRuntimeCaptureAction::auxiliary_observation;
+    }
     return std::nullopt;
 }
 
@@ -388,6 +391,8 @@ template<typename Integer>
     case StockRuntimeCaptureAction::duplicate: return "duplicate";
     case StockRuntimeCaptureAction::hold_for_delay: return "hold_for_delay";
     case StockRuntimeCaptureAction::hold_for_reorder: return "hold_for_reorder";
+    case StockRuntimeCaptureAction::auxiliary_observation:
+        return "auxiliary_observation";
     }
     return "unknown";
 }
@@ -653,6 +658,7 @@ StockRuntimeTransportJournalValidation validate_stock_runtime_transport_journal(
     std::size_t emission_count = 0U;
     std::uint64_t previous_timestamp = 0U;
     bool transport_complete = true;
+    std::size_t functional_auxiliary_query_count = 0U;
 
     for (std::size_t index = 0U; index < entries.size(); ++index) {
         const auto& entry = entries[index];
@@ -723,13 +729,30 @@ StockRuntimeTransportJournalValidation validate_stock_runtime_transport_journal(
                 "wrong-source datagram cannot be delivered");
         }
         if (entry.wrong_source) {
-            transport_complete = false;
-            if (policy ==
-                StockRuntimeTransportJournalValidationPolicy::complete_capture) {
+            const bool functional_auxiliary_query =
+                policy == StockRuntimeTransportJournalValidationPolicy::
+                    functional_complete_capture &&
+                entry.direction ==
+                    StockRuntimeCaptureDirection::client_to_server &&
+                entry.payload_byte_count == 25U &&
+                entry.action == StockRuntimeCaptureAction::auxiliary_observation &&
+                entry.hold_state == StockRuntimeTransportHoldState::none &&
+                !entry.delivered && entry.emitted_ordinals.empty() &&
+                entry.sha256 == kFunctionalRuntimeAuxiliaryQuerySha256 &&
+                functional_auxiliary_query_count <
+                    kMaximumFunctionalRuntimeAuxiliaryQueries;
+            if (functional_auxiliary_query) {
+                ++functional_auxiliary_query_count;
+            } else {
+                transport_complete = false;
+            }
+            if (!functional_auxiliary_query && policy !=
+                    StockRuntimeTransportJournalValidationPolicy::
+                        incomplete_capture) {
                 return validation_failure(
                     StockRuntimeTransportJournalErrorCode::invalid_wrong_source_state,
                     index,
-                    "complete capture cannot contain an unexpected source");
+                    "complete capture contains an unsupported unexpected source");
             }
         }
         for (std::size_t emission_index = 1U;
@@ -776,8 +799,8 @@ StockRuntimeTransportJournalValidation validate_stock_runtime_transport_journal(
             if (entry.hold_state == StockRuntimeTransportHoldState::held ||
                 entry.hold_state == StockRuntimeTransportHoldState::unresolved) {
                 transport_complete = false;
-                if (policy ==
-                    StockRuntimeTransportJournalValidationPolicy::complete_capture) {
+                if (policy != StockRuntimeTransportJournalValidationPolicy::
+                                  incomplete_capture) {
                     return validation_failure(
                         StockRuntimeTransportJournalErrorCode::unresolved_hold, index,
                         "complete journal contains an unresolved held datagram");
@@ -805,8 +828,32 @@ StockRuntimeTransportJournalValidation validate_stock_runtime_transport_journal(
             }
             required_emissions = 1U;
             break;
+        case StockRuntimeCaptureAction::auxiliary_observation:
+            if (!entry.wrong_source ||
+                entry.hold_state != StockRuntimeTransportHoldState::none ||
+                policy != StockRuntimeTransportJournalValidationPolicy::
+                              functional_complete_capture) {
+                return validation_failure(
+                    StockRuntimeTransportJournalErrorCode::invalid_hold_state,
+                    index,
+                    "auxiliary observation is outside functional policy");
+            }
+            required_emissions = 0U;
+            break;
         }
-        if (entry.emitted_ordinals.size() != required_emissions) {
+        const bool terminal_partial_emission =
+            policy == StockRuntimeTransportJournalValidationPolicy::
+                          incomplete_capture &&
+            index + 1U == entries.size() && !entry.wrong_source &&
+            entry.emitted_ordinals.size() < required_emissions;
+        if (terminal_partial_emission) {
+            // The observation was durably recorded before its terminal send
+            // failed.  Preserve that exact final record in an explicitly
+            // incomplete journal; the terminal diagnostic carries the I/O
+            // operation and native error.  Earlier records may never use this
+            // exception because that would hide a gap in delivered order.
+            transport_complete = false;
+        } else if (entry.emitted_ordinals.size() != required_emissions) {
             return validation_failure(
                 StockRuntimeTransportJournalErrorCode::invalid_emitted_ordinals, index,
                 "action does not match its emission cardinality");

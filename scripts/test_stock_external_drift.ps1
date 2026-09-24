@@ -3,6 +3,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'stock_steam_user_config_projection.ps1')
 . (Join-Path $PSScriptRoot 'stock_external_drift.ps1')
 
 function New-TestEntry {
@@ -16,7 +17,8 @@ function New-TestEntry {
         [Int64]$LastWriteTicks = 10,
         [Int64]$CreationTicks = 5,
         [Int64]$Attributes = 32,
-        [string]$ReadStatus = 'readable')
+        [string]$ReadStatus = 'readable',
+        [object]$SemanticProjection = $null)
     [pscustomobject]@{
         scope = $Scope
         relative_path = $RelativePath
@@ -30,6 +32,9 @@ function New-TestEntry {
         attributes = $(if ($ReadStatus -ceq 'readable') { $Attributes } else { $null })
         reparse_status = $(if ($ReadStatus -ceq 'readable') { 'absent' } else { 'unknown' })
         ads_status = $(if ($ReadStatus -ceq 'readable') { 'default-only' } else { 'unknown' })
+        semantic_projection = $(if ($null -ne $SemanticProjection) {
+                $SemanticProjection
+            } else { [pscustomobject]@{status='not-applicable';entry_class='none'} })
     }
 }
 
@@ -131,6 +136,60 @@ $researchDifference = Compare-StockExternalStateSnapshot `
 Assert-True ($researchDifference.scope_kinds -contains
     'research_protected_entry|identity_replaced') `
     'Research restoration identity was not classified separately.'
+
+$steamBeforeBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+    '"UserLocalConfigStore" { "AppInfoChangeNumber" "500" "Software" { "Valve" { "Steam" { "apps" { "70" { "Installed" "1" } } } } } }')
+$steamAfterBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+    '"UserLocalConfigStore" { "AppInfoChangeNumber" "501" "Software" { "Valve" { "Steam" { "apps" { "70" { "Installed" "1" } } } } } }')
+$steamBeforeProjection = ConvertFrom-StockValveKeyValuesBytes $steamBeforeBytes
+$steamAfterProjection = ConvertFrom-StockValveKeyValuesBytes $steamAfterBytes
+[Array]::Clear($steamBeforeBytes,0,$steamBeforeBytes.Length)
+[Array]::Clear($steamAfterBytes,0,$steamAfterBytes.Length)
+$steamPath = '123/config/localconfig.vdf'
+$steamParentPath = '123/config'
+$steamBefore = New-StockExternalStateSnapshot @(
+    (New-TestEntry 'steam_library_metadata' $steamPath -SemanticProjection $steamBeforeProjection),
+    (New-TestEntry 'steam_library_metadata' $steamParentPath -Kind directory `
+        -Size 0 -Sha256 '' -Attributes 16)) 'private_server_diagnostic'
+$steamAfter = New-StockExternalStateSnapshot @(
+    (New-TestEntry 'steam_library_metadata' $steamPath -Identity '00000001:0000000000000002' `
+        -Sha256 ('B' * 64) -LastWriteTicks 11 -SemanticProjection $steamAfterProjection),
+    (New-TestEntry 'steam_library_metadata' $steamParentPath -Kind directory `
+        -Size 0 -Sha256 '' -LastWriteTicks 11 -Attributes 16)) `
+    'private_server_diagnostic'
+$legacySteam = Compare-StockExternalStateSnapshot $steamBefore $steamAfter `
+    'private_server_diagnostic'
+Assert-True ($legacySteam.raw_external_state -ceq 'changed' -and
+    $legacySteam.protected_projection -ceq 'match' -and
+    $legacySteam.policy_decision -ceq 'reject' -and
+    $legacySteam.critical_external_drift -ceq 'changed') `
+    'Pending production policy did not preserve raw/reject distinctions.'
+$advisedSteam = Compare-StockExternalStateSnapshot $steamBefore $steamAfter `
+    'private_server_diagnostic' -SteamRewritePolicyId `
+    steam-appinfo-change-number-v1
+Assert-True ($advisedSteam.raw_external_state -ceq 'changed' -and
+    $advisedSteam.protected_projection -ceq 'match' -and
+    $advisedSteam.policy_decision -ceq 'explicit_advisory' -and
+    $advisedSteam.critical_external_drift -ceq 'none' -and
+    $advisedSteam.steam_user_config_advisory_count -eq 1) `
+    'Exact versioned Steam advisory was not narrowly applied.'
+$wrongParentAfter = New-StockExternalStateSnapshot @(
+    (New-TestEntry 'steam_library_metadata' $steamPath -Identity '00000001:0000000000000002' `
+        -Sha256 ('B' * 64) -LastWriteTicks 11 -SemanticProjection $steamAfterProjection),
+    (New-TestEntry 'steam_library_metadata' '123' -Kind directory -Size 0 `
+        -Sha256 '' -LastWriteTicks 11 -Attributes 16)) 'private_server_diagnostic'
+$wrongParent = Compare-StockExternalStateSnapshot $steamBefore $wrongParentAfter `
+    'private_server_diagnostic' -SteamRewritePolicyId `
+    steam-appinfo-change-number-v1
+Assert-True ($wrongParent.policy_decision -ceq 'reject' -and
+    $wrongParent.critical_external_drift -ceq 'changed') `
+    'The directory metadata exception escaped the exact atomic-replacement parent.'
+$unknownPolicyFailed = $false
+try {
+    [void](Compare-StockExternalStateSnapshot $steamBefore $steamAfter `
+        'private_server_diagnostic' -SteamRewritePolicyId unknown-v9)
+} catch { $unknownPolicyFailed = $true }
+Assert-True $unknownPolicyFailed 'Unknown drift policy ID did not fail closed.'
 
 $public = @(Write-StockExternalDriftPublicOutput $metadata)
 Assert-True ($public -contains '[stock-drift] phase=standard_server_diagnostic') `

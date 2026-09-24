@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
@@ -27,6 +28,9 @@ enum class ConnectionStopPoint {
     resource_response_boundary,
     server_baselines,
     entity_snapshot,
+    live_runtime_state,
+    live_usercmd_check,
+    live_visual_control,
     usercmd_boundary,
     precache_manifest,
     asset_dispatch,
@@ -58,10 +62,30 @@ enum class WorldCameraOption {
 
 enum class AuthenticationProviderKind {
     file,
+    steam,
+};
+
+enum class LiveInputMode {
+    keyboard_mouse,
+    scripted_check,
+    scripted_side_check,
+    scripted_jump_duck_check,
+    scripted_speed_check,
 };
 
 enum class ResourceConsistencyProviderKind {
     local,
+};
+
+enum class RuntimeReplayFixtureOption {
+    basic_mixed,
+    missing_entity_base,
+    visual_entities,
+};
+
+enum class RuntimeReplayVisualOption {
+    diagnostic,
+    local_assets,
 };
 
 struct CommandLineOptions {
@@ -70,12 +94,22 @@ struct CommandLineOptions {
     bool net_trace{false};
     bool view_world{false};
     bool view_entity_snapshot{false};
+    std::optional<RuntimeReplayFixtureOption> runtime_replay_fixture;
+    std::optional<std::string> runtime_replay_capture;
+    std::optional<RuntimeReplayVisualOption> runtime_replay_visuals;
+    std::optional<std::string> runtime_replay_screenshot;
+    std::size_t runtime_replay_record_budget{2U};
+    std::size_t runtime_replay_byte_budget{1U * 1'024U * 1'024U};
     std::optional<std::string> base_directory;
     std::string game_directory{"valve"};
     std::optional<std::string> connect_endpoint;
     ConnectionStopPoint stop_after{ConnectionStopPoint::challenge};
+    std::optional<LiveInputMode> live_input;
+    bool reference_prediction{false};
+    std::optional<std::size_t> live_session_seconds;
     std::optional<AuthenticationProviderKind> authentication_provider;
     std::optional<std::string> authentication_material_file;
+    std::optional<std::string> steam_api_runtime;
     std::optional<ResourceConsistencyProviderKind>
         resource_consistency_provider;
     std::string player_name{"Player"};

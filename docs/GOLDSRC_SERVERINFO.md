@@ -259,8 +259,9 @@ skip/bypass, download, or arbitrary server-command CLI options.
   nothing;
 - the map/mode-dependent `u32` and fixed 16-byte value remain opaque;
 - the fourth NUL string is cursor-bounded but not public semantic state;
-- live project-client to stock-HLDS pre-resource sign-on remains pending a
-  production Steam authentication provider.
+- live project-client to stock-HLDS pre-resource sign-on remains pending live
+  execution of the implemented Steam provider; both permitted M4.7.2C attempts
+  stopped before provider initialization.
 
 See [GoldSrc delta descriptions](GOLDSRC_DELTA_DESCRIPTIONS.md) and
 [GoldSrc movement-environment state](GOLDSRC_MOVEVARS.md) for the M2.4.3 and

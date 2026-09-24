@@ -143,6 +143,31 @@ namespace goldsrc = hlclient::goldsrc;
     return *encoded.datagram;
 }
 
+[[nodiscard]] std::vector<std::byte> encoded_client_fragment_carrier(
+    const std::uint32_t sequence_value,
+    std::vector<std::byte> fragment,
+    const std::span<const std::byte> suffix)
+{
+    REQUIRE(fragment.size() <=
+            (std::numeric_limits<std::uint16_t>::max)());
+    goldsrc::NetchanFragmentSlots fragments{};
+    fragments[0U] = goldsrc::NetchanFragmentDescriptor{
+        0U, 0x0001'0001U, 0U,
+        static_cast<std::uint16_t>(fragment.size()), 0U};
+    const auto fragment_size = fragment.size();
+    fragment.insert(fragment.end(), suffix.begin(), suffix.end());
+    goldsrc::ClientToServerNetchanPacket packet{
+        goldsrc::NetchanHeader{
+            goldsrc::NetchanSequenceWord{
+                sequence(sequence_value), {true, true}},
+            goldsrc::NetchanAcknowledgementWord{sequence(0U), false}},
+        fragments, std::move(fragment), fragment_size};
+    const auto encoded = goldsrc::encode_client_to_server_netchan_packet(packet);
+    REQUIRE(encoded);
+    REQUIRE(encoded.datagram);
+    return *encoded.datagram;
+}
+
 [[nodiscard]] std::vector<std::byte> compressed_service_envelope(
     const std::span<const std::byte> semantic)
 {
@@ -214,16 +239,25 @@ enum class CapturedChainVariant {
     missing_sendres,
     missing_resource_response,
     wrong_new,
+    wrong_new_padding,
     wrong_sendres,
+    sendres_with_suffix,
     wrong_resource_response,
+    resource_response_with_suffix,
+    client_fragment_before_response,
+    zero_entry_resource_response,
 };
 
 [[nodiscard]] goldsrc::StockRuntimeTransportReplayResult captured_style_transport(
-    const CapturedChainVariant variant = CapturedChainVariant::complete)
+    const CapturedChainVariant variant = CapturedChainVariant::complete,
+    const bool with_transport_padding_payload = false)
 {
     std::vector<std::byte> initial_request{
         std::byte{3U}, std::byte{'n'}, std::byte{'e'},
-        std::byte{'w'}, std::byte{0U}};
+        std::byte{'w'}, std::byte{0U},
+        goldsrc::kStockProtocol48NetchanPaddingByte,
+        goldsrc::kStockProtocol48NetchanPaddingByte,
+        goldsrc::kStockProtocol48NetchanPaddingByte};
     std::vector<std::byte> sendres{
         std::byte{3U}, std::byte{'s'}, std::byte{'e'},
         std::byte{'n'}, std::byte{'d'}, std::byte{'r'},
@@ -234,11 +268,23 @@ enum class CapturedChainVariant {
     if (variant == CapturedChainVariant::wrong_new) {
         initial_request[1U] = std::byte{'N'};
     }
+    if (variant == CapturedChainVariant::wrong_new_padding) {
+        initial_request.back() = std::byte{0U};
+    }
     if (variant == CapturedChainVariant::wrong_sendres) {
         sendres[4U] = std::byte{'D'};
     }
+    if (variant == CapturedChainVariant::sendres_with_suffix) {
+        sendres.push_back(std::byte{0xa1U});
+        sendres.push_back(std::byte{0xa2U});
+    }
     if (variant == CapturedChainVariant::wrong_resource_response) {
         resource_response[0U] = std::byte{6U};
+    }
+    if (variant == CapturedChainVariant::zero_entry_resource_response) {
+        resource_response = {
+            std::byte{goldsrc::kOpcode5ResourceResponseOpcode},
+            std::byte{0U}, std::byte{0U}};
     }
 
     auto delivered = std::vector{
@@ -269,8 +315,18 @@ enum class CapturedChainVariant {
             goldsrc::StockRuntimeCaptureDirection::client_to_server, 1U,
             std::move(initial_request));
     }
+    const std::uint32_t server_sequence_offset =
+        with_transport_padding_payload ? 1U : 0U;
+    if (with_transport_padding_payload) {
+        append(
+            goldsrc::StockRuntimeCaptureDirection::server_to_client, 1U,
+            std::vector<std::byte>(
+                goldsrc::kStockProtocol48MinimumDecodedPayloadSize,
+                goldsrc::kStockProtocol48NetchanPaddingByte));
+    }
     append(
-        goldsrc::StockRuntimeCaptureDirection::server_to_client, 1U,
+        goldsrc::StockRuntimeCaptureDirection::server_to_client,
+        1U + server_sequence_offset,
         compressed_service_envelope(first_server_signon_payload()));
     if (variant != CapturedChainVariant::missing_sendres) {
         append(
@@ -278,15 +334,44 @@ enum class CapturedChainVariant {
             std::move(sendres));
     }
     append(
-        goldsrc::StockRuntimeCaptureDirection::server_to_client, 2U,
+        goldsrc::StockRuntimeCaptureDirection::server_to_client,
+        2U + server_sequence_offset,
         compressed_service_envelope(resource_list_server_payload()));
+    const std::array concurrent_suffix{
+        std::byte{2U}, std::byte{0xb1U}, std::byte{0xb2U},
+        std::byte{0xb3U}, std::byte{0xb4U}, std::byte{0xb5U},
+        std::byte{0xb6U}, std::byte{0xb7U}, std::byte{0xb8U},
+        std::byte{0xb9U}, std::byte{0xbaU}};
+    if (variant == CapturedChainVariant::client_fragment_before_response) {
+        const auto delivery_ordinal = delivered.size();
+        delivered.push_back(datagram(
+            goldsrc::StockRuntimeCaptureDirection::client_to_server,
+            delivery_ordinal,
+            encoded_client_fragment_carrier(
+                3U,
+                {std::byte{4U}, std::byte{0U}, std::byte{0U}},
+                concurrent_suffix)));
+    }
     if (variant != CapturedChainVariant::missing_resource_response) {
-        append(
-            goldsrc::StockRuntimeCaptureDirection::client_to_server, 3U,
-            std::move(resource_response));
+        if (variant == CapturedChainVariant::resource_response_with_suffix) {
+            const auto delivery_ordinal = delivered.size();
+            delivered.push_back(datagram(
+                goldsrc::StockRuntimeCaptureDirection::client_to_server,
+                delivery_ordinal,
+                encoded_client_fragment_carrier(
+                    3U, std::move(resource_response), concurrent_suffix)));
+        } else {
+            append(
+                goldsrc::StockRuntimeCaptureDirection::client_to_server,
+                variant == CapturedChainVariant::client_fragment_before_response
+                    ? 4U
+                    : 3U,
+                std::move(resource_response));
+        }
     }
     append(
-        goldsrc::StockRuntimeCaptureDirection::server_to_client, 3U,
+        goldsrc::StockRuntimeCaptureDirection::server_to_client,
+        3U + server_sequence_offset,
         {std::byte{0x21U}, std::byte{0xa1U}, std::byte{0xa2U}});
     return goldsrc::StockRuntimeTransportReplay{}.replay(delivered);
 }
@@ -309,6 +394,9 @@ TEST_CASE("Captured signon adapter reconstructs an exact neutral boundary",
     CHECK_FALSE(reconstructed.state->observed_initial_new());
     CHECK_FALSE(reconstructed.state->observed_sendres());
     CHECK_FALSE(reconstructed.state->observed_opcode5_resource_response());
+    CHECK_FALSE(reconstructed.state->server_info());
+    CHECK_FALSE(reconstructed.state->delta_registry());
+    CHECK(reconstructed.state->user_message_definitions().empty());
     CHECK(reconstructed.state->boundary().kind() ==
           goldsrc::PostResourceResponseBoundaryKind::opcode_at_payload_start);
     REQUIRE(reconstructed.state->boundary().opcode());
@@ -387,6 +475,8 @@ TEST_CASE("Captured-style new sendres and opcode-five chain reaches exact cursor
     REQUIRE(replayed);
     REQUIRE(replayed.state);
     CHECK(replayed.state->known_signon_validated());
+    REQUIRE(replayed.state->resources());
+    CHECK_FALSE(replayed.state->resources()->entries().empty());
     CHECK(replayed.state->observed_initial_new());
     CHECK(replayed.state->observed_sendres());
     CHECK(replayed.state->observed_opcode5_resource_response());
@@ -394,6 +484,18 @@ TEST_CASE("Captured-style new sendres and opcode-five chain reaches exact cursor
     CHECK(replayed.state->decoded_server_signon_payload_count() == 3U);
     CHECK_FALSE(replayed.state->generated_ack());
     CHECK_FALSE(replayed.state->generated_client_request());
+    REQUIRE(replayed.state->server_info());
+    CHECK(replayed.state->server_info()->maximum_clients().value() == 8U);
+    REQUIRE(replayed.state->delta_registry());
+    CHECK(replayed.state->delta_registry()->schema_count() == 1U);
+    CHECK(replayed.state->delta_registry()->find_exact("alpha_t") != nullptr);
+    REQUIRE(replayed.state->user_message_definitions().size() == 2U);
+    CHECK(replayed.state->user_message_definitions()[0U].identifier == 64U);
+    CHECK(replayed.state->user_message_definitions()[0U].declared_size == -1);
+    CHECK(replayed.state->user_message_definitions()[0U].name == "HudText");
+    CHECK(replayed.state->user_message_definitions()[1U].identifier == 65U);
+    CHECK(replayed.state->user_message_definitions()[1U].declared_size == 9);
+    CHECK(replayed.state->user_message_definitions()[1U].name == "ScoreInfo");
 
     const auto& boundary = replayed.state->boundary();
     CHECK(boundary.kind() ==
@@ -416,6 +518,89 @@ TEST_CASE("Captured-style new sendres and opcode-five chain reaches exact cursor
     CHECK(cursor.next_unconsumed_bit_count == 24U);
     CHECK_FALSE(cursor.reassembled);
     CHECK_FALSE(cursor.decompressed);
+}
+
+TEST_CASE("Captured signon skips only exact Protocol 48 padding payloads",
+          "[goldsrc][stock-runtime][replay][signon-replay][captured-chain]"
+          "[padding]")
+{
+    const auto transport = captured_style_transport(
+        CapturedChainVariant::complete, true);
+    REQUIRE(transport);
+    REQUIRE(transport.state);
+    REQUIRE(transport.state->payloads().size() == 7U);
+
+    const auto replayed =
+        goldsrc::StockCapturedSignonReplay{}.replay(*transport.state);
+    REQUIRE(replayed);
+    REQUIRE(replayed.state);
+    CHECK(replayed.state->known_signon_validated());
+    CHECK(replayed.state->cursor().replay_payload_ordinal == 6U);
+    CHECK(replayed.state->cursor().source_netchan_sequence == 4U);
+}
+
+TEST_CASE("Captured signon consumes sendres only at its exact leading cursor",
+          "[goldsrc][stock-runtime][replay][signon-replay][captured-chain]"
+          "[cursor]")
+{
+    const auto transport = captured_style_transport(
+        CapturedChainVariant::sendres_with_suffix);
+    REQUIRE(transport);
+    REQUIRE(transport.state);
+
+    const auto replayed =
+        goldsrc::StockCapturedSignonReplay{}.replay(*transport.state);
+    REQUIRE(replayed);
+    REQUIRE(replayed.state);
+    CHECK(replayed.state->observed_sendres());
+}
+
+TEST_CASE("Captured signon selects a resource fragment before its opaque carrier suffix",
+          "[goldsrc][stock-runtime][replay][signon-replay][captured-chain]"
+          "[cursor]")
+{
+    const auto transport = captured_style_transport(
+        CapturedChainVariant::resource_response_with_suffix);
+    REQUIRE(transport);
+    REQUIRE(transport.state);
+
+    const auto replayed =
+        goldsrc::StockCapturedSignonReplay{}.replay(*transport.state);
+    REQUIRE(replayed);
+    REQUIRE(replayed.state);
+    CHECK(replayed.state->observed_opcode5_resource_response());
+}
+
+TEST_CASE("Captured signon advances only across typed payload boundaries before response",
+          "[goldsrc][stock-runtime][replay][signon-replay][captured-chain]"
+          "[cursor]")
+{
+    const auto transport = captured_style_transport(
+        CapturedChainVariant::client_fragment_before_response);
+    REQUIRE(transport);
+    REQUIRE(transport.state);
+
+    const auto replayed =
+        goldsrc::StockCapturedSignonReplay{}.replay(*transport.state);
+    REQUIRE(replayed);
+    REQUIRE(replayed.state);
+    CHECK(replayed.state->observed_opcode5_resource_response());
+}
+
+TEST_CASE("Captured signon accepts the exact zero-entry resource response",
+          "[goldsrc][stock-runtime][replay][signon-replay][captured-chain]"
+          "[zero-entry]")
+{
+    const auto transport = captured_style_transport(
+        CapturedChainVariant::zero_entry_resource_response);
+    REQUIRE(transport);
+    REQUIRE(transport.state);
+
+    const auto replayed =
+        goldsrc::StockCapturedSignonReplay{}.replay(*transport.state);
+    REQUIRE(replayed);
+    REQUIRE(replayed.state);
+    CHECK(replayed.state->observed_opcode5_resource_response());
 }
 
 TEST_CASE("Captured signon request identities fail closed when absent or changed",
@@ -445,6 +630,12 @@ TEST_CASE("Captured signon request identities fail closed when absent or changed
               goldsrc::StockCapturedSignonReplayErrorCode::
                   initial_request_not_observed);
     }
+    SECTION("initial new accepts only the exact Protocol 48 transport padding")
+    {
+        CHECK(rejects(CapturedChainVariant::wrong_new_padding) ==
+              goldsrc::StockCapturedSignonReplayErrorCode::
+                  initial_request_not_observed);
+    }
     SECTION("sendres is required")
     {
         CHECK(rejects(CapturedChainVariant::missing_sendres) ==
@@ -463,11 +654,11 @@ TEST_CASE("Captured signon request identities fail closed when absent or changed
               goldsrc::StockCapturedSignonReplayErrorCode::
                   resource_response_not_observed);
     }
-    SECTION("opcode-five response is exact")
+    SECTION("changed opcode-five response is not accepted")
     {
         CHECK(rejects(CapturedChainVariant::wrong_resource_response) ==
               goldsrc::StockCapturedSignonReplayErrorCode::
-                  resource_response_invalid);
+                  resource_response_not_observed);
     }
 }
 

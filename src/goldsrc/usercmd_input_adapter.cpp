@@ -1,5 +1,6 @@
 #include <hlclient/goldsrc/usercmd_input_adapter.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -265,6 +266,137 @@ GoldSrcUserCmdBuildResult GoldSrcUserCmdInputAdapter::build(
             consumes_buttons,
             consumes_impulse,
             consumes_weapon});
+    }
+    return result;
+}
+
+GoldSrcReferenceWireUserCmdBuildResult
+GoldSrcUserCmdInputAdapter::build_reference_wire(
+    const gameplay_input::GameplayInputIntent& intent,
+    const gameplay_camera::GameplayCameraState& camera,
+    const GoldSrcUserCmdBuildContext& context,
+    const GoldSrcUserCmdLimits& limits) const noexcept
+{
+    const auto wire_failure = [](const GoldSrcUserCmdInputAdapterErrorCode code,
+                                 const std::string_view text) {
+        GoldSrcReferenceWireUserCmdBuildResult result;
+        result.error = GoldSrcUserCmdInputAdapterError{code, std::nullopt, text};
+        return result;
+    };
+    if (!valid_goldsrc_usercmd_limits(limits) ||
+        !context.command_sequence.valid() ||
+        context.command_msec > limits.maximum_msec ||
+        context.command_sample_duration_nanoseconds >
+            static_cast<std::uint64_t>(limits.maximum_msec) * 1'000'000U ||
+        context.lerp_msec > limits.maximum_lerp_msec ||
+        !valid_speed_config(context.movement_speeds) ||
+        !std::isfinite(context.reference_movement.speed_key_multiplier) ||
+        context.reference_movement.speed_key_multiplier <= 0.0F ||
+        context.reference_movement.speed_key_multiplier > 1.0F ||
+        (context.reference_movement.client_maxspeed &&
+         (!std::isfinite(*context.reference_movement.client_maxspeed) ||
+          *context.reference_movement.client_maxspeed < 0.0F))) {
+        return wire_failure(
+            GoldSrcUserCmdInputAdapterErrorCode::invalid_context,
+            "Reference wire-command build context is invalid");
+    }
+    constexpr auto jump = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::jump);
+    constexpr auto duck = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::duck);
+    constexpr auto speed = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::speed);
+    constexpr auto permitted_actions = jump | duck | speed;
+    const auto observed_actions = intent.held_buttons() |
+        intent.pressed_buttons() | intent.released_buttons() |
+        context.one_shot_buttons;
+    if ((context.reference_button_policy == GoldSrcReferenceButtonPolicy::none &&
+         observed_actions != 0U) ||
+        (context.reference_button_policy == GoldSrcReferenceButtonPolicy::jump_duck &&
+         (observed_actions & ~permitted_actions) != 0U) ||
+        context.impulse.value_or(0U) != 0U ||
+        context.weapon_selection.value_or(0U) != 0U ||
+        context.impact_index != 0 ||
+        std::ranges::any_of(context.impact_position, [](const float value) {
+            return value != 0.0F;
+        })) {
+        return wire_failure(
+            GoldSrcUserCmdInputAdapterErrorCode::unsupported_action,
+            "Controlled reference movement rejects actions outside its selected jump/duck policy");
+    }
+
+    const auto pitch = quantize_wire_angle(camera.pitch_degrees());
+    const auto yaw = quantize_wire_angle(camera.yaw_degrees());
+    const auto roll = quantize_wire_angle(0.0);
+    float requested_forward = intent.focused()
+        ? mapped_axis(intent.forward_axis(),
+              context.movement_speeds.forward_speed,
+              context.movement_speeds.backward_speed)
+        : 0.0F;
+    float requested_side = intent.focused()
+        ? intent.side_axis() * context.movement_speeds.side_speed
+        : 0.0F;
+    float forward_value = requested_forward;
+    float side_value = requested_side;
+    const float multiplier = intent.focused() && (intent.held_buttons() & speed)
+        ? context.reference_movement.speed_key_multiplier : 1.0F;
+    forward_value *= multiplier;
+    side_value *= multiplier;
+    // Reference order: speed key first, then a uniform vector limit.  Zero
+    // clientmaxspeed is a no-limit sentinel in the pinned Valve input path.
+    if (context.reference_movement.client_maxspeed &&
+        *context.reference_movement.client_maxspeed > 0.0F) {
+        const double magnitude = std::hypot(static_cast<double>(forward_value),
+                                            static_cast<double>(side_value));
+        if (magnitude > *context.reference_movement.client_maxspeed) {
+            const auto scale = static_cast<float>(
+                static_cast<double>(*context.reference_movement.client_maxspeed) /
+                magnitude);
+            forward_value *= scale;
+            side_value *= scale;
+        }
+    }
+    const auto forward = quantize_wire_movement(forward_value);
+    const auto side = quantize_wire_movement(side_value);
+    if (!pitch || !yaw || !roll || !forward || !side) {
+        return wire_failure(
+            GoldSrcUserCmdInputAdapterErrorCode::state_validation_failed,
+            "Controlled reference movement could not be quantized exactly");
+    }
+
+    GoldSrcWireUserCmd command;
+    command.lerp_msec = context.lerp_msec;
+    command.msec = context.command_msec;
+    command.angle_turns = {*pitch, *yaw, *roll};
+    command.forward = *forward;
+    command.side = *side;
+    command.up = 0;
+    if (context.reference_button_policy == GoldSrcReferenceButtonPolicy::jump_duck &&
+        intent.focused()) {
+        const auto actions = intent.held_buttons() | context.one_shot_buttons;
+        command.buttons = static_cast<std::uint16_t>(
+            ((actions & jump) != 0U ? kReferenceGoldSrcButtonJump : 0U) |
+            ((actions & duck) != 0U ? kReferenceGoldSrcButtonDuck : 0U));
+    } else {
+        command.buttons = 0U;
+    }
+    command.light_level = context.light_level;
+    command.impulse = 0U;
+    command.impact_index = 0U;
+    if (!valid_wire_usercmd(command)) {
+        return wire_failure(
+            GoldSrcUserCmdInputAdapterErrorCode::state_validation_failed,
+            "Controlled reference movement failed wire-value validation");
+    }
+    GoldSrcReferenceWireUserCmdBuildResult result;
+    result.command = command;
+    result.requested_forward = requested_forward;
+    result.requested_side = requested_side;
+    result.applied_speed_multiplier = multiplier;
+    result.client_maxspeed = context.reference_movement.client_maxspeed;
+    if (intent.focused() && context.one_shot_buttons != 0U) {
+        result.one_shot_plan.emplace(GoldSrcUserCmdOneShotPlan{
+            context.command_sequence, context.one_shot_buttons, false, false});
     }
     return result;
 }

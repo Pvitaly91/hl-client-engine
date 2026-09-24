@@ -51,9 +51,15 @@ namespace windows_platform = hlclient::platform::windows;
 
 constexpr std::string_view kUsage =
     "Usage: hlclient_stock_runtime_capture --validate-config [limit options]\n"
+    "   or: hlclient_stock_runtime_capture "
+    "--validate-functional-publication-fixture "
+    "--output-run-root <precreated ignored run directory> "
+    "--output-role <normal-campaign-run|functional-runtime-capture> "
+    "--fixture-auxiliary-count <0..8> [--fixture-change-auxiliary] "
+    "[--fixture-auxiliary-before-owning|--fixture-auxiliary-owning-source]\n"
     "   or: hlclient_stock_runtime_capture --listen-port <port> "
     "--server-port <port> --output-run-root <ignored run directory> "
-    "--output-role <normal-campaign-run|pre-campaign-canary> "
+    "--output-role <normal-campaign-run|pre-campaign-canary|functional-runtime-capture> "
     "--scenario <name> [limit options] "
     "--private-ipv4-loopback-only --one-upstream-socket "
     "--byte-preserving --no-payload-rewrite "
@@ -66,6 +72,11 @@ constexpr std::string_view kUsage =
 
 struct Options final {
     bool validate_config{false};
+    bool validate_functional_publication_fixture{false};
+    bool fixture_change_auxiliary{false};
+    bool fixture_auxiliary_before_owning{false};
+    bool fixture_auxiliary_owning_source{false};
+    std::size_t fixture_auxiliary_count{0U};
     std::optional<std::uint16_t> listen_port;
     std::optional<std::uint16_t> server_port;
     std::optional<fs::path> output_run_root;
@@ -78,16 +89,19 @@ struct Options final {
     bool byte_preserving{false};
     bool no_payload_rewrite{false};
     bool precreated_empty_run_root{false};
+    std::optional<std::string> test_injected_terminal_failure;
 #ifdef _WIN32
     HANDLE stop_handle{nullptr};
     HANDLE reconnect_transition_handle{nullptr};
     HANDLE reconnect_transition_ack_handle{nullptr};
     HANDLE orchestrator_capability_handle{nullptr};
+    HANDLE test_injection_handle{nullptr};
 #else
     std::uintptr_t stop_handle{0U};
     std::uintptr_t reconnect_transition_handle{0U};
     std::uintptr_t reconnect_transition_ack_handle{0U};
     std::uintptr_t orchestrator_capability_handle{0U};
+    std::uintptr_t test_injection_handle{0U};
 #endif
     std::uint32_t orchestrator_process_id{0U};
 };
@@ -114,7 +128,7 @@ template<typename Integer>
     const std::span<const std::string_view> arguments)
 {
     Options options;
-    std::array<bool, 28U> seen{};
+    std::array<bool, 35U> seen{};
     const auto mark = [&seen](const std::size_t index) {
         if (seen[index]) {
             return false;
@@ -127,6 +141,27 @@ template<typename Integer>
         if (argument == "--validate-config") {
             if (!mark(0U)) return std::nullopt;
             options.validate_config = true;
+            continue;
+        }
+        if (argument == "--validate-functional-publication-fixture") {
+            if (!mark(28U)) return std::nullopt;
+            options.validate_functional_publication_fixture = true;
+            continue;
+        }
+        if (argument == "--fixture-change-auxiliary") {
+            if (!mark(30U)) return std::nullopt;
+            options.fixture_change_auxiliary = true;
+            continue;
+        }
+        if (argument == "--fixture-auxiliary-before-owning" ||
+            argument == "--fixture-auxiliary-owning-source") {
+            const auto seen_index = argument ==
+                    "--fixture-auxiliary-before-owning"
+                ? 31U
+                : 32U;
+            if (!mark(seen_index)) return std::nullopt;
+            options.fixture_auxiliary_before_owning = seen_index == 31U;
+            options.fixture_auxiliary_owning_source = seen_index == 32U;
             continue;
         }
         if (argument == "--private-ipv4-loopback-only" ||
@@ -174,6 +209,10 @@ template<typename Integer>
         else if (argument == "--reconnect-transition-handle") option_index = 25U;
         else if (argument == "--reconnect-transition-ack-handle") option_index = 26U;
         else if (argument == "--output-role") option_index = 27U;
+        else if (argument == "--fixture-auxiliary-count") option_index = 29U;
+        else if (argument == "--test-injected-terminal-failure")
+            option_index = 33U;
+        else if (argument == "--test-injection-handle") option_index = 34U;
         else return std::nullopt;
 
         if (!mark(option_index)) return std::nullopt;
@@ -209,7 +248,8 @@ template<typename Integer>
         } else if (argument == "--stop-handle" ||
                    argument == "--orchestrator-capability-handle" ||
                    argument == "--reconnect-transition-handle" ||
-                   argument == "--reconnect-transition-ack-handle") {
+                   argument == "--reconnect-transition-ack-handle" ||
+                   argument == "--test-injection-handle") {
             std::uintptr_t parsed{};
             if (!parse_integer(value, parsed) || parsed == 0U) {
                 return std::nullopt;
@@ -223,6 +263,8 @@ template<typename Integer>
             } else if (argument == "--reconnect-transition-ack-handle") {
                 options.reconnect_transition_ack_handle =
                     reinterpret_cast<HANDLE>(parsed);
+            } else if (argument == "--test-injection-handle") {
+                options.test_injection_handle = reinterpret_cast<HANDLE>(parsed);
             } else {
                 options.orchestrator_capability_handle =
                     reinterpret_cast<HANDLE>(parsed);
@@ -234,6 +276,8 @@ template<typename Integer>
                 options.reconnect_transition_handle = parsed;
             } else if (argument == "--reconnect-transition-ack-handle") {
                 options.reconnect_transition_ack_handle = parsed;
+            } else if (argument == "--test-injection-handle") {
+                options.test_injection_handle = parsed;
             } else {
                 options.orchestrator_capability_handle = parsed;
             }
@@ -243,6 +287,11 @@ template<typename Integer>
                 options.orchestrator_process_id == 0U) {
                 return std::nullopt;
             }
+        } else if (argument == "--test-injected-terminal-failure") {
+            if (value != "receive" && value != "send") {
+                return std::nullopt;
+            }
+            options.test_injected_terminal_failure = std::string{value};
         } else {
             std::size_t parsed{};
             if (!parse_integer(value, parsed)) return std::nullopt;
@@ -256,6 +305,9 @@ template<typename Integer>
             else if (argument == "--max-server-packets") options.limits.maximum_server_packets = parsed;
             else if (argument == "--mutation-after-client-packets") options.perturbation.client_packet_ordinal = parsed;
             else if (argument == "--mutation-after-server-packets") options.perturbation.server_packet_ordinal = parsed;
+            else if (argument == "--fixture-auxiliary-count") {
+                options.fixture_auxiliary_count = parsed;
+            }
         }
     }
 
@@ -273,27 +325,84 @@ template<typename Integer>
                         options.one_upstream_socket || options.byte_preserving ||
                         options.no_payload_rewrite ||
                         options.precreated_empty_run_root ||
+                        options.validate_functional_publication_fixture ||
+                        options.fixture_change_auxiliary ||
+                        options.fixture_auxiliary_before_owning ||
+                        options.fixture_auxiliary_owning_source ||
+                        options.test_injected_terminal_failure ||
+                        options.fixture_auxiliary_count != 0U ||
                         options.orchestrator_process_id != 0U ||
 #ifdef _WIN32
                        options.stop_handle != nullptr ||
                         options.reconnect_transition_handle != nullptr ||
                         options.reconnect_transition_ack_handle != nullptr ||
                         options.orchestrator_capability_handle != nullptr
+                        || options.test_injection_handle != nullptr
 #else
                        options.stop_handle != 0U ||
                         options.reconnect_transition_handle != 0U ||
                         options.reconnect_transition_ack_handle != 0U ||
                         options.orchestrator_capability_handle != 0U
+                        || options.test_injection_handle != 0U
 #endif
             ? std::nullopt
             : std::optional<Options>{std::move(options)};
+    }
+    if (options.validate_functional_publication_fixture) {
+        const bool supported_role = options.output_role &&
+            (*options.output_role ==
+                 goldsrc::StockRuntimeCaptureOutputRole::
+                     functional_runtime_capture ||
+             *options.output_role ==
+                 goldsrc::StockRuntimeCaptureOutputRole::normal_campaign_run);
+        return options.output_run_root && supported_role &&
+                options.precreated_empty_run_root && !options.listen_port &&
+                !options.server_port && !options.scenario &&
+                !options.private_loopback_only && !options.one_upstream_socket &&
+                !options.byte_preserving && !options.no_payload_rewrite &&
+                options.fixture_auxiliary_count <=
+                    goldsrc::kMaximumFunctionalRuntimeAuxiliaryQueries &&
+                (!options.fixture_change_auxiliary ||
+                 options.fixture_auxiliary_count != 0U) &&
+                (!options.fixture_auxiliary_before_owning ||
+                 options.fixture_auxiliary_count != 0U) &&
+                (!options.fixture_auxiliary_owning_source ||
+                 options.fixture_auxiliary_count != 0U) &&
+                !(options.fixture_auxiliary_before_owning &&
+                options.fixture_auxiliary_owning_source) &&
+                !options.test_injected_terminal_failure &&
+                options.orchestrator_process_id == 0U &&
+#ifdef _WIN32
+                options.stop_handle == nullptr &&
+                options.reconnect_transition_handle == nullptr &&
+                options.reconnect_transition_ack_handle == nullptr &&
+                options.orchestrator_capability_handle == nullptr
+                && options.test_injection_handle == nullptr
+#else
+                options.stop_handle == 0U &&
+                options.reconnect_transition_handle == 0U &&
+                options.reconnect_transition_ack_handle == 0U &&
+                options.orchestrator_capability_handle == 0U
+                && options.test_injection_handle == 0U
+#endif
+            ? std::optional<Options>{std::move(options)}
+            : std::nullopt;
     }
     if (!options.listen_port || !options.server_port ||
         *options.listen_port == *options.server_port || !options.output_run_root ||
         !options.output_role || !options.scenario ||
         !options.private_loopback_only || !options.one_upstream_socket ||
         !options.byte_preserving || !options.no_payload_rewrite ||
-        !options.precreated_empty_run_root) {
+        !options.precreated_empty_run_root || options.fixture_change_auxiliary ||
+        options.fixture_auxiliary_before_owning ||
+        options.fixture_auxiliary_owning_source ||
+        options.fixture_auxiliary_count != 0U ||
+        static_cast<bool>(options.test_injected_terminal_failure) !=
+#ifdef _WIN32
+            (options.test_injection_handle != nullptr)) {
+#else
+            (options.test_injection_handle != 0U)) {
+#endif
         return std::nullopt;
     }
     // The diagnostic role is consumed only by the server-only orchestrator.
@@ -309,6 +418,15 @@ template<typename Integer>
         options.orchestrator_capability_handle == nullptr ||
         options.stop_handle == options.orchestrator_capability_handle ||
         options.orchestrator_process_id == 0U) {
+        return std::nullopt;
+    }
+    if (options.test_injected_terminal_failure &&
+        (*options.output_role != goldsrc::StockRuntimeCaptureOutputRole::
+             functional_runtime_capture ||
+         options.test_injection_handle == options.stop_handle ||
+         options.test_injection_handle == options.orchestrator_capability_handle ||
+         ::WaitForSingleObject(options.test_injection_handle, 0U) !=
+             WAIT_OBJECT_0)) {
         return std::nullopt;
     }
     const bool reconnect = *options.scenario ==
@@ -328,11 +446,16 @@ template<typename Integer>
     }
     DWORD stop_flags = 0U;
     DWORD capability_flags = 0U;
+    DWORD test_injection_flags = 0U;
     if (!::GetHandleInformation(options.stop_handle, &stop_flags) ||
         !::GetHandleInformation(
             options.orchestrator_capability_handle, &capability_flags) ||
         (stop_flags & HANDLE_FLAG_INHERIT) == 0U ||
-        (capability_flags & HANDLE_FLAG_INHERIT) == 0U) {
+        (capability_flags & HANDLE_FLAG_INHERIT) == 0U ||
+        (options.test_injection_handle != nullptr &&
+         (!::GetHandleInformation(
+              options.test_injection_handle, &test_injection_flags) ||
+          (test_injection_flags & HANDLE_FLAG_INHERIT) == 0U))) {
         return std::nullopt;
     }
     if (reconnect) {
@@ -710,6 +833,7 @@ make_journal_entry(
     const std::span<const goldsrc::StockRuntimeTransportJournalEntry> entries,
     const goldsrc::StockRuntimeCaptureLimits& capture_limits,
     const bool complete_capture,
+    const bool functional_complete_capture,
     std::string& error)
 {
     goldsrc::StockRuntimeTransportJournalLimits limits;
@@ -721,10 +845,17 @@ make_journal_entry(
         capture_limits.maximum_duration.count()) * 1'000U;
     const auto validation = goldsrc::validate_stock_runtime_transport_journal(
         entries, limits,
-        complete_capture
+        functional_complete_capture && complete_capture
+            ? goldsrc::StockRuntimeTransportJournalValidationPolicy::
+                  functional_complete_capture
+        : complete_capture
             ? goldsrc::StockRuntimeTransportJournalValidationPolicy::complete_capture
             : goldsrc::StockRuntimeTransportJournalValidationPolicy::incomplete_capture);
-    if (!validation || validation.transport_complete != complete_capture) {
+    // An externally bounded capture can end after its last accepted datagram
+    // was fully emitted.  In that case the journal prefix is internally
+    // complete even though the capture as a whole is explicitly incomplete.
+    // Complete publication still requires an internally complete journal.
+    if (!validation || (complete_capture && !validation.transport_complete)) {
         error = validation.error
             ? "transport journal validation failed: " +
                   std::string{goldsrc::to_string(validation.error->code)}
@@ -767,6 +898,219 @@ make_journal_entry(
         error);
 }
 
+[[nodiscard]] int run_functional_publication_fixture(const Options& options)
+{
+    std::string error;
+    const auto run_root = validate_output_run_root(
+        *options.output_run_root, true, *options.output_role, error);
+    if (!run_root) {
+        std::cerr << "[stock-runtime-capture-fixture] result=unsafe-output-root\n";
+        return 3;
+    }
+    auto held_run_root = hold_output_directory(*run_root, error);
+    if (!held_run_root) {
+        std::cerr << "[stock-runtime-capture-fixture] result=output-identity-failed\n";
+        return 4;
+    }
+    std::error_code create_error;
+    const auto raw_root = *run_root / "raw";
+    if (!fs::create_directory(raw_root, create_error) || create_error) {
+        std::cerr << "[stock-runtime-capture-fixture] result=output-create-failed\n";
+        return 4;
+    }
+    auto held_raw_root = hold_output_directory(raw_root, error);
+    if (!held_raw_root) {
+        std::cerr << "[stock-runtime-capture-fixture] result=output-identity-failed\n";
+        return 4;
+    }
+
+    const auto connectionless = [](const std::string_view body) {
+        std::vector<std::byte> datagram{
+            std::byte{0xffU}, std::byte{0xffU},
+            std::byte{0xffU}, std::byte{0xffU}};
+        const auto bytes = std::as_bytes(std::span{body.data(), body.size()});
+        datagram.insert(datagram.end(), bytes.begin(), bytes.end());
+        return datagram;
+    };
+    const auto nul_terminated_connectionless = [&connectionless](std::string body) {
+        body.push_back('\0');
+        return connectionless(body);
+    };
+    const auto challenge_request = connectionless("getchallenge steam\n");
+    const auto challenge_response = nul_terminated_connectionless(
+        "A00000000 7 3 72057594037927936 0\n");
+    const std::string protected_auth(32U, 'a');
+    const std::string protocol =
+        "\\prot\\3\\unique\\-1\\raw\\steam\\cdkey\\" + protected_auth;
+    const std::string user =
+        "\\bottomcolor\\6\\cl_autowepswitch\\1\\cl_dlmax\\1024"
+        "\\cl_lc\\1\\cl_lw\\1\\cl_updaterate\\102"
+        "\\hud_classautokill\\1\\model\\fixture_model"
+        "\\name\\FixturePlayer\\topcolor\\30\\esevcmmx\\0\\_gm\\3154"
+        "\\_vgui_menus\\0\\rate\\25000";
+    auto connect_request = connectionless(
+        "connect 48 7 \"" + protocol + "\" \"" + user + "\"");
+    connect_request.insert(
+        connect_request.end(), 213U, std::byte{0xa5U});
+    const auto accept_response = nul_terminated_connectionless(
+        "B 1 \"127.0.0.1:54456\" 0 10210");
+    static constexpr std::array server_sequence{
+        std::byte{0x02U}, std::byte{0x00U}, std::byte{0x00U}, std::byte{0x00U},
+        std::byte{0x00U}, std::byte{0x00U}, std::byte{0x00U}, std::byte{0x00U},
+        std::byte{0x59U}, std::byte{0x19U}, std::byte{0x01U}, std::byte{0x03U},
+        std::byte{0x19U}, std::byte{0x01U}, std::byte{0x11U}, std::byte{0x43U}};
+    static constexpr std::array auxiliary_query{
+        std::byte{0xffU}, std::byte{0xffU}, std::byte{0xffU},
+        std::byte{0xffU}, std::byte{0x54U}, std::byte{'S'},
+        std::byte{'o'}, std::byte{'u'}, std::byte{'r'}, std::byte{'c'},
+        std::byte{'e'}, std::byte{' '}, std::byte{'E'}, std::byte{'n'},
+        std::byte{'g'}, std::byte{'i'}, std::byte{'n'}, std::byte{'e'},
+        std::byte{' '}, std::byte{'Q'}, std::byte{'u'}, std::byte{'e'},
+        std::byte{'r'}, std::byte{'y'}, std::byte{0x00U}};
+
+    goldsrc::StockRuntimeCaptureCounters counters;
+    std::vector<goldsrc::StockRuntimeTransportJournalEntry> journal;
+    journal.reserve(5U + options.fixture_auxiliary_count);
+    const auto append = [&](const goldsrc::StockRuntimeCaptureDirection direction,
+                            const std::span<const std::byte> payload,
+                            const goldsrc::StockRuntimeCaptureAction action,
+                            const bool wrong_source) {
+        if (!goldsrc::stock_runtime_capture_observe_datagram(
+                counters, options.limits, direction, payload.size())) {
+            error = "capture budget exceeded";
+            return false;
+        }
+        const auto direction_ordinal = direction ==
+                goldsrc::StockRuntimeCaptureDirection::client_to_server
+            ? counters.client_packets
+            : counters.server_packets;
+        auto entry = make_journal_entry(
+            journal.size(), direction, direction_ordinal,
+            static_cast<std::uint64_t>(journal.size()) * 1'000U,
+            payload, action, wrong_source);
+        if (!entry || !write_raw_datagram(
+                          *held_raw_root, entry->raw_filename, payload, error)) {
+            return false;
+        }
+        if (action == goldsrc::StockRuntimeCaptureAction::forward) {
+            if (!goldsrc::stock_runtime_capture_record_emission(
+                    counters, payload.size())) {
+                error = "emission counters overflowed";
+                return false;
+            }
+            entry->emitted_ordinals.push_back(
+                counters.emitted_datagrams - 1U);
+            entry->delivered = true;
+        } else if (action ==
+                       goldsrc::StockRuntimeCaptureAction::auxiliary_observation) {
+            ++counters.ignored_wrong_source_datagrams;
+            ++counters.auxiliary_observed_datagrams;
+        } else if (action == goldsrc::StockRuntimeCaptureAction::drop) {
+            ++counters.ignored_wrong_source_datagrams;
+            ++counters.dropped_datagrams;
+        }
+        journal.push_back(std::move(*entry));
+        return true;
+    };
+
+    const bool functional = *options.output_role ==
+        goldsrc::StockRuntimeCaptureOutputRole::functional_runtime_capture;
+    bool owning_endpoint_learned = false;
+    bool all_auxiliary_recognized = true;
+    const auto append_auxiliary = [&](const std::size_t index) {
+        auto query = auxiliary_query;
+        if (options.fixture_change_auxiliary && index == 0U) {
+            query.back() = std::byte{0x01U};
+        }
+        const bool recognized =
+            goldsrc::is_functional_runtime_auxiliary_observation(
+                query, functional, true, owning_endpoint_learned,
+                options.fixture_auxiliary_owning_source,
+                counters.auxiliary_observed_datagrams);
+        all_auxiliary_recognized = all_auxiliary_recognized && recognized;
+        return append(
+            goldsrc::StockRuntimeCaptureDirection::client_to_server, query,
+            recognized
+                ? goldsrc::StockRuntimeCaptureAction::auxiliary_observation
+                : goldsrc::StockRuntimeCaptureAction::drop,
+            true);
+    };
+    if (options.fixture_auxiliary_before_owning) {
+        for (std::size_t index = 0U; index < options.fixture_auxiliary_count;
+             ++index) {
+            if (!append_auxiliary(index)) {
+                std::cerr <<
+                    "[stock-runtime-capture-fixture] result=raw-write-failed\n";
+                return 5;
+            }
+        }
+    }
+    if (!append(goldsrc::StockRuntimeCaptureDirection::client_to_server,
+                challenge_request, goldsrc::StockRuntimeCaptureAction::forward,
+                false)) {
+        std::cerr << "[stock-runtime-capture-fixture] result=raw-write-failed\n";
+        return 5;
+    }
+    owning_endpoint_learned = true;
+    if (!options.fixture_auxiliary_before_owning) {
+        for (std::size_t index = 0U; index < options.fixture_auxiliary_count;
+             ++index) {
+            if (!append_auxiliary(index)) {
+                std::cerr <<
+                    "[stock-runtime-capture-fixture] result=raw-write-failed\n";
+                return 5;
+            }
+        }
+    }
+    if (!append(goldsrc::StockRuntimeCaptureDirection::server_to_client,
+                challenge_response,
+                goldsrc::StockRuntimeCaptureAction::forward, false) ||
+        !append(goldsrc::StockRuntimeCaptureDirection::client_to_server,
+                connect_request,
+                goldsrc::StockRuntimeCaptureAction::forward, false) ||
+        !append(goldsrc::StockRuntimeCaptureDirection::server_to_client,
+                accept_response,
+                goldsrc::StockRuntimeCaptureAction::forward, false)) {
+        std::cerr << "[stock-runtime-capture-fixture] result=raw-write-failed\n";
+        return 5;
+    }
+    if (!append(goldsrc::StockRuntimeCaptureDirection::server_to_client,
+                server_sequence, goldsrc::StockRuntimeCaptureAction::forward,
+                false)) {
+        std::cerr << "[stock-runtime-capture-fixture] result=raw-write-failed\n";
+        return 5;
+    }
+
+    const bool complete = all_auxiliary_recognized;
+    if (!write_transport_journal(
+            *held_run_root, journal, options.limits, complete, functional,
+            error)) {
+        std::cerr << "[stock-runtime-capture-fixture] result=journal-write-failed\n";
+        return 15;
+    }
+    goldsrc::StockRuntimeCaptureMetadata metadata;
+    metadata.scenario = goldsrc::StockRuntimeCaptureScenario::idle_runtime;
+    metadata.limits = options.limits;
+    metadata.counters = counters;
+    metadata.perturbation_count = counters.dropped_datagrams;
+    metadata.bounded_transport_complete = complete;
+    if (!write_metadata(*held_run_root, metadata, error)) {
+        std::cerr << "[stock-runtime-capture-fixture] result=metadata-write-failed\n";
+        return 12;
+    }
+    std::cout << "[stock-runtime-capture-fixture] sockets-opened=0\n"
+              << "[stock-runtime-capture-fixture] processes-started=0\n"
+              << "[stock-runtime-capture-fixture] observed-datagrams="
+              << counters.observed_datagrams << '\n'
+              << "[stock-runtime-capture-fixture] auxiliary-observed="
+              << counters.auxiliary_observed_datagrams << '\n'
+              << "[stock-runtime-capture-fixture] delivered-datagrams="
+              << counters.emitted_datagrams << '\n'
+              << "[stock-runtime-capture-fixture] result="
+              << (complete ? "success" : "incomplete") << '\n';
+    return complete ? 0 : 13;
+}
+
 struct HeldDatagram final {
     std::vector<std::byte> payload;
     network::NetworkAddress destination;
@@ -774,13 +1118,49 @@ struct HeldDatagram final {
     bool reorder_on_release{false};
 };
 
+struct RelayTerminalDiagnostic final {
+    std::string relay_phase{"capture-loop"};
+    std::string failed_operation{"unavailable"};
+    std::string native_error_domain{"unavailable"};
+    std::optional<std::uint32_t> native_error_code;
+    bool stop_requested{false};
+    bool failed{false};
+};
+
+void print_relay_terminal_diagnostic(
+    const RelayTerminalDiagnostic& diagnostic,
+    const std::string_view journal_publication_state,
+    const std::string_view metadata_publication_state)
+{
+    std::cout << "[stock-runtime-capture] relay-phase="
+              << diagnostic.relay_phase << '\n'
+              << "[stock-runtime-capture] failed-operation="
+              << diagnostic.failed_operation << '\n'
+              << "[stock-runtime-capture] native-error-domain="
+              << diagnostic.native_error_domain << '\n'
+              << "[stock-runtime-capture] native-error-code=";
+    if (diagnostic.native_error_code) {
+        std::cout << *diagnostic.native_error_code;
+    } else {
+        std::cout << "unavailable";
+    }
+    std::cout << '\n'
+              << "[stock-runtime-capture] stop-requested="
+              << (diagnostic.stop_requested ? "true" : "false") << '\n'
+              << "[stock-runtime-capture] journal-publication-state="
+              << journal_publication_state << '\n'
+              << "[stock-runtime-capture] metadata-publication-state="
+              << metadata_publication_state << '\n';
+}
+
 [[nodiscard]] bool emit_and_record(
     network::UdpSocket& socket,
     const network::NetworkAddress destination,
     const std::span<const std::byte> payload,
     goldsrc::StockRuntimeCaptureCounters& counters,
     goldsrc::StockRuntimeTransportJournalEntry& journal_entry,
-    std::string& error)
+    std::string& error,
+    network::SocketNativeError& native_error)
 {
     auto next = counters;
     if (!goldsrc::stock_runtime_capture_record_emission(next, payload.size())) {
@@ -793,7 +1173,7 @@ struct HeldDatagram final {
         error = "journal emission allocation failed";
         return false;
     }
-    if (!socket.send_to(destination, payload, error)) {
+    if (!socket.send_to(destination, payload, error, &native_error)) {
         journal_entry.emitted_ordinals.pop_back();
         return false;
     }
@@ -813,23 +1193,26 @@ struct HeldDatagram final {
     std::vector<goldsrc::StockRuntimeTransportJournalEntry>& journal,
     std::size_t& perturbation_count,
     bool& reorder_completed,
-    std::string& error)
+    std::string& error,
+    network::SocketNativeError& native_error)
 {
     if (held && action == goldsrc::StockRuntimeCaptureAction::forward) {
         // A reorder forwards the new datagram first; a delay preserves order.
         const bool completing_reorder = held->reorder_on_release;
         if (completing_reorder) {
             if (!emit_and_record(socket, destination, payload, counters,
-                                 journal[journal_index], error) ||
+                                 journal[journal_index], error, native_error) ||
                 !emit_and_record(socket, held->destination, held->payload, counters,
-                                 journal[held->journal_index], error)) {
+                                 journal[held->journal_index], error,
+                                 native_error)) {
                 return false;
             }
         } else {
             if (!emit_and_record(socket, held->destination, held->payload, counters,
-                                 journal[held->journal_index], error) ||
+                                 journal[held->journal_index], error,
+                                 native_error) ||
                 !emit_and_record(socket, destination, payload, counters,
-                                 journal[journal_index], error)) {
+                                 journal[journal_index], error, native_error)) {
                 return false;
             }
         }
@@ -842,16 +1225,16 @@ struct HeldDatagram final {
     switch (action) {
     case goldsrc::StockRuntimeCaptureAction::forward:
         return emit_and_record(socket, destination, payload, counters,
-                               journal[journal_index], error);
+                               journal[journal_index], error, native_error);
     case goldsrc::StockRuntimeCaptureAction::drop:
         ++counters.dropped_datagrams;
         ++perturbation_count;
         return true;
     case goldsrc::StockRuntimeCaptureAction::duplicate:
         if (!emit_and_record(socket, destination, payload, counters,
-                             journal[journal_index], error) ||
+                             journal[journal_index], error, native_error) ||
             !emit_and_record(socket, destination, payload, counters,
-                             journal[journal_index], error)) {
+                             journal[journal_index], error, native_error)) {
             return false;
         }
         ++counters.duplicated_datagrams;
@@ -871,6 +1254,8 @@ struct HeldDatagram final {
             goldsrc::StockRuntimeTransportHoldState::held;
         ++counters.delayed_datagrams;
         ++perturbation_count;
+        return true;
+    case goldsrc::StockRuntimeCaptureAction::auxiliary_observation:
         return true;
     }
     error = "unknown datagram action";
@@ -1152,14 +1537,19 @@ void observe_reconnect_transport(
     std::optional<HeldDatagram> held_server;
     goldsrc::StockRuntimeCaptureCounters counters;
     std::size_t perturbation_count = 0U;
+    std::size_t functional_auxiliary_query_count = 0U;
     bool reorder_completed = false;
     bool accepted_client_observed = false;
     bool accepted_server_observed = false;
     bool bidirectional_reported = false;
     bool wrong_source_observed = false;
     bool stop_requested = false;
+    std::optional<goldsrc::StockRuntimeCaptureBudgetErrorCode>
+        capture_limit_reached;
     const bool reconnect = *options.scenario ==
         goldsrc::StockRuntimeCaptureScenario::reconnect;
+    const bool functional_capture = *options.output_role == goldsrc::
+        StockRuntimeCaptureOutputRole::functional_runtime_capture;
     std::array<ReconnectTransportGeneration, 2U> reconnect_generations{
         ReconnectTransportGeneration{1U}, ReconnectTransportGeneration{2U}};
     std::size_t current_generation_index = 0U;
@@ -1173,31 +1563,42 @@ void observe_reconnect_transport(
     goldsrc::StockRuntimeReconnectRelayTransition reconnect_transition_state;
     std::vector<goldsrc::StockRuntimeTransportJournalEntry> journal;
     journal.reserve(options.limits.maximum_datagrams);
+    std::optional<RelayTerminalDiagnostic> deferred_capture_failure;
     const auto start = std::chrono::steady_clock::now();
     const auto maximum_relative_timestamp_us = static_cast<std::uint64_t>(
         options.limits.maximum_duration.count()) * 1'000U;
     std::cout << "[stock-runtime-capture] relay-ready=true\n" << std::flush;
+    network::SocketNativeError send_native_error;
 
     const auto record_observation = [&](const goldsrc::StockRuntimeCaptureDirection direction,
                                         const std::span<const std::byte> payload,
                                         const bool wrong_source,
+                                        const bool auxiliary_observation = false,
                                         const bool attribute_to_reconnect_generation = true)
         -> std::optional<std::size_t> {
         auto next = counters;
-        if (!goldsrc::stock_runtime_capture_observe_datagram(
-                next, options.limits, direction, payload.size())) {
+        const auto observed = goldsrc::stock_runtime_capture_observe_datagram(
+            next, options.limits, direction, payload.size());
+        if (!observed) {
+            capture_limit_reached = observed.code;
             error = "capture budget exceeded";
             return std::nullopt;
         }
         if (wrong_source) {
             ++next.ignored_wrong_source_datagrams;
-            ++next.dropped_datagrams;
+            if (auxiliary_observation) {
+                ++next.auxiliary_observed_datagrams;
+            } else {
+                ++next.dropped_datagrams;
+            }
         }
         const auto direction_ordinal =
             direction == goldsrc::StockRuntimeCaptureDirection::client_to_server
             ? next.client_packets
             : next.server_packets;
-        const auto action = wrong_source
+        const auto action = auxiliary_observation
+            ? goldsrc::StockRuntimeCaptureAction::auxiliary_observation
+            : wrong_source
             ? goldsrc::StockRuntimeCaptureAction::drop
             : goldsrc::stock_runtime_capture_action(
                   *options.scenario, direction, direction_ordinal,
@@ -1211,6 +1612,10 @@ void observe_reconnect_transport(
             if (error.empty()) {
                 error = "journal entry could not be created";
             }
+            deferred_capture_failure = RelayTerminalDiagnostic{
+                "observation-recording",
+                entry ? "write-raw-datagram" : "create-journal-entry",
+                "project-validation", std::nullopt, stop_requested, true};
             return std::nullopt;
         }
         journal.push_back(std::move(*entry));
@@ -1221,7 +1626,7 @@ void observe_reconnect_transport(
                 reconnect_generations[current_generation_index], direction,
                 payload, journal.size() - 1U);
         }
-        if (wrong_source) {
+        if (wrong_source && !auxiliary_observation) {
             ++perturbation_count;
         }
         return journal.size() - 1U;
@@ -1245,6 +1650,111 @@ void observe_reconnect_transport(
         }
     };
 
+    std::optional<bool> terminal_reconnect_transport_complete;
+    const auto finalize_capture = [&journal, &counters, &options,
+                                   &held_run_root,
+                                   &perturbation_count, &stop_requested,
+                                   &reconnect_endpoint_distinct,
+                                   &terminal_reconnect_transport_complete,
+                                   reconnect,
+                                   functional_capture](
+        RelayTerminalDiagnostic diagnostic,
+        const bool requested_complete,
+        std::string stop_reason,
+        std::string result,
+        int exit_code) {
+        diagnostic.stop_requested = stop_requested;
+        bool publish_complete = requested_complete && !diagnostic.failed;
+        std::string journal_state{"not-attempted"};
+        std::string metadata_state{"not-attempted"};
+        std::string writer_error;
+
+        bool journal_written = false;
+        try {
+            journal_written = write_transport_journal(
+                *held_run_root, journal, options.limits, publish_complete,
+                functional_capture, writer_error);
+        } catch (...) {
+            writer_error = "transport journal publication threw";
+        }
+        if (journal_written) {
+            journal_state = publish_complete
+                ? "published-complete" : "published-incomplete";
+        } else {
+            journal_state = "failed";
+            publish_complete = false;
+            if (!diagnostic.failed) {
+                diagnostic.failed = true;
+                diagnostic.relay_phase = "journal-publication";
+                diagnostic.failed_operation = "write-transport-journal";
+                diagnostic.native_error_domain = "project-validation";
+                diagnostic.native_error_code.reset();
+                stop_reason = "journal-write-failed";
+                result = "journal-write-failed";
+                exit_code = 15;
+            }
+        }
+
+        goldsrc::StockRuntimeCaptureMetadata metadata;
+        metadata.scenario = *options.scenario;
+        metadata.limits = options.limits;
+        metadata.counters = counters;
+        metadata.perturbation_count = perturbation_count;
+        metadata.bounded_transport_complete = publish_complete;
+        writer_error.clear();
+        bool metadata_written = false;
+        try {
+            metadata_written = write_metadata(
+                *held_run_root, metadata, writer_error);
+        } catch (...) {
+            writer_error = "capture metadata publication threw";
+        }
+        if (metadata_written) {
+            metadata_state = publish_complete
+                ? "published-complete" : "published-incomplete";
+        } else {
+            metadata_state = "failed";
+            if (!diagnostic.failed) {
+                diagnostic.failed = true;
+                diagnostic.relay_phase = "metadata-publication";
+                diagnostic.failed_operation = "write-capture-metadata";
+                diagnostic.native_error_domain = "project-validation";
+                diagnostic.native_error_code.reset();
+                stop_reason = "metadata-write-failed";
+                result = "metadata-write-failed";
+                exit_code = 12;
+            }
+        }
+
+        print_relay_terminal_diagnostic(
+            diagnostic, journal_state, metadata_state);
+        std::cout << "[stock-runtime-capture] profile="
+                  << goldsrc::kStockRuntimePendingProfile << '\n'
+                  << "[stock-runtime-capture] datagrams="
+                  << counters.observed_datagrams << '\n'
+                  << "[stock-runtime-capture] raw-bytes="
+                  << counters.observed_raw_bytes << '\n'
+                  << "[stock-runtime-capture] stop-reason="
+                  << stop_reason << '\n'
+                  << "[stock-runtime-capture] payload-rewrites=0\n"
+                  << "[stock-runtime-capture] processes-started=0\n"
+                  << "[stock-runtime-capture] connection-generations="
+                  << (reconnect ? 2U : 1U) << '\n'
+                  << "[stock-runtime-capture] generation-distinct="
+                  << (reconnect_endpoint_distinct ? "true" : "false") << '\n'
+                  << "[stock-runtime-capture] reconnect-transport="
+                  << (reconnect
+                          ? terminal_reconnect_transport_complete.value_or(false)
+                              ? "complete"
+                              : "incomplete"
+                          : "not-applicable")
+                  << '\n'
+                  << "[stock-runtime-capture] result=" << result << '\n'
+                  << std::flush;
+        return exit_code;
+    };
+
+    try {
     while (std::chrono::steady_clock::now() - start < options.limits.maximum_duration) {
 #ifdef _WIN32
         if (options.stop_handle != nullptr) {
@@ -1254,41 +1764,61 @@ void observe_reconnect_transport(
                 break;
             }
             if (stop_state == WAIT_FAILED) {
-                std::cerr << "[stock-runtime-capture] result=stop-handle-failed\n";
-                return 17;
+                const DWORD native_error = ::GetLastError();
+                return finalize_capture(
+                    RelayTerminalDiagnostic{
+                        "capture-cutoff", "wait-stop-handle", "Win32",
+                        native_error, stop_requested, true},
+                    false, "stop-handle-failed", "stop-handle-failed", 17);
             }
         }
         if (reconnect) {
             const DWORD transition_signal = ::WaitForSingleObject(
                 options.reconnect_transition_handle, 0U);
             if (transition_signal == WAIT_FAILED) {
-                std::cerr << "[stock-runtime-capture] result="
-                             "reconnect-transition-handle-failed\n";
-                return 20;
+                const DWORD native_error = ::GetLastError();
+                return finalize_capture(
+                    RelayTerminalDiagnostic{
+                        "capture-loop", "wait-reconnect-transition", "Win32",
+                        native_error, stop_requested, true},
+                    false, "reconnect-transition-handle-failed",
+                    "reconnect-transition-handle-failed", 20);
             }
             if (transition_signal == WAIT_OBJECT_0) {
                 if (!client || current_generation_index != 0U ||
                     !reconnect_transport_generation_complete(
                         reconnect_generations[0]) || held_client ||
                     held_server) {
-                    std::cerr << "[stock-runtime-capture] result="
-                                 "reconnect-generation-a-incomplete\n";
-                    return 19;
+                    return finalize_capture(
+                        RelayTerminalDiagnostic{
+                            "capture-loop", "validate-generation-a",
+                            "project-validation", std::nullopt,
+                            stop_requested, true},
+                        false, "reconnect-generation-a-incomplete",
+                        "reconnect-generation-a-incomplete", 19);
                 }
                 if (!reconnect_retirement_prepared) {
                     auto tail_emitter =
                         network::UdpSocket::open_ipv4(runtime, error);
                     if (!tail_emitter || !tail_emitter->bind(
                             network::NetworkAddress::loopback(0U), error)) {
-                        std::cerr << "[stock-runtime-capture] result="
-                                     "reconnect-tail-emitter-create-failed\n";
-                        return 24;
+                        return finalize_capture(
+                            RelayTerminalDiagnostic{
+                                "capture-loop", "create-reconnect-tail-emitter",
+                                "project-validation", std::nullopt,
+                                stop_requested, true},
+                            false, "reconnect-tail-emitter-create-failed",
+                            "reconnect-tail-emitter-create-failed", 24);
                     }
                     if (!reconnect_transition_state.
                             prepare_generation_a_retirement(true, true)) {
-                        std::cerr << "[stock-runtime-capture] result="
-                                     "reconnect-transition-state-invalid\n";
-                        return 20;
+                        return finalize_capture(
+                            RelayTerminalDiagnostic{
+                                "capture-loop", "prepare-generation-a-retirement",
+                                "project-validation", std::nullopt,
+                                stop_requested, true},
+                            false, "reconnect-transition-state-invalid",
+                            "reconnect-transition-state-invalid", 20);
                     }
                     retired_generation_a_client = client;
                     retired_generation_a_tail_emitter =
@@ -1296,9 +1826,13 @@ void observe_reconnect_transport(
                     reconnect_retirement_prepared = true;
                     if (::SetEvent(
                             options.reconnect_transition_ack_handle) == FALSE) {
-                        std::cerr << "[stock-runtime-capture] result="
-                                     "reconnect-transition-ack-failed\n";
-                        return 21;
+                        const DWORD native_error = ::GetLastError();
+                        return finalize_capture(
+                            RelayTerminalDiagnostic{
+                                "capture-loop", "set-reconnect-transition-ack",
+                                "Win32", native_error, stop_requested, true},
+                            false, "reconnect-transition-ack-failed",
+                            "reconnect-transition-ack-failed", 21);
                     }
                     std::cout << "[stock-runtime-capture] reconnect-transition="
                                  "generation-a-tail-emitter-ready\n"
@@ -1308,9 +1842,13 @@ void observe_reconnect_transport(
                         !retired_generation_a_tail_emitter ||
                         !reconnect_transition_state.
                             confirm_generation_a_shutdown(true, true)) {
-                        std::cerr << "[stock-runtime-capture] result="
-                                     "reconnect-transition-state-invalid\n";
-                        return 20;
+                        return finalize_capture(
+                            RelayTerminalDiagnostic{
+                                "capture-loop", "confirm-generation-a-shutdown",
+                                "project-validation", std::nullopt,
+                                stop_requested, true},
+                            false, "reconnect-transition-state-invalid",
+                            "reconnect-transition-state-invalid", 20);
                     }
                     reconnect_transition_requested = true;
                     reconnect_quiet_since = std::chrono::steady_clock::now();
@@ -1318,19 +1856,42 @@ void observe_reconnect_transport(
                                  "generation-a-exit-attested\n"
                               << std::flush;
                 } else {
-                    std::cerr << "[stock-runtime-capture] result="
-                                 "reconnect-transition-signal-unexpected\n";
-                    return 20;
+                    return finalize_capture(
+                        RelayTerminalDiagnostic{
+                            "capture-loop", "validate-reconnect-signal",
+                            "project-validation", std::nullopt,
+                            stop_requested, true},
+                        false, "reconnect-transition-signal-unexpected",
+                        "reconnect-transition-signal-unexpected", 20);
                 }
             }
         }
 #endif
+        if (options.test_injected_terminal_failure &&
+            *options.test_injected_terminal_failure == "receive" &&
+            !journal.empty()) {
+            return finalize_capture(
+                RelayTerminalDiagnostic{
+                    "capture-loop", "recvfrom-client-facing", "Winsock",
+                    static_cast<std::uint32_t>(WSAECONNRESET),
+                    stop_requested, true},
+                false, "injected-receive-failure",
+                "injected-receive-failed-journal-preserved", 6);
+        }
         bool progressed = false;
         auto from_client = client_socket->receive(options.limits.maximum_payload_bytes);
         if (from_client.status == network::ReceiveStatus::truncated ||
             from_client.status == network::ReceiveStatus::error) {
-            std::cerr << "[stock-runtime-capture] result=client-receive-failed\n";
-            return 6;
+            return finalize_capture(
+                RelayTerminalDiagnostic{
+                    "capture-loop", "recvfrom-client-facing",
+                    from_client.native_error ? "Winsock" : "project-validation",
+                    from_client.native_error
+                        ? std::optional<std::uint32_t>{
+                              from_client.native_error.code}
+                        : std::nullopt,
+                    stop_requested, true},
+                false, "client-receive-failed", "client-receive-failed", 6);
         }
         if (from_client.status == network::ReceiveStatus::received &&
             from_client.datagram) {
@@ -1341,6 +1902,7 @@ void observe_reconnect_transport(
                 network::NetworkAddress::loopback(0U).ipv4_host_order();
             const bool initial_endpoint_is_valid = !client &&
                 source_is_loopback &&
+                !goldsrc::is_functional_runtime_auxiliary_query(payload) &&
                 (!reconnect ||
                  (!reconnect_transition_completed &&
                   current_generation_index == 0U &&
@@ -1350,15 +1912,28 @@ void observe_reconnect_transport(
                 !reconnect_transition_state.generation_b_endpoint_learned() &&
                 source_is_loopback && retired_generation_a_client &&
                 source != *retired_generation_a_client &&
+                !goldsrc::is_functional_runtime_auxiliary_query(payload) &&
                 is_connectionless_observation(payload);
             if (!source_is_loopback || (client && source != *client) ||
                 (!client && !initial_endpoint_is_valid &&
-                 !new_generation_b_endpoint_is_valid)) {
+                  !new_generation_b_endpoint_is_valid)) {
+                const bool functional_auxiliary_query =
+                    goldsrc::is_functional_runtime_auxiliary_observation(
+                        payload,
+                        *options.output_role ==
+                            goldsrc::StockRuntimeCaptureOutputRole::
+                                functional_runtime_capture,
+                        source_is_loopback, client.has_value(),
+                        client && source == *client,
+                        functional_auxiliary_query_count);
                 if (!record_observation(
                         goldsrc::StockRuntimeCaptureDirection::client_to_server,
-                        payload, true)) {
-                    std::cerr << "[stock-runtime-capture] result=capture-bound-exceeded\n";
-                    return 7;
+                        payload, true, functional_auxiliary_query)) {
+                    break;
+                }
+                if (functional_auxiliary_query) {
+                    ++functional_auxiliary_query_count;
+                    continue;
                 }
                 wrong_source_observed = true;
                 break;
@@ -1375,9 +1950,13 @@ void observe_reconnect_transport(
                             observe_generation_b_client_datagram(
                                 true, true,
                                 is_stock_connect_observation(payload))) {
-                        std::cerr << "[stock-runtime-capture] result="
-                                     "reconnect-generation-b-lifecycle-invalid\n";
-                        return 23;
+                        return finalize_capture(
+                            RelayTerminalDiagnostic{
+                                "capture-loop", "validate-generation-b-client",
+                                "project-validation", std::nullopt,
+                                stop_requested, true},
+                            false, "reconnect-generation-b-lifecycle-invalid",
+                            "reconnect-generation-b-lifecycle-invalid", 23);
                     }
                     client = source;
                     current_generation_index = 1U;
@@ -1394,9 +1973,13 @@ void observe_reconnect_transport(
                                     true,
                                     is_connectionless_observation(payload),
                                     is_stock_connect_observation(payload))) {
-                    std::cerr << "[stock-runtime-capture] result="
-                                 "reconnect-generation-b-lifecycle-invalid\n";
-                    return 23;
+                    return finalize_capture(
+                        RelayTerminalDiagnostic{
+                            "capture-loop", "validate-generation-b-client",
+                            "project-validation", std::nullopt,
+                            stop_requested, true},
+                        false, "reconnect-generation-b-lifecycle-invalid",
+                        "reconnect-generation-b-lifecycle-invalid", 23);
                 }
                 if (reconnect && reconnect_transition_completed &&
                     current_generation_index == 1U &&
@@ -1412,28 +1995,79 @@ void observe_reconnect_transport(
                     goldsrc::StockRuntimeCaptureDirection::client_to_server,
                     payload, false);
                 if (!journal_index) {
-                    std::cerr << "[stock-runtime-capture] result=capture-bound-exceeded\n";
-                    return 7;
+                    break;
+                }
+                if (options.test_injected_terminal_failure &&
+                    *options.test_injected_terminal_failure == "send") {
+                    return finalize_capture(
+                        RelayTerminalDiagnostic{
+                            "capture-loop", "sendto-server", "Winsock",
+                            static_cast<std::uint32_t>(WSAENOBUFS),
+                            stop_requested, true},
+                        false, "injected-send-failure",
+                        "injected-send-failed-journal-preserved", 8);
                 }
                 if (!process_datagram(
                                       *upstream_socket, server, payload,
                                       journal[*journal_index].action,
                                       *journal_index, held_client, counters,
                                       journal, perturbation_count,
-                                      reorder_completed, error)) {
-                    std::cerr << "[stock-runtime-capture] result=client-forward-failed\n";
-                    return 8;
+                                      reorder_completed, error,
+                                      send_native_error)) {
+                    return finalize_capture(
+                        RelayTerminalDiagnostic{
+                            "capture-loop", "sendto-server",
+                            send_native_error ? "Winsock" : "project-validation",
+                            send_native_error
+                                ? std::optional<std::uint32_t>{
+                                      send_native_error.code}
+                                : std::nullopt,
+                            stop_requested, true},
+                        false, "client-forward-failed", "client-forward-failed",
+                        8);
                 }
                 accepted_client_observed = true;
                 report_bidirectional();
             }
         }
 
+        if (capture_limit_reached) break;
+
+#ifdef _WIN32
+        // A busy client stream cannot starve the stop event. This second poll
+        // bounds each receive batch to one client datagram before the exact
+        // accepted-observation cutoff is checked again.
+        if (options.stop_handle != nullptr) {
+            const DWORD stop_state = ::WaitForSingleObject(
+                options.stop_handle, 0U);
+            if (stop_state == WAIT_OBJECT_0) {
+                stop_requested = true;
+                break;
+            }
+            if (stop_state == WAIT_FAILED) {
+                const DWORD native_error = ::GetLastError();
+                return finalize_capture(
+                    RelayTerminalDiagnostic{
+                        "capture-cutoff", "wait-stop-handle", "Win32",
+                        native_error, stop_requested, true},
+                    false, "stop-handle-failed", "stop-handle-failed", 17);
+            }
+        }
+#endif
+
         auto from_server = upstream_socket->receive(options.limits.maximum_payload_bytes);
         if (from_server.status == network::ReceiveStatus::truncated ||
             from_server.status == network::ReceiveStatus::error) {
-            std::cerr << "[stock-runtime-capture] result=server-receive-failed\n";
-            return 9;
+            return finalize_capture(
+                RelayTerminalDiagnostic{
+                    "capture-loop", "recvfrom-server-facing",
+                    from_server.native_error ? "Winsock" : "project-validation",
+                    from_server.native_error
+                        ? std::optional<std::uint32_t>{
+                              from_server.native_error.code}
+                        : std::nullopt,
+                    stop_requested, true},
+                false, "server-receive-failed", "server-receive-failed", 9);
         }
         if (from_server.status == network::ReceiveStatus::received &&
             from_server.datagram) {
@@ -1443,8 +2077,7 @@ void observe_reconnect_transport(
                 if (!record_observation(
                         goldsrc::StockRuntimeCaptureDirection::server_to_client,
                         payload, true)) {
-                    std::cerr << "[stock-runtime-capture] result=capture-bound-exceeded\n";
-                    return 7;
+                    break;
                 }
                 wrong_source_observed = true;
                 break;
@@ -1457,9 +2090,13 @@ void observe_reconnect_transport(
                             is_stock_accept_observation(payload));
                     if (route ==
                         goldsrc::StockRuntimeReconnectServerRoute::reject) {
-                        std::cerr << "[stock-runtime-capture] result="
-                                     "reconnect-generation-b-lifecycle-invalid\n";
-                        return 23;
+                        return finalize_capture(
+                            RelayTerminalDiagnostic{
+                                "capture-loop", "route-generation-b-server",
+                                "project-validation", std::nullopt,
+                                stop_requested, true},
+                            false, "reconnect-generation-b-lifecycle-invalid",
+                            "reconnect-generation-b-lifecycle-invalid", 23);
                     }
                     generation_b_route = reconnect_transition_completed &&
                         route ==
@@ -1474,17 +2111,21 @@ void observe_reconnect_transport(
                 if (!destination ||
                     (!generation_b_route &&
                      !retired_generation_a_tail_emitter)) {
-                    std::cerr << "[stock-runtime-capture] result="
-                                 "reconnect-tail-route-missing\n";
-                    return 23;
+                    return finalize_capture(
+                        RelayTerminalDiagnostic{
+                            "capture-loop", "resolve-reconnect-tail-route",
+                            "project-validation", std::nullopt,
+                            stop_requested, true},
+                        false, "reconnect-tail-route-missing",
+                        "reconnect-tail-route-missing", 23);
                 }
                 const auto journal_index = record_observation(
                     goldsrc::StockRuntimeCaptureDirection::server_to_client,
                     payload, false,
+                    false,
                     !reconnect_transition_requested || generation_b_route);
                 if (!journal_index) {
-                    std::cerr << "[stock-runtime-capture] result=capture-bound-exceeded\n";
-                    return 7;
+                    break;
                 }
                 auto& destination_socket = generation_b_route
                     ? *client_socket : *retired_generation_a_tail_emitter;
@@ -1492,9 +2133,18 @@ void observe_reconnect_transport(
                         destination_socket, *destination, payload,
                         journal[*journal_index].action, *journal_index,
                         held_server, counters, journal, perturbation_count,
-                        reorder_completed, error)) {
-                    std::cerr << "[stock-runtime-capture] result=server-forward-failed\n";
-                    return 10;
+                        reorder_completed, error, send_native_error)) {
+                    return finalize_capture(
+                        RelayTerminalDiagnostic{
+                            "capture-loop", "sendto-client",
+                            send_native_error ? "Winsock" : "project-validation",
+                            send_native_error
+                                ? std::optional<std::uint32_t>{
+                                      send_native_error.code}
+                                : std::nullopt,
+                            stop_requested, true},
+                        false, "server-forward-failed", "server-forward-failed",
+                        10);
                 }
                 if (!reconnect_transition_requested || generation_b_route) {
                     accepted_server_observed = true;
@@ -1506,9 +2156,7 @@ void observe_reconnect_transport(
                             goldsrc::StockRuntimeCaptureDirection::
                                 server_to_client,
                             payload, true)) {
-                        std::cerr << "[stock-runtime-capture] result="
-                                     "capture-bound-exceeded\n";
-                        return 7;
+                        break;
                     }
                     wrong_source_observed = true;
                     break;
@@ -1517,17 +2165,26 @@ void observe_reconnect_transport(
                     goldsrc::StockRuntimeCaptureDirection::server_to_client,
                     payload, false);
                 if (!journal_index) {
-                    std::cerr << "[stock-runtime-capture] result=capture-bound-exceeded\n";
-                    return 7;
+                    break;
                 }
                 if (!process_datagram(
                                       *client_socket, *client, payload,
                                       journal[*journal_index].action,
                                       *journal_index, held_server, counters,
                                       journal, perturbation_count,
-                                      reorder_completed, error)) {
-                    std::cerr << "[stock-runtime-capture] result=server-forward-failed\n";
-                    return 10;
+                                      reorder_completed, error,
+                                      send_native_error)) {
+                    return finalize_capture(
+                        RelayTerminalDiagnostic{
+                            "capture-loop", "sendto-client",
+                            send_native_error ? "Winsock" : "project-validation",
+                            send_native_error
+                                ? std::optional<std::uint32_t>{
+                                      send_native_error.code}
+                                : std::nullopt,
+                            stop_requested, true},
+                        false, "server-forward-failed", "server-forward-failed",
+                        10);
                 }
                 accepted_server_observed = true;
                 report_bidirectional();
@@ -1544,9 +2201,13 @@ void observe_reconnect_transport(
             if (!client || held_client || held_server ||
                 !reconnect_transport_generation_complete(
                     reconnect_generations[0])) {
-                std::cerr << "[stock-runtime-capture] result="
-                             "reconnect-transition-not-quiescent\n";
-                return 20;
+                return finalize_capture(
+                    RelayTerminalDiagnostic{
+                        "capture-loop", "validate-reconnect-quiescence",
+                        "project-validation", std::nullopt,
+                        stop_requested, true},
+                    false, "reconnect-transition-not-quiescent",
+                    "reconnect-transition-not-quiescent", 20);
             }
             client.reset();
             accepted_client_observed = false;
@@ -1554,16 +2215,24 @@ void observe_reconnect_transport(
             bidirectional_reported = false;
             if (!reconnect_transition_state.begin_generation_b_relearn(
                     true, true, true)) {
-                std::cerr << "[stock-runtime-capture] result="
-                             "reconnect-transition-state-invalid\n";
-                return 20;
+                return finalize_capture(
+                    RelayTerminalDiagnostic{
+                        "capture-loop", "begin-generation-b-relearn",
+                        "project-validation", std::nullopt,
+                        stop_requested, true},
+                    false, "reconnect-transition-state-invalid",
+                    "reconnect-transition-state-invalid", 20);
             }
             reconnect_transition_quiet = true;
             reconnect_transition_completed = true;
             if (::SetEvent(options.reconnect_transition_ack_handle) == FALSE) {
-                std::cerr << "[stock-runtime-capture] result="
-                             "reconnect-transition-ack-failed\n";
-                return 21;
+                const DWORD native_error = ::GetLastError();
+                return finalize_capture(
+                    RelayTerminalDiagnostic{
+                        "capture-loop", "set-reconnect-transition-ack",
+                        "Win32", native_error, stop_requested, true},
+                    false, "reconnect-transition-ack-failed",
+                    "reconnect-transition-ack-failed", 21);
             }
             std::cout << "[stock-runtime-capture] reconnect-generation="
                          "2;endpoint-relearn=ready\n"
@@ -1571,6 +2240,19 @@ void observe_reconnect_transport(
         }
 #endif
         if (!progressed) std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    } catch (...) {
+        return finalize_capture(
+            RelayTerminalDiagnostic{
+                "capture-loop", "unhandled-exception", "cxx-exception",
+                std::nullopt, stop_requested, true},
+            false, "handled-exception", "bounded-internal-failure", 16);
+    }
+
+    if (deferred_capture_failure) {
+        return finalize_capture(
+            *deferred_capture_failure, false, "observation-recording-failed",
+            "observation-recording-failed", 15);
     }
 
     // A lone held datagram is released at the bounded deadline. A requested
@@ -1585,9 +2267,17 @@ void observe_reconnect_transport(
             : goldsrc::StockRuntimeTransportHoldState::released;
         if (!emit_and_record(
                 *upstream_socket, held_client->destination, held_client->payload,
-                counters, journal[held_client->journal_index], error)) {
-            std::cerr << "[stock-runtime-capture] result=delayed-flush-failed\n";
-            return 11;
+                counters, journal[held_client->journal_index], error,
+                send_native_error)) {
+            return finalize_capture(
+                RelayTerminalDiagnostic{
+                    "accepted-record-finalization", "sendto-server",
+                    send_native_error ? "Winsock" : "project-validation",
+                    send_native_error
+                        ? std::optional<std::uint32_t>{send_native_error.code}
+                        : std::nullopt,
+                    stop_requested, true},
+                false, "delayed-flush-failed", "delayed-flush-failed", 11);
         }
     }
     if (held_server && client) {
@@ -1597,16 +2287,25 @@ void observe_reconnect_transport(
             : goldsrc::StockRuntimeTransportHoldState::released;
         if (!emit_and_record(
                 *client_socket, *client, held_server->payload, counters,
-                journal[held_server->journal_index], error)) {
-            std::cerr << "[stock-runtime-capture] result=delayed-flush-failed\n";
-            return 11;
+                journal[held_server->journal_index], error,
+                send_native_error)) {
+            return finalize_capture(
+                RelayTerminalDiagnostic{
+                    "accepted-record-finalization", "sendto-client",
+                    send_native_error ? "Winsock" : "project-validation",
+                    send_native_error
+                        ? std::optional<std::uint32_t>{send_native_error.code}
+                        : std::nullopt,
+                    stop_requested, true},
+                false, "delayed-flush-failed", "delayed-flush-failed", 11);
         }
     }
 
     const bool mutation_counters_consistent =
         counters.dropped_datagrams <= counters.observed_datagrams &&
         counters.emitted_datagrams ==
-            counters.observed_datagrams - counters.dropped_datagrams +
+            counters.observed_datagrams - counters.dropped_datagrams -
+                counters.auxiliary_observed_datagrams +
                 counters.duplicated_datagrams &&
         perturbation_count == counters.dropped_datagrams +
             counters.duplicated_datagrams + counters.delayed_datagrams;
@@ -1628,21 +2327,25 @@ void observe_reconnect_transport(
          reconnect_generations[1].first_observed_ordinal &&
          *reconnect_generations[0].last_observed_ordinal <
              *reconnect_generations[1].first_observed_ordinal);
-    const bool complete = !wrong_source_observed && client.has_value() &&
+    terminal_reconnect_transport_complete = reconnect_transport_complete;
+    const auto permitted_auxiliary_query_count =
+        *options.output_role == goldsrc::StockRuntimeCaptureOutputRole::
+                functional_runtime_capture
+            ? functional_auxiliary_query_count
+            : 0U;
+    const bool complete = !capture_limit_reached && !wrong_source_observed &&
+        (!functional_capture || stop_requested) && client.has_value() &&
         counters.client_packets != 0U &&
         counters.server_packets != 0U &&
-        counters.ignored_wrong_source_datagrams == 0U &&
+        counters.ignored_wrong_source_datagrams ==
+            permitted_auxiliary_query_count &&
+        counters.auxiliary_observed_datagrams ==
+            permitted_auxiliary_query_count &&
         mutation_counters_consistent &&
         perturbation_count == expected_perturbations(*options.scenario) &&
         reconnect_transport_complete &&
         (!scenario_requires_reorder ||
             (reorder_completed && !unresolved_reorder));
-    goldsrc::StockRuntimeCaptureMetadata metadata;
-    metadata.scenario = *options.scenario;
-    metadata.limits = options.limits;
-    metadata.counters = counters;
-    metadata.perturbation_count = perturbation_count;
-    metadata.bounded_transport_complete = complete;
     if (reconnect) {
         const auto reconnect_json = reconnect_transport_observation_json(
             reconnect_generations, reconnect_retirement_prepared,
@@ -1656,45 +2359,49 @@ void observe_reconnect_transport(
                 "reconnect-transport-observation.staged.json",
                 std::as_bytes(std::span{
                     reconnect_json.data(), reconnect_json.size()}), error)) {
-            std::cerr << "[stock-runtime-capture] result="
-                         "reconnect-observation-write-failed\n";
-            return 22;
+            return finalize_capture(
+                RelayTerminalDiagnostic{
+                    "reconnect-observation-publication",
+                    "write-reconnect-observation", "project-validation",
+                    std::nullopt, stop_requested, true},
+                false, "reconnect-observation-write-failed",
+                "reconnect-observation-write-failed", 22);
         }
     }
-    if (!write_transport_journal(
-            *held_run_root, journal, options.limits, complete, error)) {
-        std::cerr << "[stock-runtime-capture] result=journal-write-failed\n";
-        return 15;
+    const std::string stop_reason = capture_limit_reached
+        ? std::string{goldsrc::to_string(*capture_limit_reached)}
+        : stop_requested
+            ? functional_capture
+                ? "functional-interval-complete"
+                : "orchestrator-request"
+            : "duration-bound";
+    const std::string result = capture_limit_reached
+        ? "capture-bound-exceeded-journal-preserved"
+        : wrong_source_observed
+            ? "unexpected-source"
+            : complete
+                ? "bounded-transport-complete-evidence-pending"
+                : "incomplete-evidence-pending";
+    RelayTerminalDiagnostic diagnostic;
+    diagnostic.relay_phase = complete ? "complete" : "capture-finalization";
+    diagnostic.stop_requested = stop_requested;
+    if (capture_limit_reached) {
+        diagnostic.failed = true;
+        diagnostic.failed_operation = "enforce-capture-budget";
+        diagnostic.native_error_domain = "project-validation";
+    } else if (wrong_source_observed) {
+        diagnostic.failed = true;
+        diagnostic.failed_operation = "validate-owning-endpoint";
+        diagnostic.native_error_domain = "project-validation";
+    } else if (!complete) {
+        diagnostic.failed = true;
+        diagnostic.failed_operation = "validate-capture-completeness";
+        diagnostic.native_error_domain = "project-validation";
     }
-    if (!write_metadata(*held_run_root, metadata, error)) {
-        std::cerr << "[stock-runtime-capture] result=metadata-write-failed\n";
-        return 12;
-    }
-    std::cout << "[stock-runtime-capture] profile="
-              << goldsrc::kStockRuntimePendingProfile << '\n'
-              << "[stock-runtime-capture] datagrams="
-              << counters.observed_datagrams << '\n'
-              << "[stock-runtime-capture] raw-bytes="
-              << counters.observed_raw_bytes << '\n'
-              << "[stock-runtime-capture] stop-reason="
-              << (stop_requested ? "orchestrator-request" : "duration-bound") << '\n'
-              << "[stock-runtime-capture] payload-rewrites=0\n"
-              << "[stock-runtime-capture] processes-started=0\n"
-              << "[stock-runtime-capture] connection-generations="
-              << (reconnect ? 2U : 1U) << '\n'
-              << "[stock-runtime-capture] generation-distinct="
-              << (reconnect_endpoint_distinct ? "true" : "false") << '\n'
-              << "[stock-runtime-capture] reconnect-transport="
-              << (reconnect
-                      ? reconnect_transport_complete ? "complete" : "incomplete"
-                      : "not-applicable") << '\n'
-              << "[stock-runtime-capture] result="
-              << (wrong_source_observed
-                      ? "unexpected-source"
-                      : complete
-                          ? "bounded-transport-complete-evidence-pending"
-                          : "incomplete-evidence-pending") << '\n';
-    return wrong_source_observed ? 14 : complete ? 0 : 13;
+    return finalize_capture(
+        diagnostic, complete, stop_reason, result,
+        capture_limit_reached ? 7 : wrong_source_observed ? 14
+                                                     : complete ? 0 : 13);
 }
 
 } // namespace
@@ -1720,9 +2427,18 @@ int main(const int argc, const char* const* argv)
                       << "[stock-runtime-capture] result=success\n";
             return 0;
         }
+        if (options->validate_functional_publication_fixture) {
+            return run_functional_publication_fixture(*options);
+        }
         return run_capture(*options);
     } catch (...) {
-        std::cerr << "[stock-runtime-capture] result=bounded-internal-failure\n";
+        print_relay_terminal_diagnostic(
+            RelayTerminalDiagnostic{
+                "startup", "unhandled-exception", "cxx-exception",
+                std::nullopt, false, true},
+            "unavailable", "unavailable");
+        std::cout << "[stock-runtime-capture] result="
+                     "bounded-internal-failure\n" << std::flush;
         return 16;
     }
 }

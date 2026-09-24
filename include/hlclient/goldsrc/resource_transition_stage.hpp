@@ -2,6 +2,7 @@
 
 #include <hlclient/goldsrc/resource_transition_control.hpp>
 #include <hlclient/goldsrc/resource_transition_request.hpp>
+#include <hlclient/goldsrc/runtime_control_decoder.hpp>
 #include <hlclient/goldsrc/service_payload_envelope.hpp>
 #include <hlclient/goldsrc/user_info_signon_stage.hpp>
 
@@ -36,6 +37,8 @@ struct ResourceTransitionStageConfig {
     ResourceTransitionControlLimits control;
     std::size_t maximum_second_service_payload_size{
         kDefaultMaximumSecondServicePayloadSize};
+    ServicePayloadCompressionPolicy second_service_payload_compression{
+        ServicePayloadCompressionPolicy::require_bzip2_envelope};
     std::size_t maximum_stage_events{
         kDefaultMaximumResourceTransitionStageEvents};
     std::size_t maximum_driver_events_per_update{
@@ -73,9 +76,80 @@ enum class ResourceTransitionStageErrorCode {
     time_moved_backwards,
     service_payload_before_ack_overflow,
     second_payload_envelope_decode_failed,
+    intermediate_message_decode_failed,
+    unexpected_intermediate_message,
     transition_control_decode_failed,
     event_backpressure,
     driver_failed,
+};
+
+enum class ResourceTransitionWireEncodingKind : std::uint8_t {
+    unavailable,
+    bzip2,
+    wire_uncompressed,
+};
+
+enum class ResourceTransitionCursorBoundaryKind : std::uint8_t {
+    parser_buffer_start_unverified,
+    validated_message_boundary,
+};
+
+enum class ResourceTransitionPayloadOrdinalScope : std::uint8_t {
+    resource_transition_nonempty_service_payload,
+};
+
+enum class ResourceTransitionLastMessageCategory : std::uint8_t {
+    user_info_first_batch,
+    runtime_control_nop,
+    transition_control,
+};
+
+// Bounded, byte-free failure evidence captured while the owning payload is
+// still alive. A byte at an unverified buffer start is deliberately separate
+// from actual_opcode: only a decoder-established service-message boundary may
+// publish the latter.
+struct ResourceTransitionFailureMetadata final {
+    ResourceTransitionControlCompatibilityProfile compatibility_profile{
+        ResourceTransitionControlCompatibilityProfile::
+            stock_protocol_48_build_10210};
+    std::uint8_t expected_opcode{kResourceTransitionControlOpcode};
+    std::optional<std::uint8_t> actual_opcode;
+    std::optional<std::uint8_t> cursor_byte_value;
+    std::size_t cursor_byte_offset{0U};
+    std::size_t cursor_bit_offset{0U};
+    ResourceTransitionCursorBoundaryKind cursor_boundary_kind{
+        ResourceTransitionCursorBoundaryKind::
+            parser_buffer_start_unverified};
+    std::optional<std::size_t> payload_ordinal;
+    ResourceTransitionPayloadOrdinalScope payload_ordinal_scope{
+        ResourceTransitionPayloadOrdinalScope::
+            resource_transition_nonempty_service_payload};
+    std::optional<NetchanDirection> direction;
+    std::optional<std::uint32_t> source_sequence;
+    std::optional<std::uint32_t> source_acknowledgement;
+    std::optional<bool> source_reliable;
+    std::optional<bool> reassembled;
+    ResourceTransitionWireEncodingKind wire_encoding{
+        ResourceTransitionWireEncodingKind::unavailable};
+    std::optional<std::size_t> wire_byte_count;
+    std::optional<std::size_t> decoded_byte_count;
+    std::optional<std::size_t> pending_suffix_byte_offset;
+    std::optional<std::size_t> pending_suffix_bit_offset;
+    bool request_queued{false};
+    bool request_transmitted{false};
+    bool request_acknowledged{false};
+    std::optional<std::uint64_t> request_reliable_generation;
+    std::optional<std::uint32_t> request_transmit_sequence;
+    std::optional<std::uint32_t> request_acknowledgement_sequence;
+    std::optional<ResourceTransitionLastMessageCategory>
+        last_successful_message_category;
+    std::optional<std::size_t> last_successful_message_byte_offset;
+    std::optional<std::size_t> last_successful_message_end_byte_offset;
+    std::optional<std::size_t> last_successful_message_payload_ordinal;
+    std::optional<std::uint32_t> last_successful_message_source_sequence;
+    std::size_t intermediate_message_count{0U};
+    std::optional<RuntimeControlDecodeErrorCode> intermediate_parser_error;
+    std::optional<ResourceTransitionControlErrorCode> parser_error;
 };
 
 struct ResourceTransitionStageError {
@@ -84,8 +158,10 @@ struct ResourceTransitionStageError {
     std::optional<UserInfoSignonStageErrorCode> user_info_code;
     std::optional<ResourceTransitionRequestErrorCode> request_code;
     std::optional<ServicePayloadEnvelopeErrorCode> envelope_code;
+    std::optional<RuntimeControlDecodeErrorCode> intermediate_control_code;
     std::optional<ResourceTransitionControlErrorCode> control_code;
     std::optional<NetchanDriverErrorCode> driver_code;
+    std::optional<ResourceTransitionFailureMetadata> failure_metadata;
     std::string context;
 };
 
@@ -98,6 +174,7 @@ public:
     [[nodiscard]] bool source_reliable() const noexcept;
     [[nodiscard]] bool reassembled() const noexcept;
     [[nodiscard]] bool decompressed() const noexcept;
+    [[nodiscard]] bool wire_uncompressed() const noexcept;
     [[nodiscard]] bool acknowledgement_reliable() const noexcept;
     [[nodiscard]] NetchanDirection direction() const noexcept;
     [[nodiscard]] NetchanDriverTimePoint received_at() const noexcept;
@@ -113,6 +190,7 @@ private:
         bool source_reliable,
         bool reassembled,
         bool decompressed,
+        bool wire_uncompressed,
         bool acknowledgement_reliable,
         NetchanDirection direction,
         NetchanDriverTimePoint received_at) noexcept;
@@ -124,6 +202,7 @@ private:
     bool source_reliable_{false};
     bool reassembled_{false};
     bool decompressed_{false};
+    bool wire_uncompressed_{false};
     bool acknowledgement_reliable_{false};
     NetchanDirection direction_{NetchanDirection::server_to_client};
     NetchanDriverTimePoint received_at_{};
@@ -172,6 +251,8 @@ enum class ResourceTransitionStageEventType {
     transition_request_queued,
     transition_request_transmitted,
     transition_request_acknowledged,
+    intermediate_message_decoded,
+    intermediate_payload_consumed,
     second_service_transfer_received,
     transition_control_decoded,
     neutral_opcode43_boundary,
@@ -192,6 +273,8 @@ enum class ResourceTransitionTraceClassification {
     transition_request_queued,
     transition_request_transmitted,
     transition_request_acknowledged,
+    intermediate_message_decoded,
+    intermediate_payload_consumed,
     second_service_transfer_received,
     transition_control_decoded,
     neutral_opcode43_boundary_reached,
@@ -216,6 +299,7 @@ struct ResourceTransitionTraceEvent {
     std::size_t byte_count{0U};
     std::optional<std::uint8_t> opcode;
     std::size_t transmitted_packet_count{0U};
+    std::optional<ResourceTransitionFailureMetadata> failure_metadata;
 };
 
 using ResourceTransitionTraceCallback =
@@ -305,7 +389,9 @@ private:
     void handle_driver_event(
         NetchanDriverEvent event,
         ResourceTransitionStageTimePoint now);
-    void handle_request_acknowledgement(ResourceTransitionStageTimePoint now);
+    void handle_request_acknowledgement(
+        const NetchanDriverEvent& event,
+        ResourceTransitionStageTimePoint now);
     void handle_payload(
         OwnedNetchanPayload payload,
         ResourceTransitionStageTimePoint now);
@@ -321,7 +407,11 @@ private:
         std::optional<ResourceTransitionRequestErrorCode> request_code = std::nullopt,
         std::optional<ServicePayloadEnvelopeErrorCode> envelope_code = std::nullopt,
         std::optional<ResourceTransitionControlErrorCode> control_code = std::nullopt,
-        std::optional<NetchanDriverErrorCode> driver_code = std::nullopt) noexcept;
+        std::optional<NetchanDriverErrorCode> driver_code = std::nullopt,
+        std::optional<ResourceTransitionFailureMetadata> failure_metadata =
+            std::nullopt,
+        std::optional<RuntimeControlDecodeErrorCode> intermediate_control_code =
+            std::nullopt) noexcept;
     void cleanup(ResourceTransitionStageTimePoint now) noexcept;
     void emit_trace(
         ResourceTransitionTraceClassification classification,
@@ -344,13 +434,74 @@ private:
     std::optional<ResourceTransitionStageError> error_;
     std::optional<OwnedNetchanPayload> pre_ack_payload_;
     std::optional<OwnedNetchanPayload> pending_decode_payload_;
+    std::optional<std::size_t> pre_ack_payload_ordinal_;
+    std::optional<std::size_t> pending_decode_payload_ordinal_;
     std::optional<OwnedServicePayload> retained_source_payload_;
     std::optional<ResourceTransitionStageTimePoint> last_update_;
     std::size_t transition_request_queue_count_{0U};
+    std::size_t received_nonempty_payload_count_{0U};
+    std::optional<std::uint64_t> request_reliable_generation_;
+    std::optional<std::uint32_t> request_transmit_sequence_;
+    std::optional<std::uint32_t> request_acknowledgement_sequence_;
+    std::optional<std::size_t> last_intermediate_message_byte_offset_;
+    std::optional<std::size_t> last_intermediate_message_end_byte_offset_;
+    std::optional<std::size_t> last_intermediate_payload_ordinal_;
+    std::optional<std::uint32_t> last_intermediate_source_sequence_;
+    std::size_t intermediate_message_count_{0U};
     bool request_transmitted_{false};
     bool request_acknowledged_{false};
     bool cleanup_done_{false};
 };
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const ResourceTransitionWireEncodingKind kind) noexcept
+{
+    switch (kind) {
+    case ResourceTransitionWireEncodingKind::unavailable:
+        return "unavailable";
+    case ResourceTransitionWireEncodingKind::bzip2: return "bzip2";
+    case ResourceTransitionWireEncodingKind::wire_uncompressed:
+        return "wire_uncompressed";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const ResourceTransitionCursorBoundaryKind kind) noexcept
+{
+    switch (kind) {
+    case ResourceTransitionCursorBoundaryKind::parser_buffer_start_unverified:
+        return "parser_buffer_start_unverified";
+    case ResourceTransitionCursorBoundaryKind::validated_message_boundary:
+        return "validated_message_boundary";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const ResourceTransitionPayloadOrdinalScope scope) noexcept
+{
+    switch (scope) {
+    case ResourceTransitionPayloadOrdinalScope::
+        resource_transition_nonempty_service_payload:
+        return "resource_transition_nonempty_service_payload";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const ResourceTransitionLastMessageCategory category) noexcept
+{
+    switch (category) {
+    case ResourceTransitionLastMessageCategory::user_info_first_batch:
+        return "user_info_first_batch";
+    case ResourceTransitionLastMessageCategory::runtime_control_nop:
+        return "runtime_control_nop";
+    case ResourceTransitionLastMessageCategory::transition_control:
+        return "transition_control";
+    }
+    return "unknown";
+}
 
 [[nodiscard]] constexpr std::string_view to_string(
     const ResourceTransitionStageErrorCode code) noexcept
@@ -374,6 +525,10 @@ private:
         return "service_payload_before_ack_overflow";
     case ResourceTransitionStageErrorCode::second_payload_envelope_decode_failed:
         return "second_payload_envelope_decode_failed";
+    case ResourceTransitionStageErrorCode::intermediate_message_decode_failed:
+        return "intermediate_message_decode_failed";
+    case ResourceTransitionStageErrorCode::unexpected_intermediate_message:
+        return "unexpected_intermediate_message";
     case ResourceTransitionStageErrorCode::transition_control_decode_failed:
         return "transition_control_decode_failed";
     case ResourceTransitionStageErrorCode::event_backpressure:

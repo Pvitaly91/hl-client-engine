@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -68,6 +69,7 @@ validate_stock_runtime_capture_limits(
 enum class StockRuntimeCaptureOutputRole {
     normal_campaign_run,
     pre_campaign_canary,
+    functional_runtime_capture,
     server_profile_diagnostic,
     server_profile_private_diagnostic,
 };
@@ -78,6 +80,56 @@ parse_stock_runtime_capture_output_role(std::string_view value) noexcept;
     StockRuntimeCaptureOutputRole role) noexcept;
 [[nodiscard]] std::string_view stock_runtime_capture_output_parent_directory(
     StockRuntimeCaptureOutputRole role) noexcept;
+
+// Strict campaign roles observe the caller's full requested duration.  A
+// functional runtime capture has its own post-map-entry interval and must
+// proceed directly to graceful relay finalization once that interval passes.
+[[nodiscard]] bool stock_runtime_capture_waits_until_requested_deadline(
+    StockRuntimeCaptureOutputRole role) noexcept;
+
+inline constexpr std::chrono::milliseconds
+    kFunctionalRuntimeCaptureRequiredInterval{15'000};
+
+enum class StockRuntimeCaptureLifecycleDecision {
+    continue_capture,
+    functional_interval_complete,
+    requested_duration_complete,
+    incomplete,
+};
+
+// Pure decision used by the production controller and its fake-clock tests.
+// The maximum duration is always an upper bound. Functional completion is
+// measured only from the confirmed map-entry boundary.
+[[nodiscard]] StockRuntimeCaptureLifecycleDecision
+stock_runtime_capture_lifecycle_decision(
+    StockRuntimeCaptureOutputRole role,
+    std::chrono::milliseconds elapsed_since_start,
+    std::optional<std::chrono::milliseconds> elapsed_since_map_entry,
+    std::chrono::milliseconds requested_maximum_duration,
+    std::chrono::milliseconds required_functional_interval =
+        kFunctionalRuntimeCaptureRequiredInterval,
+    bool capture_sources_healthy = true) noexcept;
+
+// The stock client can issue this exact connectionless server-info query from
+// a second loopback UDP endpoint while its owning netchan endpoint remains
+// active. Functional capture records it as observed/non-delivered auxiliary
+// traffic; it is never admitted to the owning delivered session stream.
+[[nodiscard]] bool is_functional_runtime_auxiliary_query(
+    std::span<const std::byte> payload) noexcept;
+inline constexpr std::size_t kMaximumFunctionalRuntimeAuxiliaryQueries = 8U;
+inline constexpr std::string_view kFunctionalRuntimeAuxiliaryQuerySha256 =
+    "db169509f419278716f974422d20349b9e4e9dfaa7f1e0242861b5abd011d237";
+
+// Payload identity alone cannot establish provenance. Admission also requires
+// the bounded functional role, loopback, an already-learned owning endpoint,
+// and a distinct source that cannot replace that endpoint.
+[[nodiscard]] bool is_functional_runtime_auxiliary_observation(
+    std::span<const std::byte> payload,
+    bool functional_capture,
+    bool source_is_loopback,
+    bool owning_endpoint_learned,
+    bool source_matches_owning_endpoint,
+    std::size_t auxiliary_observations_so_far) noexcept;
 
 enum class StockRuntimeCaptureScenario {
     baseline,
@@ -127,6 +179,7 @@ enum class StockRuntimeCaptureAction {
     duplicate,
     hold_for_delay,
     hold_for_reorder,
+    auxiliary_observation,
 };
 
 struct StockRuntimeCapturePerturbation final {
@@ -151,6 +204,7 @@ struct StockRuntimeCaptureCounters final {
     std::size_t duplicated_datagrams{0U};
     std::size_t delayed_datagrams{0U};
     std::size_t ignored_wrong_source_datagrams{0U};
+    std::size_t auxiliary_observed_datagrams{0U};
 };
 
 enum class StockRuntimeCaptureBudgetErrorCode {
@@ -162,6 +216,9 @@ enum class StockRuntimeCaptureBudgetErrorCode {
     server_packet_limit,
     emitted_counter_overflow,
 };
+
+[[nodiscard]] std::string_view to_string(
+    StockRuntimeCaptureBudgetErrorCode code) noexcept;
 
 struct StockRuntimeCaptureBudgetResult final {
     StockRuntimeCaptureBudgetErrorCode code{

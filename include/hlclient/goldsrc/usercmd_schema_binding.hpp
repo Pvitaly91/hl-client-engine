@@ -57,6 +57,7 @@ enum class GoldSrcUserCmdFieldEvidenceConfidence : std::uint8_t {
 enum class GoldSrcUserCmdFieldCodecSupport : std::uint8_t {
     unsupported,
     synthetic_only,
+    public_reference,
 };
 
 // One explicit metadata table drives both schema validation and the optional

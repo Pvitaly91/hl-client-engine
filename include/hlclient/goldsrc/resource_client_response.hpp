@@ -21,6 +21,7 @@ inline constexpr std::uint16_t kOpcode5ResourceResponseFieldIndex = 0U;
 inline constexpr std::uint8_t kOpcode5ResourceResponseFieldFlags = 4U;
 inline constexpr std::size_t kOpcode5ResourceResponseOpaqueSize = 16U;
 inline constexpr std::size_t kOpcode5ResourceResponseSemanticSize = 41U;
+inline constexpr std::size_t kOpcode5EmptyResourceResponseSemanticSize = 3U;
 inline constexpr std::size_t kOpcode5ResourceResponseFieldCount = 8U;
 inline constexpr std::size_t kResourceResponseTailSha256Size = 32U;
 
@@ -65,16 +66,19 @@ struct ResourceClientResponseLimits {
 
 enum class ResourceClientResponseCompatibilityProfile {
     stock_protocol_48_build_10210_opcode5_single_entry,
+    stock_protocol_48_build_10210_opcode5_empty_list,
 };
 
 enum class ResourceClientResponseEvidenceProfile {
     controlled_stock_exact_41_byte_layout_semantics_pending,
+    source_backed_stock_empty_custom_resource_list,
 };
 
 enum class Opcode5ResourceResponseSourceProfile {
     captured_reliable_semantic_fragment,
     independently_authored_synthetic_fixture,
     canonical_builder_output,
+    canonical_empty_list_builder_output,
 };
 
 // The semantic parser receives only the semantic bytes. This explicit
@@ -150,6 +154,7 @@ public:
 private:
     friend class Opcode5ResourceResponseParser;
     friend class Opcode5ResourceResponseBuilder;
+    friend class Opcode5EmptyResourceResponseBuilder;
 
     Opcode5ResourceResponse(
         std::string wire_name,
@@ -157,9 +162,18 @@ private:
         std::uint32_t byte_count,
         std::array<std::byte, kOpcode5ResourceResponseOpaqueSize> opaque_bytes,
         Opcode5ResourceResponseSourceGeometry source_geometry,
-        Opcode5ResourceResponseSourceProfile source_profile) noexcept;
+        Opcode5ResourceResponseSourceProfile source_profile,
+        std::uint16_t entry_count = kOpcode5ResourceResponseEntryCount,
+        ResourceClientResponseCompatibilityProfile compatibility_profile =
+            ResourceClientResponseCompatibilityProfile::
+                stock_protocol_48_build_10210_opcode5_single_entry,
+        ResourceClientResponseEvidenceProfile evidence_profile =
+            ResourceClientResponseEvidenceProfile::
+                controlled_stock_exact_41_byte_layout_semantics_pending)
+        noexcept;
 
     std::string wire_name_;
+    std::uint16_t entry_count_{kOpcode5ResourceResponseEntryCount};
     std::uint16_t field_index_{0U};
     std::uint32_t byte_count_{0U};
     // Fixed provider/evidence bytes are intentionally private. The response
@@ -169,6 +183,12 @@ private:
     Opcode5ResourceResponseSourceProfile source_profile_{
         Opcode5ResourceResponseSourceProfile::
             captured_reliable_semantic_fragment};
+    ResourceClientResponseCompatibilityProfile compatibility_profile_{
+        ResourceClientResponseCompatibilityProfile::
+            stock_protocol_48_build_10210_opcode5_single_entry};
+    ResourceClientResponseEvidenceProfile evidence_profile_{
+        ResourceClientResponseEvidenceProfile::
+            controlled_stock_exact_41_byte_layout_semantics_pending};
 };
 
 enum class Opcode5ResourceResponseErrorCode {
@@ -282,6 +302,59 @@ public:
 private:
     ResourceClientResponseLimits limits_;
     ResourceClientResponseCompatibilityProfile profile_;
+};
+
+class EncodedOpcode5EmptyResourceResponse final {
+public:
+    EncodedOpcode5EmptyResourceResponse(
+        const EncodedOpcode5EmptyResourceResponse&) = default;
+    EncodedOpcode5EmptyResourceResponse& operator=(
+        const EncodedOpcode5EmptyResourceResponse&) = delete;
+    EncodedOpcode5EmptyResourceResponse(
+        EncodedOpcode5EmptyResourceResponse&&) noexcept = default;
+    EncodedOpcode5EmptyResourceResponse& operator=(
+        EncodedOpcode5EmptyResourceResponse&&) = delete;
+    ~EncodedOpcode5EmptyResourceResponse() = default;
+
+    [[nodiscard]] const Opcode5ResourceResponse& response() const noexcept;
+    [[nodiscard]] std::span<const std::byte> semantic_bytes() const noexcept;
+
+private:
+    friend class Opcode5EmptyResourceResponseBuilder;
+
+    EncodedOpcode5EmptyResourceResponse(
+        Opcode5ResourceResponse response,
+        std::array<std::byte, kOpcode5EmptyResourceResponseSemanticSize>
+            semantic_bytes) noexcept;
+
+    Opcode5ResourceResponse response_;
+    std::array<std::byte, kOpcode5EmptyResourceResponseSemanticSize>
+        semantic_bytes_{};
+};
+
+struct Opcode5EmptyResourceResponseBuildResult {
+    std::optional<EncodedOpcode5EmptyResourceResponse> encoding;
+    std::optional<Opcode5ResourceResponseError> error;
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return encoding.has_value();
+    }
+};
+
+// The project client has no custom-logo feature in the headless D route.
+// This builder advertises that fact as clc_resourcelist with count zero; it
+// neither fabricates a tempdecal nor substitutes captured provider material.
+class Opcode5EmptyResourceResponseBuilder final {
+public:
+    explicit Opcode5EmptyResourceResponseBuilder(
+        ResourceClientResponseLimits limits = {}) noexcept;
+
+    [[nodiscard]] bool valid_configuration() const noexcept;
+    [[nodiscard]] Opcode5EmptyResourceResponseBuildResult build() const;
+
+private:
+    ResourceClientResponseLimits limits_;
 };
 
 class ResourceResponseByteRange final {

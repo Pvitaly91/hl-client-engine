@@ -1,5 +1,13 @@
 # GoldSrc usercmd transmission lifecycle
 
+M4.7.2A's [reference client-move codec](GOLDSRC_REFERENCE_CLIENT_MOVE.md) now has
+a separate [M4.7.2B reference transmission path](GOLDSRC_REFERENCE_MOVE_TRANSMISSION.md)
+through the existing history/planner/stage and NetchanDriver. Its explicit
+`reference_loopback_test_ready_v1` prerequisite authorizes only a fresh local
+test session; the application live gate below stays closed. Recorded commands
+are never sent or simulated. The remaining sections describe the earlier
+synthetic sampling path unless explicitly stated otherwise.
+
 ## Runtime gate
 
 `GoldSrcUserCmdTransmissionStage` is a caller-driven composition of the
@@ -11,9 +19,9 @@ requires an explicit `GoldSrcUserCmdSessionPrerequisite` with profile
 The default `stock_runtime_ready_evidence_pending` prerequisite fails closed in
 `signon_evidence_pending`, emits metadata only, and sends no move packet. No
 production CLI or composition-root route exposes the synthetic prerequisite to
-an arbitrary server. Stock runtime-ready sign-on, checksum, carrier, and
-server acceptance remain pending with zero accepted stock runs and zero
-verified move packets.
+an arbitrary server. Stock runtime-ready sign-on and server acceptance remain
+pending. Reference wire/checksum capture validation and local-peer carrier
+validation now exist separately; they do not promote the strict prerequisite.
 
 The production `--stop-after usercmd-boundary` route follows the normal stock
 challenge, connect/`ACCEPT`, sign-on, resource-list, and opcode-5 client-response
@@ -69,7 +77,8 @@ mutations; the caller can drain events and retry the one-shot exactly once.
 
 ## Backup and packet planning
 
-`GoldSrcUserCmdPacketPlanner` executes only `synthetic_backup_v1`. `prepare()`
+The original `GoldSrcUserCmdPacketPlanner` profile is `synthetic_backup_v1`; the
+separate reference profile and capacity policy are documented above. `prepare()`
 starts at the first command whose new-submission count is zero, selects a
 bounded contiguous history range, and walks backward from it to prepend up to
 the desired number of earlier commands that were already submitted. Commands
@@ -174,4 +183,4 @@ The lifecycle records local sampling and packet submission, not authoritative
 server execution. It contains no player collision, gravity, acceleration,
 friction, movement simulation, command prediction, server-time mapping,
 acknowledged-command replay, reconciliation, or stock entity projection.
-M4.6.3 and later milestones remain unimplemented.
+This lifecycle does not activate the separate movement/prediction components.

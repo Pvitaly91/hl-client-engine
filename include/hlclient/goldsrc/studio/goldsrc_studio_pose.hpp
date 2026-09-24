@@ -38,6 +38,7 @@ inline constexpr std::uint16_t kStudioPoseFrameFractionSteps = 4'096U;
 enum class StudioPoseCompatibilityProfile {
     synthetic_explicit_v1,
     stock_entity_projection_evidence_pending,
+    public_goldsrc48_discrete_local_asset_v1,
 };
 
 struct StudioPoseModelIdentity {

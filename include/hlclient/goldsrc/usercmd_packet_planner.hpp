@@ -2,6 +2,7 @@
 
 #include <hlclient/goldsrc/client_move_message.hpp>
 #include <hlclient/goldsrc/usercmd_history.hpp>
+#include <hlclient/goldsrc/netchan_driver.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,7 @@ namespace hlclient::goldsrc {
 enum class GoldSrcUserCmdPacketPlannerProfile : std::uint8_t {
     synthetic_backup_v1,
     stock_protocol_48_evidence_pending,
+    reference_backup_v1,
 };
 
 struct GoldSrcUserCmdPacketPlannerConfig {
@@ -56,6 +58,9 @@ public:
     [[nodiscard]] std::size_t expected_encoded_bits() const noexcept;
     [[nodiscard]] std::size_t expected_encoded_bytes() const noexcept;
     [[nodiscard]] const GoldSrcClientMoveMessage& encoded_message() const noexcept;
+    [[nodiscard]] std::span<const std::byte> encoded_bytes() const noexcept;
+    [[nodiscard]] const std::optional<ReferenceClientMoveMessage>& reference_message() const noexcept { return reference_message_; }
+    [[nodiscard]] std::size_t changed_field_count() const noexcept;
 
 private:
     friend class GoldSrcUserCmdPacketPlanner;
@@ -71,6 +76,10 @@ private:
         std::uint32_t outgoing_netchan_sequence,
         GoldSrcClientMoveMessage encoded_message,
         std::shared_ptr<const GoldSrcUserCmdPacketPlannerIdentity> owner) noexcept;
+    GoldSrcUserCmdPacketPlan(std::vector<GoldSrcUserCmdSequence> sequences,
+        std::uint64_t history_revision, std::uint64_t planner_revision,
+        std::uint64_t identity, ReferenceClientMoveMessage message,
+        std::shared_ptr<const GoldSrcUserCmdPacketPlannerIdentity> owner) noexcept;
 
     std::vector<GoldSrcUserCmdSequence> ordered_sequences_;
     std::vector<std::shared_ptr<const GoldSrcUserCmdState>> ordered_commands_;
@@ -83,6 +92,8 @@ private:
     std::optional<GoldSrcClientMoveMessage> encoded_message_;
     std::shared_ptr<const GoldSrcUserCmdPacketPlannerIdentity> owner_;
     bool consumable_{true};
+    std::optional<ReferenceClientMoveMessage> reference_message_;
+    std::shared_ptr<const std::uint8_t> history_owner_;
 };
 
 enum class GoldSrcUserCmdPacketPlannerErrorCode : std::uint8_t {
@@ -143,6 +154,13 @@ public:
         const GoldSrcUserCmdHistoryState& history,
         const GoldSrcUserCmdSchemaBinding& binding,
         std::uint32_t outgoing_netchan_sequence);
+    [[nodiscard]] GoldSrcUserCmdPacketPlanResult prepare(
+        const GoldSrcUserCmdHistoryState& history,
+        const GoldSrcUserCmdSchemaBinding& binding,
+        const NetchanOutgoingContextPlan& context);
+    [[nodiscard]] GoldSrcUserCmdPacketPlannerOperationResult preflight(
+        const GoldSrcUserCmdHistoryBuilder& history,
+        const GoldSrcUserCmdPacketPlan& plan) const noexcept;
     [[nodiscard]] GoldSrcUserCmdPacketPlannerOperationResult commit(
         GoldSrcUserCmdHistoryBuilder& history,
         GoldSrcUserCmdPacketPlan&& plan) noexcept;
@@ -154,6 +172,9 @@ private:
 
     [[nodiscard]] GoldSrcUserCmdPacketPlannerOperationResult validate(
         GoldSrcUserCmdPacketPlan& plan) const noexcept;
+    [[nodiscard]] GoldSrcUserCmdPacketPlanResult prepare_bounded(
+        const GoldSrcUserCmdHistoryState&, const GoldSrcUserCmdSchemaBinding&,
+        std::uint32_t sequence, std::size_t capacity);
 
     GoldSrcUserCmdPacketPlannerConfig config_;
     bool valid_configuration_{false};

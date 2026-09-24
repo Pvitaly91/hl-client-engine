@@ -16,23 +16,33 @@
 namespace hlclient::goldsrc {
 
 inline constexpr std::string_view kStockRuntimeResearchRunSchema =
+    "hlclient.stock-runtime-research-run.v2";
+inline constexpr std::string_view kStockRuntimeLegacyResearchRunSchema =
     "hlclient.stock-runtime-research-run.v1";
 inline constexpr std::string_view kStockRuntimeVersionObservationSchema =
     "hlclient.stock-runtime-version-observation.v1";
 inline constexpr std::string_view kStockRuntimeIsolationAttestationSchema =
     "hlclient.stock-runtime-isolation-attestation.v1";
 inline constexpr std::string_view kStockRuntimeRestorationAttestationSchema =
+    "hlclient.stock-runtime-restoration.v2";
+inline constexpr std::string_view kStockRuntimeLegacyRestorationAttestationSchema =
     "hlclient.stock-runtime-restoration.v1";
+inline constexpr std::string_view kFunctionalRuntimeCaptureSchema =
+    "hlclient.functional-runtime-capture.v1";
+inline constexpr std::string_view kFunctionalRuntimeRestorationSchema =
+    "hlclient.functional-runtime-restoration.v1";
 
 enum class StockRuntimeCaptureCorpusLoadPolicy {
     prepublication,
     published,
+    functional_capture,
 };
 
 enum class StockRuntimeCaptureCorpusPublicationState {
     ready_for_manifest_publication,
     published_incomplete,
     published_accepted,
+    functional_complete,
 };
 
 struct StockRuntimeCaptureCorpusLimits final {
@@ -288,6 +298,8 @@ private:
         return "published_incomplete";
     case StockRuntimeCaptureCorpusPublicationState::published_accepted:
         return "published_accepted";
+    case StockRuntimeCaptureCorpusPublicationState::functional_complete:
+        return "functional_complete";
     }
     return "unknown";
 }

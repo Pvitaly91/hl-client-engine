@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <optional>
 #include <string_view>
+#include <thread>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -23,6 +25,9 @@ struct Options final {
     std::uint16_t port{0U};
     std::uint32_t timeout_ms{2'000U};
     std::uint32_t exit_code{0U};
+    std::uint32_t duration_ms{0U};
+    std::uint32_t repeat_interval_ms{0U};
+    std::uint32_t auxiliary_count{0U};
 };
 
 [[nodiscard]] std::optional<Options> parse_options(
@@ -49,6 +54,13 @@ struct Options final {
             options.timeout_ms = parsed;
         } else if (name == "--exit-code" && parsed <= 255U) {
             options.exit_code = parsed;
+        } else if (name == "--duration-ms" && parsed <= 30'000U) {
+            options.duration_ms = parsed;
+        } else if (name == "--repeat-interval-ms" && parsed > 0U &&
+                   parsed <= 1'000U) {
+            options.repeat_interval_ms = parsed;
+        } else if (name == "--auxiliary-count" && parsed <= 8U) {
+            options.auxiliary_count = parsed;
         } else {
             return std::nullopt;
         }
@@ -90,15 +102,60 @@ int main(const int argc, char** argv)
     const int received = ::recvfrom(
         socket, response.data(), static_cast<int>(response.size()), 0,
         nullptr, nullptr);
-    static_cast<void>(::closesocket(socket));
-    static_cast<void>(::WSACleanup());
     constexpr std::string_view expected =
         "HLCLIENT_FAKE_ORCHESTRATION_RESPONSE_V1";
     if (received != static_cast<int>(expected.size()) ||
         std::string_view{response.data(), static_cast<std::size_t>(
                                              (std::max)(received, 0))} != expected) {
+        static_cast<void>(::closesocket(socket));
+        static_cast<void>(::WSACleanup());
         return 5;
     }
-    std::cout << "[hlclient-fake-client] ready=true\n";
+    std::cout << "[hlclient-fake-client] ready=true\n" << std::flush;
+    if (options->auxiliary_count != 0U) {
+        const SOCKET auxiliary_socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (auxiliary_socket == INVALID_SOCKET) {
+            static_cast<void>(::closesocket(socket));
+            static_cast<void>(::WSACleanup());
+            return 3;
+        }
+        constexpr std::array<char, 25U> auxiliary_query{
+            static_cast<char>(0xff), static_cast<char>(0xff),
+            static_cast<char>(0xff), static_cast<char>(0xff), 0x54, 'S', 'o',
+            'u', 'r', 'c', 'e', ' ', 'E', 'n', 'g', 'i', 'n', 'e', ' ', 'Q',
+            'u', 'e', 'r', 'y', '\0'};
+        for (std::uint32_t index = 0U; index < options->auxiliary_count; ++index) {
+            if (::sendto(auxiliary_socket, auxiliary_query.data(),
+                         static_cast<int>(auxiliary_query.size()), 0,
+                         reinterpret_cast<const sockaddr*>(&peer),
+                         sizeof(peer)) == SOCKET_ERROR) {
+                static_cast<void>(::closesocket(auxiliary_socket));
+                static_cast<void>(::closesocket(socket));
+                static_cast<void>(::WSACleanup());
+                return 4;
+            }
+        }
+        static_cast<void>(::closesocket(auxiliary_socket));
+    }
+    if (options->duration_ms != 0U && options->repeat_interval_ms != 0U) {
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds{options->duration_ms};
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (::sendto(socket, request.data(), static_cast<int>(request.size()),
+                         0, reinterpret_cast<const sockaddr*>(&peer),
+                         sizeof(peer)) == SOCKET_ERROR) {
+                static_cast<void>(::closesocket(socket));
+                static_cast<void>(::WSACleanup());
+                return 4;
+            }
+            static_cast<void>(::recvfrom(
+                socket, response.data(), static_cast<int>(response.size()), 0,
+                nullptr, nullptr));
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds{options->repeat_interval_ms});
+        }
+    }
+    static_cast<void>(::closesocket(socket));
+    static_cast<void>(::WSACleanup());
     return static_cast<int>(options->exit_code);
 }

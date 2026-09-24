@@ -229,6 +229,248 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
               hlclient::core::AuthenticationProviderKind::file);
     }
 
+    SECTION("live runtime state accepts the production Steam argv profile")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"null"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-runtime-state"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steamapps/common/Half-Life/steam_api.dll"},
+            std::string_view{"--name"}, std::string_view{"HLC_M472D"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::live_runtime_state);
+        CHECK(result.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::steam);
+        CHECK_FALSE(result.options->resource_consistency_provider);
+        CHECK(result.options->renderer == RendererBackend::null);
+        CHECK_FALSE(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
+    SECTION("live usercmd check accepts its distinct production Steam argv profile")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"null"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-usercmd-check"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steamapps/common/Half-Life/steam_api.dll"},
+            std::string_view{"--name"}, std::string_view{"HLC_M472E"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::live_usercmd_check);
+        CHECK(result.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::steam);
+        CHECK_FALSE(result.options->resource_consistency_provider);
+        CHECK(result.options->renderer == RendererBackend::null);
+        CHECK_FALSE(hlclient::core::requires_local_resource_consistency_preparation(
+            *result.options));
+    }
+
+    SECTION("live visual scripted check accepts the production OpenGL argv profile")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"opengl"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-visual-control"},
+            std::string_view{"--live-input"},
+            std::string_view{"scripted-check"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+            std::string_view{"--game"}, std::string_view{"valve"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steamapps/common/Half-Life/steam_api.dll"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->stop_after ==
+              hlclient::core::ConnectionStopPoint::live_visual_control);
+        CHECK(result.options->live_input ==
+              hlclient::core::LiveInputMode::scripted_check);
+        CHECK(result.options->renderer == RendererBackend::opengl);
+        CHECK_FALSE(result.options->live_session_seconds);
+    }
+
+    SECTION("live visual keyboard mode accepts an explicit bounded session")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"opengl"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-visual-control"},
+            std::string_view{"--live-input"},
+            std::string_view{"keyboard-mouse"},
+            std::string_view{"--live-session-seconds"}, std::string_view{"45"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+            std::string_view{"--game"}, std::string_view{"valve"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        REQUIRE(result);
+        CHECK(result.options->live_input ==
+              hlclient::core::LiveInputMode::keyboard_mouse);
+        CHECK(result.options->live_session_seconds == 45U);
+    }
+
+    SECTION("live visual side check is a distinct typed scripted input")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"opengl"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-visual-control"},
+            std::string_view{"--live-input"},
+            std::string_view{"scripted-side-check"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+            std::string_view{"--game"}, std::string_view{"valve"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->live_input ==
+              hlclient::core::LiveInputMode::scripted_side_check);
+    }
+
+    SECTION("live jump duck check is an explicit visual input source")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"opengl"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-visual-control"},
+            std::string_view{"--live-input"},
+            std::string_view{"scripted-jump-duck-check"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+            std::string_view{"--game"}, std::string_view{"valve"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->live_input ==
+              hlclient::core::LiveInputMode::scripted_jump_duck_check);
+    }
+
+    SECTION("live speed check is an explicit visual input source")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"opengl"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-visual-control"},
+            std::string_view{"--live-input"},
+            std::string_view{"scripted-speed-check"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+            std::string_view{"--game"}, std::string_view{"valve"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->live_input ==
+              hlclient::core::LiveInputMode::scripted_speed_check);
+        CHECK_FALSE(result.options->reference_prediction);
+        const std::array reference_arguments{
+            std::string_view{"--renderer"}, std::string_view{"opengl"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-visual-control"},
+            std::string_view{"--live-input"},
+            std::string_view{"scripted-speed-check"},
+            std::string_view{"--prediction"}, std::string_view{"reference"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+            std::string_view{"--game"}, std::string_view{"valve"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+        };
+        const auto reference = parse_command_line(reference_arguments);
+        REQUIRE(reference);
+        CHECK(reference.options->reference_prediction);
+        const std::array wrong_mode{
+            std::string_view{"--prediction"}, std::string_view{"reference"}};
+        CHECK_FALSE(parse_command_line(wrong_mode));
+    }
+
+    SECTION("live visual mode rejects D renderer and missing explicit input")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"null"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-visual-control"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+            std::string_view{"--game"}, std::string_view{"valve"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("requires --live-input") != std::string::npos);
+    }
+
+    SECTION("headless E rejects F live input")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"null"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-usercmd-check"},
+            std::string_view{"--live-input"}, std::string_view{"scripted-check"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("live input options require") !=
+              std::string::npos);
+    }
+
+    SECTION("live runtime state rejects custom-resource provider selection")
+    {
+        const std::array arguments{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-runtime-state"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+            std::string_view{"--resource-consistency-provider"},
+            std::string_view{"local"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+        };
+        const auto result = parse_command_line(arguments);
+
+        CHECK_FALSE(result);
+        CHECK(result.error.find("no client custom resource") !=
+              std::string::npos);
+    }
+
     SECTION("explicit file provider supports the movement-environment boundary")
     {
         const std::array arguments{
@@ -935,7 +1177,6 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
     {
         constexpr std::array unsupported{
             std::string_view{"none"},
-            std::string_view{"steam"},
             std::string_view{"bypass"},
         };
         for (const auto provider : unsupported) {
@@ -951,6 +1192,46 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
             CHECK(result.error.find("Unsupported authentication provider") !=
                   std::string::npos);
         }
+    }
+
+    SECTION("Steam provider requires its explicit runtime and no auth file")
+    {
+        const std::array valid{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"delta-schemas"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"C:/Steam/steam_api.dll"},
+            std::string_view{"--renderer"}, std::string_view{"null"},
+        };
+        const auto accepted = parse_command_line(valid);
+        REQUIRE(accepted);
+        CHECK(accepted.options->authentication_provider ==
+              hlclient::core::AuthenticationProviderKind::steam);
+        CHECK(accepted.options->steam_api_runtime ==
+              "C:/Steam/steam_api.dll");
+        CHECK_FALSE(accepted.options->authentication_material_file);
+
+        const std::array missing_runtime{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"connect-response"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+        };
+        const auto missing = parse_command_line(missing_runtime);
+        CHECK_FALSE(missing);
+        CHECK(missing.error.find("--steam-api-runtime") != std::string::npos);
+
+        const std::array forbidden_file{
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27015"},
+            std::string_view{"--stop-after"}, std::string_view{"connect-response"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"C:/Steam/steam_api.dll"},
+            std::string_view{"--auth-material-file"}, std::string_view{"auth.bin"},
+        };
+        const auto forbidden = parse_command_line(forbidden_file);
+        CHECK_FALSE(forbidden);
+        CHECK(forbidden.error.find("does not accept") != std::string::npos);
     }
 
     SECTION("local consistency provider requires an explicit basedir")
@@ -1221,6 +1502,8 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("resource-response-boundary") != std::string_view::npos);
     CHECK(help.find("server-baselines") != std::string_view::npos);
     CHECK(help.find("entity-snapshot") != std::string_view::npos);
+    CHECK(help.find("live-runtime-state") != std::string_view::npos);
+    CHECK(help.find("live-usercmd-check") != std::string_view::npos);
     CHECK(help.find("precache-manifest") != std::string_view::npos);
     CHECK(help.find("asset-dispatch") != std::string_view::npos);
     CHECK(help.find("world-geometry") != std::string_view::npos);
@@ -1249,7 +1532,9 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("provider-required") != std::string_view::npos);
     CHECK(help.find("--auth-provider") != std::string_view::npos);
     CHECK(help.find("file") != std::string_view::npos);
+    CHECK(help.find("steam") != std::string_view::npos);
     CHECK(help.find("--auth-material-file") != std::string_view::npos);
+    CHECK(help.find("--steam-api-runtime") != std::string_view::npos);
     CHECK(help.find("--resource-consistency-provider") !=
           std::string_view::npos);
     CHECK(help.find("Explicit read-only response provider") !=
@@ -1257,6 +1542,14 @@ TEST_CASE("Command line help documents user-facing options", "[core][command-lin
     CHECK(help.find("--name") != std::string_view::npos);
     CHECK(help.find("--model") != std::string_view::npos);
     CHECK(help.find("--renderer") != std::string_view::npos);
+    CHECK(help.find("--runtime-replay-fixture") != std::string_view::npos);
+    CHECK(help.find("--runtime-replay-record-budget") !=
+          std::string_view::npos);
+    CHECK(help.find("--runtime-replay-byte-budget") !=
+          std::string_view::npos);
+    CHECK(help.find("--runtime-replay-visuals") != std::string_view::npos);
+    CHECK(help.find("visual-entities") != std::string_view::npos);
+    CHECK(help.find("diagnostic") != std::string_view::npos);
 }
 
 TEST_CASE("Command line rejects renderer-native asset escape hatches",
@@ -1297,6 +1590,190 @@ TEST_CASE("Command line rejects renderer-native asset escape hatches",
         CHECK_FALSE(result);
         CHECK(result.error.find("Unknown command-line argument") !=
               std::string::npos);
+    }
+}
+
+TEST_CASE("Command line selects the application-owned offline runtime replay",
+          "[core][command-line][application-runtime-replay]")
+{
+    SECTION("default mode has no replay source") {
+        const std::array<std::string_view, 2> arguments{
+            "--renderer", "null"};
+        const auto parsed = parse_command_line(arguments);
+        REQUIRE(parsed);
+        CHECK_FALSE(parsed.options->runtime_replay_fixture);
+        CHECK_FALSE(parsed.options->runtime_replay_capture);
+    }
+
+    SECTION("explicit fixture and budgets are bounded") {
+        const std::array<std::string_view, 8> arguments{
+            "--renderer", "null",
+            "--runtime-replay-fixture", "basic-mixed",
+            "--runtime-replay-record-budget", "7",
+            "--runtime-replay-byte-budget", "4096"};
+        const auto parsed = parse_command_line(arguments);
+        REQUIRE(parsed);
+        CHECK(parsed.options->runtime_replay_fixture ==
+              hlclient::core::RuntimeReplayFixtureOption::basic_mixed);
+        CHECK(parsed.options->runtime_replay_record_budget == 7U);
+        CHECK(parsed.options->runtime_replay_byte_budget == 4'096U);
+        CHECK(parsed.options->renderer == RendererBackend::null);
+        CHECK_FALSE(parsed.options->connect_endpoint);
+        CHECK_FALSE(hlclient::core::requires_local_resource_consistency_preparation(
+            *parsed.options));
+    }
+
+    SECTION("negative fixture is a separate explicit selection") {
+        const std::array<std::string_view, 4> arguments{
+            "--renderer", "null",
+            "--runtime-replay-fixture", "missing-entity-base"};
+        const auto parsed = parse_command_line(arguments);
+        REQUIRE(parsed);
+        CHECK(parsed.options->runtime_replay_fixture ==
+              hlclient::core::RuntimeReplayFixtureOption::missing_entity_base);
+    }
+
+    SECTION("functional capture path selects the same offline application mode") {
+        const std::array<std::string_view, 6> arguments{
+            "--renderer", "null",
+            "--runtime-replay-capture", "D:\\private\\run-id",
+            "--runtime-replay-record-budget", "3"};
+        const auto parsed = parse_command_line(arguments);
+        REQUIRE(parsed);
+        CHECK(parsed.options->runtime_replay_capture ==
+              "D:\\private\\run-id");
+        CHECK_FALSE(parsed.options->runtime_replay_fixture);
+        CHECK(parsed.options->runtime_replay_record_budget == 3U);
+        CHECK_FALSE(parsed.options->connect_endpoint);
+        CHECK_FALSE(hlclient::core::requires_local_resource_consistency_preparation(
+            *parsed.options));
+    }
+
+    SECTION("diagnostic visuals allow the normal OpenGL application backend") {
+        const std::array<std::string_view, 4> arguments{
+            "--runtime-replay-fixture", "visual-entities",
+            "--runtime-replay-visuals", "diagnostic"};
+        const auto parsed = parse_command_line(arguments);
+        REQUIRE(parsed);
+        CHECK(parsed.options->renderer == RendererBackend::opengl);
+        CHECK(parsed.options->runtime_replay_fixture ==
+              hlclient::core::RuntimeReplayFixtureOption::visual_entities);
+        CHECK(parsed.options->runtime_replay_visuals ==
+              hlclient::core::RuntimeReplayVisualOption::diagnostic);
+        CHECK_FALSE(parsed.options->connect_endpoint);
+        CHECK_FALSE(hlclient::core::requires_local_resource_consistency_preparation(
+            *parsed.options));
+    }
+
+    SECTION("diagnostic visuals use the identical projection with NullRenderer") {
+        const std::array<std::string_view, 6> arguments{
+            "--renderer", "null",
+            "--runtime-replay-fixture", "visual-entities",
+            "--runtime-replay-visuals", "diagnostic"};
+        const auto parsed = parse_command_line(arguments);
+        REQUIRE(parsed);
+        CHECK(parsed.options->renderer == RendererBackend::null);
+        CHECK(parsed.options->runtime_replay_visuals ==
+              hlclient::core::RuntimeReplayVisualOption::diagnostic);
+    }
+}
+
+TEST_CASE("Offline runtime replay options reject ambiguous startup modes",
+          "[core][command-line][application-runtime-replay][security]")
+{
+    SECTION("NullRenderer is mandatory") {
+        const std::array<std::string_view, 2> arguments{
+            "--runtime-replay-fixture", "basic-mixed"};
+        const auto parsed = parse_command_line(arguments);
+        CHECK_FALSE(parsed);
+        CHECK(parsed.error.find("requires --renderer null") !=
+              std::string::npos);
+    }
+
+    SECTION("connect is rejected before application startup") {
+        const std::array<std::string_view, 6> arguments{
+            "--renderer", "null", "--runtime-replay-fixture", "basic-mixed",
+            "--connect", "127.0.0.1:27015"};
+        const auto parsed = parse_command_line(arguments);
+        CHECK_FALSE(parsed);
+        CHECK(parsed.error.find("incompatible") != std::string::npos);
+    }
+
+    SECTION("capture input rejects fixture, live connect, and OpenGL") {
+        const std::array<std::string_view, 6> both_sources{
+            "--renderer", "null", "--runtime-replay-fixture", "basic-mixed",
+            "--runtime-replay-capture", "run"};
+        CHECK_FALSE(parse_command_line(both_sources));
+
+        const std::array<std::string_view, 6> live_capture{
+            "--renderer", "null", "--runtime-replay-capture", "run",
+            "--connect", "127.0.0.1:27015"};
+        CHECK_FALSE(parse_command_line(live_capture));
+
+        const std::array<std::string_view, 2> graphical_capture{
+            "--runtime-replay-capture", "run"};
+        CHECK_FALSE(parse_command_line(graphical_capture));
+    }
+
+    SECTION("visual replay rejects connect before any side effects") {
+        const std::array<std::string_view, 8> arguments{
+            "--renderer", "opengl",
+            "--runtime-replay-fixture", "visual-entities",
+            "--runtime-replay-visuals", "diagnostic",
+            "--connect", "127.0.0.1:27015"};
+        const auto parsed = parse_command_line(arguments);
+        CHECK_FALSE(parsed);
+        CHECK(parsed.error.find("incompatible") != std::string::npos);
+    }
+
+    SECTION("visual fixture and visual mode require one another") {
+        const std::array<std::string_view, 4> fixture_only{
+            "--renderer", "null",
+            "--runtime-replay-fixture", "visual-entities"};
+        CHECK_FALSE(parse_command_line(fixture_only));
+
+        const std::array<std::string_view, 6> wrong_fixture{
+            "--renderer", "null",
+            "--runtime-replay-fixture", "basic-mixed",
+            "--runtime-replay-visuals", "diagnostic"};
+        CHECK_FALSE(parse_command_line(wrong_fixture));
+
+        const std::array<std::string_view, 2> visuals_only{
+            "--runtime-replay-visuals", "diagnostic"};
+        CHECK_FALSE(parse_command_line(visuals_only));
+    }
+
+    SECTION("asset path is rejected") {
+        const std::array<std::string_view, 6> arguments{
+            "--renderer", "null", "--runtime-replay-fixture", "basic-mixed",
+            "--basedir", "ignored"};
+        const auto parsed = parse_command_line(arguments);
+        CHECK_FALSE(parsed);
+        CHECK(parsed.error.find("incompatible") != std::string::npos);
+    }
+
+    SECTION("budgets without a replay source are rejected") {
+        const std::array<std::string_view, 4> arguments{
+            "--renderer", "null", "--runtime-replay-record-budget", "1"};
+        const auto parsed = parse_command_line(arguments);
+        CHECK_FALSE(parsed);
+        CHECK(parsed.error.find("require --runtime-replay-fixture") !=
+              std::string::npos);
+    }
+
+    for (const auto invalid : {"0", "1025", "-1", "text"}) {
+        CAPTURE(invalid);
+        const std::array<std::string_view, 6> arguments{
+            "--renderer", "null", "--runtime-replay-fixture", "basic-mixed",
+            "--runtime-replay-record-budget", invalid};
+        CHECK_FALSE(parse_command_line(arguments));
+    }
+    for (const auto invalid : {"0", "16777217", "-1", "text"}) {
+        CAPTURE(invalid);
+        const std::array<std::string_view, 6> arguments{
+            "--renderer", "null", "--runtime-replay-fixture", "basic-mixed",
+            "--runtime-replay-byte-budget", invalid};
+        CHECK_FALSE(parse_command_line(arguments));
     }
 }
 

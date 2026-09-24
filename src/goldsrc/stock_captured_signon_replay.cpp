@@ -3,6 +3,7 @@
 #include <hlclient/goldsrc/client_message.hpp>
 #include <hlclient/goldsrc/delta_description.hpp>
 #include <hlclient/goldsrc/move_vars.hpp>
+#include <hlclient/goldsrc/netchan_session.hpp>
 #include <hlclient/goldsrc/resource_list.hpp>
 #include <hlclient/goldsrc/resource_transition_control.hpp>
 #include <hlclient/goldsrc/resource_transition_request.hpp>
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <new>
 #include <ranges>
 #include <utility>
 
@@ -46,8 +48,18 @@ namespace {
 {
     return payload.bytes().size() <= 8U &&
            std::ranges::all_of(payload.bytes(), [](const std::byte value) {
-               return value == std::byte{0U};
+               return value == kStockProtocol48NetchanPaddingByte;
            });
+}
+
+[[nodiscard]] bool exact_zero_entry_resource_response(
+    const std::span<const std::byte> bytes) noexcept
+{
+    constexpr std::size_t kOpcodeAndEntryCountSize = 3U;
+    return bytes.size() == kOpcodeAndEntryCountSize &&
+           std::to_integer<std::uint8_t>(bytes[0U]) ==
+               kOpcode5ResourceResponseOpcode &&
+           bytes[1U] == std::byte{0U} && bytes[2U] == std::byte{0U};
 }
 
 [[nodiscard]] std::optional<std::span<const std::byte>>
@@ -60,7 +72,7 @@ initial_request_semantic_bytes(const StockRuntimeReplayedPayload& payload) noexc
     const auto semantic = payload.bytes().first(kInitialSignonRequestSize);
     const auto padding = payload.bytes().subspan(kInitialSignonRequestSize);
     if (!std::ranges::all_of(padding, [](const std::byte value) {
-            return value == std::byte{0U};
+            return value == kStockProtocol48NetchanPaddingByte;
         })) {
         return std::nullopt;
     }
@@ -77,6 +89,7 @@ initial_request_semantic_bytes(const StockRuntimeReplayedPayload& payload) noexc
         payload.reliable(),
         payload.reassembled(),
         payload.decompressed(),
+        false,
         payload.acknowledgement_reliable(),
         payload.direction(),
         NetchanDriverTimePoint{},
@@ -114,11 +127,20 @@ StockCapturedSignonReplayState::StockCapturedSignonReplayState(
     StockPostResourceResponseCursor cursor,
     const std::size_t observed_client_request_count,
     const std::size_t decoded_server_signon_payload_count,
-    const bool known_signon_validated) noexcept
+    const bool known_signon_validated,
+    std::optional<ServerInfoState> server_info,
+    std::shared_ptr<const DeltaSchemaRegistryState> delta_registry,
+    std::vector<PostMoveVarsUserMessageDefinition>
+        user_message_definitions,
+    std::shared_ptr<const ResourceListState> resources) noexcept
     : boundary_{std::move(boundary)}, cursor_{cursor},
       observed_client_request_count_{observed_client_request_count},
       decoded_server_signon_payload_count_{decoded_server_signon_payload_count},
-      known_signon_validated_{known_signon_validated}
+      known_signon_validated_{known_signon_validated},
+      server_info_{std::move(server_info)},
+      delta_registry_{std::move(delta_registry)},
+      user_message_definitions_{std::move(user_message_definitions)},
+      resources_{std::move(resources)}
 {
 }
 
@@ -149,6 +171,22 @@ bool StockCapturedSignonReplayState::observed_sendres() const noexcept
 bool StockCapturedSignonReplayState::observed_opcode5_resource_response() const noexcept
 {
     return known_signon_validated_ && observed_client_request_count_ >= 3U;
+}
+const std::optional<ServerInfoState>&
+StockCapturedSignonReplayState::server_info() const noexcept
+{
+    return server_info_;
+}
+const std::shared_ptr<const DeltaSchemaRegistryState>&
+StockCapturedSignonReplayState::delta_registry() const noexcept
+{
+    return delta_registry_;
+}
+
+std::span<const PostMoveVarsUserMessageDefinition>
+StockCapturedSignonReplayState::user_message_definitions() const noexcept
+{
+    return user_message_definitions_;
 }
 
 StockCapturedSignonReplay::StockCapturedSignonReplay(
@@ -224,11 +262,33 @@ StockCapturedSignonReplayResult StockCapturedSignonReplay::replay(
     }
     const auto initial_bytes =
         initial_request_semantic_bytes(payloads[*initial_request_index]);
-    if (!initial_bytes || !parse_initial_signon_request(*initial_bytes)) {
+    if (!initial_bytes) {
         return signon_failure(
             StockCapturedSignonReplayErrorCode::initial_request_not_observed,
             *initial_request_index,
-            "observed initial request does not match the existing exact codec");
+            payloads[*initial_request_index].bytes().size() <
+                    kInitialSignonRequestSize ||
+                payloads[*initial_request_index].bytes().size() >
+                    kInitialSignonRequestSize + 3U
+                ? "observed initial request is outside the bounded netchan "
+                  "message-size envelope"
+                : "observed initial request has noncanonical Protocol 48 "
+                  "transport padding");
+    }
+    const auto parsed_initial_request =
+        parse_initial_signon_request(*initial_bytes);
+    if (!parsed_initial_request) {
+        const auto code = parsed_initial_request.error
+            ? to_string(parsed_initial_request.error->code)
+            : std::string_view{"unavailable"};
+        const auto byte_offset = parsed_initial_request.error
+            ? parsed_initial_request.error->byte_offset
+            : 0U;
+        return signon_failure(
+            StockCapturedSignonReplayErrorCode::initial_request_not_observed,
+            *initial_request_index,
+            "observed initial request codec failure=" + std::string{code} +
+                ";byte-offset=" + std::to_string(byte_offset));
     }
 
     const auto first_server_index = next_semantic(NetchanDirection::server_to_client);
@@ -301,12 +361,24 @@ StockCapturedSignonReplayResult StockCapturedSignonReplay::replay(
     }
     ResourceTransitionRequestParser sendres_parser;
     const auto sendres = sendres_parser.parse(payloads[*sendres_index].bytes(), 0U);
-    if (!sendres || !sendres.request ||
-        sendres.bytes_consumed != payloads[*sendres_index].bytes().size()) {
+    if (!sendres || !sendres.request) {
+        const auto repeated_initial =
+            initial_request_semantic_bytes(payloads[*sendres_index]);
+        const bool exact_initial_retransmission = repeated_initial &&
+            parse_initial_signon_request(*repeated_initial);
+        const auto code = sendres.error
+            ? to_string(sendres.error->code)
+            : std::string_view{"unavailable"};
+        const auto byte_offset = sendres.error
+            ? sendres.error->byte_offset
+            : 0U;
         return signon_failure(
             StockCapturedSignonReplayErrorCode::resource_transition_request_not_observed,
             *sendres_index,
-            "observed C-to-S payload is not one exact sendres request");
+            exact_initial_retransmission
+                ? "exact initial request retransmission precedes sendres"
+                : "sendres codec failure=" + std::string{code} +
+                      ";byte-offset=" + std::to_string(byte_offset));
     }
 
     const auto second_server_index = next_semantic(NetchanDirection::server_to_client);
@@ -356,36 +428,107 @@ StockCapturedSignonReplayResult StockCapturedSignonReplay::replay(
             "resource list did not end at the exact owning payload boundary");
     }
 
-    const auto response_index = next_semantic(NetchanDirection::client_to_server);
+    Opcode5ResourceResponseParser response_parser;
+    std::optional<std::size_t> response_index;
+    std::size_t client_candidates = 0U;
+    while (cursor < payloads.size() &&
+           client_candidates < limits_.maximum_client_request_candidates) {
+        const auto candidate_index = cursor++;
+        const auto& candidate = payloads[candidate_index];
+        if (transport_padding_only(candidate) ||
+            candidate.direction() != NetchanDirection::client_to_server) {
+            continue;
+        }
+        ++client_candidates;
+        if (candidate.kind() ==
+                StockRuntimeReplayedPayloadKind::
+                    contemporaneous_fragment_suffix ||
+            candidate.bytes().empty() ||
+            std::to_integer<std::uint8_t>(candidate.bytes().front()) !=
+                kOpcode5ResourceResponseOpcode) {
+            continue;
+        }
+        if (exact_zero_entry_resource_response(candidate.bytes())) {
+            response_index = candidate_index;
+            break;
+        }
+        const auto response = response_parser.parse(
+            candidate.bytes(),
+            Opcode5ResourceResponseSourceGeometry{
+                0U, candidate.bytes().size(), candidate.bytes().size()},
+            Opcode5ResourceResponseSourceProfile::
+                captured_reliable_semantic_fragment);
+        if (!response || !response.response ||
+            response.bytes_consumed != candidate.bytes().size()) {
+            const auto code = response.error
+                ? to_string(response.error->code)
+                : std::string_view{"unavailable"};
+            const auto byte_offset = response.error
+                ? response.error->byte_offset
+                : response.bytes_consumed;
+            return signon_failure(
+                StockCapturedSignonReplayErrorCode::resource_response_invalid,
+                candidate_index,
+                "observed resource response codec failure=" + std::string{code} +
+                    ";byte-offset=" + std::to_string(byte_offset) +
+                    ";payload-bytes=" +
+                    std::to_string(candidate.bytes().size()));
+        }
+        response_index = candidate_index;
+        break;
+    }
     if (!response_index) {
         return signon_failure(
             StockCapturedSignonReplayErrorCode::resource_response_not_observed,
-            cursor, "observed opcode-5 resource response is absent or out of order");
-    }
-    const auto& response_payload = payloads[*response_index];
-    Opcode5ResourceResponseParser response_parser;
-    const auto response = response_parser.parse(
-        response_payload.bytes(),
-        Opcode5ResourceResponseSourceGeometry{
-            0U, response_payload.bytes().size(), response_payload.bytes().size()},
-        Opcode5ResourceResponseSourceProfile::captured_reliable_semantic_fragment);
-    if (!response || !response.response ||
-        response.bytes_consumed != response_payload.bytes().size()) {
-        return signon_failure(
-            StockCapturedSignonReplayErrorCode::resource_response_invalid,
-            *response_index,
-            "observed resource response failed the existing exact 41-byte parser");
+            cursor,
+            client_candidates >= limits_.maximum_client_request_candidates
+                ? "bounded client request candidate limit reached before opcode 5"
+                : "observed opcode-5 resource response is absent");
     }
 
-    const auto post_response_index = next_semantic(NetchanDirection::server_to_client);
+    std::optional<std::size_t> post_response_index;
+    while (cursor < payloads.size()) {
+        const auto candidate_index = cursor++;
+        if (!transport_padding_only(payloads[candidate_index]) &&
+            payloads[candidate_index].direction() ==
+                NetchanDirection::server_to_client) {
+            post_response_index = candidate_index;
+            break;
+        }
+    }
     if (!post_response_index) {
         return signon_failure(
             StockCapturedSignonReplayErrorCode::post_resource_cursor_unavailable,
             cursor,
             "first post-response server payload is absent or out of order");
     }
+    std::shared_ptr<const DeltaSchemaRegistryState> retained_registry;
+    std::optional<ServerInfoState> retained_server_info;
+    std::vector<PostMoveVarsUserMessageDefinition> retained_user_messages;
+    std::shared_ptr<const ResourceListState> retained_resources;
+    try {
+        retained_registry = std::make_shared<const DeltaSchemaRegistryState>(
+            delta.state->registry);
+        retained_server_info.emplace(pre_resource.state->server_info());
+        retained_resources = std::make_shared<const ResourceListState>(*resource_list.state);
+        for (const auto& control : movevars.state->controls()) {
+            if (const auto* definition =
+                    std::get_if<PostMoveVarsUserMessageDefinition>(
+                        &control.body())) {
+                retained_user_messages.push_back(*definition);
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        return signon_failure(
+            StockCapturedSignonReplayErrorCode::allocation_failed,
+            *post_response_index,
+            "unable to retain decoded sign-on initialization context");
+    }
     return reconstruct_boundary(
-        transport, *post_response_index, 3U, 3U, true);
+        transport, *post_response_index, 3U, 3U, true,
+        std::move(retained_server_info), std::move(retained_registry),
+        std::move(retained_user_messages),
+        std::move(retained_resources));
 }
 
 StockCapturedSignonReplayResult
@@ -406,7 +549,12 @@ StockCapturedSignonReplayResult StockCapturedSignonReplay::reconstruct_boundary(
     const std::size_t first_post_response_server_payload_ordinal,
     const std::size_t observed_client_request_count,
     const std::size_t decoded_server_signon_payload_count,
-    const bool known_signon_validated) const
+    const bool known_signon_validated,
+    std::optional<ServerInfoState> server_info,
+    std::shared_ptr<const DeltaSchemaRegistryState> delta_registry,
+    std::vector<PostMoveVarsUserMessageDefinition>
+        user_message_definitions,
+    std::shared_ptr<const ResourceListState> resources) const
 {
     if (!valid_configuration()) {
         return signon_failure(
@@ -462,7 +610,9 @@ StockCapturedSignonReplayResult StockCapturedSignonReplay::reconstruct_boundary(
                 payload_bits - cursor_bits, payload.reassembled(),
                 payload.decompressed()},
             observed_client_request_count, decoded_server_signon_payload_count,
-            known_signon_validated},
+            known_signon_validated, std::move(server_info),
+            std::move(delta_registry), std::move(user_message_definitions),
+            std::move(resources)},
         std::nullopt,
     };
 }

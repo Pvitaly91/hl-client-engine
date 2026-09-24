@@ -32,6 +32,8 @@ add_executable(hlclient_tests
     test_first_person_camera.cpp
     test_goldsrc_client_move_message.cpp
     test_goldsrc_move_checksum.cpp
+    test_reference_client_move.cpp
+    test_reference_move_transmission.cpp
     test_goldsrc_usercmd_delta_codec.cpp
     test_goldsrc_usercmd_duration.cpp
     test_goldsrc_usercmd_fake_hlds_integration.cpp
@@ -226,7 +228,16 @@ add_executable(hlclient_tests
     test_resource_transition_request.cpp
     test_resource_transition_stage.cpp
     test_resource_transition_udp_integration.cpp
+    test_runtime_control_decoder.cpp
+    test_entity_baseline_decoder.cpp
+    test_client_data_decoder.cpp
+    test_packet_entity_decoder.cpp
+    test_runtime_replay_session.cpp
+    test_runtime_replay_scene_source.cpp
+    test_runtime_replay_visual_projection.cpp
+    test_live_visual_control.cpp
     test_server_info.cpp
+    test_stock_spawn_request.cpp
     test_service_payload_envelope.cpp
     test_stock_captured_signon_replay.cpp
     test_stock_runtime_capture_corpus.cpp
@@ -244,6 +255,7 @@ if(WIN32)
     target_sources(
         hlclient_tests
         PRIVATE
+            test_runtime_replay_local_assets.cpp
             test_windows_binary_identity.cpp
             test_windows_network_isolation.cpp
             test_windows_process_orchestrator.cpp
@@ -261,6 +273,7 @@ endif()
 
 target_link_libraries(hlclient_tests
     PRIVATE
+        hlclient_reference_move_test_support
         Catch2::Catch2WithMain
         SDL3::SDL3-shared
         hlclient::bzip2
@@ -300,6 +313,11 @@ target_link_libraries(hlclient_tests
         hlclient_goldsrc_usercmd_session
         hlclient_goldsrc_delta_values
         hlclient_goldsrc_entity_snapshots
+        hlclient_goldsrc_entity_baseline_decoder
+        hlclient_goldsrc_packet_entity_decoder
+        hlclient_goldsrc_runtime_replay
+        hlclient_application_runtime_replay
+        hlclient_goldsrc_client_data_decoder
         hlclient_goldsrc_stock_runtime
         hlclient_goldsrc_stock_runtime_capture
         hlclient_stock_runtime_campaign
@@ -340,6 +358,7 @@ target_link_libraries(hlclient_tests
         hlclient_prediction_api
         hlclient_prediction_visual
         hlclient_interactive_preview
+        hlclient_live_visual_control
         hlclient_glad
         hlclient_world_render
         hlclient_world_spatial
@@ -408,9 +427,150 @@ set_tests_properties(
     hlclient_null_renderer_smoke
     PROPERTIES
         ENVIRONMENT "HLCLIENT_SMOKE_TEST_FRAMES=2"
+        FAIL_REGULAR_EXPRESSION "runtime_replay source_mode="
         TIMEOUT 30
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+
+add_test(
+    NAME hlclient_application_runtime_replay_basic
+    COMMAND
+        $<TARGET_FILE:hlclient>
+        --renderer null
+        --runtime-replay-fixture basic-mixed
+)
+set_tests_properties(
+    hlclient_application_runtime_replay_basic
+    PROPERTIES
+        LABELS "offline;application;runtime-replay"
+        PASS_REGULAR_EXPRESSION
+            "runtime_replay source_mode=offline_builtin_fixture.*applied=4.*failed=0.*pending=0.*updates=2.*terminal=completed.*canonical_hash=18197719904158225405"
+        FAIL_REGULAR_EXPRESSION
+            "Asset pipeline initialized;Half-Life game directory validated;\\[net\\]"
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_test(
+    NAME hlclient_application_runtime_replay_budget_one
+    COMMAND
+        $<TARGET_FILE:hlclient>
+        --renderer null
+        --runtime-replay-fixture basic-mixed
+        --runtime-replay-record-budget 1
+)
+set_tests_properties(
+    hlclient_application_runtime_replay_budget_one
+    PROPERTIES
+        LABELS "offline;application;runtime-replay"
+        PASS_REGULAR_EXPRESSION
+            "runtime_replay source_mode=offline_builtin_fixture.*applied=4.*failed=0.*pending=0.*updates=4.*terminal=completed.*canonical_hash=18197719904158225405"
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_test(
+    NAME hlclient_application_runtime_replay_visual_null
+    COMMAND
+        $<TARGET_FILE:hlclient>
+        --renderer null
+        --runtime-replay-fixture visual-entities
+        --runtime-replay-visuals diagnostic
+)
+set_tests_properties(
+    hlclient_application_runtime_replay_visual_null
+    PROPERTIES
+        LABELS "offline;application;runtime-replay;visual-projection"
+        PASS_REGULAR_EXPRESSION
+            "runtime_replay source_mode=offline_builtin_fixture.*fixture=visual-entities.*applied=5.*failed=0.*visual_failed=0.*pending=0.*terminal=completed.*canonical_hash=12436714874079549176.*visual_binding=diagnostic_fixture.*asset_source=project_generated.*stock_model_binding=not_verified.*presented_runtime_revision=6.*visual_frame_revision=5.*projected_frames=5.*unchanged_records=1.*resource_builds=1"
+        FAIL_REGULAR_EXPRESSION
+            "Asset pipeline initialized;Half-Life game directory validated;\\[net\\]"
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_test(
+    NAME hlclient_application_runtime_replay_visual_rejects_connect
+    COMMAND
+        $<TARGET_FILE:hlclient>
+        --renderer opengl
+        --runtime-replay-fixture visual-entities
+        --runtime-replay-visuals diagnostic
+        --connect 127.0.0.1:27015
+)
+set_tests_properties(
+    hlclient_application_runtime_replay_visual_rejects_connect
+    PROPERTIES
+        LABELS "offline;application;runtime-replay;visual-projection"
+        WILL_FAIL TRUE
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_test(
+    NAME hlclient_application_runtime_replay_missing_base
+    COMMAND
+        $<TARGET_FILE:hlclient>
+        --renderer null
+        --runtime-replay-fixture missing-entity-base
+)
+set_tests_properties(
+    hlclient_application_runtime_replay_missing_base
+    PROPERTIES
+        LABELS "offline;application;runtime-replay"
+        WILL_FAIL TRUE
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_test(
+    NAME hlclient_application_runtime_replay_update_limit
+    COMMAND
+        $<TARGET_FILE:hlclient>
+        --renderer null
+        --runtime-replay-fixture basic-mixed
+        --runtime-replay-record-budget 1
+)
+set_tests_properties(
+    hlclient_application_runtime_replay_update_limit
+    PROPERTIES
+        ENVIRONMENT "HLCLIENT_SMOKE_TEST_FRAMES=1"
+        LABELS "offline;application;runtime-replay"
+        WILL_FAIL TRUE
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_test(
+    NAME hlclient_application_runtime_replay_rejects_connect
+    COMMAND
+        $<TARGET_FILE:hlclient>
+        --renderer null
+        --runtime-replay-fixture basic-mixed
+        --connect 127.0.0.1:27015
+)
+set_tests_properties(
+    hlclient_application_runtime_replay_rejects_connect
+    PROPERTIES
+        LABELS "offline;application;runtime-replay"
+        WILL_FAIL TRUE
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_test(
+    NAME hlclient_application_runtime_replay_capture_missing_fails_closed
+    COMMAND
+        "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+        -NoLogo
+        -NoProfile
+        -NonInteractive
+        -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/scripts/test_hlclient_runtime_capture_cli.ps1"
+        -ToolPath $<TARGET_FILE:hlclient>
+        -AbsentRunRoot
+        "${CMAKE_CURRENT_BINARY_DIR}/absent-functional-runtime-capture")
+set_tests_properties(
+    hlclient_application_runtime_replay_capture_missing_fails_closed
+    PROPERTIES
+        LABELS "offline;application;runtime-replay;functional-capture"
+        PASS_REGULAR_EXPRESSION
+            "\\[runtime-replay-capture-cli\\] result=success"
+        TIMEOUT 30
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 
 add_executable(
     hlclient_collision_fixture_writer

@@ -125,22 +125,107 @@ namespace Hlclient
 '@
 }
 
+function Get-StockExternalAcquisitionFailure {
+    param(
+        [Exception]$Exception,
+        [string]$Phase,
+        [bool]$IdentityBeforeObtained,
+        [bool]$BytesOrHashObtained,
+        [bool]$ChangedDuringObservation)
+    $nativeCode = $null
+    $cursor = $Exception
+    while ($null -ne $cursor) {
+        if ($cursor -is [ComponentModel.Win32Exception]) {
+            $nativeCode = [int]$cursor.NativeErrorCode
+            break
+        }
+        $cursor = $cursor.InnerException
+    }
+    $reason = if ($nativeCode -eq 5 -or
+        $Exception -is [UnauthorizedAccessException]) { 'access_denied' }
+    elseif ($nativeCode -in @(2, 3) -or
+        $Exception -is [IO.FileNotFoundException] -or
+        $Exception -is [IO.DirectoryNotFoundException] -or
+        $Exception -is [Management.Automation.ItemNotFoundException]) {
+        'entry_missing_during_observation'
+    }
+    elseif ($nativeCode -in @(32, 33)) { 'sharing_violation' }
+    elseif ($ChangedDuringObservation -or $Phase -ceq 'consistency_check') {
+        'entry_changed_during_observation'
+    }
+    elseif ($Phase -ceq 'topology_check') { 'reparse_rejected' }
+    elseif ($Phase -ceq 'ads_check') { 'ads_rejected' }
+    elseif ($Phase -ceq 'semantic_parse') { 'semantic_parse_failed' }
+    elseif ($Exception -is [IO.IOException]) { 'other_io_failure' }
+    elseif ($Exception -is [Management.Automation.RuntimeException]) {
+        'script_error'
+    } else { 'reason_unavailable' }
+    return [pscustomobject]@{
+        entry_ordinal = 0
+        phase = $Phase
+        typed_reason = $reason
+        native_error_code = $(if ($null -eq $nativeCode) { 'N/A' } else {
+                [string]$nativeCode })
+        exception_category = $Exception.GetType().FullName
+        identity_before_obtained = $IdentityBeforeObtained
+        bytes_or_hash_obtained = $BytesOrHashObtained
+        changed_during_observation = $ChangedDuringObservation
+    }
+}
+
+function Set-StockExternalStateEntryFailure {
+    param(
+        [object]$Entry,
+        [Exception]$Exception,
+        [string]$Phase,
+        [bool]$IdentityBeforeObtained = $false,
+        [bool]$BytesOrHashObtained = $false,
+        [bool]$ChangedDuringObservation = $false)
+    $Entry.entry_kind = 'unavailable'
+    $Entry.read_status = 'unreadable'
+    $Entry.identity = $null
+    $Entry.size = $null
+    $Entry.sha256 = $null
+    $Entry.last_write_ticks = $null
+    $Entry.creation_ticks = $null
+    $Entry.attributes = $null
+    $Entry.reparse_status = 'unknown'
+    $Entry.ads_status = 'unknown'
+    $Entry.semantic_projection = [pscustomobject]@{
+        status = 'unavailable'; entry_class = 'none'
+    }
+    $Entry.acquisition_diagnostic = Get-StockExternalAcquisitionFailure `
+        $Exception $Phase $IdentityBeforeObtained $BytesOrHashObtained `
+        $ChangedDuringObservation
+}
+
 function New-StockExternalStateEntry {
     param([string]$Scope, [string]$RelativePath, [string]$Path)
     Assert-StockExternalDriftToken $Scope $script:StockExternalDriftScopes `
         'External drift scope'
+    $phase = 'topology_check'
+    $identityBeforeObtained = $false
+    $bytesOrHashObtained = $false
+    $changedDuringObservation = $false
     try {
+        [void](Get-Item -LiteralPath $Path -Force -ErrorAction Stop)
         if (Get-Command Assert-NoReparsePointInExistingPath -ErrorAction SilentlyContinue) {
             Assert-NoReparsePointInExistingPath $Path 'external drift entry'
         }
+        $phase = 'ads_check'
         if (Get-Command Assert-OnlyDefaultDataStream -ErrorAction SilentlyContinue) {
             Assert-OnlyDefaultDataStream $Path 'external drift entry'
         }
+        $phase = 'identity_before'
         Initialize-StockExternalIdentityNative
         $before = [Hlclient.StockExternalIdentity]::Observe($Path)
+        $identityBeforeObtained = $true
+        $phase = 'content_read'
         $sha256 = if ($before.IsDirectory) { '' } else {
             (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
         }
+        if (-not $before.IsDirectory) { $bytesOrHashObtained = $true }
+        $phase = 'semantic_parse'
         $semanticProjection = if (-not $before.IsDirectory -and
             $Scope -ceq 'steam_library_metadata' -and
             (Get-Command Get-StockSteamUserConfigProjection `
@@ -149,13 +234,16 @@ function New-StockExternalStateEntry {
         } else {
             [pscustomobject]@{ status = 'not-applicable'; entry_class = 'none' }
         }
+        $phase = 'identity_after'
         $after = [Hlclient.StockExternalIdentity]::Observe($Path)
+        $phase = 'consistency_check'
         if ($before.Identity -cne $after.Identity -or
             $before.Size -ne $after.Size -or
             $before.CreationTicks -ne $after.CreationTicks -or
             $before.LastWriteTicks -ne $after.LastWriteTicks -or
             $before.Attributes -ne $after.Attributes -or
             $before.IsDirectory -ne $after.IsDirectory) {
+            $changedDuringObservation = $true
             throw 'External-state entry changed during observation.'
         }
         return [pscustomobject]@{
@@ -172,8 +260,12 @@ function New-StockExternalStateEntry {
             reparse_status = 'absent'
             ads_status = 'default-only'
             semantic_projection = $semanticProjection
+            acquisition_diagnostic = $null
         }
     } catch {
+        $diagnostic = Get-StockExternalAcquisitionFailure $_.Exception $phase `
+            $identityBeforeObtained $bytesOrHashObtained `
+            $changedDuringObservation
         return [pscustomobject]@{
             scope = $Scope
             relative_path = $RelativePath.Replace('\', '/')
@@ -190,6 +282,7 @@ function New-StockExternalStateEntry {
             semantic_projection = [pscustomobject]@{
                 status = 'unavailable'; entry_class = 'none'
             }
+            acquisition_diagnostic = $diagnostic
         }
     }
 }
@@ -259,6 +352,14 @@ function New-StockExternalStateSnapshot {
                 $algorithm.ComputeHash($bytes))).Replace('-', '')
     } finally { $algorithm.Dispose() }
     $orderedEntries = @($keys | ForEach-Object { $byKey[$_] })
+    for ($index = 0; $index -lt $orderedEntries.Count; ++$index) {
+        $diagnosticProperty = $orderedEntries[$index].PSObject.Properties[
+            'acquisition_diagnostic']
+        if ($null -ne $diagnosticProperty -and
+            $null -ne $diagnosticProperty.Value) {
+            $diagnosticProperty.Value.entry_ordinal = $index + 1
+        }
+    }
     return [pscustomobject]@{
         schema = 'hlclient.stock-external-state-snapshot.v1'
         phase = $Phase
@@ -271,7 +372,15 @@ function New-StockExternalStateSnapshot {
 }
 
 function Compare-StockExternalStateSnapshot {
-    param([object]$Before, [object]$After, [string]$Phase)
+    param(
+        [object]$Before,
+        [object]$After,
+        [string]$Phase,
+        [string]$SteamRewritePolicyId = 'legacy-strict-v1')
+    if (@('legacy-strict-v1', 'steam-appinfo-change-number-v1') -cnotcontains
+        $SteamRewritePolicyId) {
+        throw 'Unknown stock Steam external-state policy ID.'
+    }
     if ($null -eq $Before -or $null -eq $After -or
         [string]$Before.schema -cne 'hlclient.stock-external-state-snapshot.v1' -or
         [string]$After.schema -cne 'hlclient.stock-external-state-snapshot.v1') {
@@ -324,6 +433,31 @@ function Compare-StockExternalStateSnapshot {
         $afterEntry = $afterByKey[$key]
         if ([string]$beforeEntry.read_status -cne 'readable' -or
             [string]$afterEntry.read_status -cne 'readable') {
+            $acquisitionDiagnostics = [Collections.Generic.List[object]]::new()
+            foreach ($side in @(
+                    [pscustomobject]@{ Name = 'before'; Entry = $beforeEntry },
+                    [pscustomobject]@{ Name = 'after'; Entry = $afterEntry })) {
+                $property = $side.Entry.PSObject.Properties[
+                    'acquisition_diagnostic']
+                if ($null -ne $property -and $null -ne $property.Value) {
+                    [void]$acquisitionDiagnostics.Add([pscustomobject]@{
+                            snapshot_side = $side.Name
+                            entry_ordinal = [int]$property.Value.entry_ordinal
+                            phase = [string]$property.Value.phase
+                            typed_reason = [string]$property.Value.typed_reason
+                            native_error_code =
+                                [string]$property.Value.native_error_code
+                            exception_category =
+                                [string]$property.Value.exception_category
+                            identity_before_obtained =
+                                [bool]$property.Value.identity_before_obtained
+                            bytes_or_hash_obtained =
+                                [bool]$property.Value.bytes_or_hash_obtained
+                            changed_during_observation =
+                                [bool]$property.Value.changed_during_observation
+                        })
+                }
+            }
             [void]$changes.Add([pscustomobject]@{
                     scope = [string]$beforeEntry.scope
                     relative_path = [string]$beforeEntry.relative_path
@@ -338,7 +472,9 @@ function Compare-StockExternalStateSnapshot {
                     entry_kind_changed = $false
                     presence_changed = $false
                     reparse_changed = $false
-                    ads_changed = $false })
+                    ads_changed = $false
+                    acquisition_diagnostics =
+                        $acquisitionDiagnostics.ToArray() })
             continue
         }
         $fields = [Collections.Generic.List[string]]::new()
@@ -388,11 +524,19 @@ function Compare-StockExternalStateSnapshot {
             (Get-Command Compare-StockSteamUserConfigProjection `
                 -ErrorAction SilentlyContinue)) {
             $semantic = Compare-StockSteamUserConfigProjection `
-                $beforeSemanticProperty.Value $afterSemanticProperty.Value
+                $beforeSemanticProperty.Value $afterSemanticProperty.Value `
+                -PolicyId $SteamRewritePolicyId
+            $exactFileScope = [string]$beforeEntry.entry_kind -ceq 'file' -and
+                [string]$afterEntry.entry_kind -ceq 'file' -and
+                [string]$beforeEntry.relative_path -cmatch
+                    '^[0-9]{1,20}/config/localconfig\.vdf$' -and
+                [string]$beforeEntry.relative_path -ceq
+                    [string]$afterEntry.relative_path
             $semanticRewrite = 'observed'
             $semanticProjectionStatus = [string]$semantic.status
             $semanticCandidateEligible = [bool]$semantic.candidate_eligible
-            $semanticAdvisoryEligible = [bool]$semantic.eligible
+            $semanticAdvisoryEligible = [bool]$semantic.eligible -and
+                $exactFileScope
             $semanticVolatileClasses = @($semantic.volatile_classes)
             $semanticUnknownChanges = [int]$semantic.unknown_changes
             $semanticFatalChanges = [int]$semantic.fatal_changes
@@ -418,6 +562,7 @@ function Compare-StockExternalStateSnapshot {
                 reparse_changed = $fields -contains 'reparse_status'
                 ads_changed = $fields -contains 'ads_status'
                 steam_user_config_rewrite = $semanticRewrite
+                steam_user_config_policy_id = $SteamRewritePolicyId
                 steam_user_config_projection = $semanticProjectionStatus
                 steam_user_config_candidate_eligible =
                     $semanticCandidateEligible
@@ -494,6 +639,13 @@ function Compare-StockExternalStateSnapshot {
     }
     $promotedRewriteCount = @($steamRewrites | Where-Object {
             [bool]$_.steam_user_config_advisory_eligible }).Count
+    $promotedRewrite = @($steamRewrites | Where-Object {
+            [bool]$_.steam_user_config_advisory_eligible })
+    $exactCompanionParent = $null
+    if ($promotedRewrite.Count -eq 1) {
+        $exactCompanionParent = ([string]$promotedRewrite[0].relative_path) `
+            -replace '/localconfig\.vdf$', ''
+    }
     $criticalChanges = [Collections.Generic.List[object]]::new()
     foreach ($change in $changes) {
         $isPromotedRewrite = $change.PSObject.Properties[
@@ -501,7 +653,16 @@ function Compare-StockExternalStateSnapshot {
             [bool]$change.steam_user_config_advisory_eligible
         $isCompanionDirectoryMetadata = $promotedRewriteCount -eq 1 -and
             [string]$change.scope -ceq 'steam_library_metadata' -and
+            [string]$change.relative_path -ceq $exactCompanionParent -and
             [string]$change.kind -ceq 'directory_metadata_changed' -and
+            @($change.changed_fields).Count -eq 1 -and
+            @($change.changed_fields)[0] -ceq 'last_write_ticks' -and
+            -not [bool]$change.identity_changed -and
+            -not [bool]$change.content_digest_changed -and
+            -not [bool]$change.size_changed -and
+            -not [bool]$change.creation_time_changed -and
+            -not [bool]$change.attributes_changed -and
+            -not [bool]$change.entry_kind_changed -and
             -not [bool]$change.presence_changed -and
             -not [bool]$change.reparse_changed -and
             -not [bool]$change.ads_changed
@@ -511,6 +672,12 @@ function Compare-StockExternalStateSnapshot {
     }
     $criticalResult = if ($unreadable -ne 0) { 'incomplete' }
         elseif ($criticalChanges.Count -eq 0) { 'none' } else { 'changed' }
+    $rawExternalState = if ($changes.Count -eq 0) { 'unchanged' } else { 'changed' }
+    $policyDecision = if ($rawExternalState -ceq 'unchanged' -and
+        $criticalResult -ceq 'none') { 'strict_pass' }
+        elseif ($promotedRewriteCount -eq 1 -and
+            $criticalResult -ceq 'none') { 'explicit_advisory' }
+        else { 'reject' }
     return [pscustomobject]@{
         schema = 'hlclient.stock-external-drift.v1'
         phase = $Phase
@@ -531,6 +698,10 @@ function Compare-StockExternalStateSnapshot {
         scope_kinds = $scopeKinds
         changes = @($changes)
         critical_external_drift = $criticalResult
+        raw_external_state = $rawExternalState
+        protected_projection = $steamProjection
+        policy_id = $SteamRewritePolicyId
+        policy_decision = $policyDecision
         steam_user_config_rewrite = $(if ($steamRewrites.Count -eq 0) {
                 'none'
             } else { 'observed' })
@@ -555,6 +726,23 @@ function Write-StockExternalDriftPublicOutput {
         $parts = $pair.Split('|')
         Write-Output "[stock-drift] scope=$($parts[0]) kind=$($parts[1])"
     }
+    foreach ($change in @($Difference.changes | Where-Object {
+                $_.kind -ceq 'snapshot_entry_unreadable' })) {
+        foreach ($diagnostic in @($change.acquisition_diagnostics)) {
+            Write-Output (('[stock-drift-acquisition] scope={0} ' +
+                    'entry-ordinal={1} snapshot-side={2} phase={3} ' +
+                    'reason={4} native-error-code={5} ' +
+                    'exception-category={6} identity-before={7} ' +
+                    'bytes-hash={8} changed-during={9}') -f
+                $change.scope, $diagnostic.entry_ordinal,
+                $diagnostic.snapshot_side, $diagnostic.phase,
+                $diagnostic.typed_reason, $diagnostic.native_error_code,
+                $diagnostic.exception_category,
+                ([string]$diagnostic.identity_before_obtained).ToLowerInvariant(),
+                ([string]$diagnostic.bytes_or_hash_obtained).ToLowerInvariant(),
+                ([string]$diagnostic.changed_during_observation).ToLowerInvariant())
+        }
+    }
     foreach ($entry in @(
             @('changed-scopes', $Difference.changed_scopes),
             @('content-changes', $Difference.content_changes),
@@ -565,6 +753,10 @@ function Write-StockExternalDriftPublicOutput {
             @('timestamp-changes', $Difference.timestamp_changes),
             @('critical-external-drift',
                 $Difference.critical_external_drift),
+            @('raw-external-state', $Difference.raw_external_state),
+            @('protected-projection', $Difference.protected_projection),
+            @('policy-id', $Difference.policy_id),
+            @('policy-decision', $Difference.policy_decision),
             @('steam-user-config-rewrite',
                 $Difference.steam_user_config_rewrite),
             @('steam-user-config-projection',

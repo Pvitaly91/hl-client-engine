@@ -36,11 +36,70 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [switch]$PrivateDiagnoseServerProfile,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [switch]$FunctionalSmoke,
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [switch]$ProjectClientStockSignon,
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [ValidateSet('delta-schemas', 'live-runtime-state', 'live-usercmd-check', 'live-visual-control')]
+    [string]$ProjectClientStop = 'delta-schemas',
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [ValidateSet('scripted-check', 'scripted-side-check', 'scripted-jump-duck-check', 'scripted-speed-check', 'keyboard-mouse')]
+    [string]$ProjectClientLiveInput = 'scripted-check',
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [ValidateSet('off', 'reference')]
+    [string]$ProjectClientPrediction = 'off',
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [string]$SteamApiRuntimePath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
+    [switch]$FunctionalRuntimeCapture,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
     [switch]$MeasureExternalDriftControl,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnosticSelfTest')]
     [switch]$ValidateServerProfileDiagnosticPolicy,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'OrchestratorStartupBoundarySelfTest')]
+    [switch]$ValidateOrchestratorStartupBoundary,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'OrchestratorStartupBoundarySelfTest')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPublicationRoundtripSelfTest')]
+    [ValidateNotNullOrEmpty()]
+    [string]$OrchestratorPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPublicationRoundtripSelfTest')]
+    [ValidateNotNullOrEmpty()]
+    [string]$FakeClientPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPublicationRoundtripSelfTest')]
+    [ValidateNotNullOrEmpty()]
+    [string]$FakeServerPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'RetainedBackupRecovery')]
+    [switch]$RecoverRetainedBackup,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'RetainedBackupRecoverySelfTest')]
+    [switch]$ValidateRetainedBackupRecovery,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalFailureRetentionSelfTest')]
+    [switch]$ValidateFunctionalFailureRetention,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalResearchProjectionSelfTest')]
+    [switch]$ValidateFunctionalResearchProjection,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPublicationRoundtripSelfTest')]
+    [switch]$ValidateFunctionalPublicationRoundtrip,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'RetainedBackupRecovery')]
+    [ValidateNotNullOrEmpty()]
+    [string]$RetainedBackupRoot,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
@@ -48,6 +107,9 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'RetainedBackupRecovery')]
     [ValidateNotNullOrEmpty()]
     [string]$ResearchHalfLifeRoot,
 
@@ -57,6 +119,8 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateNotNullOrEmpty()]
     [string]$ClientPath,
 
@@ -66,6 +130,8 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateNotNullOrEmpty()]
     [string]$HldsPath,
 
@@ -73,8 +139,19 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPublicationRoundtripSelfTest')]
     [ValidateNotNullOrEmpty()]
     [string]$CaptureToolPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPublicationRoundtripSelfTest')]
+    [ValidateNotNullOrEmpty()]
+    [string]$CheckerPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPublicationRoundtripSelfTest')]
+    [ValidateNotNullOrEmpty()]
+    [string]$HlclientPath,
 
     [Parameter(ParameterSetName = 'Capture')]
     [switch]$EnableActiveCapture,
@@ -88,10 +165,20 @@ param(
     [AllowEmptyString()]
     [string]$ConfirmPrivateDiagnostic,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [AllowEmptyString()]
+    [string]$ConfirmFunctionalSmoke,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
+    [AllowEmptyString()]
+    [string]$ConfirmFunctionalRuntimeCapture,
+
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateNotNullOrEmpty()]
     [string]$NetworkIsolationGuardPath,
 
@@ -100,6 +187,8 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateNotNullOrEmpty()]
     [string]$AppManifestPath,
 
@@ -119,12 +208,16 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateSet('valve')]
     [string]$Game,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateSet('boot_camp', 'crossfire', 'stalkyard')]
     [string]$Map,
 
@@ -147,6 +240,8 @@ param(
     [Parameter(ParameterSetName = 'ActivePreflight')]
     [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1024, 65534)]
     [int]$RelayPort = 27140,
 
@@ -154,12 +249,16 @@ param(
     [Parameter(ParameterSetName = 'ActivePreflight')]
     [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1024, 65534)]
     [int]$ServerPort = 27141,
 
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateNotNullOrEmpty()]
     [string]$OutputRoot = '.\manual-artifacts\stock-runtime',
 
@@ -169,42 +268,62 @@ param(
     [Parameter(ParameterSetName = 'Capture')]
     [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
     [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(5, 300)]
     [int]$MaximumDurationSeconds = 45,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'ServerProfileDiagnostic')]
+    [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
+    [ValidateSet('legacy-stdio-hlds-banner-v1',
+        'steam-hlds-10210-no-mode-banner-v1')]
+    [string]$ServerProfileId = 'legacy-stdio-hlds-banner-v1',
+
+    [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 65536)]
     [int]$MaximumDatagrams = 8192,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 536870912)]
     [Int64]$MaximumTotalRawBytes = 67108864,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 65507)]
     [int]$MaximumPayloadBytes = 65507,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 67108864)]
     [int]$MaximumReassembledBytes = 8388608,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 268435456)]
     [int]$MaximumDecompressedBytes = 33554432,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 65536)]
     [int]$MaximumMessageCount = 8192,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 32768)]
     [int]$MaximumRuntimeFrames = 4096,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 65536)]
     [int]$MaximumClientPackets = 4096,
 
     [Parameter(ParameterSetName = 'Capture')]
+    [Parameter(ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateRange(1, 65536)]
     [int]$MaximumServerPackets = 4096,
 
@@ -214,7 +333,20 @@ param(
 
     [Parameter(ParameterSetName = 'Capture')]
     [ValidateRange(1, 65536)]
-    [int]$MutationAfterServerPackets = 20
+    [int]$MutationAfterServerPackets = 20,
+
+    [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [switch]$EnableWriterTraceHandoff,
+
+    [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [string]$WriterTraceToolPath,
+
+    [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [ValidatePattern('^[0-9A-Fa-f]{64}$')]
+    [string]$ExpectedWriterTraceToolSha256,
+
+    [Parameter(ParameterSetName = 'PrivateServerProfileDiagnostic')]
+    [string]$WriterTraceTargetPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -229,6 +361,10 @@ $requiredServerProfileDiagnosticRoot = [IO.Path]::GetFullPath(
     (Join-Path $manualRoot 'stock-runtime-server-profile-diagnostic')).TrimEnd('\', '/')
 $requiredPrivateServerProfileDiagnosticRoot = [IO.Path]::GetFullPath(
     (Join-Path $manualRoot 'stock-runtime-server-profile-private')).TrimEnd('\', '/')
+$requiredFunctionalSmokeRoot = [IO.Path]::GetFullPath(
+    (Join-Path $manualRoot 'research-copy-smoke')).TrimEnd('\', '/')
+$requiredFunctionalRuntimeCaptureRoot = [IO.Path]::GetFullPath(
+    (Join-Path $manualRoot 'research-runtime-capture')).TrimEnd('\', '/')
 $markerName = '.hlclient-research-isolated'
 $markerText = 'HLCLIENT_STOCK_RESEARCH_ISOLATED_COPY_V1'
 $pendingMarkerName = '.hlclient-research-pending'
@@ -236,12 +372,72 @@ $preparationManifestName = '.hlclient-research-preparation.json'
 $externalApprovalName = 'external-target-approval.json'
 $activeCaptureToken = 'HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1'
 $privateDiagnosticToken = 'HLCLIENT_PRIVATE_HLDS_BANNER_DIAGNOSTIC_V1'
+$functionalSmokeToken = 'HLCLIENT_LOCAL_RESEARCH_COPY_SMOKE_V1'
+$functionalRuntimeCaptureToken = 'HLCLIENT_FUNCTIONAL_RUNTIME_CAPTURE_V1'
+$stockSteamRewritePolicyId = 'legacy-strict-v1'
 $serverProfileDiagnosticMode =
     $PSCmdlet.ParameterSetName -ceq 'ServerProfileDiagnostic'
 $privateServerProfileDiagnosticMode =
     $PSCmdlet.ParameterSetName -ceq 'PrivateServerProfileDiagnostic'
 $anyServerProfileDiagnosticMode =
     $serverProfileDiagnosticMode -or $privateServerProfileDiagnosticMode
+$functionalSmokeMode = $PSCmdlet.ParameterSetName -ceq 'FunctionalSmoke'
+$projectClientStockSignonMode =
+    $functionalSmokeMode -and [bool]$ProjectClientStockSignon
+$projectClientLiveRuntimeMode = $projectClientStockSignonMode -and
+    $ProjectClientStop -ceq 'live-runtime-state'
+$projectClientUserCmdMode = $projectClientStockSignonMode -and
+    $ProjectClientStop -ceq 'live-usercmd-check'
+$projectClientVisualMode = $projectClientStockSignonMode -and
+    $ProjectClientStop -ceq 'live-visual-control'
+if ($projectClientVisualMode -and
+    $ProjectClientLiveInput -ceq 'scripted-jump-duck-check') {
+    Import-Module (Join-Path $PSScriptRoot 'g_jump_duck_summary.psm1') `
+        -ErrorAction Stop
+}
+if ($projectClientVisualMode -and
+    $ProjectClientLiveInput -ceq 'scripted-speed-check') {
+    Import-Module (Join-Path $PSScriptRoot 'h1_speed_summary.psm1') `
+        -ErrorAction Stop
+}
+$projectClientLiveMode = $projectClientLiveRuntimeMode -or
+    $projectClientUserCmdMode -or $projectClientVisualMode
+$functionalRuntimeCaptureMode =
+    $PSCmdlet.ParameterSetName -ceq 'FunctionalRuntimeCapture'
+$functionalResearchProjectionSelfTestMode =
+    $PSCmdlet.ParameterSetName -ceq 'FunctionalResearchProjectionSelfTest'
+$functionalPolicyMode = $functionalSmokeMode -or $functionalRuntimeCaptureMode -or
+    $functionalResearchProjectionSelfTestMode
+if ($projectClientStockSignonMode -ne
+    (-not [string]::IsNullOrWhiteSpace($SteamApiRuntimePath))) {
+    throw 'ProjectClientStockSignon and SteamApiRuntimePath must be supplied together.'
+}
+if (-not $projectClientStockSignonMode -and
+    $PSBoundParameters.ContainsKey('ProjectClientStop')) {
+    throw 'ProjectClientStop requires ProjectClientStockSignon.'
+}
+if ($PSBoundParameters.ContainsKey('ProjectClientLiveInput') -and
+    -not $projectClientVisualMode) {
+    throw 'ProjectClientLiveInput requires live-visual-control.'
+}
+if ($ProjectClientPrediction -ceq 'reference' -and -not $projectClientVisualMode) {
+    throw 'ProjectClientPrediction reference requires live-visual-control.'
+}
+$writerTraceModulePath = Join-Path $PSScriptRoot 'stock_writer_trace_handoff.psm1'
+if ($EnableWriterTraceHandoff) {
+    if (-not $privateServerProfileDiagnosticMode -or
+        [string]::IsNullOrWhiteSpace($WriterTraceToolPath) -or
+        [string]::IsNullOrWhiteSpace($ExpectedWriterTraceToolSha256) -or
+        [string]::IsNullOrWhiteSpace($WriterTraceTargetPath) -or
+        -not (Test-Path -LiteralPath $writerTraceModulePath -PathType Leaf)) {
+        throw 'writer_trace_handoff_request_invalid'
+    }
+    Import-Module $writerTraceModulePath -Force
+} elseif ($PSBoundParameters.ContainsKey('WriterTraceToolPath') -or
+    $PSBoundParameters.ContainsKey('ExpectedWriterTraceToolSha256') -or
+    $PSBoundParameters.ContainsKey('WriterTraceTargetPath')) {
+    throw 'writer_trace_handoff_parameters_without_enable'
+}
 $steamConfigProjectionImplementation = Join-Path $PSScriptRoot `
     'stock_steam_user_config_projection.ps1'
 if (-not (Test-Path -LiteralPath $steamConfigProjectionImplementation `
@@ -258,12 +454,22 @@ $maximumEntries = 199999
 $maximumResearchBytes = [Int64]17179869184
 $maximumSteamManifestBytes = 1048576
 $protectedRoots = @(
+    'steam_appid.txt',
     'config.cfg', 'userconfig.cfg', 'autoexec.cfg', 'custom.hpk',
     'qconsole.log', 'hlds.log', 'logs', 'screenshots', 'save', 'demo', 'demos',
-    'valve/config.cfg', 'valve/userconfig.cfg', 'valve/autoexec.cfg',
+    'valve/config.cfg', 'valve/voice_ban.dt',
+    'valve/userconfig.cfg', 'valve/autoexec.cfg',
     'valve/custom.hpk', 'valve/qconsole.log', 'valve/hlds.log', 'valve/logs',
     'valve/screenshots', 'valve/save', 'valve/demo', 'valve/demos',
     'valve/config', 'platform/config')
+$functionalMutablePaths = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::OrdinalIgnoreCase)
+foreach ($functionalMutablePath in @(
+        'steam_appid.txt', 'valve/config.cfg', 'valve/voice_ban.dt',
+        'platform/config/InGameDialogConfig.vdf',
+        'platform/config/ServerBrowser.vdf')) {
+    [void]$functionalMutablePaths.Add($functionalMutablePath)
+}
 
 # This is intentionally the first Capture-mode action. It does not resolve or
 # inspect any caller-supplied path and occurs before output, backup, socket,
@@ -275,7 +481,12 @@ if (($PSCmdlet.ParameterSetName -eq 'Capture' -and
     ($PSCmdlet.ParameterSetName -eq 'ServerProfileDiagnostic' -and
         $ConfirmActiveCapture -cne $activeCaptureToken) -or
     ($PSCmdlet.ParameterSetName -eq 'PrivateServerProfileDiagnostic' -and
-        $ConfirmPrivateDiagnostic -cne $privateDiagnosticToken)) {
+        $ConfirmPrivateDiagnostic -cne $privateDiagnosticToken) -or
+    ($functionalSmokeMode -and
+        $ConfirmFunctionalSmoke -cne $functionalSmokeToken) -or
+    ($functionalRuntimeCaptureMode -and
+        $ConfirmFunctionalRuntimeCapture -cne
+            $functionalRuntimeCaptureToken)) {
     Write-Output '[stock-runtime-capture] active-capture=explicit-opt-in-required'
     Write-Output '[stock-runtime-capture] processes-started=0'
     Write-Output '[stock-runtime-capture] files-written=0'
@@ -387,7 +598,9 @@ function Assert-OnlyDefaultDataStream {
         [Hlclient.StockRuntimeDirectoryCapability]::ValidateOnlyDefaultDataStream(
             [IO.Path]::GetFullPath($Path))
     } catch {
-        throw "$Label must contain only its default data stream."
+        throw [InvalidOperationException]::new(
+            "$Label must contain only its default data stream.",
+            $_.Exception)
     }
 }
 
@@ -430,7 +643,15 @@ function Get-BoundedItems {
 
 function Get-FileSha256 {
     param([string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    $stream = [IO.File]::Open(
+        $Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '')
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
 }
 
 function Assert-ExternalApprovalDigestAvailable {
@@ -556,6 +777,146 @@ function Get-ResearchSnapshot {
     return [pscustomobject]@{
         Entries = @($entries); EntryCount = $entries.Count
         TotalBytes = $totalBytes; ManifestSha256 = $manifest
+    }
+}
+
+function Get-RetainedBackupRecoverySnapshot {
+    param([string]$Root, [switch]$ExcludeBackupIdentityLock)
+    Assert-OnlyDefaultDataStream $Root 'retained recovery snapshot root'
+    $entries = [Collections.Generic.List[object]]::new()
+    [Int64]$totalBytes = 0
+    foreach ($item in @(Get-BoundedItems -Root $Root | Sort-Object FullName)) {
+        $relative = Get-RelativePath -Path $item.FullName -Root $Root
+        if ($ExcludeBackupIdentityLock -and
+            $relative -ceq '.hlclient-restoration-identity-lock') {
+            continue
+        }
+        Assert-OnlyDefaultDataStream $item.FullName `
+            'retained recovery snapshot entry'
+        $isDirectory =
+            ($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0
+        if (-not $isDirectory) {
+            Assert-NoHardLink $item.FullName 'retained recovery snapshot file'
+        }
+        [Int64]$length = if ($isDirectory) { 0 } else { $item.Length }
+        if ($length -lt 0 -or
+            $totalBytes -gt ($maximumResearchBytes - $length)) {
+            throw 'Retained recovery snapshot exceeds its byte bound.'
+        }
+        $totalBytes += $length
+        [void]$entries.Add([pscustomobject]@{
+            RelativePath = $relative
+            Kind = $(if ($isDirectory) { 'directory' } else { 'file' })
+            Length = $length
+            Sha256 = $(if ($isDirectory) { '' } else {
+                    Get-FileSha256 $item.FullName
+                })
+            WriteTicks = $(if ($isDirectory) { [Int64]0 } else {
+                    $item.LastWriteTimeUtc.Ticks
+                })
+            Attributes = [Int64]$item.Attributes
+        })
+    }
+    $canonical = @($entries | ForEach-Object {
+        '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.RelativePath, $_.Kind,
+            $_.Length, $_.Sha256, $_.WriteTicks, $_.Attributes
+    }) -join "`n"
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonical)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $manifest =
+            ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '')
+    } finally { $sha.Dispose() }
+    return [pscustomobject]@{
+        EntryCount = $entries.Count
+        TotalBytes = $totalBytes
+        ManifestSha256 = $manifest
+    }
+}
+
+function Invoke-RetainedBackupRecoveryInspection {
+    param([string]$ResearchRoot, [string]$BackupRoot)
+    $research = [IO.Path]::GetFullPath($ResearchRoot).TrimEnd('\', '/')
+    $backup = [IO.Path]::GetFullPath($BackupRoot).TrimEnd('\', '/')
+    $systemTemporaryRoot =
+        [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+    if (-not (Test-Path -LiteralPath $research -PathType Container)) {
+        throw 'Retained recovery research root is absent.'
+    }
+    if (-not (Test-Path -LiteralPath $backup -PathType Container) -or
+        [IO.Path]::GetDirectoryName($backup).TrimEnd('\', '/') -ine
+            $systemTemporaryRoot -or
+        [IO.Path]::GetFileName($backup) -cnotmatch
+            '^hlclient-stock-runtime-restore-[0-9a-f]{32}$') {
+        throw 'Retained recovery backup identity is invalid.'
+    }
+    if ((Test-PathAtOrBelow $backup $research) -or
+        (Test-PathAtOrBelow $research $backup)) {
+        throw 'Retained recovery paths are not disjoint.'
+    }
+    Assert-NoReparsePointInExistingPath $research `
+        'retained recovery research root'
+    Assert-NoReparsePointInExistingPath $backup `
+        'retained recovery backup root'
+    Assert-OnlyDefaultDataStream $research 'retained recovery research root'
+    Assert-OnlyDefaultDataStream $backup 'retained recovery backup root'
+    $backupItems = @(Get-ChildItem -LiteralPath $backup -Force)
+    $data = Join-Path $backup 'data'
+    if ($backupItems.Count -ne 1 -or
+        $backupItems[0].Name -cne 'data' -or
+        -not $backupItems[0].PSIsContainer -or
+        -not (Test-Path -LiteralPath $data -PathType Container)) {
+        throw 'Legacy retained recovery backup has an unexpected root shape.'
+    }
+    $identityLock = Join-Path $data '.hlclient-restoration-identity-lock'
+    if (-not (Test-Path -LiteralPath $identityLock -PathType Container) -or
+        @(Get-ChildItem -LiteralPath $identityLock -Force).Count -ne 0) {
+        throw 'Legacy retained recovery backup identity lock is invalid.'
+    }
+    foreach ($marker in @($markerName, '.hlclient-research-pending',
+            '.hlclient-research-preparation.json')) {
+        $researchMarker = Join-Path $research $marker
+        $backupMarker = Join-Path $data $marker
+        if (-not (Test-Path -LiteralPath $researchMarker -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $backupMarker -PathType Leaf) -or
+            (Get-FileSha256 $researchMarker) -cne
+                (Get-FileSha256 $backupMarker)) {
+            throw "Retained recovery provenance marker mismatch: $marker"
+        }
+    }
+    $markerValue = Read-BoundedAsciiMarker (Join-Path $research $markerName)
+    if ($markerValue -cne $markerText -and
+        $markerValue -cne ($markerText + "`n") -and
+        $markerValue -cne ($markerText + "`r`n")) {
+        throw 'Retained recovery isolation marker is invalid.'
+    }
+    $preparation = Read-BoundedJson `
+        (Join-Path $research '.hlclient-research-preparation.json') `
+        65536 'retained recovery preparation manifest'
+    if ([string]$preparation.schema -cne
+            'hlclient.stock-runtime-research-preparation.v3' -or
+        [string]$preparation.preparation_status -cne
+            'exact-materialized-copy-verified') {
+        throw 'Retained recovery preparation provenance is invalid.'
+    }
+    $current = Get-RetainedBackupRecoverySnapshot $research
+    $before = Get-RetainedBackupRecoverySnapshot $data `
+        -ExcludeBackupIdentityLock
+    $unchanged = $current.EntryCount -eq $before.EntryCount -and
+        $current.TotalBytes -eq $before.TotalBytes -and
+        $current.ManifestSha256 -ceq $before.ManifestSha256
+    return [pscustomobject]@{
+        RecoveryStatus = $(if ($unchanged) {
+                'no_restoration_needed_verified_unchanged'
+            } else { 'recovery_unresolved' })
+        RestorationStatus = 'restoration_not_attempted'
+        BackupStatus = 'retained'
+        CurrentEntryCount = $current.EntryCount
+        BackupEntryCount = $before.EntryCount
+        CurrentTotalBytes = $current.TotalBytes
+        BackupTotalBytes = $before.TotalBytes
+        CurrentManifestSha256 = $current.ManifestSha256
+        BackupManifestSha256 = $before.ManifestSha256
     }
 }
 
@@ -823,6 +1184,45 @@ namespace Hlclient
             finally
             {
                 CloseHandle(handle);
+            }
+        }
+
+        public static void WriteRestorationRootAdsProbe(string directoryPath)
+        {
+            string canonical = Path.GetFullPath(directoryPath).TrimEnd('\\', '/');
+            const string probeName = ":hlclient-restoration-root-ads-probe";
+            IntPtr handle = CreateFile(
+                canonical + probeName, GenericWrite, FileShareRead,
+                IntPtr.Zero, 2, 0x80, IntPtr.Zero);
+            if (handle == InvalidHandle)
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Restoration root ADS probe creation failed.");
+            try
+            {
+                byte[] bytes = Encoding.ASCII.GetBytes("mutation");
+                uint written;
+                if (!WriteFile(handle, bytes, (uint)bytes.Length,
+                        out written, IntPtr.Zero) || written != bytes.Length ||
+                    !FlushFileBuffers(handle))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Restoration root ADS probe write failed.");
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
+        public static void DeleteRestorationRootAdsProbe(string directoryPath)
+        {
+            string canonical = Path.GetFullPath(directoryPath).TrimEnd('\\', '/');
+            const string probeName = ":hlclient-restoration-root-ads-probe";
+            if (!DeleteFile(canonical + probeName))
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error != 2)
+                    throw new Win32Exception(error,
+                        "Restoration root ADS probe cleanup failed.");
             }
         }
 
@@ -1981,7 +2381,8 @@ function New-RunDirectoryCapability {
     param([string]$RunRoot)
     foreach ($leaf in @('raw', 'logs', 'version-observation.staged.json',
             'isolation-attestation.staged.json',
-            'server-profile-diagnostic.staged.json')) {
+            'server-profile-diagnostic.staged.json',
+            'functional-smoke.staged.json')) {
         $anchor = Join-Path $RunRoot $leaf
         if (Test-Path -LiteralPath $anchor) {
             Assert-NoReparsePointInExistingPath $anchor 'capture run identity anchor'
@@ -2360,6 +2761,122 @@ function Assert-LowerSha256Reference {
     }
 }
 
+function Assert-FunctionalResearchProjection {
+    param([string]$Root, [object[]]$Items)
+    if (-not $functionalPolicyMode -or
+        [string]::IsNullOrWhiteSpace($AppManifestPath)) {
+        throw 'Functional research projection is unavailable outside functional launch policy.'
+    }
+    $manifest = [IO.Path]::GetFullPath($AppManifestPath)
+    if ([IO.Path]::GetFileName($manifest) -cne 'appmanifest_70.acf' -or
+        -not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw 'Functional research projection requires appmanifest_70.acf.'
+    }
+    $sourceRoot = [IO.Path]::GetFullPath(
+        (Join-Path (Split-Path -Parent $manifest) 'common\Half-Life')).TrimEnd('\', '/')
+    if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container) -or
+        (Test-PathAtOrBelow $Root $sourceRoot) -or
+        (Test-PathAtOrBelow $sourceRoot $Root)) {
+        throw 'Functional Valve projection source is absent or overlaps research root.'
+    }
+
+    $researchEntries = [Collections.Generic.Dictionary[string, object]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in $Items) {
+        $relative = Get-RelativePath $item.FullName $Root
+        if ($relative -ceq $markerName -or
+            $relative -ceq $pendingMarkerName -or
+            $relative -ceq $preparationManifestName) {
+            continue
+        }
+        if ($researchEntries.ContainsKey($relative)) {
+            throw 'Functional research projection contains an ambiguous path.'
+        }
+        $researchEntries.Add($relative, $item)
+    }
+    $sourceItems = @(Get-BoundedItems $sourceRoot)
+    $sourceEntries = [Collections.Generic.Dictionary[string, object]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in $sourceItems) {
+        $relative = Get-RelativePath $item.FullName $sourceRoot
+        if ($relative.Equals('hlfxmp', [StringComparison]::OrdinalIgnoreCase) -or
+            $relative.StartsWith('hlfxmp/', [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        if ($sourceEntries.ContainsKey($relative)) {
+            throw 'Functional Valve projection source contains an ambiguous path.'
+        }
+        $sourceEntries.Add($relative, $item)
+    }
+
+    foreach ($relative in $researchEntries.Keys) {
+        if ($functionalMutablePaths.Contains($relative)) { continue }
+        if (-not $sourceEntries.ContainsKey($relative)) {
+            throw 'Functional research projection has an unapproved extra path.'
+        }
+        $researchItem = $researchEntries[$relative]
+        $sourceItem = $sourceEntries[$relative]
+        $researchDirectory = ($researchItem.Attributes -band
+            [IO.FileAttributes]::Directory) -ne 0
+        $sourceDirectory = ($sourceItem.Attributes -band
+            [IO.FileAttributes]::Directory) -ne 0
+        if ($researchDirectory -ne $sourceDirectory) {
+            throw 'Functional research projection entry kind changed.'
+        }
+        if (-not $researchDirectory -and
+            ($researchItem.Length -ne $sourceItem.Length -or
+             (Get-FileSha256 $researchItem.FullName) -cne
+                (Get-FileSha256 $sourceItem.FullName))) {
+            throw 'Functional research projection immutable content changed.'
+        }
+    }
+    # A v3 preparation manifest attests the exact source inventory at copy time.
+    # A later file added to the primary installation is not part of that prepared
+    # projection and must not invalidate it. The forward comparison above still
+    # rejects every unapproved research-only path and verifies every immutable
+    # research byte against the current source; critical launch/game identities
+    # are additionally required below.
+    foreach ($relative in $functionalMutablePaths) {
+        if ($relative -ceq 'steam_appid.txt') {
+            if (-not $researchEntries.ContainsKey($relative) -or
+                ($researchEntries[$relative].Attributes -band
+                    [IO.FileAttributes]::Directory) -ne 0) {
+                throw 'Functional research projection lacks its local App ID marker.'
+            }
+            $appIdValue = Read-BoundedAsciiMarker `
+                $researchEntries[$relative].FullName
+            if ($appIdValue -cne '70' -and $appIdValue -cne "70`n" -and
+                $appIdValue -cne "70`r`n") {
+                throw 'Functional research projection has an invalid local App ID marker.'
+            }
+            continue
+        }
+        if (-not $researchEntries.ContainsKey($relative) -or
+            -not $sourceEntries.ContainsKey($relative) -or
+            ($researchEntries[$relative].Attributes -band
+                [IO.FileAttributes]::Directory) -ne 0 -or
+            ($sourceEntries[$relative].Attributes -band
+                [IO.FileAttributes]::Directory) -ne 0) {
+            throw 'Functional research projection mutable allowlist shape changed.'
+        }
+    }
+    foreach ($critical in @(
+            'hl.exe', 'hlds.exe', 'valve/cl_dlls/client.dll',
+            'valve/dlls/hl.dll', 'valve/liblist.gam',
+            'valve/maps/boot_camp.bsp')) {
+        if (-not $researchEntries.ContainsKey($critical) -or
+            -not $sourceEntries.ContainsKey($critical) -or
+            (Get-FileSha256 $researchEntries[$critical].FullName) -cne
+                (Get-FileSha256 $sourceEntries[$critical].FullName)) {
+            throw 'Functional research projection critical identity changed.'
+        }
+    }
+    return [pscustomobject]@{
+        Status = 'prepared_projection_content_verified'
+        MutablePathCount = [Int64]$functionalMutablePaths.Count
+    }
+}
+
 function Get-ResearchPreparationInventory {
     param([string]$Root, [object[]]$Items)
     $v1Records = [Collections.Generic.List[string]]::new()
@@ -2455,7 +2972,11 @@ function Assert-ResearchPendingMarker {
 }
 
 function Assert-ResearchPreparationManifest {
-    param([string]$Root, [object[]]$Items)
+    param(
+        [string]$Root,
+        [object[]]$Items,
+        [switch]$AllowFunctionalMutableDrift
+    )
     $path = [IO.Path]::GetFullPath(
         (Join-Path $Root $preparationManifestName))
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -2508,6 +3029,7 @@ function Assert-ResearchPreparationManifest {
             Schema = [string]$manifest.schema
             ExternalTargetProfile = 'none'
             ExternalTargetCount = [Int64]0
+            InventoryStatus = 'exact'
         }
     }
 
@@ -2624,12 +3146,17 @@ function Assert-ResearchPreparationManifest {
             throw 'Research preparation manifest v3 preparation profile is invalid.'
         }
 
-        if ($sourceEntryCount -ne $inventory.EntryCount -or
-            $sourceByteCount -ne $inventory.ByteCount -or
-            $destinationEntryCount -ne $inventory.EntryCount -or
-            $destinationByteCount -ne $inventory.ByteCount -or
-            $manifest.source_inventory_sha256 -cne $inventory.V2Sha256 -or
-            $manifest.destination_inventory_sha256 -cne $inventory.V2Sha256) {
+        $inventoryExact = $sourceEntryCount -eq $inventory.EntryCount -and
+            $sourceByteCount -eq $inventory.ByteCount -and
+            $destinationEntryCount -eq $inventory.EntryCount -and
+            $destinationByteCount -eq $inventory.ByteCount -and
+            $manifest.source_inventory_sha256 -ceq $inventory.V2Sha256 -and
+            $manifest.destination_inventory_sha256 -ceq $inventory.V2Sha256
+        $functionalProjection = $null
+        if (-not $inventoryExact -and $AllowFunctionalMutableDrift) {
+            $functionalProjection = Assert-FunctionalResearchProjection `
+                $Root $Items
+        } elseif (-not $inventoryExact) {
             throw 'Research preparation manifest v3 inventory disagrees with the tree.'
         }
 
@@ -2647,6 +3174,9 @@ function Assert-ResearchPreparationManifest {
             Schema = [string]$manifest.schema
             ExternalTargetProfile = [string]$manifest.external_target_profile
             ExternalTargetCount = $approvedExternalCount
+            InventoryStatus = $(if ($inventoryExact) { 'exact' } else {
+                    [string]$functionalProjection.Status
+                })
         }
     }
 
@@ -2738,6 +3268,7 @@ function Assert-ResearchPreparationManifest {
         Schema = [string]$manifest.schema
         ExternalTargetProfile = 'none'
         ExternalTargetCount = [Int64]0
+        InventoryStatus = 'exact'
     }
 }
 
@@ -2820,13 +3351,36 @@ function Resolve-IsolatedResearchRoot {
         throw 'Research root lacks the exact isolation marker.'
     }
     $preparationManifest = Assert-ResearchPreparationManifest `
-        $root $boundedResearchItems
+        $root $boundedResearchItems `
+        -AllowFunctionalMutableDrift:$functionalPolicyMode
     $client = [IO.Path]::GetFullPath($ClientPath)
     $server = [IO.Path]::GetFullPath($HldsPath)
-    if ($client -ine (Join-Path $root 'hl.exe') -or $server -ine (Join-Path $root 'hlds.exe')) {
+    $expectedProjectClient = [IO.Path]::GetFullPath(
+        (Join-Path $repositoryRoot 'build\bin\Release\hlclient.exe'))
+    if (($projectClientStockSignonMode -and
+         $client -ine $expectedProjectClient) -or
+        (-not $projectClientStockSignonMode -and
+         $client -ine (Join-Path $root 'hl.exe')) -or
+        $server -ine (Join-Path $root 'hlds.exe')) {
         throw 'ClientPath and HldsPath must be the canonical root launchers.'
     }
-    foreach ($pair in @(@($client, '1.1.1.1', 'stock client'), @($server, '4.1.1.1', 'stock server'))) {
+    if ($projectClientStockSignonMode) {
+        Assert-PathBelowRoot $client $repositoryRoot 'project client'
+        Assert-NoReparsePointInExistingPath $client 'project client'
+        Assert-OnlyDefaultDataStream $client 'project client'
+        Assert-NoHardLink $client 'project client'
+        if (-not (Test-Path -LiteralPath $client -PathType Leaf)) {
+            throw 'Project client executable is absent.'
+        }
+    }
+    $stockBinaryPairs = @()
+    if ($projectClientStockSignonMode) {
+        $stockBinaryPairs += ,@($server, '4.1.1.1', 'stock server')
+    } else {
+        $stockBinaryPairs += ,@($client, '1.1.1.1', 'stock client')
+        $stockBinaryPairs += ,@($server, '4.1.1.1', 'stock server')
+    }
+    foreach ($pair in $stockBinaryPairs) {
         Assert-NoReparsePointInExistingPath $pair[0] $pair[2]
         Assert-OnlyDefaultDataStream $pair[0] $pair[2]
         Assert-NoHardLink $pair[0] $pair[2]
@@ -2851,6 +3405,7 @@ function Resolve-IsolatedResearchRoot {
         PreparationManifestSchema = $preparationManifest.Schema
         ExternalTargetProfile = $preparationManifest.ExternalTargetProfile
         ExternalTargetCount = [Int64]$preparationManifest.ExternalTargetCount
+        InventoryStatus = [string]$preparationManifest.InventoryStatus
     }
 }
 
@@ -3064,6 +3619,115 @@ function Confirm-OrchestratorProcessJobCleanup {
     }
 }
 
+function New-BoundedProcessStreamState {
+    param([string]$Name, [IO.TextReader]$Reader)
+    $buffer = [char[]]::new(2048)
+    return [pscustomobject]@{
+        Name = $Name
+        Reader = $Reader
+        Buffer = $buffer
+        Builder = [Text.StringBuilder]::new()
+        Bytes = [Int64]0
+        Done = $false
+        Task = $Reader.ReadAsync($buffer, 0, $buffer.Length)
+    }
+}
+
+function Receive-BoundedProcessStream {
+    param([object]$State)
+    if ($null -eq $State -or $State.Done -or -not $State.Task.IsCompleted) {
+        return
+    }
+    $read = $State.Task.GetAwaiter().GetResult()
+    if ($read -eq 0) {
+        $State.Done = $true
+        return
+    }
+    $chunk = [string]::new($State.Buffer, 0, $read)
+    $chunkBytes = [Text.Encoding]::UTF8.GetByteCount($chunk)
+    if ($State.Bytes -gt (65536 - $chunkBytes)) {
+        throw "Project orchestrator $($State.Name) exceeded its byte bound."
+    }
+    $State.Bytes += $chunkBytes
+    [void]$State.Builder.Append($chunk)
+    $State.Task = $State.Reader.ReadAsync(
+        $State.Buffer, 0, $State.Buffer.Length)
+}
+
+function Complete-BoundedProcessStreams {
+    param(
+        [object]$StdoutState,
+        [object]$StderrState,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while (-not ($StdoutState.Done -and $StderrState.Done)) {
+        Receive-BoundedProcessStream $StdoutState
+        Receive-BoundedProcessStream $StderrState
+        if ($StdoutState.Done -and $StderrState.Done) { return }
+        if ($clock.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+            throw 'Project orchestrator output drain exceeded its bounded deadline.'
+        }
+        Start-Sleep -Milliseconds 10
+    }
+}
+
+function Get-BoundedStartupDiagnostic {
+    param([object]$State)
+    if ($null -eq $State) { return '' }
+    $value = $State.Builder.ToString().Replace("`r", ' ').Replace("`n", ' ').Trim()
+    if ($value.Length -gt 1024) { return $value.Substring(0, 1024) }
+    return $value
+}
+
+function Update-OrchestratorStartupCaptureState {
+    param([object]$ExactExitState, [object]$StdoutState, [object]$StderrState)
+    if ($null -eq $ExactExitState) { return }
+    if ($null -ne $StdoutState) {
+        $ExactExitState.StartupStdout = $StdoutState.Builder.ToString()
+        $ExactExitState.StartupStdoutBytes = [Int64]$StdoutState.Bytes
+    }
+    if ($null -ne $StderrState) {
+        $ExactExitState.StartupStderr = $StderrState.Builder.ToString()
+        $ExactExitState.StartupStderrBytes = [Int64]$StderrState.Bytes
+    }
+}
+
+function New-OrchestratorExitState {
+    return [pscustomobject]@{
+        Started = $false
+        StartupStatus = 'not_started'
+        StartupWaitResult = $null
+        StartupNativeError = $null
+        StartupExitCode = $null
+        StartupExitCodeHex = $null
+        StartupStdout = ''
+        StartupStderr = ''
+        StartupStdoutBytes = [Int64]0
+        StartupStderrBytes = [Int64]0
+        ExitConfirmed = $false
+        ExitCode = $null
+        NoOrchestratorProcessCreated = $false
+        CleanupSignaled = $false
+        CampaignJobCleanupConfirmed = $false
+        GuardJobCleanupConfirmed = $false
+        JobCleanupConfirmed = $false
+        WriterTracePrelaunchReady = $false
+        WriterTraceReady = $false
+        WriterTraceLaunchReleased = $false
+        WriterTraceStockProcessesStopped = $false
+        WriterTraceStockProcessesStoppedUtc = $null
+        WriterTraceFinalized = $false
+        WriterTraceCollectorProcessId = $null
+        WriterTraceCompleteness = 'not_started'
+        WriterTraceFailure = $null
+        WriterTraceOwner = $null
+        PrimaryFailure = $null
+        CleanupFailure = $null
+        Failure = $null
+    }
+}
+
 function Invoke-BoundedOrchestrator {
     param(
         [string]$Path,
@@ -3074,7 +3738,11 @@ function Invoke-BoundedOrchestrator {
         [IntPtr]$JobHandle = [IntPtr]::Zero,
         [IntPtr]$GuardJobHandle = [IntPtr]::Zero,
         [IntPtr]$IsolationReleaseHandle = [IntPtr]::Zero,
-        [object]$ExactExitState = $null
+        [object]$ExactExitState = $null,
+        [IntPtr]$WriterTracePrelaunchReadyHandle = [IntPtr]::Zero,
+        [IntPtr]$WriterTraceLaunchReleaseHandle = [IntPtr]::Zero,
+        [IntPtr]$WriterTraceStockStoppedHandle = [IntPtr]::Zero,
+        [object]$WriterTraceRequest = $null
     )
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Path
@@ -3092,77 +3760,161 @@ function Invoke-BoundedOrchestrator {
     $result = $null
     $invocationError = $null
     $cleanupFailure = $null
+    $writerTraceOwner = $null
+    $stdoutState = $null
+    $stderrState = $null
     try {
-        if (-not $process.Start()) { throw 'Orchestrator process did not start.' }
+        try {
+            if (-not $process.Start()) {
+                throw 'Process.Start returned false.'
+            }
+        } catch {
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.StartupStatus = 'process_start_failed'
+                $ExactExitState.PrimaryFailure = $_.Exception.Message
+            }
+            throw "orchestrator_process_start_failed: $($_.Exception.Message)"
+        }
         $started = $true
         if ($null -ne $ExactExitState) { $ExactExitState.Started = $true }
-        if ($CapabilityHandle -ne [IntPtr]::Zero -and
-            [Hlclient.StockRuntimeOrchestratorCapability]::WaitForSingleObject(
-                $CapabilityHandle, 5000) -ne 0) {
-            throw 'Project orchestrator did not attest the inherited wrapper transaction capability.'
+        $stdoutState = New-BoundedProcessStreamState stdout $process.StandardOutput
+        $stderrState = New-BoundedProcessStreamState stderr $process.StandardError
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        if ($CapabilityHandle -ne [IntPtr]::Zero) {
+            while ($true) {
+                Receive-BoundedProcessStream $stdoutState
+                Receive-BoundedProcessStream $stderrState
+                $capabilityWait =
+                    [Hlclient.StockRuntimeOrchestratorCapability]::WaitForSingleObject(
+                        $CapabilityHandle, 0)
+                if ($capabilityWait -eq 0) {
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.StartupStatus = 'acknowledgement_received'
+                        $ExactExitState.StartupWaitResult = [uint32]$capabilityWait
+                    }
+                    break
+                }
+                if ($capabilityWait -eq [uint32]::MaxValue) {
+                    $nativeError =
+                        [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.StartupStatus = 'wait_failed'
+                        $ExactExitState.StartupWaitResult = [uint32]$capabilityWait
+                        $ExactExitState.StartupNativeError = $nativeError
+                    }
+                    throw "orchestrator_startup_wait_failed: wait-result=$capabilityWait; win32=$nativeError"
+                }
+                if ($capabilityWait -ne 258) {
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.StartupStatus = 'wait_failed'
+                        $ExactExitState.StartupWaitResult = [uint32]$capabilityWait
+                    }
+                    throw "orchestrator_startup_wait_failed: wait-result=$capabilityWait"
+                }
+                if ($process.HasExited) {
+                    # The child can SetEvent and exit between the preceding
+                    # zero-timeout poll and HasExited. Recheck the same
+                    # inherited capability after observing exit so that this
+                    # successful boundary is not misclassified as early exit.
+                    $postExitWait =
+                        [Hlclient.StockRuntimeOrchestratorCapability]::WaitForSingleObject(
+                            $CapabilityHandle, 0)
+                    if ($postExitWait -eq 0) {
+                        if ($null -ne $ExactExitState) {
+                            $ExactExitState.StartupStatus =
+                                'acknowledgement_received'
+                            $ExactExitState.StartupWaitResult =
+                                [uint32]$postExitWait
+                        }
+                        break
+                    }
+                    Complete-BoundedProcessStreams $stdoutState $stderrState
+                    $exitCode = [int]$process.ExitCode
+                    $exitHex = '0x{0:X8}' -f ([uint32]$exitCode)
+                    $stderrDiagnostic = Get-BoundedStartupDiagnostic $stderrState
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.StartupStatus = 'early_exit'
+                        $ExactExitState.StartupWaitResult = [uint32]$capabilityWait
+                        $ExactExitState.StartupExitCode = $exitCode
+                        $ExactExitState.StartupExitCodeHex = $exitHex
+                    }
+                    throw "orchestrator_startup_early_exit: exit-code=$exitCode; exit-code-hex=$exitHex; stderr=$stderrDiagnostic"
+                }
+                if ($clock.ElapsedMilliseconds -ge 5000) {
+                    if ($null -ne $ExactExitState) {
+                        $ExactExitState.StartupStatus = 'timeout'
+                        $ExactExitState.StartupWaitResult = [uint32]$capabilityWait
+                    }
+                    throw 'orchestrator_startup_timeout: acknowledgement was not received within 5000 ms'
+                }
+                Start-Sleep -Milliseconds 10
+            }
+        }
+        if ($null -ne $WriterTraceRequest) {
+            if ($WriterTracePrelaunchReadyHandle -eq [IntPtr]::Zero -or
+                $WriterTraceLaunchReleaseHandle -eq [IntPtr]::Zero -or
+                $WriterTraceStockStoppedHandle -eq [IntPtr]::Zero) {
+                throw 'writer_trace_handoff_capabilities_missing'
+            }
+            $prelaunchClock = [Diagnostics.Stopwatch]::StartNew()
+            while ([Hlclient.StockRuntimeOrchestratorCapability]::WaitForSingleObject(
+                    $WriterTracePrelaunchReadyHandle, 0) -ne 0) {
+                if ($process.HasExited) {
+                    throw 'writer_trace_prelaunch_not_reached'
+                }
+                if ($prelaunchClock.ElapsedMilliseconds -ge 60000) {
+                    throw 'writer_trace_prelaunch_timeout'
+                }
+                Start-Sleep -Milliseconds 25
+            }
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.WriterTracePrelaunchReady = $true
+            }
+            Add-StockWriterTraceTimelineEvent $WriterTraceRequest.Timeline `
+                prelaunch_ready -IpcEvidence orchestrator_prelaunch_event |
+                Out-Null
+            $writerTraceOwner = Start-StockWriterTraceCollector $WriterTraceRequest
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.WriterTraceOwner = $writerTraceOwner
+            }
+            if (-not $writerTraceOwner.Started -or
+                $null -eq $writerTraceOwner.ReadyReceipt) {
+                throw $(if ($writerTraceOwner.Failure) {
+                        $writerTraceOwner.Failure
+                    } else { 'writer_trace_not_ready' })
+            }
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.WriterTraceReady = $true
+                $ExactExitState.WriterTraceCollectorProcessId =
+                    $writerTraceOwner.ProcessId
+            }
+            if (-not [Hlclient.StockRuntimeOrchestratorCapability]::SetEvent(
+                    $WriterTraceLaunchReleaseHandle)) {
+                $nativeError =
+                    [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw "writer_trace_launch_release_failed_win32_$nativeError"
+            }
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.WriterTraceLaunchReleased = $true
+            }
+            Add-StockWriterTraceTimelineEvent $writerTraceOwner.Timeline `
+                launch_released -IpcEvidence wrapper_release_event | Out-Null
         }
         # Read both redirected streams concurrently into fixed-size chunks.
         # ReadToEndAsync would eventually reject oversized output but could
         # buffer it without a bound first.  These builders never admit more
         # than 64 KiB per stream; finally kills this exact process on overflow
         # or timeout, which closes its owned Job boundary in active mode.
-        $clock = [Diagnostics.Stopwatch]::StartNew()
-        $stdoutBuilder = [Text.StringBuilder]::new()
-        $stderrBuilder = [Text.StringBuilder]::new()
-        $stdoutBuffer = [char[]]::new(2048)
-        $stderrBuffer = [char[]]::new(2048)
-        [Int64]$stdoutBytes = 0
-        [Int64]$stderrBytes = 0
-        $stdoutDone = $false
-        $stderrDone = $false
-        $stdoutTask = $process.StandardOutput.ReadAsync(
-            $stdoutBuffer, 0, $stdoutBuffer.Length)
-        $stderrTask = $process.StandardError.ReadAsync(
-            $stderrBuffer, 0, $stderrBuffer.Length)
-        while (-not ($stdoutDone -and $stderrDone)) {
+        while (-not ($stdoutState.Done -and $stderrState.Done)) {
             [Int64]$remainingMilliseconds =
                 ([Int64]$TimeoutSeconds * 1000) - $clock.ElapsedMilliseconds
             if ($remainingMilliseconds -le 0) {
                 throw 'Project orchestrator exceeded its bounded deadline.'
             }
-            $pendingReads = [Collections.Generic.List[Threading.Tasks.Task]]::new()
-            if (-not $stdoutDone) { [void]$pendingReads.Add($stdoutTask) }
-            if (-not $stderrDone) { [void]$pendingReads.Add($stderrTask) }
-            $waitMilliseconds = [Math]::Min(100, [int]$remainingMilliseconds)
-            [void][Threading.Tasks.Task]::WaitAny(
-                $pendingReads.ToArray(), $waitMilliseconds)
-
-            if (-not $stdoutDone -and $stdoutTask.IsCompleted) {
-                $read = $stdoutTask.GetAwaiter().GetResult()
-                if ($read -eq 0) {
-                    $stdoutDone = $true
-                } else {
-                    $chunk = [string]::new($stdoutBuffer, 0, $read)
-                    $chunkBytes = [Text.Encoding]::UTF8.GetByteCount($chunk)
-                    if ($stdoutBytes -gt (65536 - $chunkBytes)) {
-                        throw 'Project orchestrator stdout exceeded its byte bound.'
-                    }
-                    $stdoutBytes += $chunkBytes
-                    [void]$stdoutBuilder.Append($chunk)
-                    $stdoutTask = $process.StandardOutput.ReadAsync(
-                        $stdoutBuffer, 0, $stdoutBuffer.Length)
-                }
-            }
-            if (-not $stderrDone -and $stderrTask.IsCompleted) {
-                $read = $stderrTask.GetAwaiter().GetResult()
-                if ($read -eq 0) {
-                    $stderrDone = $true
-                } else {
-                    $chunk = [string]::new($stderrBuffer, 0, $read)
-                    $chunkBytes = [Text.Encoding]::UTF8.GetByteCount($chunk)
-                    if ($stderrBytes -gt (65536 - $chunkBytes)) {
-                        throw 'Project orchestrator stderr exceeded its byte bound.'
-                    }
-                    $stderrBytes += $chunkBytes
-                    [void]$stderrBuilder.Append($chunk)
-                    $stderrTask = $process.StandardError.ReadAsync(
-                        $stderrBuffer, 0, $stderrBuffer.Length)
-                }
+            Receive-BoundedProcessStream $stdoutState
+            Receive-BoundedProcessStream $stderrState
+            if (-not ($stdoutState.Done -and $stderrState.Done)) {
+                Start-Sleep -Milliseconds ([Math]::Min(10, [int]$remainingMilliseconds))
             }
         }
         [Int64]$remainingForExit =
@@ -3171,8 +3923,32 @@ function Invoke-BoundedOrchestrator {
             -not $process.WaitForExit([int]$remainingForExit)) {
             throw 'Project orchestrator exceeded its bounded deadline.'
         }
-        $stdout = $stdoutBuilder.ToString()
-        $stderr = $stderrBuilder.ToString()
+        if ($null -ne $WriterTraceRequest) {
+            $stockStopped =
+                [Hlclient.StockRuntimeOrchestratorCapability]::WaitForSingleObject(
+                    $WriterTraceStockStoppedHandle, 0)
+            if ($stockStopped -ne 0) {
+                throw 'writer_trace_stock_processes_stopped_not_attested'
+            }
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.WriterTraceStockProcessesStopped = $true
+                $ExactExitState.WriterTraceStockProcessesStoppedUtc =
+                    [DateTime]::UtcNow.ToString('o')
+            }
+            $writerTraceOwner.StockProcessesStoppedUtc =
+                [DateTime]::UtcNow.ToString('o')
+            $writerTraceOwner = Complete-StockWriterTraceCollector `
+                $writerTraceOwner $WriterTraceRequest.TailMilliseconds
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.WriterTraceFinalized =
+                    $null -ne $writerTraceOwner.FinalReceipt
+                $ExactExitState.WriterTraceCompleteness =
+                    $writerTraceOwner.TraceCompleteness
+                $ExactExitState.WriterTraceFailure = $writerTraceOwner.Failure
+            }
+        }
+        $stdout = $stdoutState.Builder.ToString()
+        $stderr = $stderrState.Builder.ToString()
         $stdoutLines = @($stdout -split '\r?\n' | Where-Object { $_.Length -ne 0 })
         $stderrLines = @($stderr -split '\r?\n' | Where-Object { $_.Length -ne 0 })
         if ($stdoutLines.Count -gt 128 -or $stderrLines.Count -gt 128 -or
@@ -3194,6 +3970,16 @@ function Invoke-BoundedOrchestrator {
             'preflight-schema', 'elevation-status', 'app-manifest',
             'wfp-session', 'timestamp-category', 'connection-generations',
             'generation-distinct', 'candidate-conflict',
+            'server-profile-id', 'server-readiness-status',
+            'server-readiness-endpoint-proof', 'server-readiness-map-proof',
+            'server-readiness-owned-process',
+            'server-readiness-process-identity',
+            'server-readiness-endpoint-owner',
+            'server-readiness-endpoint-address',
+            'server-readiness-endpoint-port',
+            'server-readiness-response-source', 'server-readiness-map',
+            'server-readiness-game', 'server-readiness-query-attempts',
+            'server-readiness-response-bytes',
             'server-profile-parse-status', 'server-profile-mismatch-field',
             'server-profile-engine-version-status',
             'server-profile-runtime-mode-status', 'server-profile-game-status',
@@ -3208,7 +3994,75 @@ function Invoke-BoundedOrchestrator {
             'server-profile-observed-line-count',
             'server-profile-observed-engine-version',
             'server-profile-observed-protocol',
-            'server-profile-observed-build', 'server-profile-result')
+            'server-profile-observed-build', 'server-profile-result',
+            'writer-trace-prelaunch-ready',
+            'writer-trace-launch-released',
+            'writer-trace-stock-processes-stopped',
+            'writer-trace-clock-frequency',
+            'writer-trace-stock-process-created-ticks',
+            'writer-trace-stock-processes-stopped-ticks',
+            'startup-boundary', 'mode', 'purpose', 'evidence-eligible',
+            'route', 'stable-duration-ms', 'client-exit-code',
+            'client-exit-code-hex', 'client-wait-result',
+            'client-wait-native-error',
+            'server-exit-code', 'external-steam-state',
+            'external-steam-state-policy', 'client-name-observed',
+            'client-entered-game-observed',
+            'client-running-at-readiness-deadline',
+            'server-process-created', 'server-process-id',
+            'client-process-created', 'client-process-id',
+            'client-image-identity', 'client-resume-result',
+            'client-initialized', 'connect-requested',
+            'connection-status', 'client-map-entry-status',
+            'map-entry-source', 'last-confirmed-stage',
+            'client-steam-argument', 'server-logging',
+            'client-connect-port',
+            'steam-authentication-error-observed',
+            'application-entry-observed', 'arguments-accepted',
+            'provider-begin-observed', 'steam-api-init-attempted',
+            'steam-api-initialized', 'fresh-material-acquired',
+            'connect-sent', 'connection-accepted',
+            'serverinfo-received', 'schema-registry-received',
+            'authentication-status', 'serverinfo-protocol',
+            'serverinfo-max-clients', 'serverinfo-game', 'serverinfo-map',
+            'schema-count', 'schema-field-count',
+            'resource-continuation-sent',
+            'spawn-request-transmitted',
+            'spawn-request-acknowledged',
+            'signon-reply-transmitted',
+            'signon-reply-acknowledged',
+            'live-service-payloads-received',
+            'client-world-state-published', 'usercmd-transmitted',
+            'usercmd-movement-verified', 'live-visual-verified',
+            'usercmd-generated',
+            'usercmd-new', 'usercmd-backup', 'usercmd-packets',
+            'usercmd-server-samples',
+            'baseline-entity-count', 'service-payload-count',
+            'applied-runtime-record-count', 'world-entity-count',
+            'publication-revision', 'canonical-state-hash',
+            'stable-runtime-interval-ms',
+            'diagnostic-publication', 'lifecycle-clock', 'lifecycle-unit',
+            'requested-maximum-duration-ms',
+            'required-runtime-interval-ms',
+            'client-map-entry-observed-ms',
+            'functional-interval-completed-ms', 'shutdown-requested-ms',
+            'relay-stop-requested-ms', 'relay-finalization-completed-ms',
+            'stop-reason', 'stock-shutdown-method',
+            'relay-phase', 'failed-operation', 'native-error-domain',
+            'native-error-code', 'relay-exit-code',
+            'relay-exit-code-hex', 'wait-result', 'stop-requested',
+            'journal-publication-state', 'metadata-publication-state')
+        if ($projectClientVisualMode -and
+            $ProjectClientLiveInput -ceq 'scripted-jump-duck-check') {
+            $allowedKeys += @(Get-GJumpDuckNativeStatusKeys)
+        }
+        if ($projectClientVisualMode -and
+            $ProjectClientLiveInput -ceq 'scripted-speed-check') {
+            $allowedKeys += @('speed-result')
+        }
+        if ($ProjectClientPrediction -ceq 'reference') {
+            $allowedKeys += @('prediction-result')
+        }
         $values = [Collections.Generic.Dictionary[string, string]]::new(
             [StringComparer]::Ordinal)
         foreach ($line in $stdoutLines) {
@@ -3221,13 +4075,51 @@ function Invoke-BoundedOrchestrator {
             }
             $values.Add($key, $Matches.value)
         }
+        if ($null -ne $writerTraceOwner) {
+            foreach ($requiredTimelineKey in @(
+                    'writer-trace-clock-frequency',
+                    'writer-trace-stock-process-created-ticks',
+                    'writer-trace-stock-processes-stopped-ticks')) {
+                if (-not $values.ContainsKey($requiredTimelineKey)) {
+                    throw "writer_trace_orchestrator_timeline_missing:$requiredTimelineKey"
+                }
+            }
+            [Int64]$orchestratorFrequency =
+                $values['writer-trace-clock-frequency']
+            [Int64]$stockCreatedTicks =
+                $values['writer-trace-stock-process-created-ticks']
+            [Int64]$stockStoppedTicks =
+                $values['writer-trace-stock-processes-stopped-ticks']
+            if ($orchestratorFrequency -ne
+                    [Int64]$writerTraceOwner.Timeline.ClockFrequency -or
+                $stockCreatedTicks -le 0 -or $stockStoppedTicks -le 0) {
+                throw 'writer_trace_orchestrator_timeline_domain_invalid'
+            }
+            Add-StockWriterTraceTimelineEvent $writerTraceOwner.Timeline `
+                stock_process_created -NowTicks $stockCreatedTicks `
+                -Source orchestrator `
+                -IpcEvidence orchestrator_persisted_qpc | Out-Null
+            Add-StockWriterTraceTimelineEvent $writerTraceOwner.Timeline `
+                stock_processes_stopped -NowTicks $stockStoppedTicks `
+                -Source orchestrator `
+                -IpcEvidence orchestrator_cleanup_event | Out-Null
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.WriterTraceOwner = $writerTraceOwner
+            }
+        }
         $result = [pscustomobject]@{
             ExitCode = $process.ExitCode
             Values = $values
             StderrLineCount = $stderrLines.Count
+            WriterTrace = $writerTraceOwner
         }
     } catch {
         $invocationError = $_
+        if ($null -ne $ExactExitState) {
+            $ExactExitState.PrimaryFailure = $_.Exception.Message
+        }
+        Update-OrchestratorStartupCaptureState `
+            $ExactExitState $stdoutState $stderrState
     } finally {
         # A pipeline stop/Ctrl+C can interrupt WaitForExit before the C++
         # boundary returns.  Terminating that exact owned orchestrator closes
@@ -3244,6 +4136,11 @@ function Invoke-BoundedOrchestrator {
                 }
                 if (-not $process.WaitForExit(5000) -or -not $process.HasExited) {
                     throw 'Exact orchestrator process exit was not confirmed after termination.'
+                }
+                if ($null -ne $stdoutState -and $null -ne $stderrState) {
+                    Complete-BoundedProcessStreams $stdoutState $stderrState
+                    Update-OrchestratorStartupCaptureState `
+                        $ExactExitState $stdoutState $stderrState
                 }
                 if ($null -ne $ExactExitState) {
                     $ExactExitState.ExitConfirmed = $true
@@ -3293,6 +4190,7 @@ function Invoke-BoundedOrchestrator {
                 $cleanupFailure = $_
                 if ($null -ne $ExactExitState) {
                     $ExactExitState.Failure = $_.Exception.Message
+                    $ExactExitState.CleanupFailure = $_.Exception.Message
                 }
             }
         } else {
@@ -3338,15 +4236,32 @@ function Invoke-BoundedOrchestrator {
                 $cleanupFailure = $_
                 if ($null -ne $ExactExitState) {
                     $ExactExitState.Failure = $_.Exception.Message
+                    $ExactExitState.CleanupFailure = $_.Exception.Message
                 }
+            }
+        }
+        if ($null -ne $writerTraceOwner -and
+            $null -eq $writerTraceOwner.FinalReceipt) {
+            $writerTraceOwner = Complete-StockWriterTraceCollector `
+                $writerTraceOwner 0 $(if ($null -ne $invocationError) {
+                        $invocationError.Exception.Message
+                    } else { '' })
+            if ($null -ne $ExactExitState) {
+                $ExactExitState.WriterTraceFinalized =
+                    $null -ne $writerTraceOwner.FinalReceipt
+                $ExactExitState.WriterTraceCompleteness =
+                    $writerTraceOwner.TraceCompleteness
+                $ExactExitState.WriterTraceFailure = $writerTraceOwner.Failure
+                $ExactExitState.WriterTraceOwner = $writerTraceOwner
             }
         }
         $process.Dispose()
     }
     if ($null -ne $cleanupFailure) {
         if ($null -ne $invocationError) {
-            throw ($invocationError.Exception.Message + '; ' +
-                $cleanupFailure.Exception.Message)
+            $invocationError.Exception.Data['cleanup-failure'] =
+                $cleanupFailure.Exception.Message
+            throw $invocationError
         }
         throw $cleanupFailure
     }
@@ -3399,32 +4314,44 @@ function Add-ExternalStateTree {
         [string]$Root,
         [string]$RelativePrefix)
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return }
-    Assert-NoReparsePointInExistingPath $Root 'external state tree'
-    [void]$Entries.Add((New-StockExternalStateEntry $Scope $RelativePrefix $Root))
-    $queue = [Collections.Generic.Queue[IO.DirectoryInfo]]::new()
-    $queue.Enqueue([IO.DirectoryInfo](Get-Item -LiteralPath $Root -Force))
+    $rootEntry = New-StockExternalStateEntry $Scope $RelativePrefix $Root
+    [void]$Entries.Add($rootEntry)
+    if ($rootEntry.read_status -cne 'readable' -or
+        $rootEntry.entry_kind -cne 'directory') { return }
+    $queue = [Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue([pscustomobject]@{
+            Directory = [IO.DirectoryInfo](Get-Item -LiteralPath $Root -Force)
+            Entry = $rootEntry
+        })
     $rootPrefix = $Root.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     while ($queue.Count -ne 0) {
-        $directory = $queue.Dequeue()
-        [string[]]$children = @($directory.GetFileSystemInfos() |
-            ForEach-Object FullName)
+        $queued = $queue.Dequeue()
+        $directory = $queued.Directory
+        try {
+            [string[]]$children = @($directory.GetFileSystemInfos() |
+                ForEach-Object FullName)
+        } catch {
+            Set-StockExternalStateEntryFailure $queued.Entry $_.Exception `
+                enumeration $true $false $false
+            continue
+        }
         [Array]::Sort($children, [StringComparer]::OrdinalIgnoreCase)
         foreach ($childPath in $children) {
             if ($Entries.Count -ge 50000) {
                 throw 'External state snapshot exceeds its entry bound.'
             }
-            $item = Get-Item -LiteralPath $childPath -Force
-            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'External state snapshot contains a reparse point.'
-            }
-            $relative = $item.FullName.Substring($rootPrefix.Length).Replace('\', '/')
+            $relative = $childPath.Substring($rootPrefix.Length).Replace('\', '/')
             if ($RelativePrefix -cne '.') {
                 $relative = $RelativePrefix.TrimEnd('/') + '/' + $relative
             }
-            [void]$Entries.Add((New-StockExternalStateEntry `
-                    $Scope $relative $item.FullName))
-            if (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
-                $queue.Enqueue([IO.DirectoryInfo]$item)
+            $entry = New-StockExternalStateEntry $Scope $relative $childPath
+            [void]$Entries.Add($entry)
+            if ($entry.read_status -ceq 'readable' -and
+                $entry.entry_kind -ceq 'directory') {
+                $queue.Enqueue([pscustomobject]@{
+                        Directory = [IO.DirectoryInfo]$childPath
+                        Entry = $entry
+                    })
             }
         }
     }
@@ -3501,6 +4428,181 @@ function Write-AtomicJsonNoOverwrite {
     Assert-RunDirectoryCapability $DirectoryCapability $parent
     Assert-NoReparsePoint $Path $Label
     Assert-NoHardLink $Path $Label
+}
+
+function Publish-FunctionalRuntimeCaptureArtifacts {
+    param(
+        [string]$RunRoot,
+        [string]$RunId,
+        [object]$DirectoryCapability,
+        [bool]$PublishComplete,
+        [bool]$OwnedProcessesStopped,
+        [bool]$ResearchRestorationExact,
+        [string]$BeforeManifestSha256,
+        [string]$AfterManifestSha256,
+        [bool]$RelayReady,
+        [bool]$ServerReady,
+        [bool]$ClientReady,
+        [bool]$TransportComplete,
+        [string]$GameName,
+        [string]$MapName,
+        [int]$MaximumDuration,
+        [string]$ServerProfile,
+        [object]$Lifecycle)
+
+    $restorationDocument = [ordered]@{
+        schema = 'hlclient.functional-runtime-restoration.v1'
+        run_id = $RunId
+        owned_process_cleanup = $(if ($OwnedProcessesStopped) {
+                'exact'
+            } else { 'incomplete' })
+        research_restoration = $(if ($ResearchRestorationExact) {
+                'exact'
+            } else { 'not_exact' })
+        before_manifest_sha256 = $BeforeManifestSha256
+        after_manifest_sha256 = $AfterManifestSha256
+    }
+    Write-AtomicJsonNoOverwrite `
+        (Join-Path $RunRoot 'restoration-attestation.functional.json') `
+        $restorationDocument 'functional runtime restoration attestation' `
+        $DirectoryCapability
+
+    if (-not $PublishComplete) {
+        return [pscustomobject]@{
+            ManifestPublished = $false
+            Result = 'functional_runtime_capture_incomplete'
+        }
+    }
+    if (-not $OwnedProcessesStopped -or -not $ResearchRestorationExact -or
+        -not $RelayReady -or -not $ServerReady -or -not $ClientReady -or
+        -not $TransportComplete) {
+        throw 'Functional complete publication prerequisites are inconsistent.'
+    }
+    if ($null -eq $Lifecycle) {
+        throw 'Functional complete publication lacks lifecycle data.'
+    }
+    $lifecycleValues = @{}
+    if ($Lifecycle -is [Collections.IDictionary]) {
+        foreach ($key in $Lifecycle.Keys) {
+            $lifecycleValues[[string]$key] = [string]$Lifecycle[$key]
+        }
+    } else {
+        foreach ($property in $Lifecycle.PSObject.Properties) {
+            $lifecycleValues[[string]$property.Name] = [string]$property.Value
+        }
+    }
+    foreach ($key in @(
+            'lifecycle-clock', 'lifecycle-unit',
+            'requested-maximum-duration-ms',
+            'required-runtime-interval-ms',
+            'client-map-entry-observed-ms',
+            'functional-interval-completed-ms', 'shutdown-requested-ms',
+            'relay-stop-requested-ms', 'relay-finalization-completed-ms',
+            'stop-reason', 'stock-shutdown-method')) {
+        if (-not $lifecycleValues.ContainsKey($key)) {
+            throw "Functional lifecycle field is missing: $key."
+        }
+    }
+    [Int64]$requestedMaximumMs = $lifecycleValues[
+        'requested-maximum-duration-ms']
+    [Int64]$requiredIntervalMs = $lifecycleValues[
+        'required-runtime-interval-ms']
+    [Int64]$mapEntryMs = $lifecycleValues['client-map-entry-observed-ms']
+    [Int64]$intervalCompleteMs = $lifecycleValues[
+        'functional-interval-completed-ms']
+    [Int64]$shutdownRequestedMs = $lifecycleValues['shutdown-requested-ms']
+    [Int64]$relayStopMs = $lifecycleValues['relay-stop-requested-ms']
+    [Int64]$relayFinalizedMs = $lifecycleValues[
+        'relay-finalization-completed-ms']
+    if ($lifecycleValues['lifecycle-clock'] -cnotin @(
+            'steady-clock', 'scaled-steady-clock') -or
+        $lifecycleValues['lifecycle-unit'] -cne 'milliseconds' -or
+        $requestedMaximumMs -ne ([Int64]$MaximumDuration * 1000) -or
+        $requiredIntervalMs -ne 15000 -or $mapEntryMs -lt 0 -or
+        $intervalCompleteMs -lt ($mapEntryMs + $requiredIntervalMs) -or
+        $shutdownRequestedMs -lt $intervalCompleteMs -or
+        $relayStopMs -lt $shutdownRequestedMs -or
+        $relayFinalizedMs -lt $relayStopMs -or
+        $relayFinalizedMs -ge $requestedMaximumMs -or
+        $lifecycleValues['stop-reason'] -cne
+            'functional-interval-complete' -or
+        $lifecycleValues['stock-shutdown-method'] -cne
+            'owned-process-terminate') {
+        throw 'Functional lifecycle ordering or identity is invalid.'
+    }
+
+    $fileBindings = [ordered]@{}
+    foreach ($name in @(
+            'capture-metadata.json', 'transport-journal.jsonl',
+            'version-observation.staged.json',
+            'isolation-attestation.staged.json')) {
+        $path = Join-Path $RunRoot $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Functional publication input is missing: $name."
+        }
+        Assert-NoReparsePoint $path "functional publication input $name"
+        Assert-NoHardLink $path "functional publication input $name"
+        $fileBindings[$name] = [ordered]@{
+            byte_length = (Get-Item -LiteralPath $path).Length
+            sha256 = Get-FileSha256 $path
+        }
+    }
+    $functionalManifest = [ordered]@{
+        schema = 'hlclient.functional-runtime-capture.v1'
+        purpose = 'functional_runtime_capture'
+        campaign_evidence_eligible = $false
+        run_id = $RunId
+        recorded_by_stock_pair = $true
+        validated_by_our_decoder = $false
+        route = 'stock_client_loopback_relay_stock_hlds'
+        relay_policy = 'byte_preserving_owning_session_no_perturbation'
+        game = $GameName
+        map = $MapName
+        maximum_duration_seconds = $MaximumDuration
+        output_role = 'functional-runtime-capture'
+        server_profile_id = $ServerProfile
+        client_steam_argument = 'present'
+        external_steam_state = 'not_assessed'
+        lifecycle_clock = $lifecycleValues['lifecycle-clock']
+        lifecycle_unit = $lifecycleValues['lifecycle-unit']
+        requested_maximum_duration_ms = $requestedMaximumMs
+        required_runtime_interval_ms = $requiredIntervalMs
+        client_map_entry_observed_ms = $mapEntryMs
+        functional_interval_completed_ms = $intervalCompleteMs
+        shutdown_requested_ms = $shutdownRequestedMs
+        relay_stop_requested_ms = $relayStopMs
+        relay_finalization_completed_ms = $relayFinalizedMs
+        stop_reason = $lifecycleValues['stop-reason']
+        stock_shutdown_method = $lifecycleValues['stock-shutdown-method']
+        capture_status = 'complete'
+        owned_process_cleanup = 'exact'
+        research_restoration = 'exact'
+        capture_metadata_byte_length =
+            $fileBindings['capture-metadata.json'].byte_length
+        capture_metadata_sha256 =
+            $fileBindings['capture-metadata.json'].sha256
+        transport_journal_byte_length =
+            $fileBindings['transport-journal.jsonl'].byte_length
+        transport_journal_sha256 =
+            $fileBindings['transport-journal.jsonl'].sha256
+        version_observation_byte_length =
+            $fileBindings['version-observation.staged.json'].byte_length
+        version_observation_sha256 =
+            $fileBindings['version-observation.staged.json'].sha256
+        isolation_attestation_byte_length =
+            $fileBindings['isolation-attestation.staged.json'].byte_length
+        isolation_attestation_sha256 =
+            $fileBindings['isolation-attestation.staged.json'].sha256
+        result = 'functional_runtime_capture_complete'
+    }
+    Write-AtomicJsonNoOverwrite `
+        (Join-Path $RunRoot 'functional-runtime-capture.json') `
+        $functionalManifest 'functional runtime capture manifest' `
+        $DirectoryCapability
+    return [pscustomobject]@{
+        ManifestPublished = $true
+        Result = 'functional_runtime_capture_complete'
+    }
 }
 
 function Write-AtomicJsonBatchNoOverwrite {
@@ -3695,8 +4797,12 @@ function Write-StagedRestorationAttestation {
     $externalStatus = if ($ExternalBefore.ManifestSha256 -ceq
         $ExternalAfter.ManifestSha256) { 'none' } else { 'changed' }
     $value = [ordered]@{
-        schema = 'hlclient.stock-runtime-restoration.v1'
+        schema = 'hlclient.stock-runtime-restoration.v2'
         external_file_drift = $externalStatus
+        raw_external_state = $ExternalDifference.raw_external_state
+        protected_projection = $ExternalDifference.protected_projection
+        steam_rewrite_policy_id = $ExternalDifference.policy_id
+        policy_decision = $ExternalDifference.policy_decision
         snapshot_entry_count = $Before.EntryCount
         pre_manifest_sha256 = $Before.ManifestSha256
         post_manifest_sha256 = $After.ManifestSha256
@@ -4010,6 +5116,1197 @@ if ($PSCmdlet.ParameterSetName -eq 'DirectoryCapabilityBootstrap') {
     return
 }
 
+if ($PSCmdlet.ParameterSetName -eq 'FunctionalResearchProjectionSelfTest') {
+    $systemTemporaryRoot =
+        [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+    $testRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
+        'hlclient-functional-research-projection-' +
+        [Guid]::NewGuid().ToString('N'))))
+    $researchRoot = Join-Path $testRoot 'research'
+    $sourceRoot = Join-Path $testRoot 'steam\steamapps\common\Half-Life'
+    $script:AppManifestPath = Join-Path $testRoot `
+        'steam\steamapps\appmanifest_70.acf'
+
+    function Write-FunctionalProjectionFixtureFile {
+        param([string]$Base, [string]$Relative, [string]$Content)
+        $path = Join-Path $Base ($Relative.Replace('/', '\'))
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $path)) | Out-Null
+        [IO.File]::WriteAllText(
+            $path, $Content, [Text.UTF8Encoding]::new($false))
+    }
+
+    try {
+        [IO.Directory]::CreateDirectory(
+            (Split-Path -Parent $script:AppManifestPath)) | Out-Null
+        [IO.File]::WriteAllText(
+            $script:AppManifestPath, 'fixture',
+            [Text.UTF8Encoding]::new($false))
+        $projectionFiles = @(
+            'hl.exe', 'hlds.exe', 'valve/cl_dlls/client.dll',
+            'valve/dlls/hl.dll', 'valve/liblist.gam',
+            'valve/maps/boot_camp.bsp', 'steam_appid.txt',
+            'valve/config.cfg', 'valve/voice_ban.dt',
+            'platform/config/InGameDialogConfig.vdf',
+            'platform/config/ServerBrowser.vdf')
+        foreach ($relative in $projectionFiles) {
+            Write-FunctionalProjectionFixtureFile `
+                $sourceRoot $relative ('same:' + $relative)
+            Write-FunctionalProjectionFixtureFile `
+                $researchRoot $relative ('same:' + $relative)
+        }
+
+        # This represents a file installed after the v3 research copy was
+        # prepared. It must not retroactively become part of that projection.
+        Write-FunctionalProjectionFixtureFile $sourceRoot `
+            'valve/post-preparation-source-only.cfg' 'later-source-file'
+        $accepted = Assert-FunctionalResearchProjection `
+            $researchRoot @(Get-BoundedItems $researchRoot)
+        if ($accepted.Status -cne 'prepared_projection_content_verified') {
+            throw 'Later source-only file did not preserve the prepared projection.'
+        }
+
+        Write-FunctionalProjectionFixtureFile $researchRoot `
+            'valve/unapproved-research-only.cfg' 'research-only-file'
+        $researchOnlyRejected = $false
+        try {
+            [void](Assert-FunctionalResearchProjection `
+                $researchRoot @(Get-BoundedItems $researchRoot))
+        } catch {
+            if ($_.Exception.Message -ceq
+                    'Functional research projection has an unapproved extra path.') {
+                $researchOnlyRejected = $true
+            } else { throw }
+        }
+        if (-not $researchOnlyRejected) {
+            throw 'Unapproved research-only file was not rejected.'
+        }
+        [IO.File]::Delete((Join-Path $researchRoot `
+            'valve\unapproved-research-only.cfg'))
+
+        Write-FunctionalProjectionFixtureFile $researchRoot 'hl.exe' `
+            'changed:hl.exe'
+        $changedCriticalRejected = $false
+        try {
+            [void](Assert-FunctionalResearchProjection `
+                $researchRoot @(Get-BoundedItems $researchRoot))
+        } catch {
+            if ($_.Exception.Message -ceq
+                    'Functional research projection immutable content changed.') {
+                $changedCriticalRejected = $true
+            } else { throw }
+        }
+        if (-not $changedCriticalRejected) {
+            throw 'Changed critical research binary was not rejected.'
+        }
+        Write-FunctionalProjectionFixtureFile $researchRoot 'hl.exe' 'same:hl.exe'
+
+        $requiredMapPath = Join-Path $researchRoot 'valve\maps\boot_camp.bsp'
+        [IO.File]::Delete($requiredMapPath)
+        $missingCriticalRejected = $false
+        try {
+            [void](Assert-FunctionalResearchProjection `
+                $researchRoot @(Get-BoundedItems $researchRoot))
+        } catch {
+            if ($_.Exception.Message -ceq
+                    'Functional research projection critical identity changed.') {
+                $missingCriticalRejected = $true
+            } else { throw }
+        }
+        if (-not $missingCriticalRejected) {
+            throw 'Missing required research map was not rejected.'
+        }
+        Write-FunctionalProjectionFixtureFile $researchRoot `
+            'valve/maps/boot_camp.bsp' 'same:valve/maps/boot_camp.bsp'
+
+        Write-FunctionalProjectionFixtureFile $researchRoot `
+            'valve/config.cfg' 'allowed-runtime-mutation'
+        $mutableAccepted = Assert-FunctionalResearchProjection `
+            $researchRoot @(Get-BoundedItems $researchRoot)
+        if ($mutableAccepted.Status -cne 'prepared_projection_content_verified') {
+            throw 'Approved functional runtime mutation was not accepted.'
+        }
+        Write-FunctionalProjectionFixtureFile $researchRoot `
+            'valve/config.cfg' 'same:valve/config.cfg'
+        if ((Get-FileSha256 (Join-Path $researchRoot 'valve\config.cfg')) -cne
+                (Get-FileSha256 (Join-Path $sourceRoot 'valve\config.cfg'))) {
+            throw 'Approved functional runtime mutation was not restored exactly.'
+        }
+
+        Write-Output '[stock-runtime-projection-test] later-source-addition=accepted'
+        Write-Output '[stock-runtime-projection-test] research-only-addition=rejected'
+        Write-Output '[stock-runtime-projection-test] changed-critical-binary=rejected'
+        Write-Output '[stock-runtime-projection-test] missing-required-map=rejected'
+        Write-Output '[stock-runtime-projection-test] mutable-path=accepted-and-restored'
+        Write-Output '[stock-runtime-projection-test] strict-policy=separate'
+        Write-Output '[stock-runtime-projection-test] stock-launch=absent'
+        Write-Output '[stock-runtime-projection-test] result=success'
+    } finally {
+        if (Test-Path -LiteralPath $testRoot) {
+            Remove-SafeTree $testRoot $systemTemporaryRoot
+        }
+    }
+    return
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'FunctionalPublicationRoundtripSelfTest') {
+    if ($env:OS -cne 'Windows_NT') {
+        throw 'Functional publication roundtrip requires Windows.'
+    }
+    $captureFixtureTool = Resolve-TrustedRepositoryTool $CaptureToolPath `
+        'hlclient_stock_runtime_capture.exe' 'stock runtime capture fixture'
+    $functionalChecker = Resolve-TrustedRepositoryTool $CheckerPath `
+        'hlclient_stock_runtime_check.exe' 'stock runtime functional checker'
+    $functionalHlclient = Resolve-TrustedRepositoryTool $HlclientPath `
+        'hlclient.exe' 'functional replay application'
+    $lifecycleOrchestrator = Resolve-TrustedRepositoryTool $OrchestratorPath `
+        'hlclient_stock_runtime_orchestrator.exe' `
+        'functional lifecycle orchestrator'
+    $lifecycleFakeClient = Resolve-TrustedRepositoryTool $FakeClientPath `
+        'hlclient_stock_runtime_fake_client.exe' `
+        'functional lifecycle fake client'
+    $lifecycleFakeServer = Resolve-TrustedRepositoryTool $FakeServerPath `
+        'hlclient_stock_runtime_fake_server.exe' `
+        'functional lifecycle fake server'
+    [Collections.Generic.List[object]]$createdRuns = @()
+
+    function Invoke-FunctionalPublicationTool {
+        param([string]$Path, [string[]]$Arguments, [string]$Label)
+        $savedPreference = $ErrorActionPreference
+        $locationPushed = $false
+        try {
+            $ErrorActionPreference = 'Continue'
+            Push-Location -LiteralPath $repositoryRoot
+            $locationPushed = $true
+            [string[]]$lines = @(& $Path @Arguments 2>&1 |
+                    ForEach-Object { $_.ToString() })
+            $exitCode = $LASTEXITCODE
+        } finally {
+            if ($locationPushed) { Pop-Location }
+            $ErrorActionPreference = $savedPreference
+        }
+        if ($lines.Count -gt 256 -or
+            [Text.Encoding]::UTF8.GetByteCount(($lines -join "`n")) -gt 131072) {
+            throw "$Label output exceeded its bound."
+        }
+        return [pscustomobject]@{ ExitCode = $exitCode; Lines = $lines }
+    }
+
+    function New-FunctionalProducerFixture {
+        param(
+            [int]$AuxiliaryCount,
+            [string]$Role = 'functional-runtime-capture',
+            [switch]$ChangedAuxiliary,
+            [switch]$AuxiliaryBeforeOwning)
+        $parent = if ($Role -ceq 'functional-runtime-capture') {
+            $requiredFunctionalRuntimeCaptureRoot
+        } else { $requiredOutputRoot }
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+            [IO.Directory]::CreateDirectory($parent) | Out-Null
+        }
+        $runId = [Guid]::NewGuid().ToString('N')
+        $runRoot = Join-Path $parent $runId
+        [IO.Directory]::CreateDirectory($runRoot) | Out-Null
+        [void]$createdRuns.Add([pscustomobject]@{
+                Root = $runRoot
+                Parent = $parent
+            })
+        $arguments = @(
+            '--validate-functional-publication-fixture',
+            '--output-run-root', $runRoot,
+            '--output-role', $Role,
+            '--fixture-auxiliary-count', [string]$AuxiliaryCount,
+            '--precreated-empty-run-root')
+        if ($ChangedAuxiliary) { $arguments += '--fixture-change-auxiliary' }
+        if ($AuxiliaryBeforeOwning) {
+            $arguments += '--fixture-auxiliary-before-owning'
+        }
+        $result = Invoke-FunctionalPublicationTool `
+            $captureFixtureTool $arguments 'functional producer fixture'
+        return [pscustomobject]@{
+            RunId = $runId
+            RunRoot = $runRoot
+            Result = $result
+        }
+    }
+
+    function Add-FunctionalFixturePublicationInputs {
+        param([string]$RunRoot)
+        [IO.Directory]::CreateDirectory((Join-Path $RunRoot 'logs')) | Out-Null
+        $capability = New-RunDirectoryCapability $RunRoot
+        try {
+            $version = [ordered]@{
+                schema = 'hlclient.stock-runtime-version-observation.v1'
+                map_category = 'boot_camp'
+                client_file_version = '1.1.1.1'
+                client_pe_machine = 'x86'
+                client_signature = 'valid'
+                client_profile_fingerprint = ('a' * 64)
+                server_launcher_version = '4.1.1.1'
+                server_pe_machine = 'x86'
+                server_signature = 'valid'
+                server_profile_fingerprint = ('b' * 64)
+                steam_app_id = 70
+                steam_build_id = 15961492
+                server_engine_version = '1.1.2.2'
+                protocol = 48
+                server_build = 10210
+                evidence_status = 'observed'
+            }
+            $isolation = [ordered]@{
+                schema = 'hlclient.stock-runtime-isolation-attestation.v1'
+                session_type = 'dynamic'
+                persistent_rule_count = 0
+                ipv4_loopback = 'allowed'
+                ipv6_loopback = 'capability_unavailable'
+                non_loopback_canary = 'denied_os_classified'
+                cleanup_status = 'exact'
+                evidence_status = 'observed'
+            }
+            Write-AtomicJsonNoOverwrite `
+                (Join-Path $RunRoot 'version-observation.staged.json') `
+                $version 'functional fixture version observation' $capability
+            Write-AtomicJsonNoOverwrite `
+                (Join-Path $RunRoot 'isolation-attestation.staged.json') `
+                $isolation 'functional fixture isolation attestation' $capability
+        } finally {
+            $capability.Dispose()
+        }
+    }
+
+    function Complete-FunctionalFixturePublication {
+        param([object]$Fixture)
+        Add-FunctionalFixturePublicationInputs $Fixture.RunRoot
+        $fixtureLifecycle = [ordered]@{
+            'lifecycle-clock' = 'scaled-steady-clock'
+            'lifecycle-unit' = 'milliseconds'
+            'requested-maximum-duration-ms' = '90000'
+            'required-runtime-interval-ms' = '15000'
+            'client-map-entry-observed-ms' = '15000'
+            'functional-interval-completed-ms' = '30000'
+            'shutdown-requested-ms' = '30000'
+            'relay-stop-requested-ms' = '30001'
+            'relay-finalization-completed-ms' = '30002'
+            'stop-reason' = 'functional-interval-complete'
+            'stock-shutdown-method' = 'owned-process-terminate'
+        }
+        $capability = New-RunDirectoryCapability $Fixture.RunRoot
+        try {
+            $publication = Publish-FunctionalRuntimeCaptureArtifacts `
+                $Fixture.RunRoot $Fixture.RunId $capability `
+                $true $true $true ('c' * 64) ('c' * 64) `
+                $true $true $true $true valve boot_camp 90 `
+                'steam-hlds-10210-no-mode-banner-v1' $fixtureLifecycle
+            if (-not [bool]$publication.ManifestPublished) {
+                throw 'Functional fixture manifest was not published.'
+            }
+        } finally {
+            $capability.Dispose()
+        }
+    }
+
+    function Assert-FunctionalLoaderAndReplay {
+        param([object]$Fixture, [int]$AuxiliaryCount)
+        $checked = Invoke-FunctionalPublicationTool $functionalChecker @(
+            '--capture-root', $Fixture.RunRoot,
+            '--scenario', 'netchan',
+            '--publication-stage', 'functional') `
+            'functional corpus checker'
+        if ($checked.ExitCode -ne 0 -or
+            $checked.Lines -cnotcontains '[stock-runtime] transport-valid=true' -or
+            $checked.Lines -cnotcontains (
+                '[stock-runtime] auxiliary-observed=' + $AuxiliaryCount) -or
+            $checked.Lines -cnotcontains '[stock-runtime] delivered-datagrams=5' -or
+            $checked.Lines -cnotcontains '[stock-runtime] result=netchan') {
+            throw ('Production loader or transport replay rejected a published ' +
+                'fixture: exit=' + $checked.ExitCode + '; output=' +
+                ($checked.Lines -join '|'))
+        }
+        return $checked
+    }
+
+    $stockNames = @('hl', 'hlds', 'Steam', 'hlfx')
+    $stockBefore = @(Get-Process -Name $stockNames -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Id | Sort-Object)
+    try {
+        $lifecycleRunId = [Guid]::NewGuid().ToString('N')
+        $lifecycleRunRoot = Join-Path $requiredFunctionalRuntimeCaptureRoot `
+            $lifecycleRunId
+        [void]$createdRuns.Add([pscustomobject]@{
+                Root = $lifecycleRunRoot
+                Parent = $requiredFunctionalRuntimeCaptureRoot
+            })
+        $firstSocket = [Net.Sockets.UdpClient]::new(0)
+        try {
+            $lifecycleRelayPort = `
+                ([Net.IPEndPoint]$firstSocket.Client.LocalEndPoint).Port
+        } finally { $firstSocket.Dispose() }
+        do {
+            $secondSocket = [Net.Sockets.UdpClient]::new(0)
+            try {
+                $lifecycleServerPort = `
+                    ([Net.IPEndPoint]$secondSocket.Client.LocalEndPoint).Port
+            } finally { $secondSocket.Dispose() }
+        } while ($lifecycleServerPort -eq $lifecycleRelayPort)
+        $lifecycleClock = [Diagnostics.Stopwatch]::StartNew()
+        $lifecycle = Invoke-FunctionalPublicationTool `
+            $lifecycleOrchestrator @(
+                '--validate-functional-lifecycle',
+                '--run-root', $lifecycleRunRoot,
+                '--client', $lifecycleFakeClient,
+                '--server', $lifecycleFakeServer,
+                '--relay', $captureFixtureTool,
+                '--game', 'valve', '--map', 'boot_camp',
+                '--scenario', 'idle-runtime',
+                '--output-role', 'functional-runtime-capture',
+                '--relay-port', [string]$lifecycleRelayPort,
+                '--server-port', [string]$lifecycleServerPort,
+                '--max-duration-seconds', '90') `
+            'functional lifecycle orchestration fixture'
+        $lifecycleClock.Stop()
+        foreach ($requiredLine in @(
+                '[functional-lifecycle-test] requested-maximum-duration-ms=90000',
+                '[functional-lifecycle-test] required-runtime-interval-ms=15000',
+                '[functional-lifecycle-test] stop-reason=functional-interval-complete',
+                '[functional-lifecycle-test] stock-shutdown-method=owned-process-terminate',
+                '[functional-lifecycle-test] peer-shutdown-after-relay-finalization=true',
+                '[functional-lifecycle-test] result=success')) {
+            if ($lifecycle.Lines -cnotcontains $requiredLine) {
+                throw "Functional lifecycle output is missing: $requiredLine"
+            }
+        }
+        if ($lifecycle.ExitCode -ne 0 -or
+            $lifecycleClock.ElapsedMilliseconds -ge 10000 -or
+            -not (Test-Path -LiteralPath (Join-Path $lifecycleRunRoot `
+                    'transport-journal.jsonl') -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $lifecycleRunRoot `
+                    'capture-metadata.json') -PathType Leaf)) {
+            throw 'Production functional lifecycle did not stop and flush early.'
+        }
+        $lifecycleFixture = [pscustomobject]@{
+            RunId = $lifecycleRunId
+            RunRoot = $lifecycleRunRoot
+        }
+        $lifecycleMetadata = Get-Content -Raw -LiteralPath `
+            (Join-Path $lifecycleRunRoot 'capture-metadata.json') |
+            ConvertFrom-Json
+        if ([Int64]$lifecycleMetadata.auxiliary_observed_datagrams -ne 2 -or
+            [Int64]$lifecycleMetadata.emitted_datagrams -ne
+                ([Int64]$lifecycleMetadata.observed_datagrams - 2)) {
+            throw 'Lifecycle auxiliary observations were delivered or lost.'
+        }
+        Complete-FunctionalFixturePublication $lifecycleFixture
+        $lifecycleLoaded = Invoke-FunctionalPublicationTool `
+            $functionalChecker @(
+                '--capture-root', $lifecycleRunRoot,
+                '--scenario', 'transport',
+                '--publication-stage', 'functional') `
+            'functional lifecycle corpus loader'
+        if ($lifecycleLoaded.ExitCode -ne 0 -or
+            $lifecycleLoaded.Lines -cnotcontains `
+                '[stock-runtime] transport-valid=true') {
+            throw 'Lifecycle producer output was rejected by the production loader.'
+        }
+
+        $limitRunId = [Guid]::NewGuid().ToString('N')
+        $limitRunRoot = Join-Path $requiredFunctionalRuntimeCaptureRoot $limitRunId
+        [void]$createdRuns.Add([pscustomobject]@{
+                Root = $limitRunRoot
+                Parent = $requiredFunctionalRuntimeCaptureRoot
+            })
+        $firstSocket = [Net.Sockets.UdpClient]::new(0)
+        try {
+            $limitRelayPort = `
+                ([Net.IPEndPoint]$firstSocket.Client.LocalEndPoint).Port
+        } finally { $firstSocket.Dispose() }
+        do {
+            $secondSocket = [Net.Sockets.UdpClient]::new(0)
+            try {
+                $limitServerPort = `
+                    ([Net.IPEndPoint]$secondSocket.Client.LocalEndPoint).Port
+            } finally { $secondSocket.Dispose() }
+        } while ($limitServerPort -eq $limitRelayPort)
+        $limitLifecycle = Invoke-FunctionalPublicationTool `
+            $lifecycleOrchestrator @(
+                '--validate-functional-lifecycle',
+                '--validate-functional-lifecycle-limit',
+                '--run-root', $limitRunRoot,
+                '--client', $lifecycleFakeClient,
+                '--server', $lifecycleFakeServer,
+                '--relay', $captureFixtureTool,
+                '--game', 'valve', '--map', 'boot_camp',
+                '--scenario', 'idle-runtime',
+                '--output-role', 'functional-runtime-capture',
+                '--relay-port', [string]$limitRelayPort,
+                '--server-port', [string]$limitServerPort,
+                '--max-duration-seconds', '90',
+                '--max-client-packets', '4') `
+            'functional lifecycle limit fixture'
+        foreach ($requiredLine in @(
+                '[functional-lifecycle-limit-test] stop-reason=client-packet-limit',
+                '[functional-lifecycle-limit-test] journal=preserved',
+                '[functional-lifecycle-limit-test] complete-manifest=absent',
+                '[functional-lifecycle-limit-test] result=success')) {
+            if ($limitLifecycle.Lines -cnotcontains $requiredLine) {
+                throw "Functional lifecycle limit output is missing: $requiredLine"
+            }
+        }
+        $limitMetadata = Get-Content -Raw -LiteralPath `
+            (Join-Path $limitRunRoot 'capture-metadata.json') | ConvertFrom-Json
+        $limitJournal = @(Get-Content -LiteralPath `
+            (Join-Path $limitRunRoot 'transport-journal.jsonl') |
+            ForEach-Object { $_ | ConvertFrom-Json })
+        $limitRaw = @(Get-ChildItem -LiteralPath (Join-Path $limitRunRoot 'raw') `
+            -File)
+        $limitObservedOrdinals = @($limitJournal | ForEach-Object {
+                [Int64]$_.observed_ordinal
+            })
+        if ($limitLifecycle.ExitCode -ne 0 -or
+            [bool]$limitMetadata.bounded_transport_complete -or
+            [Int64]$limitMetadata.client_packets -ne 4 -or
+            $limitJournal.Count -lt 1 -or
+            $limitJournal.Count -ne [Int64]$limitMetadata.observed_datagrams -or
+            $limitRaw.Count -ne $limitJournal.Count -or
+            (Compare-Object -ReferenceObject @(0..($limitJournal.Count - 1)) `
+                -DifferenceObject $limitObservedOrdinals) -or
+            (Test-Path -LiteralPath (Join-Path $limitRunRoot `
+                    'functional-runtime-capture.json'))) {
+            throw 'Controlled capture limit did not preserve an exact incomplete journal.'
+        }
+        $limitLoader = Invoke-FunctionalPublicationTool `
+            $functionalChecker @(
+                '--capture-root', $limitRunRoot,
+                '--scenario', 'transport',
+                '--publication-stage', 'functional') `
+            'functional incomplete limit corpus rejection'
+        if ($limitLoader.ExitCode -eq 0) {
+            throw 'Functional loader accepted a limit-truncated capture as complete.'
+        }
+
+        $writerFailureRunId = [Guid]::NewGuid().ToString('N')
+        $writerFailureRunRoot = Join-Path `
+            $requiredFunctionalRuntimeCaptureRoot $writerFailureRunId
+        [void]$createdRuns.Add([pscustomobject]@{
+                Root = $writerFailureRunRoot
+                Parent = $requiredFunctionalRuntimeCaptureRoot
+            })
+        $firstSocket = [Net.Sockets.UdpClient]::new(0)
+        try {
+            $writerFailureRelayPort =
+                ([Net.IPEndPoint]$firstSocket.Client.LocalEndPoint).Port
+        } finally { $firstSocket.Dispose() }
+        do {
+            $secondSocket = [Net.Sockets.UdpClient]::new(0)
+            try {
+                $writerFailureServerPort =
+                    ([Net.IPEndPoint]$secondSocket.Client.LocalEndPoint).Port
+            } finally { $secondSocket.Dispose() }
+        } while ($writerFailureServerPort -eq $writerFailureRelayPort)
+        $writerFailureLifecycle = Invoke-FunctionalPublicationTool `
+            $lifecycleOrchestrator @(
+                '--validate-functional-lifecycle',
+                '--validate-functional-lifecycle-writer-failure',
+                '--run-root', $writerFailureRunRoot,
+                '--client', $lifecycleFakeClient,
+                '--server', $lifecycleFakeServer,
+                '--relay', $captureFixtureTool,
+                '--game', 'valve', '--map', 'boot_camp',
+                '--scenario', 'idle-runtime',
+                '--output-role', 'functional-runtime-capture',
+                '--relay-port', [string]$writerFailureRelayPort,
+                '--server-port', [string]$writerFailureServerPort,
+                '--max-duration-seconds', '90') `
+            'functional lifecycle writer failure fixture'
+        foreach ($requiredLine in @(
+                '[functional-lifecycle-writer-failure-test] writer-error=distinct',
+                '[functional-lifecycle-writer-failure-test] metadata=published-incomplete',
+                '[functional-lifecycle-writer-failure-test] complete-manifest=absent',
+                '[functional-lifecycle-writer-failure-test] peer-shutdown-after-relay-finalization=true',
+                '[functional-lifecycle-writer-failure-test] result=success')) {
+            if ($writerFailureLifecycle.Lines -cnotcontains $requiredLine) {
+                throw "Functional writer failure output is missing: $requiredLine"
+            }
+        }
+        $writerFailureMetadata = Get-Content -Raw -LiteralPath `
+            (Join-Path $writerFailureRunRoot 'capture-metadata.json') |
+            ConvertFrom-Json
+        if ($writerFailureLifecycle.ExitCode -ne 0 -or
+            [bool]$writerFailureMetadata.bounded_transport_complete -or
+            -not (Test-Path -LiteralPath (Join-Path $writerFailureRunRoot `
+                    'transport-journal.jsonl') -PathType Container) -or
+            (Test-Path -LiteralPath (Join-Path $writerFailureRunRoot `
+                    'functional-runtime-capture.json'))) {
+            throw 'Writer failure was promoted or did not retain incomplete metadata.'
+        }
+        $writerFailureLoader = Invoke-FunctionalPublicationTool `
+            $functionalChecker @(
+                '--capture-root', $writerFailureRunRoot,
+                '--scenario', 'transport',
+                '--publication-stage', 'functional') `
+            'functional writer failure corpus rejection'
+        if ($writerFailureLoader.ExitCode -eq 0) {
+            throw 'Functional loader accepted a writer-failed capture as complete.'
+        }
+
+        foreach ($injectedFailure in @('receive', 'send')) {
+            $injectedRunId = [Guid]::NewGuid().ToString('N')
+            $injectedRunRoot = Join-Path `
+                $requiredFunctionalRuntimeCaptureRoot $injectedRunId
+            [void]$createdRuns.Add([pscustomobject]@{
+                    Root = $injectedRunRoot
+                    Parent = $requiredFunctionalRuntimeCaptureRoot
+                })
+            $firstSocket = [Net.Sockets.UdpClient]::new(0)
+            try {
+                $injectedRelayPort =
+                    ([Net.IPEndPoint]$firstSocket.Client.LocalEndPoint).Port
+            } finally { $firstSocket.Dispose() }
+            do {
+                $secondSocket = [Net.Sockets.UdpClient]::new(0)
+                try {
+                    $injectedServerPort =
+                        ([Net.IPEndPoint]$secondSocket.Client.LocalEndPoint).Port
+                } finally { $secondSocket.Dispose() }
+            } while ($injectedServerPort -eq $injectedRelayPort)
+            $injectedLifecycle = Invoke-FunctionalPublicationTool `
+                $lifecycleOrchestrator @(
+                    '--validate-functional-lifecycle',
+                    '--validate-functional-lifecycle-injected-failure',
+                    $injectedFailure,
+                    '--run-root', $injectedRunRoot,
+                    '--client', $lifecycleFakeClient,
+                    '--server', $lifecycleFakeServer,
+                    '--relay', $captureFixtureTool,
+                    '--game', 'valve', '--map', 'boot_camp',
+                    '--scenario', 'idle-runtime',
+                    '--output-role', 'functional-runtime-capture',
+                    '--relay-port', [string]$injectedRelayPort,
+                    '--server-port', [string]$injectedServerPort,
+                    '--max-duration-seconds', '90') `
+                "functional lifecycle injected $injectedFailure fixture"
+            foreach ($requiredLine in @(
+                    "[functional-lifecycle-injected-failure-test] variant=$injectedFailure",
+                    '[functional-lifecycle-injected-failure-test] primary-error=retained',
+                    '[functional-lifecycle-injected-failure-test] journal=published-incomplete',
+                    '[functional-lifecycle-injected-failure-test] metadata=published-incomplete',
+                    '[functional-lifecycle-injected-failure-test] complete-manifest=absent',
+                    '[functional-lifecycle-injected-failure-test] peers-alive-through-relay-terminal=true',
+                    '[functional-lifecycle-injected-failure-test] result=success')) {
+                if ($injectedLifecycle.Lines -cnotcontains $requiredLine) {
+                    throw "Injected failure output is missing: $requiredLine"
+                }
+            }
+            $injectedMetadata = Get-Content -Raw -LiteralPath `
+                (Join-Path $injectedRunRoot 'capture-metadata.json') |
+                ConvertFrom-Json
+            $injectedJournal = @(Get-Content -LiteralPath `
+                (Join-Path $injectedRunRoot 'transport-journal.jsonl') |
+                ForEach-Object { $_ | ConvertFrom-Json })
+            if ($injectedLifecycle.ExitCode -ne 0 -or
+                [bool]$injectedMetadata.bounded_transport_complete -or
+                $injectedJournal.Count -lt 1 -or
+                (Test-Path -LiteralPath (Join-Path $injectedRunRoot `
+                        'functional-runtime-capture.json'))) {
+                throw "Injected $injectedFailure failure lost its incomplete corpus."
+            }
+            if ($injectedFailure -ceq 'send' -and
+                @($injectedJournal[0].emitted_ordinals).Count -ne 0) {
+                throw 'Injected send failure fabricated an emitted ordinal.'
+            }
+            $injectedLoader = Invoke-FunctionalPublicationTool `
+                $functionalChecker @(
+                    '--capture-root', $injectedRunRoot,
+                    '--scenario', 'transport',
+                    '--publication-stage', 'functional') `
+                "functional injected $injectedFailure corpus rejection"
+            if ($injectedLoader.ExitCode -eq 0) {
+                throw "Functional loader accepted injected $injectedFailure failure."
+            }
+        }
+
+        foreach ($auxiliaryCount in @(0, 1, 3)) {
+            $fixture = New-FunctionalProducerFixture $auxiliaryCount
+            if ($fixture.Result.ExitCode -ne 0) {
+                throw 'Production capture writer fixture failed.'
+            }
+            Complete-FunctionalFixturePublication $fixture
+            $checked = Assert-FunctionalLoaderAndReplay `
+                $fixture $auxiliaryCount
+            if ($checked.Lines -cnotcontains (
+                    '[stock-runtime] observed-datagrams=' +
+                    (5 + $auxiliaryCount)) -or
+                $fixture.Result.Lines -cnotcontains (
+                    '[stock-runtime-capture-fixture] auxiliary-observed=' +
+                    $auxiliaryCount)) {
+                throw 'Functional observed/auxiliary cardinality is inconsistent.'
+            }
+        }
+
+        $strict = New-FunctionalProducerFixture 1 'normal-campaign-run'
+        if ($strict.Result.ExitCode -ne 13 -or
+            (Test-Path -LiteralPath (Join-Path $strict.RunRoot `
+                    'functional-runtime-capture.json'))) {
+            throw 'Strict publication accepted functional auxiliary traffic.'
+        }
+        $changed = New-FunctionalProducerFixture 1 `
+            -ChangedAuxiliary
+        if ($changed.Result.ExitCode -ne 13 -or
+            $changed.Result.Lines -cnotcontains `
+                '[stock-runtime-capture-fixture] auxiliary-observed=0') {
+            throw 'Changed auxiliary query was not rejected.'
+        }
+        $beforeOwning = New-FunctionalProducerFixture 1 `
+            -AuxiliaryBeforeOwning
+        if ($beforeOwning.Result.ExitCode -ne 13 -or
+            $beforeOwning.Result.Lines -cnotcontains `
+                '[stock-runtime-capture-fixture] auxiliary-observed=0') {
+            throw 'Auxiliary query captured an owning endpoint.'
+        }
+
+        $withoutManifest = New-FunctionalProducerFixture 0
+        Add-FunctionalFixturePublicationInputs $withoutManifest.RunRoot
+        $missingManifestCheck = Invoke-FunctionalPublicationTool `
+            $functionalChecker @('--capture-root', $withoutManifest.RunRoot,
+                '--scenario', 'transport', '--publication-stage', 'functional') `
+            'missing functional manifest check'
+        if ($missingManifestCheck.ExitCode -eq 0) {
+            throw 'Functional loader accepted a missing final manifest.'
+        }
+
+        $missingJournal = New-FunctionalProducerFixture 0
+        [IO.File]::Delete((Join-Path $missingJournal.RunRoot `
+                'transport-journal.jsonl'))
+        Add-FunctionalFixturePublicationInputs $missingJournal.RunRoot
+        $capability = New-RunDirectoryCapability $missingJournal.RunRoot
+        $publicationFailed = $false
+        try {
+            try {
+                [void](Publish-FunctionalRuntimeCaptureArtifacts `
+                    $missingJournal.RunRoot $missingJournal.RunId $capability `
+                    $true $true $true ('c' * 64) ('c' * 64) `
+                    $true $true $true $true valve boot_camp 90 `
+                    'steam-hlds-10210-no-mode-banner-v1' ([ordered]@{
+                        'lifecycle-clock' = 'scaled-steady-clock'
+                        'lifecycle-unit' = 'milliseconds'
+                        'requested-maximum-duration-ms' = '90000'
+                        'required-runtime-interval-ms' = '15000'
+                        'client-map-entry-observed-ms' = '15000'
+                        'functional-interval-completed-ms' = '30000'
+                        'shutdown-requested-ms' = '30000'
+                        'relay-stop-requested-ms' = '30001'
+                        'relay-finalization-completed-ms' = '30002'
+                        'stop-reason' = 'functional-interval-complete'
+                        'stock-shutdown-method' = 'owned-process-terminate'
+                    }))
+            } catch { $publicationFailed = $true }
+        } finally { $capability.Dispose() }
+        if (-not $publicationFailed -or
+            (Test-Path -LiteralPath (Join-Path $missingJournal.RunRoot `
+                    'functional-runtime-capture.json'))) {
+            throw 'Finalization failure left a false complete manifest.'
+        }
+
+        $rawMismatch = New-FunctionalProducerFixture 0
+        Complete-FunctionalFixturePublication $rawMismatch
+        $rawPath = Join-Path $rawMismatch.RunRoot 'raw\00000000-c2s.bin'
+        $rawBytes = [IO.File]::ReadAllBytes($rawPath)
+        $rawBytes[0] = $rawBytes[0] -bxor 1
+        [IO.File]::WriteAllBytes($rawPath, $rawBytes)
+        $rawMismatchCheck = Invoke-FunctionalPublicationTool `
+            $functionalChecker @('--capture-root', $rawMismatch.RunRoot,
+                '--scenario', 'transport', '--publication-stage', 'functional') `
+            'raw mismatch check'
+        if ($rawMismatchCheck.ExitCode -eq 0) {
+            throw 'Functional loader accepted changed raw bytes.'
+        }
+
+        $semanticFailure = New-FunctionalProducerFixture 1
+        Complete-FunctionalFixturePublication $semanticFailure
+        $beforeCaptureHash = Get-FileSha256 `
+            (Join-Path $semanticFailure.RunRoot 'capture-metadata.json')
+        $beforeJournalHash = Get-FileSha256 `
+            (Join-Path $semanticFailure.RunRoot 'transport-journal.jsonl')
+        $application = Invoke-FunctionalPublicationTool $functionalHlclient @(
+            '--renderer', 'null', '--runtime-replay-capture',
+            $semanticFailure.RunRoot) 'functional replay application'
+        if ($application.ExitCode -eq 0 -or
+            $beforeCaptureHash -cne (Get-FileSha256 `
+                (Join-Path $semanticFailure.RunRoot 'capture-metadata.json')) -or
+            $beforeJournalHash -cne (Get-FileSha256 `
+                (Join-Path $semanticFailure.RunRoot 'transport-journal.jsonl')) -or
+            -not (Test-Path -LiteralPath (Join-Path $semanticFailure.RunRoot `
+                    'functional-runtime-capture.json'))) {
+            throw 'Semantic replay failure changed or deleted a valid capture.'
+        }
+
+        $stockAfter = @(Get-Process -Name $stockNames -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Id | Sort-Object)
+        if (Compare-Object -ReferenceObject $stockBefore `
+                -DifferenceObject $stockAfter) {
+            throw 'Functional publication roundtrip changed stock-process inventory.'
+        }
+        Write-Output '[functional-publication-test] producer=production-writer'
+        Write-Output '[functional-publication-test] lifecycle=interval-stop-flush-loaded'
+        Write-Output '[functional-publication-test] lifecycle-auxiliary=observed-not-delivered'
+        Write-Output '[functional-publication-test] limit=incomplete-journal-preserved'
+        Write-Output '[functional-publication-test] consumer=production-functional-loader'
+        Write-Output '[functional-publication-test] transport-replay=complete'
+        Write-Output '[functional-publication-test] auxiliary-accounting=observed-not-delivered'
+        Write-Output '[functional-publication-test] strict-policy=separate'
+        Write-Output '[functional-publication-test] invalid-context=rejected'
+        Write-Output '[functional-publication-test] missing-artifacts=rejected'
+        Write-Output '[functional-publication-test] raw-integrity=rejected-on-change'
+        Write-Output '[functional-publication-test] finalization-failure=no-complete-manifest'
+        Write-Output '[functional-publication-test] semantic-failure=capture-retained'
+        Write-Output '[functional-publication-test] stock-launch=absent'
+        Write-Output '[functional-publication-test] result=success'
+    } finally {
+        foreach ($created in $createdRuns) {
+            if (Test-Path -LiteralPath $created.Root -PathType Container) {
+                Remove-SafeTree $created.Root $created.Parent
+            }
+        }
+    }
+    return
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'FunctionalFailureRetentionSelfTest') {
+    $systemTemporaryRoot =
+        [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+    $testRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
+        'hlclient-functional-failure-retention-' +
+        [Guid]::NewGuid().ToString('N'))))
+    $researchRoot = Join-Path $testRoot 'research'
+    $outputRoot = Join-Path $testRoot 'manual-artifacts\research-copy-smoke'
+    $runRoot = Join-Path $outputRoot ([Guid]::NewGuid().ToString('N'))
+    $restorationGuard = $null
+    $runCapability = $null
+    try {
+        [IO.Directory]::CreateDirectory($researchRoot) | Out-Null
+        [IO.Directory]::CreateDirectory($runRoot) | Out-Null
+        [IO.File]::WriteAllText(
+            (Join-Path $researchRoot $markerName), $markerText,
+            [Text.UTF8Encoding]::new($false))
+        $statePath = Join-Path $researchRoot 'state.bin'
+        [IO.File]::WriteAllText(
+            $statePath, 'before', [Text.UTF8Encoding]::new($false))
+        $before = Get-ResearchSnapshot $researchRoot
+        $restorationGuard = New-RestorationGuard $researchRoot $before
+        [IO.File]::WriteAllText(
+            $statePath, 'mutated', [Text.UTF8Encoding]::new($false))
+
+        $stagedPath = Join-Path $runRoot 'functional-smoke.staged.json'
+        $staged = [ordered]@{
+            schema = 'hlclient.local-research-copy-smoke.v2'
+            mode = 'local_research_copy_smoke_v1'
+            purpose = 'functional_smoke'
+            evidence_eligible = $false
+            connection_status = 'unknown'
+            client_map_entry = 'unknown'
+            last_confirmed_stage = 'connect_requested'
+            primary_failure = 'client-connect-state-unknown'
+            owned_process_cleanup = 'exact'
+            restoration_status = 'wrapper_pending'
+            publication_status = 'staged_after_process_cleanup'
+        }
+        [IO.File]::WriteAllText(
+            $stagedPath, (($staged | ConvertTo-Json -Depth 4) + "`r`n"),
+            [Text.UTF8Encoding]::new($false))
+
+        $after = Restore-ResearchState $restorationGuard
+        if ($after.ManifestSha256 -cne $before.ManifestSha256 -or
+            -not (Test-Path -LiteralPath $stagedPath -PathType Leaf)) {
+            throw 'Functional failure summary did not survive exact restoration.'
+        }
+        $runCapability = New-RunDirectoryCapability $runRoot
+        $wrapperPath = Join-Path $runRoot 'functional-smoke-wrapper.json'
+        Write-AtomicJsonNoOverwrite $wrapperPath ([ordered]@{
+                schema = 'hlclient.local-research-copy-smoke-wrapper.v2'
+                evidence_eligible = $false
+                native_summary_retained_across_restoration = $true
+                owned_process_cleanup = 'exact'
+                restoration_status = 'exact'
+                result = 'local_server_ready_client_blocked'
+            }) 'functional failure retention wrapper' $runCapability
+        $wrapper = Read-BoundedJsonWithRetainedBytes `
+            $wrapperPath 65536 'functional failure retention wrapper' `
+            $runCapability
+        if (-not [bool]$wrapper.Value.native_summary_retained_across_restoration -or
+            [string]$wrapper.Value.restoration_status -cne 'exact' -or
+            [string]$wrapper.Value.result -cne
+                'local_server_ready_client_blocked') {
+            throw 'Functional failure final summary contract regressed.'
+        }
+        Write-Output '[functional-failure-retention-test] failed-connection-summary=retained'
+        Write-Output '[functional-failure-retention-test] restoration=exact'
+        Write-Output '[functional-failure-retention-test] final-summary=published-after-restoration'
+        Write-Output '[functional-failure-retention-test] evidence-eligible=false'
+        Write-Output '[functional-failure-retention-test] result=success'
+    } finally {
+        if ($null -ne $runCapability) {
+            $runCapability.Dispose()
+            $runCapability = $null
+        }
+        if ($null -ne $restorationGuard) {
+            $backupPath = $restorationGuard.TemporaryRoot
+            Close-RestorationGuardCapabilities $restorationGuard
+            if (Test-Path -LiteralPath $backupPath -PathType Container) {
+                Remove-SafeTree $backupPath $systemTemporaryRoot
+            }
+        }
+        if (Test-Path -LiteralPath $testRoot -PathType Container) {
+            Remove-SafeTree $testRoot $systemTemporaryRoot
+        }
+    }
+    return
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'RetainedBackupRecovery') {
+    $recovery = Invoke-RetainedBackupRecoveryInspection `
+        $ResearchHalfLifeRoot $RetainedBackupRoot
+    Write-Output '[stock-runtime-recovery] mode=legacy-retained-backup-inspection'
+    Write-Output ("[stock-runtime-recovery] recovery-status={0}" -f
+        $recovery.RecoveryStatus)
+    Write-Output ("[stock-runtime-recovery] restoration-status={0}" -f
+        $recovery.RestorationStatus)
+    Write-Output ("[stock-runtime-recovery] backup-status={0}" -f
+        $recovery.BackupStatus)
+    Write-Output ("[stock-runtime-recovery] current-entries={0}" -f
+        $recovery.CurrentEntryCount)
+    Write-Output ("[stock-runtime-recovery] backup-entries={0}" -f
+        $recovery.BackupEntryCount)
+    Write-Output ("[stock-runtime-recovery] comparison={0}" -f
+        $(if ($recovery.RecoveryStatus -ceq
+                'no_restoration_needed_verified_unchanged') {
+                'exact'
+            } else { 'different' }))
+    if ($recovery.RecoveryStatus -cne
+            'no_restoration_needed_verified_unchanged') {
+        throw 'recovery_unresolved: legacy retained backup differs and lacks a persisted exact metadata manifest'
+    }
+    return
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'RetainedBackupRecoverySelfTest') {
+    $systemTemporaryRoot =
+        [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+    $testRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
+        'hlclient-retained-recovery-test-' + [Guid]::NewGuid().ToString('N'))))
+    $backupRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
+        'hlclient-stock-runtime-restore-' + [Guid]::NewGuid().ToString('N'))))
+    try {
+        [IO.Directory]::CreateDirectory($testRoot) | Out-Null
+        $data = Join-Path $backupRoot 'data'
+        [IO.Directory]::CreateDirectory($data) | Out-Null
+        [IO.Directory]::CreateDirectory(
+            (Join-Path $data '.hlclient-restoration-identity-lock')) | Out-Null
+        $preparation = [ordered]@{
+            schema = 'hlclient.stock-runtime-research-preparation.v3'
+            preparation_status = 'exact-materialized-copy-verified'
+        } | ConvertTo-Json
+        foreach ($entry in @(
+                @($markerName, $markerText),
+                @('.hlclient-research-pending', 'synthetic-pending'),
+                @('.hlclient-research-preparation.json', $preparation),
+                @('state.bin', 'before'))) {
+            [IO.File]::WriteAllText(
+                (Join-Path $testRoot $entry[0]), $entry[1],
+                [Text.UTF8Encoding]::new($false))
+            [IO.File]::Copy(
+                (Join-Path $testRoot $entry[0]),
+                (Join-Path $data $entry[0]), $false)
+        }
+        $unchanged = Invoke-RetainedBackupRecoveryInspection `
+            $testRoot $backupRoot
+        if ($unchanged.RecoveryStatus -cne
+                'no_restoration_needed_verified_unchanged' -or
+            $unchanged.RestorationStatus -cne 'restoration_not_attempted' -or
+            $unchanged.BackupStatus -cne 'retained') {
+            throw 'Legacy retained backup unchanged classification regressed.'
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $testRoot 'state.bin'), 'different',
+            [Text.UTF8Encoding]::new($false))
+        $differentHash = Get-FileSha256 (Join-Path $testRoot 'state.bin')
+        $unresolved = Invoke-RetainedBackupRecoveryInspection `
+            $testRoot $backupRoot
+        if ($unresolved.RecoveryStatus -cne 'recovery_unresolved' -or
+            (Get-FileSha256 (Join-Path $testRoot 'state.bin')) -cne
+                $differentHash) {
+            throw 'Legacy retained backup difference did not fail closed.'
+        }
+        Write-Output '[stock-runtime-recovery-test] unchanged=no_restoration_needed_verified_unchanged'
+        Write-Output '[stock-runtime-recovery-test] difference=recovery_unresolved'
+        Write-Output '[stock-runtime-recovery-test] blanket-copy=absent'
+        Write-Output '[stock-runtime-recovery-test] backup=retained'
+        Write-Output '[stock-runtime-recovery-test] result=success'
+    } finally {
+        foreach ($path in @($backupRoot, $testRoot)) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-SafeTree $path $systemTemporaryRoot
+            }
+        }
+    }
+    return
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'OrchestratorStartupBoundarySelfTest') {
+    if ($env:OS -cne 'Windows_NT' -or [IntPtr]::Size -ne 8) {
+        throw 'Orchestrator startup boundary test requires x64 Windows PowerShell.'
+    }
+    $orchestrator = Resolve-TrustedRepositoryTool $OrchestratorPath `
+        'hlclient_stock_runtime_orchestrator.exe' 'stock runtime orchestrator'
+    $systemTemporaryRoot =
+        [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+    $fixtureRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
+        'hlclient-stock-startup-boundary-' + [Guid]::NewGuid().ToString('N'))))
+    $restorationGuard = $null
+    $capabilities = $null
+
+    function New-StartupBoundaryCapabilities {
+        return [pscustomobject]@{
+            Startup = New-OrchestratorTransactionCapability
+            Cleanup = New-OrchestratorTransactionCapability
+            Job = New-OrchestratorProcessJobCapability
+            GuardJob = New-OrchestratorProcessJobCapability
+            IsolationRelease = New-OrchestratorTransactionCapability
+        }
+    }
+
+    function Close-StartupBoundaryCapabilities {
+        param([object]$Capabilities)
+        if ($null -eq $Capabilities) { return }
+        foreach ($name in @('Startup', 'Cleanup', 'Job', 'GuardJob',
+                'IsolationRelease')) {
+            $handle = [IntPtr]$Capabilities.$name
+            if ($handle -ne [IntPtr]::Zero) {
+                if (-not [Hlclient.StockRuntimeOrchestratorCapability]::CloseHandle(
+                        $handle)) {
+                    throw "Startup boundary $name capability close failed."
+                }
+                $Capabilities.$name = [IntPtr]::Zero
+            }
+        }
+    }
+
+    function New-StartupBoundaryArguments {
+        param(
+            [object]$Capabilities,
+            [switch]$Probe,
+            [switch]$UnknownArgument,
+            [switch]$InvalidCleanupHandle,
+            [switch]$FunctionalRuntimeCapture
+        )
+        $cleanupValue = if ($InvalidCleanupHandle) { '65535' } else {
+            ([IntPtr]$Capabilities.Cleanup).ToInt64().ToString(
+                [Globalization.CultureInfo]::InvariantCulture)
+        }
+        $arguments = @(
+            $(if ($FunctionalRuntimeCapture) {
+                    '--confirmation-token'
+                } else { '--functional-confirmation-token' }),
+            $(if ($FunctionalRuntimeCapture) {
+                    $activeCaptureToken
+                } else { $functionalSmokeToken }),
+            '--wrapper-capability-handle',
+            ([IntPtr]$Capabilities.Startup).ToInt64().ToString(
+                [Globalization.CultureInfo]::InvariantCulture),
+            '--wrapper-cleanup-capability-handle', $cleanupValue,
+            '--wrapper-job-handle',
+            ([IntPtr]$Capabilities.Job).ToInt64().ToString(
+                [Globalization.CultureInfo]::InvariantCulture),
+            '--wrapper-guard-job-handle',
+            ([IntPtr]$Capabilities.GuardJob).ToInt64().ToString(
+                [Globalization.CultureInfo]::InvariantCulture),
+            '--isolation-release-handle',
+            ([IntPtr]$Capabilities.IsolationRelease).ToInt64().ToString(
+                [Globalization.CultureInfo]::InvariantCulture),
+            '--wrapper-process-id', [string]$PID,
+            '--run-root', (Join-Path $fixtureRoot (
+                'manual-artifacts\research-copy-smoke\' +
+                [Guid]::Empty.ToString('N'))),
+            '--research-root', $fixtureRoot,
+            '--client', (Join-Path $fixtureRoot 'never-launch-hl.exe'),
+            '--server', (Join-Path $fixtureRoot 'never-launch-hlds.exe'),
+            '--relay', (Join-Path $fixtureRoot 'never-launch-relay.exe'),
+            '--isolation-guard', (Join-Path $fixtureRoot 'never-launch-guard.exe'),
+            '--app-manifest', (Join-Path $fixtureRoot 'never-read-appmanifest.acf'),
+            '--game', 'valve', '--map', 'boot_camp',
+            '--relay-port', '27140', '--server-port', '27141',
+            '--server-profile-id', 'steam-hlds-10210-no-mode-banner-v1',
+            '--max-duration-seconds', '5',
+            '--max-datagrams', '8192',
+            '--max-total-raw-bytes', '67108864',
+            '--max-payload-bytes', '65507',
+            '--max-reassembled-bytes', '8388608',
+            '--max-decompressed-bytes', '33554432',
+            '--max-message-count', '8192',
+            '--max-runtime-frames', '4096',
+            '--max-client-packets', '4096',
+            '--max-server-packets', '4096',
+            '--mutation-after-client-packets', '20',
+            '--mutation-after-server-packets', '20')
+        if ($FunctionalRuntimeCapture) {
+            $arguments += @(
+                '--output-role', 'functional-runtime-capture',
+                '--scenario', 'idle-runtime')
+        } else {
+            $arguments += '--functional-smoke'
+        }
+        if ($Probe) { $arguments += '--validate-wrapper-startup' }
+        if ($UnknownArgument) {
+            $arguments += @('--definitely-unknown-startup-argument', '1')
+        }
+        return $arguments
+    }
+
+    $stockNames = @('hl', 'hlds', 'hlclient_stock_runtime_isolation_guard',
+        'hlclient_stock_runtime_capture')
+    $stockBefore = @(Get-Process -Name $stockNames -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Id | Sort-Object)
+    try {
+        [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        [IO.File]::WriteAllText(
+            (Join-Path $fixtureRoot $markerName), $markerText,
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText(
+            (Join-Path $fixtureRoot 'state.bin'), 'before',
+            [Text.UTF8Encoding]::new($false))
+
+        $capabilities = New-StartupBoundaryCapabilities
+        $successState = New-OrchestratorExitState
+        $success = Invoke-BoundedOrchestrator $orchestrator `
+            @(New-StartupBoundaryArguments $capabilities -Probe) 15 `
+            $capabilities.Startup $capabilities.Cleanup $capabilities.Job `
+            $capabilities.GuardJob $capabilities.IsolationRelease $successState
+        if ($success.ExitCode -ne 0 -or
+            $successState.StartupStatus -cne 'acknowledgement_received' -or
+            -not $successState.JobCleanupConfirmed -or
+            -not $successState.CleanupSignaled) {
+            throw 'Functional startup probe did not complete its exact handshake.'
+        }
+        Assert-OrchestratorValue $success startup-boundary acknowledged
+        Assert-OrchestratorValue $success processes-started 0
+        Assert-OrchestratorValue $success capture-files-written 0
+        Assert-OrchestratorValue $success evidence-eligible false
+        Assert-OrchestratorValue $success result success
+        Close-StartupBoundaryCapabilities $capabilities
+        $capabilities = $null
+
+        $capabilities = New-StartupBoundaryCapabilities
+        $captureState = New-OrchestratorExitState
+        $captureStartup = Invoke-BoundedOrchestrator $orchestrator `
+            @(New-StartupBoundaryArguments $capabilities -Probe `
+                -FunctionalRuntimeCapture) 15 `
+            $capabilities.Startup $capabilities.Cleanup $capabilities.Job `
+            $capabilities.GuardJob $capabilities.IsolationRelease $captureState
+        if ($captureStartup.ExitCode -ne 0 -or
+            $captureState.StartupStatus -cne 'acknowledgement_received' -or
+            -not $captureState.JobCleanupConfirmed -or
+            -not $captureState.CleanupSignaled) {
+            throw 'Functional runtime capture startup probe did not complete its exact handshake.'
+        }
+        Assert-OrchestratorValue $captureStartup startup-boundary acknowledged
+        Assert-OrchestratorValue $captureStartup mode `
+            functional_runtime_capture_v1
+        Assert-OrchestratorValue $captureStartup purpose `
+            functional_runtime_capture_startup_probe
+        Assert-OrchestratorValue $captureStartup processes-started 0
+        Assert-OrchestratorValue $captureStartup capture-files-written 0
+        Assert-OrchestratorValue $captureStartup evidence-eligible false
+        Assert-OrchestratorValue $captureStartup result success
+        Close-StartupBoundaryCapabilities $capabilities
+        $capabilities = $null
+
+        $before = Get-ResearchSnapshot $fixtureRoot
+        $restorationGuard = New-RestorationGuard $fixtureRoot $before
+        [IO.File]::WriteAllText(
+            (Join-Path $fixtureRoot 'state.bin'), 'mutated',
+            [Text.UTF8Encoding]::new($false))
+        $capabilities = New-StartupBoundaryCapabilities
+        $earlyState = New-OrchestratorExitState
+        $earlyError = $null
+        try {
+            [void](Invoke-BoundedOrchestrator $orchestrator `
+                @(New-StartupBoundaryArguments $capabilities -UnknownArgument) 15 `
+                $capabilities.Startup $capabilities.Cleanup $capabilities.Job `
+                $capabilities.GuardJob $capabilities.IsolationRelease $earlyState)
+        } catch { $earlyError = $_ }
+        if ($null -eq $earlyError -or $earlyState.StartupStatus -cne 'early_exit' -or
+            $earlyState.StartupExitCode -ne 2 -or
+            $earlyState.StartupExitCodeHex -cne '0x00000002' -or
+            $earlyState.StartupStderr -cnotmatch '^Usage:' -or
+            -not $earlyState.JobCleanupConfirmed -or
+            $earlyError.Exception.Message -notmatch
+                '^orchestrator_startup_early_exit:') {
+            throw 'Early parser exit was not preserved as a typed startup result.'
+        }
+        $afterRecovery = Restore-ResearchState $restorationGuard
+        if ($afterRecovery.ManifestSha256 -cne $before.ManifestSha256) {
+            throw 'Pre-acknowledgement failure recovery was not exact.'
+        }
+        Close-StartupBoundaryCapabilities $capabilities
+        $capabilities = $null
+
+        $capabilities = New-StartupBoundaryCapabilities
+        $invalidState = New-OrchestratorExitState
+        $invalidError = $null
+        try {
+            [void](Invoke-BoundedOrchestrator $orchestrator `
+                @(New-StartupBoundaryArguments $capabilities -InvalidCleanupHandle) 15 `
+                $capabilities.Startup $capabilities.Cleanup $capabilities.Job `
+                $capabilities.GuardJob $capabilities.IsolationRelease $invalidState)
+        } catch { $invalidError = $_ }
+        if ($null -eq $invalidError -or
+            $invalidState.StartupStatus -cne 'early_exit' -or
+            $invalidState.StartupExitCode -ne 3 -or
+            $invalidState.StartupStdout -cnotmatch
+                'failure-category=wrapper_transaction_capability_required') {
+            throw 'Invalid inherited handle was not rejected before startup acknowledgment.'
+        }
+        Close-StartupBoundaryCapabilities $capabilities
+        $capabilities = $null
+
+        $stockAfter = @(Get-Process -Name $stockNames -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Id | Sort-Object)
+        if (Compare-Object -ReferenceObject $stockBefore -DifferenceObject $stockAfter) {
+            throw 'Startup boundary fixture changed the stock-process inventory.'
+        }
+        Write-Output '[stock-runtime-startup-test] powershell-bitness=x64'
+        Write-Output '[stock-runtime-startup-test] functional-arguments=accepted'
+        Write-Output '[stock-runtime-startup-test] functional-runtime-capture-arguments=accepted'
+        Write-Output '[stock-runtime-startup-test] wrapper-acknowledgement=received'
+        Write-Output '[stock-runtime-startup-test] acknowledged-child-exit-code=0'
+        Write-Output '[stock-runtime-startup-test] acknowledged-child-exit-code-hex=0x00000000'
+        Write-Output '[stock-runtime-startup-test] stock-launch=absent'
+        Write-Output '[stock-runtime-startup-test] unknown-argument=typed-early-exit'
+        Write-Output '[stock-runtime-startup-test] unknown-argument-exit-code=2'
+        Write-Output '[stock-runtime-startup-test] unknown-argument-exit-code-hex=0x00000002'
+        Write-Output '[stock-runtime-startup-test] invalid-handle=rejected'
+        Write-Output '[stock-runtime-startup-test] invalid-handle-exit-code=3'
+        Write-Output '[stock-runtime-startup-test] invalid-handle-exit-code-hex=0x00000003'
+        Write-Output '[stock-runtime-startup-test] startup-stderr=retained-bounded'
+        Write-Output '[stock-runtime-startup-test] pre-ack-recovery=exact'
+        Write-Output '[stock-runtime-startup-test] tracing-capabilities=not-required'
+        Write-Output '[stock-runtime-startup-test] evidence-eligible=false'
+        Write-Output '[stock-runtime-startup-test] result=success'
+    } finally {
+        if ($null -ne $capabilities) {
+            Close-StartupBoundaryCapabilities $capabilities
+        }
+        if ($null -ne $restorationGuard) {
+            Close-RestorationBackupCapabilities $restorationGuard
+            if (Test-Path -LiteralPath $restorationGuard.TemporaryRoot) {
+                Remove-SafeTree $restorationGuard.TemporaryRoot $systemTemporaryRoot
+            }
+            Close-RestorationGuardCapabilities $restorationGuard
+        }
+        if (Test-Path -LiteralPath $fixtureRoot) {
+            Remove-SafeTree $fixtureRoot $systemTemporaryRoot
+        }
+    }
+    return
+}
+
 if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
     $systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
     $selfTestRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
@@ -4055,9 +6352,8 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
         $rootAdsName = 'hlclient-restoration-root-ads-probe'
         $rootAdsRejected = $false
         try {
-            [IO.File]::WriteAllText(
-                ($testResearch + ':' + $rootAdsName), 'mutation',
-                [Text.Encoding]::ASCII)
+            [Hlclient.StockRuntimeDirectoryCapability]::WriteRestorationRootAdsProbe(
+                $testResearch)
             try { [void](Get-ResearchSnapshot $testResearch) }
             catch {
                 if ($_.Exception.Message -cmatch
@@ -4066,7 +6362,8 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
                 } else { throw }
             }
         } finally {
-            [IO.File]::Delete($testResearch + ':' + $rootAdsName)
+            [Hlclient.StockRuntimeDirectoryCapability]::DeleteRestorationRootAdsProbe(
+                $testResearch)
         }
         if (-not $rootAdsRejected) {
             throw 'Restoration self-test did not reject a research-root ADS mutation.'
@@ -4611,7 +6908,8 @@ if ($PSCmdlet.ParameterSetName -eq 'ExternalDriftControl') {
     $externalAfter = Get-ExternalSteamStateSnapshot `
         $manifestPath $research.Root $DriftPhase
     $externalDifference = Compare-StockExternalStateSnapshot `
-        $externalBefore $externalAfter $DriftPhase
+        $externalBefore $externalAfter $DriftPhase `
+        -SteamRewritePolicyId $stockSteamRewritePolicyId
     Write-StockExternalDriftPublicOutput $externalDifference
     Write-Output '[stock-runtime-capture] stock-processes-started=0'
     Write-Output '[stock-runtime-capture] wfp-sessions-started=0'
@@ -4694,7 +6992,8 @@ if ($PSCmdlet.ParameterSetName -eq 'ActivePreflight') {
     $externalAfter = Get-ExternalSteamStateSnapshot `
         $manifestPath $research.Root 'wfp_preflight'
     $externalDifference = Compare-StockExternalStateSnapshot `
-        $externalBefore $externalAfter 'wfp_preflight'
+        $externalBefore $externalAfter 'wfp_preflight' `
+        -SteamRewritePolicyId $stockSteamRewritePolicyId
     Write-StockExternalDriftPublicOutput $externalDifference
     if ([string]$externalDifference.result -cne 'none') {
         throw 'external_steam_state_changed'
@@ -4754,7 +7053,11 @@ $scenarioAliases = @{
     'duplicate-server-runtime' = 'duplicate-server-to-client-transport-ordinal'
     'reorder-server-runtime' = 'reorder-server-to-client-transport-ordinal'
 }
-$canonicalScenario = if ($anyServerProfileDiagnosticMode) {
+$canonicalScenario = if ($functionalSmokeMode) {
+    'local_research_copy_smoke_v1'
+} elseif ($functionalRuntimeCaptureMode) {
+    'idle-runtime'
+} elseif ($anyServerProfileDiagnosticMode) {
     'server-profile-diagnostic'
 } elseif ($scenarioAliases.ContainsKey($Scenario)) {
     $scenarioAliases[$Scenario]
@@ -4765,8 +7068,12 @@ $orchestratorScenario = switch ($canonicalScenario) {
     'reorder-server-to-client-transport-ordinal' { 'reorder-server-runtime'; break }
     default { $canonicalScenario }
 }
+if (-not $functionalPolicyMode -and -not $anyServerProfileDiagnosticMode -and
+    $ServerProfileId -cne 'legacy-stdio-hlds-banner-v1') {
+    throw 'Observed HLDS profile is production-inactive until the verified rewrite threshold and activation gates pass.'
+}
 
-if (-not $anyServerProfileDiagnosticMode -and
+if (-not $functionalPolicyMode -and -not $anyServerProfileDiagnosticMode -and
     ($canonicalScenario -ceq 'baseline' -or
         $canonicalScenario -ceq 'idle-runtime') -and
     $MaximumDurationSeconds -lt 30) {
@@ -4777,7 +7084,7 @@ if (-not $anyServerProfileDiagnosticMode -and
     throw 'Accepted baseline and idle-runtime observations require a requested duration of at least 30 seconds.'
 }
 
-if (-not $anyServerProfileDiagnosticMode -and
+if (-not $functionalPolicyMode -and -not $anyServerProfileDiagnosticMode -and
     $canonicalScenario -ceq 'reconnect' -and
     $MaximumDurationSeconds -lt 60) {
     Write-Output '[stock-runtime-capture] active-capture=blocked'
@@ -4785,6 +7092,36 @@ if (-not $anyServerProfileDiagnosticMode -and
     Write-Output '[stock-runtime-capture] processes-started=0'
     Write-Output '[stock-runtime-capture] files-written=0'
     throw 'A two-generation reconnect observation requires at least 60 seconds.'
+}
+
+$research = $null
+$steamApiRuntime = $null
+if ($functionalPolicyMode) {
+    # Copy validation is read-only and does not require WFP privileges. Run it
+    # before the elevation gate so a non-elevated caller can distinguish an
+    # invalid research copy from an otherwise launch-ready environment.
+    $research = Resolve-IsolatedResearchRoot
+    Write-Output '[stock-runtime-capture] functional-research-validation=success'
+    Write-Output ("[stock-runtime-capture] research-inventory-status={0}" -f
+        $research.InventoryStatus)
+}
+if ($projectClientStockSignonMode) {
+    $steamApiRuntime = [IO.Path]::GetFullPath($SteamApiRuntimePath)
+    if ([IO.Path]::GetFileName($steamApiRuntime) -cne 'steam_api.dll' -or
+        -not (Test-Path -LiteralPath $steamApiRuntime -PathType Leaf)) {
+        throw 'SteamApiRuntimePath must name an existing official steam_api.dll.'
+    }
+    Assert-NoReparsePointInExistingPath $steamApiRuntime 'Steam API runtime'
+    Assert-OnlyDefaultDataStream $steamApiRuntime 'Steam API runtime'
+    Assert-NoHardLink $steamApiRuntime 'Steam API runtime'
+    $steamApiSignature = Get-AuthenticodeSignature -LiteralPath $steamApiRuntime
+    if ($steamApiSignature.Status -ne 'Valid' -or
+        $null -eq $steamApiSignature.SignerCertificate -or
+        $steamApiSignature.SignerCertificate.Subject -cnotmatch
+            '^CN=Valve Corp\.(?:,|$)') {
+        throw 'Steam API runtime is not validly Valve-signed.'
+    }
+    Write-Output '[stock-runtime-capture] steam-api-runtime=validated-official-x86-candidate'
 }
 
 if (-not (Test-IsElevatedAdministrator)) {
@@ -4808,12 +7145,14 @@ $activeScenarios = @(
     'drop-server-to-client-transport-ordinal',
     'duplicate-server-to-client-transport-ordinal',
     'reorder-server-to-client-transport-ordinal')
-if (-not $anyServerProfileDiagnosticMode -and
+if (-not $functionalPolicyMode -and -not $anyServerProfileDiagnosticMode -and
     $activeScenarios -cnotcontains $canonicalScenario) {
     throw 'The requested scenario is outside the M4.7.1.1 active-capture allowlist; no run was started.'
 }
 try {
-    $research = Resolve-IsolatedResearchRoot
+    if ($null -eq $research) {
+        $research = Resolve-IsolatedResearchRoot
+    }
 } catch {
     if ($_.Exception.Message -ceq 'research_copy_not_evidence_eligible') {
         Write-Output '[stock-runtime-capture] active-capture=blocked'
@@ -4835,6 +7174,8 @@ Write-Output ("[stock-runtime-capture] external-target-profile={0}" -f
     $research.ExternalTargetProfile)
 Write-Output ("[stock-runtime-capture] external-target-count={0}" -f
     $research.ExternalTargetCount)
+Write-Output ("[stock-runtime-capture] research-inventory-status={0}" -f
+    $research.InventoryStatus)
 $output = [IO.Path]::GetFullPath($OutputRoot).TrimEnd('\', '/')
 if ($serverProfileDiagnosticMode) {
     if ($output -ine $requiredServerProfileDiagnosticRoot) {
@@ -4843,6 +7184,14 @@ if ($serverProfileDiagnosticMode) {
 } elseif ($privateServerProfileDiagnosticMode) {
     if ($output -ine $requiredPrivateServerProfileDiagnosticRoot) {
         throw 'PrivateServerProfileDiagnostic requires the exact repository manual-artifacts/stock-runtime-server-profile-private root.'
+    }
+} elseif ($functionalSmokeMode) {
+    if ($output -ine $requiredFunctionalSmokeRoot) {
+        throw 'FunctionalSmoke requires the exact repository manual-artifacts/research-copy-smoke root.'
+    }
+} elseif ($functionalRuntimeCaptureMode) {
+    if ($output -ine $requiredFunctionalRuntimeCaptureRoot) {
+        throw 'FunctionalRuntimeCapture requires the exact repository manual-artifacts/research-runtime-capture root.'
     }
 } elseif ($PreCampaignCanary) {
     if ($canonicalScenario -cne 'baseline' -or $Map -cne 'boot_camp' -or
@@ -4884,6 +7233,19 @@ $activeValidationArguments = @(
     '--relay', $tool, '--isolation-guard', $guardPath,
     '--app-manifest', $manifestPath, '--game', 'valve', '--map', $Map,
     '--relay-port', [string]$RelayPort, '--server-port', [string]$ServerPort)
+if ($projectClientStockSignonMode) {
+    $activeValidationArguments += @(
+        '--project-client-stock-signon', '--steam-api-runtime',
+        $steamApiRuntime, '--project-client-stop', $ProjectClientStop)
+    if ($projectClientVisualMode) {
+        $activeValidationArguments += @(
+            '--project-client-live-input', $ProjectClientLiveInput)
+        if ($ProjectClientPrediction -ceq 'reference') {
+            $activeValidationArguments += @(
+                '--project-client-prediction', 'reference')
+        }
+    }
+}
 $activeValidation = Invoke-BoundedOrchestrator $orchestratorPath `
     $activeValidationArguments 90
 if ($activeValidation.ExitCode -ne 0) {
@@ -4925,8 +7287,10 @@ $externalDriftPhase = if ($privateServerProfileDiagnosticMode) {
 } elseif ($serverProfileDiagnosticMode) {
     'standard_server_diagnostic'
 } else { 'standard_server_diagnostic' }
-$externalBefore = Get-ExternalSteamStateSnapshot `
-    $manifestPath $research.Root $externalDriftPhase
+$externalBefore = if ($functionalPolicyMode) { $null } else {
+    Get-ExternalSteamStateSnapshot `
+        $manifestPath $research.Root $externalDriftPhase
+}
 $guard = New-RestorationGuard $research.Root $before
 $runId = [Guid]::NewGuid().ToString('N')
 $runRoot = Join-Path $output $runId
@@ -4937,17 +7301,20 @@ $wrapperCleanupCapability = [IntPtr]::Zero
 $wrapperJob = [IntPtr]::Zero
 $wrapperGuardJob = [IntPtr]::Zero
 $isolationReleaseCapability = [IntPtr]::Zero
-$orchestratorExitState = [pscustomobject]@{
-    Started = $false
-    ExitConfirmed = $false
-    ExitCode = $null
-    NoOrchestratorProcessCreated = $false
-    CleanupSignaled = $false
-    CampaignJobCleanupConfirmed = $false
-    GuardJobCleanupConfirmed = $false
-    JobCleanupConfirmed = $false
-    Failure = $null
+$writerTracePrelaunchReadyCapability = [IntPtr]::Zero
+$writerTraceLaunchReleaseCapability = [IntPtr]::Zero
+$writerTraceStockStoppedCapability = [IntPtr]::Zero
+$writerTraceRequest = $null
+if ($EnableWriterTraceHandoff) {
+    $writerTraceRequest = New-StockWriterTraceRequest `
+        -TransactionId $runId -ToolPath $WriterTraceToolPath `
+        -ExpectedToolSha256 $ExpectedWriterTraceToolSha256 `
+        -TargetPath $WriterTraceTargetPath `
+        -OutputPath (Join-Path $output ("writer-trace-$runId.json")) `
+        -TraceReadyTimeoutMilliseconds 5000 -TailMilliseconds 15000 `
+        -DrainTimeoutMilliseconds 5000 -HardTraceDeadlineMilliseconds 60000
 }
+$orchestratorExitState = New-OrchestratorExitState
 $primaryError = $null
 $cleanupErrors = [Collections.Generic.List[string]]::new()
 $after = $null
@@ -4964,11 +7331,23 @@ try {
     $wrapperJob = New-OrchestratorProcessJobCapability
     $wrapperGuardJob = New-OrchestratorProcessJobCapability
     $isolationReleaseCapability = New-OrchestratorTransactionCapability
+    if ($EnableWriterTraceHandoff) {
+        $writerTracePrelaunchReadyCapability =
+            New-OrchestratorTransactionCapability
+        $writerTraceLaunchReleaseCapability =
+            New-OrchestratorTransactionCapability
+        $writerTraceStockStoppedCapability =
+            New-OrchestratorTransactionCapability
+    }
     $arguments = @(
-        $(if ($privateServerProfileDiagnosticMode) {
+        $(if ($functionalSmokeMode) {
+                '--functional-confirmation-token'
+            } elseif ($privateServerProfileDiagnosticMode) {
                 '--private-diagnostic-token'
             } else { '--confirmation-token' }),
-        $(if ($privateServerProfileDiagnosticMode) {
+        $(if ($functionalSmokeMode) {
+                $functionalSmokeToken
+            } elseif ($privateServerProfileDiagnosticMode) {
                 $privateDiagnosticToken
             } else { $activeCaptureToken }),
         '--wrapper-capability-handle', $wrapperCapability.ToInt64().ToString(
@@ -4988,17 +7367,9 @@ try {
         '--client', $research.Client, '--server', $research.Server,
         '--relay', $tool, '--isolation-guard', $guardPath,
         '--app-manifest', $manifestPath, '--game', $Game, '--map', $Map,
-        '--output-role', $(if ($privateServerProfileDiagnosticMode) {
-                'server-profile-private-diagnostic'
-            } elseif ($serverProfileDiagnosticMode) {
-                'server-profile-diagnostic'
-            } elseif ($PreCampaignCanary) {
-                'pre-campaign-canary'
-            } else {
-                'normal-campaign-run'
-            }),
         '--relay-port', [string]$RelayPort,
         '--server-port', [string]$ServerPort,
+        '--server-profile-id', $ServerProfileId,
         '--max-duration-seconds', [string]$MaximumDurationSeconds,
         '--max-datagrams', [string]$MaximumDatagrams,
         '--max-total-raw-bytes', [string]$MaximumTotalRawBytes,
@@ -5011,7 +7382,49 @@ try {
         '--max-server-packets', [string]$MaximumServerPackets,
         '--mutation-after-client-packets', [string]$MutationAfterClientPackets,
         '--mutation-after-server-packets', [string]$MutationAfterServerPackets)
-    if ($anyServerProfileDiagnosticMode) {
+    if ($functionalSmokeMode) {
+        $arguments += '--functional-smoke'
+        if ($projectClientStockSignonMode) {
+            $arguments += @(
+                '--project-client-stock-signon', '--steam-api-runtime',
+                $steamApiRuntime, '--project-client-stop', $ProjectClientStop)
+            if ($projectClientVisualMode) {
+                $arguments += @(
+                    '--project-client-live-input', $ProjectClientLiveInput)
+                if ($ProjectClientPrediction -ceq 'reference') {
+                    $arguments += @(
+                        '--project-client-prediction', 'reference')
+                }
+            }
+        }
+    } else {
+        $arguments += @('--output-role', $(if ($privateServerProfileDiagnosticMode) {
+                    'server-profile-private-diagnostic'
+                } elseif ($serverProfileDiagnosticMode) {
+                    'server-profile-diagnostic'
+                } elseif ($functionalRuntimeCaptureMode) {
+                    'functional-runtime-capture'
+                } elseif ($PreCampaignCanary) {
+                    'pre-campaign-canary'
+                } else {
+                    'normal-campaign-run'
+                }))
+    }
+    if ($EnableWriterTraceHandoff) {
+        $arguments += @(
+            '--writer-trace-prelaunch-ready-handle',
+            $writerTracePrelaunchReadyCapability.ToInt64().ToString(
+                [Globalization.CultureInfo]::InvariantCulture),
+            '--writer-trace-launch-release-handle',
+            $writerTraceLaunchReleaseCapability.ToInt64().ToString(
+                [Globalization.CultureInfo]::InvariantCulture),
+            '--writer-trace-stock-stopped-handle',
+            $writerTraceStockStoppedCapability.ToInt64().ToString(
+                [Globalization.CultureInfo]::InvariantCulture))
+    }
+    if ($functionalSmokeMode) {
+        # Functional smoke deliberately has no capture scenario or evidence role.
+    } elseif ($anyServerProfileDiagnosticMode) {
         $arguments += $(if ($privateServerProfileDiagnosticMode) {
                 '--private-diagnose-server-profile'
             } else { '--diagnose-server-profile' })
@@ -5021,8 +7434,67 @@ try {
     $orchestratorResult = Invoke-BoundedOrchestrator $orchestratorPath $arguments `
         ($MaximumDurationSeconds + 90) $wrapperCapability `
         $wrapperCleanupCapability $wrapperJob $wrapperGuardJob `
-        $isolationReleaseCapability $orchestratorExitState
+        $isolationReleaseCapability $orchestratorExitState `
+        $writerTracePrelaunchReadyCapability `
+        $writerTraceLaunchReleaseCapability `
+        $writerTraceStockStoppedCapability $writerTraceRequest
     $orchestratorExitCode = $orchestratorResult.ExitCode
+    if ($functionalSmokeMode -or $functionalRuntimeCaptureMode) {
+        foreach ($diagnosticKey in @(
+                'processes-started', 'server-ready', 'client-ready',
+                'server-process-created', 'server-process-id',
+                'client-process-created', 'client-process-id',
+                'client-image-identity', 'client-resume-result',
+                'client-initialized', 'connect-requested',
+                'connection-status', 'client-map-entry-status',
+                'map-entry-source', 'last-confirmed-stage',
+                'client-steam-argument', 'server-logging',
+                'client-connect-port',
+                'steam-authentication-error-observed',
+                'application-entry-observed', 'arguments-accepted',
+                'provider-begin-observed', 'steam-api-init-attempted',
+                'steam-api-initialized', 'fresh-material-acquired',
+                'connect-sent', 'connection-accepted',
+                'serverinfo-received', 'schema-registry-received',
+                'authentication-status', 'serverinfo-protocol',
+                'serverinfo-max-clients', 'serverinfo-game', 'serverinfo-map',
+                'schema-count', 'schema-field-count',
+                'client-name-observed', 'client-entered-game-observed',
+                'client-running-at-readiness-deadline',
+                'stable-duration-ms', 'client-exit-code',
+                'client-exit-code-hex', 'client-wait-result',
+                'client-wait-native-error',
+                'server-exit-code', 'diagnostic-publication',
+                'jump-duck-result', 'speed-result', 'prediction-result', 'jump-observed',
+                'descent-observed', 'duck-observed',
+                'release-response-observed',
+                'jump-new-submitted', 'duck-new-submitted',
+                'relay-phase', 'failed-operation', 'native-error-domain',
+                'native-error-code', 'relay-exit-code',
+                'relay-exit-code-hex', 'wait-result', 'stop-requested',
+                'journal-publication-state',
+                'metadata-publication-state')) {
+            if ($orchestratorResult.Values.ContainsKey($diagnosticKey)) {
+                Write-Output ("[stock-runtime-capture] {0}={1}" -f
+                    $diagnosticKey,
+                    $orchestratorResult.Values[$diagnosticKey])
+            }
+        }
+        if ($functionalRuntimeCaptureMode) {
+            foreach ($requiredRelayDiagnosticKey in @(
+                    'relay-phase', 'failed-operation',
+                    'native-error-domain', 'native-error-code',
+                    'relay-exit-code', 'relay-exit-code-hex',
+                    'wait-result', 'stop-requested',
+                    'journal-publication-state',
+                    'metadata-publication-state')) {
+                if (-not $orchestratorResult.Values.ContainsKey(
+                        $requiredRelayDiagnosticKey)) {
+                    throw "orchestrator_relay_diagnostic_missing:$requiredRelayDiagnosticKey"
+                }
+            }
+        }
+    }
     if ($orchestratorExitCode -ne 0) {
         $category = 'orchestrator_failed'
         if ($orchestratorResult.Values.ContainsKey('failure-category')) {
@@ -5034,7 +7506,173 @@ try {
     Assert-OrchestratorValue $orchestratorResult failure-category none
     Assert-OrchestratorValue $orchestratorResult result success
     Assert-OrchestratorValue $orchestratorResult job-cleanup exact
-    if ($anyServerProfileDiagnosticMode) {
+    if ($EnableWriterTraceHandoff) {
+        Assert-OrchestratorValue $orchestratorResult `
+            writer-trace-prelaunch-ready true
+        Assert-OrchestratorValue $orchestratorResult `
+            writer-trace-launch-released true
+        Assert-OrchestratorValue $orchestratorResult `
+            writer-trace-stock-processes-stopped true
+        if (-not $orchestratorExitState.WriterTraceFinalized) {
+            throw 'writer_trace_not_finalized_before_post_run_inventory'
+        }
+    } else {
+        Assert-OrchestratorValue $orchestratorResult `
+            writer-trace-prelaunch-ready false
+        Assert-OrchestratorValue $orchestratorResult `
+            writer-trace-launch-released false
+        Assert-OrchestratorValue $orchestratorResult `
+            writer-trace-stock-processes-stopped false
+    }
+    Assert-OrchestratorValue $orchestratorResult server-profile-id `
+        $ServerProfileId
+    if ($functionalSmokeMode) {
+        foreach ($entry in ([ordered]@{
+                mode = $(if ($projectClientStockSignonMode) {
+                        if ($projectClientVisualMode) {
+                            'project_client_live_visual_control_v1'
+                        } elseif ($projectClientUserCmdMode) {
+                            'project_client_live_usercmd_check_v1'
+                        } elseif ($projectClientLiveRuntimeMode) {
+                            'project_client_live_runtime_state_v1'
+                        } else { 'project_client_stock_signon_v1' }
+                    } else { 'local_research_copy_smoke_v1' })
+                purpose = $(if ($projectClientStockSignonMode) {
+                        if ($projectClientVisualMode) {
+                            'fresh_project_client_live_visual_control'
+                        } elseif ($projectClientUserCmdMode) {
+                            'fresh_project_client_usercmd_server_motion'
+                        } elseif ($projectClientLiveRuntimeMode) {
+                            'fresh_project_client_live_runtime_state'
+                        } else { 'fresh_project_client_stock_signon' }
+                    } else { 'functional_smoke' })
+                'evidence-eligible' = $(if ($projectClientStockSignonMode) {
+                        'true'
+                    } else { 'false' })
+                route = 'direct_loopback'
+                'external-steam-state' = $(if ($projectClientStockSignonMode) {
+                        'current_user_session_used'
+                    } else { 'not_assessed' })
+                'external-steam-state-policy' = $(if (
+                        $projectClientStockSignonMode) {
+                        'provider_runtime_only_no_credentials_or_material_retained'
+                    } else { 'functional_observation_only' })
+                'relay-ready' = 'false'
+                'server-ready' = 'true'
+                'client-ready' = 'true'
+                'bounded-transport-complete' = 'false'
+            }).GetEnumerator()) {
+            Assert-OrchestratorValue $orchestratorResult $entry.Key $entry.Value
+        }
+        if ($projectClientStockSignonMode) {
+            foreach ($entry in ([ordered]@{
+                    'steam-api-initialized' = 'true'
+                    'fresh-material-acquired' = 'true'
+                    'connect-sent' = 'true'
+                    'connection-accepted' = 'true'
+                    'serverinfo-received' = 'true'
+                    'schema-registry-received' = 'true'
+                    'authentication-status' = 'pending-or-unknown'
+                    'last-confirmed-stage' = $(if (
+                            $projectClientVisualMode) {
+                            if ($ProjectClientPrediction -ceq 'reference') {
+                                'live_local_prediction_and_reconciliation_verified'
+                            } elseif ($ProjectClientLiveInput -ceq
+                                    'scripted-jump-duck-check') {
+                                'live_jump_duck_server_verified'
+                            } elseif ($ProjectClientLiveInput -ceq
+                                    'scripted-speed-check') {
+                                'live_normal_speed_and_shift_walk_verified'
+                            } else { 'live_visual_control_verified' }
+                        } elseif ($projectClientUserCmdMode) {
+                            'live_usercmd_server_motion_verified'
+                        } elseif ($projectClientLiveRuntimeMode) {
+                            'live_runtime_state_ready'
+                        } else { 'delta_schemas_ready' })
+                }).GetEnumerator()) {
+                Assert-OrchestratorValue $orchestratorResult `
+                    $entry.Key $entry.Value
+            }
+            if ($projectClientLiveMode) {
+                foreach ($entry in ([ordered]@{
+                        'resource-continuation-sent' = 'true'
+                        'spawn-request-transmitted' = 'true'
+                        'live-service-payloads-received' = 'true'
+                        'client-world-state-published' = $(if (
+                                $projectClientVisualMode -and
+                                $ProjectClientLiveInput -ceq 'keyboard-mouse') {
+                                'false'
+                            } else { 'true' })
+                    }).GetEnumerator()) {
+                    Assert-OrchestratorValue $orchestratorResult `
+                        $entry.Key $entry.Value
+                }
+                if ($projectClientLiveRuntimeMode) {
+                    Assert-OrchestratorValue $orchestratorResult `
+                        'usercmd-transmitted' '0'
+                } elseif ($projectClientVisualMode) {
+                    foreach ($entry in ([ordered]@{
+                            'usercmd-transmitted' = 'true'
+                            'live-visual-verified' = 'true'
+                        }).GetEnumerator()) {
+                        Assert-OrchestratorValue $orchestratorResult `
+                            $entry.Key $entry.Value
+                    }
+                    foreach ($countKey in @(
+                            'usercmd-generated', 'usercmd-new',
+                            'usercmd-packets', 'usercmd-server-samples')) {
+                        [Int64]$observedCount = 0
+                        if (-not $orchestratorResult.Values.ContainsKey($countKey) -or
+                            -not [Int64]::TryParse(
+                                $orchestratorResult.Values[$countKey],
+                                [ref]$observedCount) -or $observedCount -le 0) {
+                            throw "Live visual control did not report a positive $countKey."
+                        }
+                    }
+                    if ($ProjectClientPrediction -ceq 'reference') {
+                        Assert-OrchestratorValue $orchestratorResult `
+                            'prediction-result' `
+                            'live_local_prediction_and_reconciliation_verified'
+                    } elseif ($ProjectClientLiveInput -ceq
+                            'scripted-jump-duck-check') {
+                        Assert-GJumpDuckNativeSummary `
+                            -Values $orchestratorResult.Values
+                    } elseif ($ProjectClientLiveInput -ceq
+                            'scripted-speed-check') {
+                        Assert-H1SpeedNativeSummary `
+                            -Values $orchestratorResult.Values
+                    }
+                } else {
+                    foreach ($entry in ([ordered]@{
+                            'usercmd-transmitted' = 'true'
+                            'usercmd-movement-verified' = 'true'
+                        }).GetEnumerator()) {
+                        Assert-OrchestratorValue $orchestratorResult `
+                            $entry.Key $entry.Value
+                    }
+                    foreach ($countKey in @(
+                            'usercmd-generated', 'usercmd-new',
+                            'usercmd-packets', 'usercmd-server-samples')) {
+                        [Int64]$observedCount = 0
+                        if (-not $orchestratorResult.Values.ContainsKey($countKey) -or
+                            -not [Int64]::TryParse(
+                                $orchestratorResult.Values[$countKey],
+                                [ref]$observedCount) -or $observedCount -le 0) {
+                            throw "Live usercmd check did not report a positive $countKey."
+                        }
+                    }
+                }
+            }
+        } else {
+            [Int64]$stableDuration = 0
+            if (-not $orchestratorResult.Values.ContainsKey('stable-duration-ms') -or
+                -not [Int64]::TryParse(
+                    $orchestratorResult.Values['stable-duration-ms'],
+                    [ref]$stableDuration) -or $stableDuration -lt 30000) {
+                throw 'Functional smoke did not retain a stable 30-second map session.'
+            }
+        }
+    } elseif ($anyServerProfileDiagnosticMode) {
         Assert-OrchestratorValue $orchestratorResult relay-ready false
         Assert-OrchestratorValue $orchestratorResult client-ready false
         Assert-OrchestratorValue $orchestratorResult bounded-transport-complete false
@@ -5078,6 +7716,24 @@ try {
                 'duplicate-field') -cnotcontains
                 $orchestratorResult.Values['server-profile-result']) {
             throw 'Server profile diagnostic emitted an invalid typed status.'
+        }
+        if ($ServerProfileId -ceq 'steam-hlds-10210-no-mode-banner-v1') {
+            foreach ($readinessKey in @(
+                    'server-readiness-status', 'server-readiness-endpoint-proof',
+                    'server-readiness-map-proof', 'server-readiness-owned-process',
+                    'server-readiness-process-identity',
+                    'server-readiness-endpoint-owner',
+                    'server-readiness-endpoint-address',
+                    'server-readiness-endpoint-port',
+                    'server-readiness-response-source', 'server-readiness-map',
+                    'server-readiness-game', 'server-readiness-query-attempts',
+                    'server-readiness-response-bytes')) {
+                if (-not $orchestratorResult.Values.ContainsKey($readinessKey)) {
+                    throw "Observed HLDS readiness omitted $readinessKey."
+                }
+            }
+            Assert-OrchestratorValue $orchestratorResult `
+                server-readiness-status ready
         }
     } else {
         Assert-OrchestratorValue $orchestratorResult relay-ready true
@@ -5148,6 +7804,20 @@ try {
         }
         $isolationReleaseCapability = [IntPtr]::Zero
     }
+    foreach ($traceCapability in @(
+            $writerTracePrelaunchReadyCapability,
+            $writerTraceLaunchReleaseCapability,
+            $writerTraceStockStoppedCapability)) {
+        if ($traceCapability -ne [IntPtr]::Zero -and
+            -not [Hlclient.StockRuntimeOrchestratorCapability]::CloseHandle(
+                $traceCapability)) {
+            [void]$cleanupErrors.Add(
+                'Writer trace lifecycle capability close failed.')
+        }
+    }
+    $writerTracePrelaunchReadyCapability = [IntPtr]::Zero
+    $writerTraceLaunchReleaseCapability = [IntPtr]::Zero
+    $writerTraceStockStoppedCapability = [IntPtr]::Zero
     if (Test-Path -LiteralPath $runRoot -PathType Container) {
         try { $runDirectoryCapability = New-RunDirectoryCapability $runRoot }
         catch { [void]$cleanupErrors.Add($_.Exception.Message) }
@@ -5155,17 +7825,40 @@ try {
     $cleanupAttested = $orchestratorExitState.ExitConfirmed -and
         $orchestratorExitState.JobCleanupConfirmed
     if ($cleanupAttested) {
-        try { $after = Restore-ResearchState $guard }
+        try {
+            if ($null -ne $orchestratorExitState.WriterTraceOwner) {
+                Add-StockWriterTraceTimelineEvent `
+                    $orchestratorExitState.WriterTraceOwner.Timeline `
+                    restoration_started | Out-Null
+            }
+            $after = Restore-ResearchState $guard
+        }
         catch { [void]$cleanupErrors.Add($_.Exception.Message) }
     } else {
         [void]$cleanupErrors.Add(
             'Owned process cleanup was not attested; research restoration was not started.')
     }
     try {
-        $externalAfter = Get-ExternalSteamStateSnapshot `
-            $manifestPath $research.Root $externalDriftPhase
+        if ($null -ne $orchestratorExitState.WriterTraceOwner) {
+            Add-StockWriterTraceTimelineEvent `
+                $orchestratorExitState.WriterTraceOwner.Timeline `
+                post_inventory_started | Out-Null
+        }
+        if (-not $functionalPolicyMode) {
+            $externalAfter = Get-ExternalSteamStateSnapshot `
+                $manifestPath $research.Root $externalDriftPhase
+        }
     }
     catch { [void]$cleanupErrors.Add($_.Exception.Message) }
+    finally {
+        if ($null -ne $orchestratorExitState.WriterTraceOwner) {
+            try {
+                Add-StockWriterTraceTimelineEvent `
+                    $orchestratorExitState.WriterTraceOwner.Timeline `
+                    post_inventory_finished | Out-Null
+            } catch { [void]$cleanupErrors.Add($_.Exception.Message) }
+        }
+    }
     if ($null -ne $after) {
         try {
             Assert-RestorationDirectoryCapabilities $guard
@@ -5196,12 +7889,486 @@ if ($runExists) {
 $ownedStopped = $cleanupAttested
 $restorationExact = $null -ne $after -and
     $after.ManifestSha256 -ceq $before.ManifestSha256
+if ($functionalSmokeMode) {
+    $orchestratorValues = if ($null -ne $orchestratorResult) {
+        $orchestratorResult.Values
+    } else { $null }
+    $functionalStaged = $null
+    $functionalStagedPath = Join-Path $runRoot 'functional-smoke.staged.json'
+    if ($runExists -and $null -ne $runDirectoryCapability -and
+        (Test-Path -LiteralPath $functionalStagedPath -PathType Leaf)) {
+        try {
+            $functionalStagedRecord = Read-BoundedJsonWithRetainedBytes `
+                $functionalStagedPath 131072 `
+                'staged functional smoke summary' $runDirectoryCapability
+            $functionalStaged = $functionalStagedRecord.Value
+            $expectedFunctionalMode = if ($projectClientStockSignonMode) {
+                if ($projectClientVisualMode) {
+                    'project_client_live_visual_control_v1'
+                } elseif ($projectClientUserCmdMode) {
+                    'project_client_live_usercmd_check_v1'
+                } elseif ($projectClientLiveRuntimeMode) {
+                    'project_client_live_runtime_state_v1'
+                } else { 'project_client_stock_signon_v1' }
+            } else { 'local_research_copy_smoke_v1' }
+            $expectedFunctionalPurpose = if ($projectClientStockSignonMode) {
+                if ($projectClientVisualMode) {
+                    'fresh_project_client_live_visual_control'
+                } elseif ($projectClientUserCmdMode) {
+                    'fresh_project_client_usercmd_server_motion'
+                } elseif ($projectClientLiveRuntimeMode) {
+                    'fresh_project_client_live_runtime_state'
+                } else { 'fresh_project_client_stock_signon' }
+            } else { 'functional_smoke' }
+            $expectedClientSteamArgument = if ($projectClientStockSignonMode) {
+                'not_applicable'
+            } else { 'present' }
+            $expectedClientWorkingDirectoryRole =
+                if ($projectClientStockSignonMode) {
+                    'repository_build_directory'
+                } else { 'research_root' }
+            $expectedActualClientArgvProfile =
+                if ($projectClientVisualMode) {
+                    "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=$ProjectClientLiveInput;basedir=research-root;game=valve$(if ($ProjectClientPrediction -ceq 'reference') {';prediction=reference'})"
+                } elseif ($projectClientUserCmdMode) {
+                    'renderer=null;auth-provider=steam;stop-after=live-usercmd-check;resource-advertisement=empty'
+                } elseif ($projectClientLiveRuntimeMode) {
+                    'renderer=null;auth-provider=steam;stop-after=live-runtime-state;resource-advertisement=empty'
+                } elseif ($projectClientStockSignonMode) {
+                    'renderer=null;auth-provider=steam;stop-after=delta-schemas'
+                } else { 'stock-steam-windowed-connect' }
+            if ([string]$functionalStaged.schema -cne
+                    'hlclient.local-research-copy-smoke.v2' -or
+                [string]$functionalStaged.mode -cne $expectedFunctionalMode -or
+                [string]$functionalStaged.purpose -cne
+                    $expectedFunctionalPurpose -or
+                [bool]$functionalStaged.evidence_eligible -ne
+                    $projectClientStockSignonMode -or
+                [string]$functionalStaged.route -cne 'direct_loopback' -or
+                [string]$functionalStaged.game -cne 'valve' -or
+                [string]$functionalStaged.map -cne $Map -or
+                [Int64]$functionalStaged.server_port -ne $ServerPort -or
+                [string]$functionalStaged.client_steam_argument -cne
+                    $expectedClientSteamArgument -or
+                [string]$functionalStaged.client_working_directory_role -cne
+                    $expectedClientWorkingDirectoryRole -or
+                [string]$functionalStaged.actual_client_argv_profile -cne
+                    $expectedActualClientArgvProfile -or
+                [string]$functionalStaged.server_working_directory_role -cne
+                    'research_root' -or
+                [string]$functionalStaged.server_logging -cne
+                    'enabled_before_map' -or
+                [string]$functionalStaged.restoration_status -cne
+                    'wrapper_pending' -or
+                [string]$functionalStaged.publication_status -cne
+                    'staged_after_process_cleanup') {
+                throw 'Staged functional smoke summary contract is invalid.'
+            }
+            if ($projectClientStockSignonMode) {
+                foreach ($projectField in @(
+                        'image_identity_verified', 'resume_result',
+                        'application_entry_observed', 'arguments_accepted',
+                        'provider_begin_observed', 'steam_api_init_attempted',
+                        'steam_api_initialized', 'fresh_material_acquired',
+                        'connect_sent', 'connection_accepted',
+                        'serverinfo_received', 'schema_registry_received',
+                        'authentication_status', 'client_exit_code_hex',
+                        'child_wait_result', 'child_wait_native_error',
+                        'serverinfo_protocol', 'serverinfo_max_clients',
+                        'serverinfo_game', 'serverinfo_map', 'schema_count',
+                        'schema_field_count', 'resource_continuation_sent',
+                        'spawn_request_transmitted',
+                        'spawn_request_acknowledged',
+                        'signon_reply_transmitted',
+                        'signon_reply_acknowledged',
+                        'live_service_payloads_received',
+                        'client_world_state_published', 'usercmd_transmitted',
+                        'usercmd_movement_verified', 'live_visual_verified',
+                        'jump_duck_result', 'speed_result',
+                        'prediction_result', 'jump_observed',
+                        'descent_observed', 'duck_observed',
+                        'release_response_observed',
+                        'jump_new_submitted', 'duck_new_submitted',
+                        'usercmd_generated',
+                        'usercmd_new', 'usercmd_backup', 'usercmd_packets',
+                        'usercmd_server_samples',
+                        'rx_progress_post_input',
+                        'baseline_entity_count', 'service_payload_count',
+                        'applied_runtime_record_count', 'world_entity_count',
+                        'publication_revision', 'canonical_state_hash',
+                        'stable_runtime_interval_ms', 'protocol_progress',
+                        'transition_failure')) {
+                    if ($functionalStaged.PSObject.Properties.Name -cnotcontains
+                            $projectField) {
+                        throw "Staged project-client sign-on summary omitted $projectField."
+                    }
+                }
+                if (@('not_reached', 'failed', 'pending_or_unknown') -cnotcontains
+                        [string]$functionalStaged.authentication_status) {
+                    throw 'Staged project-client authentication status is invalid.'
+                }
+                if ($projectClientVisualMode -and
+                    $ProjectClientLiveInput -ceq
+                        'scripted-jump-duck-check') {
+                    Assert-GJumpDuckStagedContract `
+                        -Summary $functionalStaged
+                } elseif ($projectClientVisualMode -and
+                    $ProjectClientLiveInput -ceq 'scripted-speed-check' -and
+                    $ProjectClientPrediction -cne 'reference') {
+                    Assert-H1SpeedStagedContract `
+                        -Summary $functionalStaged
+                }
+                $progressFields = @(
+                    'steam_initialization', 'fresh_material',
+                    'connect_transmission', 'accept', 'serverinfo',
+                    'schema_registry', 'movevars', 'user_info',
+                    'sendres_queued', 'sendres_transmitted',
+                    'sendres_acknowledged', 'resource_transition',
+                    'resource_list', 'resource_response_queued',
+                    'resource_response_transmitted',
+                    'resource_response_acknowledged', 'resource_response',
+                    'spawn_queued', 'spawn_transmitted',
+                    'spawn_acknowledged', 'baselines',
+                    'runtime_publication', 'operational_interval')
+                foreach ($progressField in $progressFields) {
+                    if ($functionalStaged.protocol_progress.PSObject.Properties.Name `
+                            -cnotcontains $progressField -or
+                        @('not_reached', 'pending', 'succeeded', 'failed',
+                            'unknown') -cnotcontains
+                            [string]$functionalStaged.protocol_progress.$progressField) {
+                        throw "Staged project-client progress field is invalid: $progressField."
+                    }
+                }
+                foreach ($transitionField in @(
+                        'present', 'stage', 'profile', 'expected_opcode',
+                        'actual_opcode', 'cursor_byte_value', 'cursor',
+                        'boundary', 'payload_ordinal',
+                        'payload_ordinal_scope', 'direction',
+                        'source_sequence', 'source_acknowledgement',
+                        'source_reliable', 'reassembled', 'encoding',
+                        'wire_size', 'decoded_size', 'pending_suffix_start',
+                        'sendres_queued', 'sendres_transmitted',
+                        'sendres_acknowledged',
+                        'request_reliable_generation',
+                        'request_transmit_sequence',
+                        'request_acknowledgement_sequence', 'last_category',
+                        'last_scope', 'last_cursor', 'parser_error',
+                        'primary_error')) {
+                    if ($functionalStaged.transition_failure.PSObject.Properties.Name `
+                            -cnotcontains $transitionField) {
+                        throw "Staged transition diagnostic omitted $transitionField."
+                    }
+                }
+            }
+        } catch {
+            $functionalStaged = $null
+            [void]$cleanupErrors.Add($_.Exception.Message)
+        }
+    } else {
+        [void]$cleanupErrors.Add(
+            'Staged functional smoke summary was not retained before restoration.')
+    }
+    $serverReady = $null -ne $orchestratorValues -and
+        $orchestratorValues.ContainsKey('server-ready') -and
+        $orchestratorValues['server-ready'] -ceq 'true'
+    $clientReady = $null -ne $orchestratorValues -and
+        $orchestratorValues.ContainsKey('client-ready') -and
+        $orchestratorValues['client-ready'] -ceq 'true'
+    $functionalSuccess = $null -eq $primaryError -and
+        $cleanupErrors.Count -eq 0 -and $runExists -and $ownedStopped -and
+        $restorationExact -and $serverReady -and $clientReady -and
+        $orchestratorExitCode -eq 0
+    $functionalResult = if ($functionalSuccess) {
+        if ($projectClientStockSignonMode) {
+            if ($projectClientVisualMode) {
+                if ($ProjectClientLiveInput -ceq
+                        'scripted-jump-duck-check') {
+                    'fresh_project_client_jump_duck_server_verified'
+                } elseif ($ProjectClientPrediction -ceq 'reference') {
+                    'live_local_prediction_and_reconciliation_verified'
+                } elseif ($ProjectClientLiveInput -ceq
+                        'scripted-speed-check') {
+                    'live_normal_speed_and_shift_walk_verified'
+                } else {
+                    'fresh_project_client_live_visual_control_integrated'
+                }
+            } elseif ($projectClientUserCmdMode) {
+                'fresh_project_client_usercmd_server_motion_verified'
+            } elseif ($projectClientLiveRuntimeMode) {
+                'fresh_project_client_live_runtime_state_verified'
+            } else { 'fresh_project_client_stock_signon_verified' }
+        } else { 'local_client_server_smoke_passed' }
+    } elseif (-not $ownedStopped -or -not $restorationExact -or
+        $cleanupErrors.Count -ne 0) {
+        'local_smoke_integrity_failed'
+    } elseif ($serverReady) {
+        'local_server_ready_client_blocked'
+    } else {
+        'local_server_startup_failed'
+    }
+    if ($runExists -and $null -ne $runDirectoryCapability) {
+        $orchestratorSha256 = Get-FileSha256 $orchestratorPath
+        $functionalWrapper = [ordered]@{
+            schema = 'hlclient.local-research-copy-smoke-wrapper.v2'
+            mode = $(if ($projectClientStockSignonMode) {
+                    if ($projectClientVisualMode) {
+                        'project_client_live_visual_control_v1'
+                    } elseif ($projectClientUserCmdMode) {
+                        'project_client_live_usercmd_check_v1'
+                    } elseif ($projectClientLiveRuntimeMode) {
+                        'project_client_live_runtime_state_v1'
+                    } else { 'project_client_stock_signon_v1' }
+                } else { 'local_research_copy_smoke_v1' })
+            purpose = $(if ($projectClientStockSignonMode) {
+                    if ($projectClientVisualMode) {
+                        'fresh_project_client_live_visual_control'
+                    } elseif ($projectClientUserCmdMode) {
+                        'fresh_project_client_usercmd_server_motion'
+                    } elseif ($projectClientLiveRuntimeMode) {
+                        'fresh_project_client_live_runtime_state'
+                    } else { 'fresh_project_client_stock_signon' }
+                } else { 'functional_smoke' })
+            evidence_eligible = $projectClientStockSignonMode
+            run_id = $runId
+            route = 'direct_loopback'
+            launch = [ordered]@{
+                configuration = 'Release'
+                orchestrator_path = $orchestratorPath
+                orchestrator_sha256 = $orchestratorSha256
+                research_root = $research.Root
+                server_path = $research.Server
+                client_path = $research.Client
+                game = $Game
+                map = $Map
+                server_port = $ServerPort
+                client_steam_argument = $(if ($projectClientStockSignonMode) {
+                        'not_applicable'
+                    } else { 'present' })
+                authentication_provider = $(if ($projectClientStockSignonMode) {
+                        'steam_legacy_initiate_game_connection'
+                    } else { 'stock_client' })
+                client_working_directory = $(if ($projectClientStockSignonMode) {
+                        Split-Path -Parent $research.Client
+                    } else { $research.Root })
+                connect_argument = "127.0.0.1:$ServerPort"
+            }
+            startup = [ordered]@{
+                status = $orchestratorExitState.StartupStatus
+                exit_code = $orchestratorExitCode
+                stdout_bytes = $orchestratorExitState.StartupStdoutBytes
+                stderr_bytes = $orchestratorExitState.StartupStderrBytes
+            }
+            native_summary_retained_across_restoration =
+                ($null -ne $functionalStaged)
+            native_summary = $functionalStaged
+            external_steam_state = $(if ($projectClientStockSignonMode) {
+                    'current_user_session_used'
+                } else { 'not_assessed' })
+            external_steam_state_policy = $(if ($projectClientStockSignonMode) {
+                    'provider_runtime_only_no_credentials_or_material_retained'
+                } else { 'functional_observation_only' })
+            owned_process_cleanup = $(if ($ownedStopped) { 'exact' } else { 'incomplete' })
+            restoration_status = $(if ($restorationExact) { 'exact' } else { 'not_exact' })
+            result = $functionalResult
+        }
+        try {
+            Write-AtomicJsonNoOverwrite `
+                (Join-Path $runRoot 'functional-smoke-wrapper.json') `
+                $functionalWrapper 'functional smoke wrapper result' `
+                $runDirectoryCapability
+        } catch {
+            $functionalSuccess = $false
+            $functionalResult = 'local_smoke_integrity_failed'
+            [void]$cleanupErrors.Add($_.Exception.Message)
+        }
+    }
+    Write-Output ("[research-copy-smoke] mode={0}" -f $(if (
+            $projectClientStockSignonMode) { if (
+                $projectClientVisualMode) {
+                    'project_client_live_visual_control_v1'
+                } elseif ($projectClientUserCmdMode) {
+                    'project_client_live_usercmd_check_v1'
+                } elseif ($projectClientLiveRuntimeMode) {
+                    'project_client_live_runtime_state_v1'
+                } else { 'project_client_stock_signon_v1' } }
+            else { 'local_research_copy_smoke_v1' }))
+    Write-Output ("[research-copy-smoke] purpose={0}" -f $(if (
+            $projectClientStockSignonMode) { if (
+                $projectClientVisualMode) {
+                    'fresh_project_client_live_visual_control'
+                } elseif ($projectClientUserCmdMode) {
+                    'fresh_project_client_usercmd_server_motion'
+                } elseif ($projectClientLiveRuntimeMode) {
+                    'fresh_project_client_live_runtime_state'
+                } else { 'fresh_project_client_stock_signon' } }
+            else { 'functional_smoke' }))
+    Write-Output ("[research-copy-smoke] evidence_eligible={0}" -f
+        $projectClientStockSignonMode.ToString().ToLowerInvariant())
+    Write-Output ("[research-copy-smoke] external_steam_state={0}" -f $(if (
+            $projectClientStockSignonMode) { 'current_user_session_used' }
+            else { 'not_assessed' }))
+    Write-Output ("[research-copy-smoke] run_id={0}" -f $runId)
+    Write-Output ("[research-copy-smoke] run_root={0}" -f $runRoot)
+    Write-Output ("[research-copy-smoke] server_ready={0}" -f
+        $serverReady.ToString().ToLowerInvariant())
+    Write-Output ("[research-copy-smoke] client_map_entry={0}" -f
+        $clientReady.ToString().ToLowerInvariant())
+    foreach ($summaryKey in @(
+            'client-process-created', 'client-image-identity',
+            'client-resume-result', 'client-initialized',
+            'connect-requested', 'connection-status',
+            'client-map-entry-status', 'map-entry-source',
+            'last-confirmed-stage', 'stable-duration-ms',
+            'application-entry-observed', 'arguments-accepted',
+            'provider-begin-observed', 'steam-api-init-attempted',
+            'steam-api-initialized', 'fresh-material-acquired', 'connect-sent',
+            'connection-accepted', 'serverinfo-received',
+            'schema-registry-received', 'authentication-status',
+            'resource-continuation-sent', 'spawn-request-transmitted',
+            'spawn-request-acknowledged', 'signon-reply-transmitted',
+            'signon-reply-acknowledged', 'live-service-payloads-received',
+            'client-world-state-published', 'usercmd-transmitted',
+            'usercmd-movement-verified', 'live-visual-verified',
+            'jump-duck-result', 'speed-result', 'prediction-result', 'jump-observed', 'descent-observed',
+            'duck-observed', 'release-response-observed',
+            'jump-new-submitted', 'duck-new-submitted',
+            'usercmd-generated', 'usercmd-new',
+            'usercmd-backup', 'usercmd-packets', 'usercmd-server-samples',
+            'serverinfo-protocol', 'serverinfo-max-clients',
+            'serverinfo-game', 'serverinfo-map', 'schema-count',
+            'schema-field-count', 'baseline-entity-count',
+            'service-payload-count', 'applied-runtime-record-count',
+            'world-entity-count', 'publication-revision',
+            'canonical-state-hash', 'stable-runtime-interval-ms',
+            'client-exit-code', 'client-exit-code-hex',
+            'client-wait-result', 'client-wait-native-error',
+            'server-exit-code',
+            'diagnostic-publication')) {
+        $summaryValue = if ($null -ne $orchestratorValues -and
+            $orchestratorValues.ContainsKey($summaryKey)) {
+            $orchestratorValues[$summaryKey]
+        } else { 'unknown' }
+        Write-Output ("[research-copy-smoke] {0}={1}" -f
+            $summaryKey, $summaryValue)
+    }
+    Write-Output ("[research-copy-smoke] diagnostic_root={0}" -f $runRoot)
+    Write-Output ("[research-copy-smoke] owned_process_cleanup={0}" -f
+        $(if ($ownedStopped) { 'exact' } else { 'incomplete' }))
+    Write-Output ("[research-copy-smoke] restoration_status={0}" -f
+        $(if ($restorationExact) { 'exact' } else { 'not_exact' }))
+    Write-Output ("[research-copy-smoke] result={0}" -f $functionalResult)
+    if ($null -ne $runDirectoryCapability) {
+        $runDirectoryCapability.Dispose()
+        $runDirectoryCapability = $null
+    }
+    if ($functionalSuccess) { return }
+    if ($null -ne $primaryError) { throw $primaryError }
+    throw "Functional smoke failed: $functionalResult."
+}
+if ($functionalRuntimeCaptureMode) {
+    $orchestratorValues = if ($null -ne $orchestratorResult) {
+        $orchestratorResult.Values
+    } else { $null }
+    $relayReady = $null -ne $orchestratorValues -and
+        $orchestratorValues.ContainsKey('relay-ready') -and
+        $orchestratorValues['relay-ready'] -ceq 'true'
+    $serverReady = $null -ne $orchestratorValues -and
+        $orchestratorValues.ContainsKey('server-ready') -and
+        $orchestratorValues['server-ready'] -ceq 'true'
+    $clientReady = $null -ne $orchestratorValues -and
+        $orchestratorValues.ContainsKey('client-ready') -and
+        $orchestratorValues['client-ready'] -ceq 'true'
+    $transportComplete = $null -ne $orchestratorValues -and
+        $orchestratorValues.ContainsKey('bounded-transport-complete') -and
+        $orchestratorValues['bounded-transport-complete'] -ceq 'true'
+    $functionalCaptureSuccess = $null -eq $primaryError -and
+        $cleanupErrors.Count -eq 0 -and $runExists -and $ownedStopped -and
+        $restorationExact -and $relayReady -and $serverReady -and
+        $clientReady -and $transportComplete -and
+        $orchestratorExitCode -eq 0
+    $functionalCaptureResult = if ($functionalCaptureSuccess) {
+        'functional_runtime_capture_complete'
+    } elseif (-not $ownedStopped -or -not $restorationExact -or
+        $cleanupErrors.Count -ne 0) {
+        'functional_runtime_capture_integrity_failed'
+    } elseif ($runExists) {
+        'functional_runtime_capture_incomplete'
+    } else {
+        'functional_runtime_capture_not_created'
+    }
+    if ($runExists -and $null -ne $runDirectoryCapability) {
+        try {
+            $publication = Publish-FunctionalRuntimeCaptureArtifacts `
+                $runRoot $runId $runDirectoryCapability `
+                $functionalCaptureSuccess $ownedStopped $restorationExact `
+                $before.ManifestSha256 `
+                $(if ($null -ne $after) { $after.ManifestSha256 } else { $null }) `
+                $relayReady $serverReady $clientReady $transportComplete `
+                $Game $Map $MaximumDurationSeconds $ServerProfileId `
+                $orchestratorValues
+            if ($functionalCaptureSuccess -and
+                -not [bool]$publication.ManifestPublished) {
+                throw 'Functional publication did not reach its commit point.'
+            }
+        } catch {
+            $functionalCaptureSuccess = $false
+            $functionalCaptureResult =
+                'functional_runtime_capture_integrity_failed'
+            [void]$cleanupErrors.Add($_.Exception.Message)
+        }
+    }
+    Write-Output '[functional-runtime-capture] purpose=functional_runtime_capture'
+    Write-Output '[functional-runtime-capture] campaign_evidence_eligible=false'
+    Write-Output '[functional-runtime-capture] external_steam_state=not_assessed'
+    Write-Output '[functional-runtime-capture] route=stock_client_loopback_relay_stock_hlds'
+    Write-Output ("[functional-runtime-capture] run_id={0}" -f $runId)
+    Write-Output ("[functional-runtime-capture] run_root={0}" -f $runRoot)
+    Write-Output ("[functional-runtime-capture] relay_ready={0}" -f
+        $relayReady.ToString().ToLowerInvariant())
+    Write-Output ("[functional-runtime-capture] server_ready={0}" -f
+        $serverReady.ToString().ToLowerInvariant())
+    Write-Output ("[functional-runtime-capture] client_map_entry={0}" -f
+        $clientReady.ToString().ToLowerInvariant())
+    Write-Output ("[functional-runtime-capture] transport_complete={0}" -f
+        $transportComplete.ToString().ToLowerInvariant())
+    Write-Output ("[functional-runtime-capture] owned_process_cleanup={0}" -f
+        $(if ($ownedStopped) { 'exact' } else { 'incomplete' }))
+    Write-Output ("[functional-runtime-capture] restoration_status={0}" -f
+        $(if ($restorationExact) { 'exact' } else { 'not_exact' }))
+    Write-Output ("[functional-runtime-capture] result={0}" -f
+        $functionalCaptureResult)
+    if ($null -ne $runDirectoryCapability) {
+        $runDirectoryCapability.Dispose()
+        $runDirectoryCapability = $null
+    }
+    if ($functionalCaptureSuccess) { return }
+    if ($null -ne $primaryError) { throw $primaryError }
+    throw "Functional runtime capture failed: $functionalCaptureResult."
+}
 $externalDifference = if ($null -ne $externalAfter) {
     Compare-StockExternalStateSnapshot `
-        $externalBefore $externalAfter $externalDriftPhase
+        $externalBefore $externalAfter $externalDriftPhase `
+        -SteamRewritePolicyId $stockSteamRewritePolicyId
 } else { $null }
 $externalExact = $null -ne $externalDifference -and
     [string]$externalDifference.result -ceq 'none'
+$writerTraceTerminalReceipt = $null
+if ($EnableWriterTraceHandoff -and
+    $null -ne $orchestratorExitState.WriterTraceOwner) {
+    $writerSnapshotResult = if ($null -eq $externalDifference) {
+        'incomplete'
+    } elseif ([string]$externalDifference.result -ceq 'none') {
+        'unchanged'
+    } else { 'changed' }
+    try {
+        $writerTraceTerminalReceipt = Write-StockWriterTraceTerminalReceipt `
+            $orchestratorExitState.WriterTraceOwner $writerSnapshotResult
+    } catch {
+        [void]$cleanupErrors.Add(
+            'writer_trace_terminal_receipt_publication_failed:' +
+            $_.Exception.Message)
+    }
+}
 $version = $null
 $isolation = $null
 $restoration = $null
@@ -5307,8 +8474,26 @@ if ($anyServerProfileDiagnosticMode) {
         map_status = 'server-profile-map-status'
     }
     if ([string]$staged.schema -cne
-            'hlclient.stock-runtime-server-profile-diagnostic-staged.v1') {
+            'hlclient.stock-runtime-server-profile-diagnostic-staged.v2' -or
+        [string]$staged.profile_id -cne $ServerProfileId) {
         throw 'Staged server profile diagnostic schema is invalid.'
+    }
+    $expectedReadinessStatus = if ($ServerProfileId -ceq
+        'steam-hlds-10210-no-mode-banner-v1') {
+        $orchestratorResult.Values['server-readiness-status']
+    } else { 'not-applicable' }
+    $expectedEndpointProof = if ($ServerProfileId -ceq
+        'steam-hlds-10210-no-mode-banner-v1') {
+        $orchestratorResult.Values['server-readiness-endpoint-proof']
+    } else { 'absent' }
+    $expectedMapProof = if ($ServerProfileId -ceq
+        'steam-hlds-10210-no-mode-banner-v1') {
+        $orchestratorResult.Values['server-readiness-map-proof']
+    } else { 'absent' }
+    if ([string]$staged.readiness_status -cne $expectedReadinessStatus -or
+        [string]$staged.endpoint_proof_source -cne $expectedEndpointProof -or
+        [string]$staged.map_proof_source -cne $expectedMapProof) {
+        throw 'Staged server readiness proof disagrees with the bounded process result.'
     }
     foreach ($property in $fieldMappings.Keys) {
         if ([string]$staged.$property -cne
@@ -5375,13 +8560,14 @@ if ($anyServerProfileDiagnosticMode) {
     }
     $diagnosticManifest = [ordered]@{
         schema = if ($privateServerProfileDiagnosticMode) {
-            'hlclient.stock-runtime-server-profile-private-diagnostic.v1'
-        } else { 'hlclient.stock-runtime-server-profile-diagnostic.v1' }
+            'hlclient.stock-runtime-server-profile-private-diagnostic.v2'
+        } else { 'hlclient.stock-runtime-server-profile-diagnostic.v2' }
         run_id = $runId
         role = if ($privateServerProfileDiagnosticMode) {
             'server-profile-private-diagnostic'
         } else { 'server-profile-diagnostic' }
         evidence_eligible = $false
+        profile_id = $ServerProfileId
         parse_status = $orchestratorResult.Values['server-profile-parse-status']
         mismatch_field = $orchestratorResult.Values['server-profile-mismatch-field']
         engine_version_status = $orchestratorResult.Values['server-profile-engine-version-status']
@@ -5399,6 +8585,9 @@ if ($anyServerProfileDiagnosticMode) {
             $orchestratorResult.Values['server-profile-process-log-truncated'] -ceq 'true'
         observed_byte_count = [Int64]$orchestratorResult.Values['server-profile-observed-byte-count']
         observed_line_count = [Int64]$orchestratorResult.Values['server-profile-observed-line-count']
+        readiness_status = $expectedReadinessStatus
+        endpoint_proof_source = $expectedEndpointProof
+        map_proof_source = $expectedMapProof
         stock_client_launched = $false
         udp_corpus_created = $false
         restoration_status = 'exact'
@@ -5417,6 +8606,10 @@ if ($anyServerProfileDiagnosticMode) {
         drift_removed = $externalDifference.removed
         drift_unreadable = $externalDifference.unreadable
         critical_external_drift = $externalDifference.critical_external_drift
+        raw_external_state = $externalDifference.raw_external_state
+        protected_projection = $externalDifference.protected_projection
+        steam_rewrite_policy_id = $externalDifference.policy_id
+        policy_decision = $externalDifference.policy_decision
         steam_user_config_rewrite = $externalDifference.steam_user_config_rewrite
         steam_user_config_projection = $externalDifference.steam_user_config_projection
         steam_user_config_volatile_classes =
@@ -5580,8 +8773,23 @@ if ($null -ne $primaryError) {
             [string]$isolation.evidence_status -cne 'observed') {
             throw 'Isolation attestation is not accepted.'
         }
-        if ([string]$restoration.schema -cne 'hlclient.stock-runtime-restoration.v1' -or
-            [string]$restoration.external_file_drift -cne 'none' -or
+        $restorationPolicyAccepted =
+            ([string]$restoration.schema -ceq
+                'hlclient.stock-runtime-restoration.v2') -and
+            (([string]$restoration.raw_external_state -ceq 'unchanged' -and
+              [string]$restoration.external_file_drift -ceq 'none' -and
+              [string]$restoration.protected_projection -ceq 'none' -and
+              @('legacy-strict-v1', 'steam-appinfo-change-number-v1') -ccontains
+                [string]$restoration.steam_rewrite_policy_id -and
+              [string]$restoration.policy_decision -ceq 'strict_pass') -or
+             ([string]$restoration.raw_external_state -ceq 'changed' -and
+              [string]$restoration.external_file_drift -ceq 'changed' -and
+              [string]$restoration.protected_projection -ceq 'match' -and
+              [string]$restoration.steam_rewrite_policy_id -ceq
+                'steam-appinfo-change-number-v1' -and
+              [string]$restoration.policy_decision -ceq
+                'explicit_advisory'))
+        if (-not $restorationPolicyAccepted -or
             [string]$restoration.restoration_status -cne 'exact' -or
             -not [bool]$restoration.created_files_removed -or
             -not [bool]$restoration.protected_paths_included -or
@@ -5590,8 +8798,9 @@ if ($null -ne $primaryError) {
             [Int64]$restoration.input_events_injected -ne 0 -or
             [string]$restoration.pre_manifest_sha256 -cne
                 [string]$restoration.post_manifest_sha256 -or
-            [string]$restoration.external_pre_manifest_sha256 -cne
-                [string]$restoration.external_post_manifest_sha256) {
+            (([string]$restoration.raw_external_state -ceq 'unchanged') -ne
+             ([string]$restoration.external_pre_manifest_sha256 -ceq
+                [string]$restoration.external_post_manifest_sha256))) {
             throw 'Restoration attestation is not accepted.'
         }
         foreach ($finalLeaf in @(
@@ -6039,7 +9248,7 @@ if ($runExists) {
         $journalCount = [Int64]$walkerValues['journal-entries']
     }
     $runManifest = [ordered]@{
-        schema = 'hlclient.stock-runtime-research-run.v1'
+        schema = 'hlclient.stock-runtime-research-run.v2'
         run_id = $runId
         scenario = $canonicalScenario
         map_category = $Map
@@ -6058,7 +9267,18 @@ if ($runExists) {
                 $orchestratorResult.Values['client-ready']
             } else { 'not-observed' })
         restoration_status = $(if ($restorationExact) { 'exact' } else { 'not-exact' })
-        external_drift_status = $(if ($externalExact) { 'none' } else { 'changed-or-unavailable' })
+        external_drift_status = $(if ($externalExact) { 'none' } elseif (
+                $null -ne $externalDifference) { 'changed' } else { 'unavailable' })
+        raw_external_state = $(if ($null -ne $externalDifference) {
+                $externalDifference.raw_external_state
+            } else { 'incomplete' })
+        protected_projection = $(if ($null -ne $externalDifference) {
+                $externalDifference.protected_projection
+            } else { 'incomplete' })
+        steam_rewrite_policy_id = $stockSteamRewritePolicyId
+        policy_decision = $(if ($null -ne $externalDifference) {
+                $externalDifference.policy_decision
+            } else { 'reject' })
         raw_datagram_count = $rawCount
         journal_entry_count = $journalCount
         delivered_sequenced_c2s_count = $(if ($null -ne $checkerValues) {

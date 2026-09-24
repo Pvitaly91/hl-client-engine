@@ -41,6 +41,7 @@ struct Options final {
     std::uint32_t ready_delay_ms{0U};
     std::uint32_t profile_chunk_delay_ms{25U};
     bool suppress_ready{false};
+    bool repeat_responses{false};
     std::optional<std::string> profile_variant;
     std::optional<std::filesystem::path> create_file;
     std::optional<std::filesystem::path> attempt_child_create_file;
@@ -56,6 +57,10 @@ struct Options final {
         const std::string_view name{argv[index]};
         if (name == "--suppress-ready" && !options.suppress_ready) {
             options.suppress_ready = true;
+            continue;
+        }
+        if (name == "--repeat-responses" && !options.repeat_responses) {
+            options.repeat_responses = true;
             continue;
         }
         if (index + 1 >= argc) return std::nullopt;
@@ -83,12 +88,17 @@ struct Options final {
                 options.profile_chunk_delay_ms > 30'000U) return std::nullopt;
         } else if (name == "--hlds-profile-variant" &&
                    !options.profile_variant) {
-            constexpr std::array<std::string_view, 14U> variants{
+            constexpr std::array<std::string_view, 19U> variants{
                 "valid", "engine-version-mismatch", "runtime-mode-mismatch",
                 "game-mismatch", "protocol-mismatch", "build-mismatch",
                 "endpoint-address-mismatch", "endpoint-port-mismatch",
                 "map-mismatch", "partial-chunks", "late-completion",
-                "duplicate-field", "exit-before-profile", "log-truncation"};
+                "duplicate-field", "exit-before-profile", "log-truncation",
+                "observed-no-mode",
+                "observed-no-mode-map-mismatch",
+                "observed-no-mode-protocol-mismatch",
+                "observed-no-mode-malformed-response",
+                "observed-no-mode-wrong-source"};
             if (std::ranges::find(variants, value) == variants.end()) {
                 return std::nullopt;
             }
@@ -158,6 +168,7 @@ int main(const int argc, char** argv)
         if (!options->profile_variant) return true;
         const auto& variant = *options->profile_variant;
         if (variant == "exit-before-profile") return true;
+        const bool observed = variant.starts_with("observed-no-mode");
         const std::string engine = variant == "engine-version-mismatch"
             ? "1.1.2.3" : "1.1.2.2";
         const std::string mode = variant == "runtime-mode-mismatch"
@@ -176,12 +187,19 @@ int main(const int argc, char** argv)
             : options->port;
         const std::string map = variant == "map-mismatch"
             ? "crossfire" : "boot_camp";
-        std::string banner = "Protocol version " + protocol + "\r\n" +
-            "Exe version " + engine + "/" + mode + " (" + game + ")\r\n" +
+        const
+        std::string engine_line =
+            observed ? "Exe version " + engine + " (" + game + ")\r\n"
+                     :
+            "Exe version " + engine + "/" + mode + " (" + game + ")\r\n";
+        std::string banner =
+            "Protocol version " + protocol + "\r\n" + engine_line +
             "Exe build: 00:00:00 Jan 1 2026 (" + build + ")\r\n" +
+            (observed ? "Server IP address fake-machine\r\n"
+                      :
             "Server IP address " + address + ":" +
             std::to_string(endpoint_port) + "\r\n" +
-            "map     : " + map + " at: 0 x, 0 y, 0 z\r\n";
+            "map     : " + map + " at: 0 x, 0 y, 0 z\r\n");
         if (variant == "duplicate-field") {
             banner += "Protocol version 48\r\n";
         }
@@ -292,12 +310,61 @@ int main(const int argc, char** argv)
             socket, buffer.data(), static_cast<int>(buffer.size()), 0,
             reinterpret_cast<sockaddr*>(&peer), &peer_size);
         if (received <= 0) continue;
-        constexpr std::string_view response =
+        std::vector<char> response;
+        const bool observed =
+            options->profile_variant && options->profile_variant->starts_with("observed-no-mode");
+        constexpr std::array<unsigned char, 25U> a2s_info{
+            0xFFU, 0xFFU, 0xFFU, 0xFFU, 0x54U, 'S', 'o', 'u', 'r', 'c', 'e', ' ',  'E',
+            'n',   'g',   'i',   'n',   'e',   ' ', 'Q', 'u', 'e', 'r', 'y', 0x00U};
+        const bool info_query = observed && received >= static_cast<int>(a2s_info.size()) &&
+                                std::equal(a2s_info.begin(), a2s_info.end(),
+                                           reinterpret_cast<const unsigned char*>(buffer.data()));
+        if (info_query) {
+            const auto append_byte = [&response](const unsigned char value) {
+                response.push_back(static_cast<char>(value));
+            };
+            const auto append_string = [&response](const std::string_view value) { response.insert(response.end(), value.begin(), value.end());
+                response.push_back('\0');
+            };
+            response.insert(response.end(), 4U, static_cast<char>(0xFFU));
+            append_byte(0x49U);
+            append_byte(*options->profile_variant == "observed-no-mode-protocol-mismatch" ? 47U
+                                                                                          : 48U);
+            append_string("hlclient-fake");
+            append_string(*options->profile_variant == "observed-no-mode-map-mismatch"
+                              ? "crossfire"
+                              : "boot_camp");
+            append_string("valve");
+            append_string("Half-Life");
+            append_byte(70U);
+            append_byte(0U);
+            append_byte(0U);
+            append_byte(8U);
+            append_byte(0U);
+            append_byte('d');
+            append_byte('w');
+            append_byte(0U);
+            append_byte(0U);
+            append_string("1.1.2.2");
+            if (*options->profile_variant == "observed-no-mode-malformed-response") {
+                response.pop_back();
+            }
+        } else {
+            constexpr std::string_view generic =
             "HLCLIENT_FAKE_ORCHESTRATION_RESPONSE_V1";
-        static_cast<void>(::sendto(
-            socket, response.data(), static_cast<int>(response.size()), 0,
+            response.assign(generic.begin(), generic.end());
+        }
+        SOCKET response_socket = socket;
+        if (options->profile_variant &&
+            *options->profile_variant == "observed-no-mode-wrong-source") {
+            response_socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        }
+        static_cast<void>(::sendto(response_socket, response.data(), static_cast<int>(response.size()), 0,
             reinterpret_cast<const sockaddr*>(&peer), peer_size));
-        break;
+        if (response_socket != socket && response_socket != INVALID_SOCKET) {
+            static_cast<void>(::closesocket(response_socket));
+        }
+        if (!observed && !options->repeat_responses) break;
     }
     static_cast<void>(::closesocket(socket));
     static_cast<void>(::WSACleanup());

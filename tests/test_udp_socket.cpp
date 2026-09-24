@@ -13,6 +13,13 @@
 #include <thread>
 #include <utility>
 
+#ifdef _WIN32
+#    ifndef WIN32_LEAN_AND_MEAN
+#        define WIN32_LEAN_AND_MEAN
+#    endif
+#    include <winsock2.h>
+#endif
+
 namespace {
 
 using hlclient::network::Datagram;
@@ -45,11 +52,13 @@ TEST_CASE("Nonblocking UDP sockets exchange a loopback datagram", "[network][udp
     CHECK(invalid_receive.status == ReceiveStatus::error);
     CHECK_FALSE(invalid_receive.datagram.has_value());
     CHECK_FALSE(invalid_receive.error.empty());
+    CHECK_FALSE(invalid_receive.native_error);
 
     const auto empty_receive = receiver->receive();
     CHECK(empty_receive.status == ReceiveStatus::would_block);
     CHECK_FALSE(empty_receive.datagram.has_value());
     CHECK(empty_receive.error.empty());
+    CHECK_FALSE(empty_receive.native_error);
 
     auto sender = UdpSocket::open_ipv4(runtime, error);
     INFO(error);
@@ -115,6 +124,24 @@ TEST_CASE("Nonblocking UDP sockets exchange a loopback datagram", "[network][udp
     REQUIRE(oversized_result.source);
     CHECK(*oversized_result.source == *sender_address);
     CHECK(oversized_result.payload_size_lower_bound >= oversized_payload.size());
+#ifdef _WIN32
+    REQUIRE(oversized_result.native_error);
+    CHECK(oversized_result.native_error.domain ==
+          hlclient::network::SocketNativeErrorDomain::winsock);
+    CHECK(oversized_result.native_error.code == WSAEMSGSIZE);
+#endif
+
+#ifdef _WIN32
+    hlclient::network::SocketNativeError send_native_error;
+    CHECK_FALSE(sender->send_to(
+        NetworkAddress{0xffffffffU, 9U}, payload, error, &send_native_error));
+    REQUIRE(send_native_error);
+    CHECK(send_native_error.domain ==
+          hlclient::network::SocketNativeErrorDomain::winsock);
+    CHECK(send_native_error.code != 0U);
+    CHECK(error.find(std::to_string(send_native_error.code)) !=
+          std::string::npos);
+#endif
 }
 
 TEST_CASE("UDP sockets retain the network runtime they need", "[network][udp]")
@@ -149,6 +176,12 @@ TEST_CASE("Moved-from UDP sockets fail safely", "[network][udp]")
     UdpSocket moved{std::move(*original)};
     CHECK_FALSE(original->bind(NetworkAddress::loopback(0), error));
     CHECK_FALSE(error.empty());
+
+    const std::array payload{std::byte{0x01U}};
+    hlclient::network::SocketNativeError native_error;
+    CHECK_FALSE(original->send_to(
+        NetworkAddress::loopback(1U), payload, error, &native_error));
+    CHECK_FALSE(native_error);
 
     const bool bound = moved.bind(NetworkAddress::loopback(0), error);
     INFO(error);

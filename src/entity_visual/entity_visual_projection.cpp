@@ -172,6 +172,12 @@ EntityVisualModelReference EntityVisualModelReference::synthetic_model_slot(
 }
 
 EntityVisualModelReference
+EntityVisualModelReference::public_goldsrc48_model_slot(std::uint32_t value) noexcept
+{
+    return EntityVisualModelReference{EntityVisualModelReferenceProfile::public_goldsrc48_model_slot, value};
+}
+
+EntityVisualModelReference
 EntityVisualModelReference::stock_modelindex_evidence_pending(
     const std::uint32_t raw_value) noexcept
 {

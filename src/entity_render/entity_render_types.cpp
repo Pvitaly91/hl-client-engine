@@ -73,4 +73,38 @@ bool finite_entity_render_bounds(const assets::WorldBounds& bounds) noexcept
         bounds.minimum.z <= bounds.maximum.z;
 }
 
+std::array<float, 16U> entity_render_model_matrix(
+    const EntityRenderTransform& transform) noexcept
+{
+    constexpr float radians = 0.01745329251994329577F;
+    const float x = transform.rotation_degrees.x * radians;
+    const float y = transform.rotation_degrees.y * radians;
+    const float z = transform.rotation_degrees.z * radians;
+    const float cx = std::cos(x);
+    const float sx = std::sin(x);
+    const float cy = std::cos(y);
+    const float sy = std::sin(y);
+    const float cz = std::cos(z);
+    const float sz = std::sin(z);
+    const float scale = transform.uniform_scale;
+    return {
+        (cz * cy) * scale,
+        (sz * cy) * scale,
+        (-sy) * scale,
+        0.0F,
+        (cz * sy * sx - sz * cx) * scale,
+        (sz * sy * sx + cz * cx) * scale,
+        (cy * sx) * scale,
+        0.0F,
+        (cz * sy * cx + sz * sx) * scale,
+        (sz * sy * cx - cz * sx) * scale,
+        (cy * cx) * scale,
+        0.0F,
+        transform.origin.x,
+        transform.origin.y,
+        transform.origin.z,
+        1.0F,
+    };
+}
+
 } // namespace hlclient::entity_render

@@ -81,10 +81,21 @@ struct OwnedServicePayload {
     bool source_reliable{false};
     bool reassembled{false};
     bool decompressed{false};
+    // True only when the service bytes were valid on the wire without a
+    // BZ2-NUL envelope.  Together with `decompressed`, this marks an owning
+    // payload as ready for service decoders while retaining truthful source
+    // metadata.
+    bool wire_uncompressed{false};
     bool acknowledgement_reliable{false};
     NetchanDirection direction{NetchanDirection::server_to_client};
     NetchanDriverTimePoint received_at{};
 };
+
+[[nodiscard]] constexpr bool service_payload_decode_ready(
+    const OwnedServicePayload& payload) noexcept
+{
+    return payload.decompressed || payload.wire_uncompressed;
+}
 
 [[nodiscard]] OwnedServicePayload make_owned_service_payload(
     OwnedNetchanPayload&& payload) noexcept;
@@ -223,6 +234,7 @@ public:
         bool source_reliable,
         bool reassembled,
         bool decompressed,
+        bool wire_uncompressed,
         bool acknowledgement_reliable,
         NetchanDirection direction,
         NetchanDriverTimePoint received_at,
@@ -236,6 +248,7 @@ public:
     [[nodiscard]] bool source_reliable() const noexcept;
     [[nodiscard]] bool reassembled() const noexcept;
     [[nodiscard]] bool decompressed() const noexcept;
+    [[nodiscard]] bool wire_uncompressed() const noexcept;
     [[nodiscard]] bool acknowledgement_reliable() const noexcept;
     [[nodiscard]] NetchanDirection direction() const noexcept;
     [[nodiscard]] NetchanDriverTimePoint received_at() const noexcept;
@@ -250,6 +263,7 @@ private:
     bool source_reliable_{false};
     bool reassembled_{false};
     bool decompressed_{false};
+    bool wire_uncompressed_{false};
     bool acknowledgement_reliable_{false};
     NetchanDirection direction_{NetchanDirection::server_to_client};
     NetchanDriverTimePoint received_at_{};

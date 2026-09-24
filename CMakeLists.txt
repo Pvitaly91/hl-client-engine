@@ -62,7 +62,19 @@ endif()
 
 function(hlclient_enable_address_sanitizer target)
     if(HLCLIENT_ENABLE_ADDRESS_SANITIZER)
-        target_compile_options(${target} PRIVATE /fsanitize=address)
+        # MSVC reports C5072 when ASan is enabled without debug information.
+        # Embed line information and retain a linker PDB only in the opt-in
+        # sanitizer Release configuration; ordinary Release optimization and
+        # /WX are unchanged.
+        target_compile_options(
+            ${target}
+            PRIVATE
+                /fsanitize=address
+                "$<$<CONFIG:Release>:/Z7>")
+        target_link_options(
+            ${target}
+            PRIVATE
+                "$<$<CONFIG:Release>:/DEBUG>")
         # The focused ASan targets intentionally link ordinary project
         # libraries from the same opt-in tree.  Disable MSVC STL's separate
         # container-annotation ABI so annotated and ordinary objects retain a
@@ -671,6 +683,7 @@ hlclient_add_library(
     include/hlclient/goldsrc/resource_transition_request.hpp
     include/hlclient/goldsrc/resource_transition_stage.hpp
     include/hlclient/goldsrc/server_info.hpp
+    include/hlclient/goldsrc/stock_spawn_request.hpp
     include/hlclient/goldsrc/service_message_stream.hpp
     include/hlclient/goldsrc/service_payload_envelope.hpp
     include/hlclient/goldsrc/user_info_signon_stage.hpp
@@ -689,6 +702,7 @@ hlclient_add_library(
     src/goldsrc/resource_transition_request.cpp
     src/goldsrc/resource_transition_stage.cpp
     src/goldsrc/server_info.cpp
+    src/goldsrc/stock_spawn_request.cpp
     src/goldsrc/service_message_stream.cpp
     src/goldsrc/service_payload_envelope.cpp
     src/goldsrc/user_info_signon_stage.cpp
@@ -764,6 +778,8 @@ set_property(
 
 hlclient_add_library(
     hlclient_goldsrc_usercmd_codec
+    include/hlclient/goldsrc/reference_client_move.hpp
+    src/goldsrc/reference_client_move.cpp
     include/hlclient/goldsrc/bit_writer.hpp
     include/hlclient/goldsrc/client_move_message.hpp
     include/hlclient/goldsrc/move_checksum.hpp
@@ -782,7 +798,7 @@ target_link_libraries(
     PUBLIC
         hlclient::goldsrc_usercmd_api
         hlclient::goldsrc_delta_schema
-    PRIVATE hlclient::core)
+    PRIVATE hlclient::core hlclient::goldsrc_delta_values hlclient::goldsrc_signon)
 set_property(
     TARGET hlclient_goldsrc_usercmd_codec
     PROPERTY FOLDER "Engine/Network/GoldSrc/Client Move")
@@ -799,6 +815,7 @@ target_link_libraries(
     hlclient_goldsrc_entity_snapshots
     PUBLIC
         hlclient::goldsrc_delta_values
+        hlclient::goldsrc_netchan
         hlclient::goldsrc_signon
     PRIVATE hlclient::core)
 set_property(
@@ -828,12 +845,14 @@ set_property(
 
 hlclient_add_library(
     hlclient_goldsrc_stock_runtime
+    include/hlclient/goldsrc/runtime_control_decoder.hpp
     include/hlclient/goldsrc/stock_authoritative_movement.hpp
     include/hlclient/goldsrc/stock_command_ack_evidence.hpp
     include/hlclient/goldsrc/stock_local_player_identity.hpp
     include/hlclient/goldsrc/stock_runtime_frame.hpp
     include/hlclient/goldsrc/stock_runtime_message_catalog.hpp
     include/hlclient/goldsrc/stock_server_time.hpp
+    src/goldsrc/runtime_control_decoder.cpp
     src/goldsrc/stock_authoritative_movement.cpp
     src/goldsrc/stock_command_ack_evidence.cpp
     src/goldsrc/stock_local_player_identity.cpp
@@ -853,6 +872,148 @@ target_link_libraries(
 set_property(
     TARGET hlclient_goldsrc_stock_runtime
     PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Evidence")
+
+hlclient_add_library(
+    hlclient_goldsrc_entity_baseline_decoder
+    include/hlclient/goldsrc/entity_baseline_decoder.hpp
+    src/goldsrc/entity_baseline_decoder.cpp
+)
+add_library(
+    hlclient::goldsrc_entity_baseline_decoder ALIAS
+    hlclient_goldsrc_entity_baseline_decoder)
+target_link_libraries(
+    hlclient_goldsrc_entity_baseline_decoder
+    PUBLIC hlclient::goldsrc_entity_snapshots
+           hlclient::goldsrc_stock_runtime
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_entity_baseline_decoder
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Entities")
+
+hlclient_add_library(
+    hlclient_goldsrc_client_data_decoder
+    include/hlclient/goldsrc/client_data_decoder.hpp
+    src/goldsrc/client_data_decoder.cpp
+)
+add_library(
+    hlclient::goldsrc_client_data_decoder ALIAS
+    hlclient_goldsrc_client_data_decoder)
+target_link_libraries(
+    hlclient_goldsrc_client_data_decoder
+    PUBLIC
+        hlclient::goldsrc_delta_values
+        hlclient::goldsrc_stock_runtime
+    PRIVATE
+        hlclient::core
+        hlclient::goldsrc_netchan)
+set_property(
+    TARGET hlclient_goldsrc_client_data_decoder
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Client Data")
+
+hlclient_add_library(
+    hlclient_goldsrc_packet_entity_decoder
+    include/hlclient/goldsrc/packet_entity_decoder.hpp
+    src/goldsrc/packet_entity_decoder.cpp
+)
+add_library(
+    hlclient::goldsrc_packet_entity_decoder ALIAS
+    hlclient_goldsrc_packet_entity_decoder)
+target_link_libraries(
+    hlclient_goldsrc_packet_entity_decoder
+    PUBLIC
+        hlclient::goldsrc_entity_baseline_decoder
+        hlclient::goldsrc_client_data_decoder
+        hlclient::goldsrc_stock_runtime
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_packet_entity_decoder
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Entities")
+
+add_executable(
+    hlclient_runtime_control_check
+    apps/hlclient_runtime_control_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_runtime_control_check)
+target_link_libraries(
+    hlclient_runtime_control_check
+    PRIVATE hlclient::goldsrc_stock_runtime)
+set_property(
+    TARGET hlclient_runtime_control_check
+    PROPERTY FOLDER "Tools/Network/GoldSrc")
+
+if(BUILD_TESTING)
+    add_test(
+        NAME hlclient_runtime_control_literal_fixture
+        COMMAND $<TARGET_FILE:hlclient_runtime_control_check>)
+    set_tests_properties(
+        hlclient_runtime_control_literal_fixture
+        PROPERTIES
+            PASS_REGULAR_EXPRESSION "result=success"
+            TIMEOUT 15)
+endif()
+
+add_executable(
+    hlclient_entity_baseline_check
+    apps/hlclient_entity_baseline_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_entity_baseline_check)
+target_link_libraries(
+    hlclient_entity_baseline_check
+    PRIVATE hlclient::goldsrc_entity_baseline_decoder)
+set_property(
+    TARGET hlclient_entity_baseline_check
+    PROPERTY FOLDER "Tools/Network/GoldSrc")
+
+if(BUILD_TESTING)
+    add_test(
+        NAME hlclient_entity_baseline_literal_fixture
+        COMMAND $<TARGET_FILE:hlclient_entity_baseline_check>)
+    set_tests_properties(
+        hlclient_entity_baseline_literal_fixture
+        PROPERTIES PASS_REGULAR_EXPRESSION "result=success" TIMEOUT 15)
+endif()
+
+add_executable(
+    hlclient_entity_snapshot_check
+    apps/hlclient_entity_snapshot_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_entity_snapshot_check)
+target_link_libraries(
+    hlclient_entity_snapshot_check
+    PRIVATE hlclient::goldsrc_packet_entity_decoder)
+set_property(
+    TARGET hlclient_entity_snapshot_check
+    PROPERTY FOLDER "Tools/Network/GoldSrc")
+
+if(BUILD_TESTING)
+    add_test(
+        NAME hlclient_entity_snapshot_literal_fixture
+        COMMAND $<TARGET_FILE:hlclient_entity_snapshot_check>)
+    set_tests_properties(
+        hlclient_entity_snapshot_literal_fixture
+        PROPERTIES PASS_REGULAR_EXPRESSION "result=success" TIMEOUT 15)
+endif()
+
+add_executable(
+    hlclient_clientdata_check
+    apps/hlclient_clientdata_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_clientdata_check)
+target_link_libraries(
+    hlclient_clientdata_check
+    PRIVATE hlclient::goldsrc_packet_entity_decoder)
+set_property(
+    TARGET hlclient_clientdata_check
+    PROPERTY FOLDER "Tools/Network/GoldSrc")
+
+if(BUILD_TESTING)
+    add_test(
+        NAME hlclient_clientdata_literal_fixture
+        COMMAND $<TARGET_FILE:hlclient_clientdata_check>)
+    set_tests_properties(
+        hlclient_clientdata_literal_fixture
+        PROPERTIES PASS_REGULAR_EXPRESSION "result=success" TIMEOUT 15)
+endif()
 
 hlclient_add_library(
     hlclient_goldsrc_stock_runtime_capture
@@ -916,6 +1077,19 @@ hlclient_add_library(
 add_library(
     hlclient::stock_runtime_transport_replay ALIAS
     hlclient_stock_runtime_transport_replay)
+add_library(hlclient_reference_move_test_support STATIC apps/hlclient_client_move_check/transport_self_test.cpp)
+target_compile_features(hlclient_reference_move_test_support PRIVATE cxx_std_20)
+hlclient_enable_warnings(hlclient_reference_move_test_support)
+hlclient_enable_address_sanitizer(hlclient_reference_move_test_support)
+target_link_libraries(hlclient_reference_move_test_support PUBLIC hlclient::goldsrc_usercmd_session)
+set_property(TARGET hlclient_reference_move_test_support PROPERTY FOLDER "Tools/GoldSrc")
+add_executable(hlclient_client_move_check apps/hlclient_client_move_check/main.cpp)
+target_compile_features(hlclient_client_move_check PRIVATE cxx_std_20)
+hlclient_enable_warnings(hlclient_client_move_check)
+hlclient_enable_address_sanitizer(hlclient_client_move_check)
+target_link_libraries(hlclient_client_move_check PRIVATE
+    hlclient::goldsrc_usercmd_codec hlclient::stock_runtime_transport_replay hlclient_reference_move_test_support)
+set_property(TARGET hlclient_client_move_check PROPERTY FOLDER "Tools/GoldSrc")
 target_link_libraries(
     hlclient_stock_runtime_transport_replay
     PUBLIC
@@ -1000,7 +1174,7 @@ if(WIN32)
     target_link_libraries(
         hlclient_windows_process_orchestrator
         PUBLIC hlclient::windows_binary_identity
-        PRIVATE hlclient::core)
+        PRIVATE iphlpapi ws2_32 hlclient::core)
 
     hlclient_add_library(
         hlclient_windows_network_isolation
@@ -1439,20 +1613,25 @@ hlclient_add_library(
     hlclient_app_support
     include/hlclient/app/authentication_material_file.hpp
     include/hlclient/app/explicit_file_authentication_provider.hpp
+    include/hlclient/app/steam_authentication_provider.hpp
     include/hlclient/app/precache_manifest_exit_policy.hpp
     src/app/authentication_material_file.cpp
     src/app/explicit_file_authentication_provider.cpp
+    src/app/steam_authentication_provider.cpp
 )
 add_library(hlclient::app_support ALIAS hlclient_app_support)
 target_link_libraries(
     hlclient_app_support
-    PUBLIC hlclient::auth hlclient::goldsrc_resource_readiness)
+    PUBLIC hlclient::auth hlclient::goldsrc_resource_readiness
+    PRIVATE hlclient::hash_md5)
 set_property(TARGET hlclient_app_support PROPERTY FOLDER "Apps")
 
 hlclient_add_library(
     hlclient_client
     include/hlclient/client/client_world_state.hpp
+    include/hlclient/client/runtime_observation.hpp
     src/client/client_world_state.cpp
+    src/client/runtime_observation.cpp
 )
 add_library(hlclient::client ALIAS hlclient_client)
 target_link_libraries(
@@ -1472,6 +1651,89 @@ target_link_libraries(
     hlclient_renderer_api PRIVATE hlclient::core hlclient::world_render_api)
 set_property(TARGET hlclient_renderer_api PROPERTY FOLDER "Engine/Renderer")
 target_link_libraries(hlclient_client PRIVATE hlclient::renderer_api)
+
+hlclient_add_library(
+    hlclient_goldsrc_runtime_replay
+    include/hlclient/goldsrc/runtime_replay_fixture.hpp
+    include/hlclient/goldsrc/runtime_replay_session.hpp
+    src/goldsrc/runtime_replay_fixture.cpp
+    src/goldsrc/runtime_replay_session.cpp
+)
+add_library(
+    hlclient::goldsrc_runtime_replay ALIAS
+    hlclient_goldsrc_runtime_replay)
+target_link_libraries(
+    hlclient_goldsrc_runtime_replay
+    PUBLIC
+        hlclient::client
+        hlclient::goldsrc_packet_entity_decoder
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_runtime_replay
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Replay")
+
+hlclient_add_library(
+    hlclient_goldsrc_live_runtime
+    include/hlclient/goldsrc/live_runtime_stage.hpp
+    src/goldsrc/live_runtime_stage.cpp
+)
+add_library(
+    hlclient::goldsrc_live_runtime ALIAS hlclient_goldsrc_live_runtime)
+target_link_libraries(
+    hlclient_goldsrc_live_runtime
+    PUBLIC
+        hlclient::client
+        hlclient::goldsrc_entity_baseline_decoder
+        hlclient::goldsrc_runtime_replay
+        hlclient::goldsrc_signon
+    PRIVATE hlclient::core)
+target_link_libraries(
+    hlclient_goldsrc_client PUBLIC hlclient::goldsrc_live_runtime)
+set_property(
+    TARGET hlclient_goldsrc_live_runtime
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Live")
+
+hlclient_add_library(
+    hlclient_goldsrc_runtime_capture_replay
+    include/hlclient/goldsrc/runtime_replay_capture.hpp
+    src/goldsrc/runtime_replay_capture.cpp
+)
+add_library(
+    hlclient::goldsrc_runtime_capture_replay ALIAS
+    hlclient_goldsrc_runtime_capture_replay)
+target_link_libraries(
+    hlclient_goldsrc_runtime_capture_replay
+    PUBLIC
+        hlclient::goldsrc_runtime_replay
+        hlclient::stock_runtime_transport_replay
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_goldsrc_runtime_capture_replay
+    PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Replay")
+
+add_executable(
+    hlclient_runtime_replay_check
+    apps/hlclient_runtime_replay_check/main.cpp
+)
+hlclient_enable_warnings(hlclient_runtime_replay_check)
+target_link_libraries(
+    hlclient_runtime_replay_check
+    PRIVATE hlclient::goldsrc_runtime_replay)
+set_property(
+    TARGET hlclient_runtime_replay_check
+    PROPERTY FOLDER "Tools/Network/GoldSrc")
+
+if(BUILD_TESTING)
+    add_test(
+        NAME hlclient_runtime_replay_literal_fixture
+        COMMAND $<TARGET_FILE:hlclient_runtime_replay_check>)
+    set_tests_properties(
+        hlclient_runtime_replay_literal_fixture
+        PROPERTIES
+            LABELS "offline;goldsrc;runtime-replay"
+            PASS_REGULAR_EXPRESSION "result=success"
+            TIMEOUT 15)
+endif()
 
 hlclient_add_library(
     hlclient_gameplay_camera
@@ -1521,6 +1783,7 @@ target_link_libraries(
     hlclient_goldsrc_usercmd_sampling
     PUBLIC
         hlclient::goldsrc_usercmd_api
+        hlclient::goldsrc_usercmd_codec
         hlclient::gameplay_input
         hlclient::gameplay_camera
     PRIVATE hlclient::core)
@@ -1533,18 +1796,30 @@ hlclient_add_library(
     include/hlclient/goldsrc/usercmd_history.hpp
     include/hlclient/goldsrc/usercmd_packet_planner.hpp
     include/hlclient/goldsrc/usercmd_transmission_stage.hpp
+    include/hlclient/goldsrc/reference_prediction_anchor.hpp
+    include/hlclient/goldsrc/reference_prediction_seed.hpp
+    include/hlclient/goldsrc/reference_prediction_command.hpp
+    include/hlclient/goldsrc/reference_prediction_reconciliation.hpp
     src/goldsrc/usercmd_history.cpp
     src/goldsrc/usercmd_packet_planner.cpp
     src/goldsrc/usercmd_transmission_stage.cpp
+    src/goldsrc/reference_prediction_anchor.cpp
+    src/goldsrc/reference_prediction_seed.cpp
+    src/goldsrc/reference_prediction_command.cpp
+    src/goldsrc/reference_prediction_reconciliation.cpp
 )
 add_library(
     hlclient::goldsrc_usercmd_session ALIAS hlclient_goldsrc_usercmd_session)
+target_link_libraries(
+    hlclient_goldsrc_live_runtime
+    PUBLIC hlclient::goldsrc_usercmd_session)
 target_link_libraries(
     hlclient_goldsrc_usercmd_session
     PUBLIC
         hlclient::goldsrc_usercmd_codec
         hlclient::goldsrc_netchan
         hlclient::goldsrc_usercmd_sampling
+        hlclient::goldsrc_runtime_replay
     PRIVATE hlclient::core)
 set_property(
     TARGET hlclient_goldsrc_usercmd_session
@@ -1619,6 +1894,9 @@ add_library(
     hlclient::goldsrc_local_movement ALIAS
     hlclient_goldsrc_local_movement)
 target_link_libraries(
+    hlclient_goldsrc_usercmd_session
+    PUBLIC hlclient::goldsrc_local_movement)
+target_link_libraries(
     hlclient_goldsrc_local_movement
     PUBLIC
         hlclient::collision_api
@@ -1641,6 +1919,9 @@ hlclient_add_library(
     src/prediction/synthetic_authoritative_player.cpp
 )
 add_library(hlclient::local_prediction ALIAS hlclient_local_prediction)
+target_link_libraries(
+    hlclient_goldsrc_usercmd_session
+    PUBLIC hlclient::local_prediction)
 target_link_libraries(
     hlclient_local_prediction
     PUBLIC
@@ -1856,6 +2137,38 @@ target_link_libraries(
 set_property(TARGET hlclient_scene_api PROPERTY FOLDER "Engine/Client")
 
 hlclient_add_library(
+    hlclient_application_runtime_replay
+    include/hlclient/app/runtime_replay_scene_source.hpp
+    include/hlclient/app/runtime_replay_visual_projection.hpp
+    src/app/runtime_replay_scene_source.cpp
+    src/app/runtime_replay_visual_projection.cpp
+    include/hlclient/app/runtime_replay_local_assets.hpp
+    src/app/runtime_replay_local_assets.cpp
+)
+add_library(
+    hlclient::application_runtime_replay ALIAS
+    hlclient_application_runtime_replay)
+target_link_libraries(
+    hlclient_application_runtime_replay
+    PUBLIC
+        hlclient::scene_api
+        hlclient::goldsrc_runtime_replay
+        hlclient::goldsrc_runtime_capture_replay
+        hlclient::entity_scene_package_build
+        hlclient::goldsrc_asset_dispatch
+        hlclient::goldsrc_visual_asset_bundle
+        hlclient::goldsrc_world_texture_import
+        hlclient::world_render_package
+        hlclient::goldsrc_lightmaps
+          hlclient::studio_pose
+          hlclient::entity_frame_composition
+          hlclient::goldsrc_bsp_collision
+      PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_application_runtime_replay
+    PROPERTY FOLDER "Apps")
+
+hlclient_add_library(
     hlclient_interactive_preview
     include/hlclient/interactive_preview/interactive_entity_visibility.hpp
     include/hlclient/interactive_preview/interactive_preview_controller.hpp
@@ -1876,6 +2189,23 @@ target_link_libraries(
         hlclient::renderer_api)
 set_property(
     TARGET hlclient_interactive_preview PROPERTY FOLDER "Engine/Client/Camera")
+
+hlclient_add_library(
+    hlclient_live_visual_control
+    include/hlclient/app/live_visual_control.hpp
+    src/app/live_visual_control.cpp
+)
+add_library(
+    hlclient::live_visual_control ALIAS hlclient_live_visual_control)
+target_link_libraries(
+    hlclient_live_visual_control
+    PUBLIC
+        hlclient::client
+        hlclient::gameplay_camera
+        hlclient::gameplay_input
+    PRIVATE hlclient::core)
+set_property(
+    TARGET hlclient_live_visual_control PROPERTY FOLDER "Apps")
 
 hlclient_add_library(
     hlclient_world_preview
@@ -1941,6 +2271,7 @@ target_link_libraries(
     PRIVATE
         hlclient::core
         hlclient::app_support
+        hlclient::application_runtime_replay
         hlclient::platform
         hlclient::filesystem
         hlclient::asset_api
@@ -1965,6 +2296,7 @@ target_link_libraries(
         hlclient::world_render
         hlclient::world_preview
         hlclient::interactive_preview
+        hlclient::live_visual_control
 )
 
 add_executable(
@@ -2301,6 +2633,20 @@ if(BUILD_TESTING)
         hlclient_stock_runtime_active_disabled
         PROPERTIES TIMEOUT 15)
 
+    add_test(
+        NAME hlclient_research_copy_smoke_policy
+        COMMAND
+            "${HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE}"
+            -NoLogo
+            -NoProfile
+            -NonInteractive
+            -ExecutionPolicy Bypass
+            -File
+                "${PROJECT_SOURCE_DIR}/scripts/test_research_copy_smoke.ps1")
+    set_tests_properties(
+        hlclient_research_copy_smoke_policy
+        PROPERTIES TIMEOUT 15)
+
     if(WIN32)
         foreach(
             _hlclient_external_target_script_test
@@ -2425,6 +2771,132 @@ if(BUILD_TESTING)
             NAMES powershell powershell.exe
             REQUIRED)
         add_test(
+            NAME hlclient_stock_runtime_orchestrator_startup_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateOrchestratorStartupBoundary
+                -OrchestratorPath
+                    $<TARGET_FILE:hlclient_stock_runtime_orchestrator>)
+        add_test(
+            NAME hlclient_stock_runtime_orchestrator_startup_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateOrchestratorStartupBoundary
+                -OrchestratorPath
+                    $<TARGET_FILE:hlclient_stock_runtime_orchestrator>)
+        add_test(
+            NAME hlclient_stock_runtime_retained_backup_recovery_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateRetainedBackupRecovery)
+        add_test(
+            NAME hlclient_stock_runtime_retained_backup_recovery_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateRetainedBackupRecovery)
+        add_test(
+            NAME hlclient_functional_failure_retention_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateFunctionalFailureRetention)
+        add_test(
+            NAME hlclient_functional_failure_retention_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateFunctionalFailureRetention)
+        add_test(
+            NAME hlclient_functional_research_projection_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateFunctionalResearchProjection)
+        add_test(
+            NAME hlclient_functional_research_projection_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateFunctionalResearchProjection)
+        add_test(
+            NAME hlclient_functional_publication_roundtrip_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateFunctionalPublicationRoundtrip
+                -CaptureToolPath
+                    $<TARGET_FILE:hlclient_stock_runtime_capture>
+                -OrchestratorPath
+                    $<TARGET_FILE:hlclient_stock_runtime_orchestrator>
+                -FakeClientPath
+                    $<TARGET_FILE:hlclient_stock_runtime_fake_client>
+                -FakeServerPath
+                    $<TARGET_FILE:hlclient_stock_runtime_fake_server>
+                -CheckerPath
+                    $<TARGET_FILE:hlclient_stock_runtime_check>
+                -HlclientPath
+                    $<TARGET_FILE:hlclient>)
+        add_test(
+            NAME hlclient_functional_publication_roundtrip_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1"
+                -ValidateFunctionalPublicationRoundtrip
+                -CaptureToolPath
+                    $<TARGET_FILE:hlclient_stock_runtime_capture>
+                -OrchestratorPath
+                    $<TARGET_FILE:hlclient_stock_runtime_orchestrator>
+                -FakeClientPath
+                    $<TARGET_FILE:hlclient_stock_runtime_fake_client>
+                -FakeServerPath
+                    $<TARGET_FILE:hlclient_stock_runtime_fake_server>
+                -CheckerPath
+                    $<TARGET_FILE:hlclient_stock_runtime_check>
+                -HlclientPath
+                    $<TARGET_FILE:hlclient>)
+        add_test(
+            NAME hlclient_functional_log_observation
+            COMMAND
+                $<TARGET_FILE:hlclient_stock_runtime_orchestrator>
+                --validate-functional-log-observation)
+        set_tests_properties(
+            hlclient_stock_runtime_orchestrator_startup_pwsh7
+            hlclient_stock_runtime_orchestrator_startup_powershell51
+            hlclient_stock_runtime_retained_backup_recovery_pwsh7
+            hlclient_stock_runtime_retained_backup_recovery_powershell51
+            hlclient_functional_failure_retention_pwsh7
+            hlclient_functional_failure_retention_powershell51
+            hlclient_functional_research_projection_pwsh7
+            hlclient_functional_research_projection_powershell51
+            hlclient_functional_publication_roundtrip_pwsh7
+            hlclient_functional_publication_roundtrip_powershell51
+            hlclient_functional_log_observation
+            PROPERTIES TIMEOUT 60)
+        add_test(
             NAME hlclient_stock_runtime_unbound_canary_recovery_pwsh7
             COMMAND
                 "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
@@ -2509,6 +2981,26 @@ if(BUILD_TESTING)
                 -File
                     "${PROJECT_SOURCE_DIR}/scripts/test_stock_steam_user_config_projection.ps1")
         add_test(
+            NAME hlclient_stock_steam_rewrite_accounting_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_steam_rewrite_observation_accounting.ps1")
+        add_test(
+            NAME hlclient_stock_steam_rewrite_accounting_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo
+                -NoProfile
+                -NonInteractive
+                -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_steam_rewrite_observation_accounting.ps1")
+        add_test(
             NAME hlclient_stock_private_diagnostic_token_pwsh7
             COMMAND
                 "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
@@ -2532,6 +3024,20 @@ if(BUILD_TESTING)
                     "${PROJECT_SOURCE_DIR}/scripts/test_stock_private_diagnostic_token.ps1"
                 -CaptureScriptPath
                     "${PROJECT_SOURCE_DIR}/scripts/capture_stock_runtime_state.ps1")
+        add_test(
+            NAME hlclient_stock_writer_trace_handoff_pwsh7
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_writer_trace_handoff.ps1")
+        add_test(
+            NAME hlclient_stock_writer_trace_handoff_powershell51
+            COMMAND
+                "${HLCLIENT_STOCK_RUNTIME_POWERSHELL51_EXECUTABLE}"
+                -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File
+                    "${PROJECT_SOURCE_DIR}/scripts/test_stock_writer_trace_handoff.ps1")
         set_tests_properties(
             hlclient_stock_runtime_unbound_canary_recovery_pwsh7
             hlclient_stock_runtime_unbound_canary_recovery_powershell51
@@ -2541,8 +3047,12 @@ if(BUILD_TESTING)
             hlclient_stock_external_drift_powershell51
             hlclient_stock_steam_user_config_projection_pwsh7
             hlclient_stock_steam_user_config_projection_powershell51
+            hlclient_stock_steam_rewrite_accounting_pwsh7
+            hlclient_stock_steam_rewrite_accounting_powershell51
             hlclient_stock_private_diagnostic_token_pwsh7
             hlclient_stock_private_diagnostic_token_powershell51
+            hlclient_stock_writer_trace_handoff_pwsh7
+            hlclient_stock_writer_trace_handoff_powershell51
             PROPERTIES TIMEOUT 30)
 
         add_test(
@@ -2856,6 +3366,15 @@ foreach(
         hlclient_movement_api
         hlclient_prediction_api
         hlclient_goldsrc_stock_runtime
+        hlclient_goldsrc_delta_values
+        hlclient_goldsrc_entity_snapshots
+        hlclient_goldsrc_entity_baseline_decoder
+        hlclient_goldsrc_client_data_decoder
+        hlclient_goldsrc_packet_entity_decoder
+        hlclient_goldsrc_runtime_replay
+        hlclient_goldsrc_live_runtime
+        hlclient_goldsrc_runtime_capture_replay
+        hlclient_application_runtime_replay
         hlclient_goldsrc_stock_runtime_capture
         hlclient_stock_runtime_transport_journal
         hlclient_stock_runtime_corpus
@@ -2870,6 +3389,12 @@ foreach(
         hlclient_movement_check
         hlclient_prediction_check
         hlclient_prediction_viewer
+        hlclient_runtime_control_check
+        hlclient_entity_baseline_check
+        hlclient_entity_snapshot_check
+        hlclient_clientdata_check
+        hlclient_runtime_replay_check
+        hlclient
         hlclient_stock_runtime_check
         hlclient_stock_runtime_capture
         hlclient_world_viewer

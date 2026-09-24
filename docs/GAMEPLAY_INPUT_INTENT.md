@@ -60,3 +60,29 @@ This does not change the intent contract into a stock input mapping. The
 synthetic speed/run bit does not scale dry-walk movement, and no intent is sent
 over the network by the local controller. See
 [player-walk viewer](PLAYER_WALK_VIEWER.md).
+
+M4.7.2F adds a deliberately narrower production consumer for an explicit live
+visual-control session. It takes only the intent's W/S and A/D axes plus
+captured relative mouse look, normalizes diagonals, and submits bounded 20 ms
+samples through the already verified reference usercmd
+history/planner/transmission chain. It does not map Space, Control, mouse
+buttons, wheel, use, reload, weapon selection, or the older synthetic button
+masks. This project amplitude and sensitivity policy is not claimed to be the
+original GoldSrc configuration.
+
+Mouse yaw/pitch is local view state shared by rendering and subsequent
+usercmds. Camera translation is never derived from that local intent: it is
+published only from a fresh receiving-client origin plus the validated
+clientdata view offset. Consequently a held W key cannot move the camera until
+the server returns a new position, and there is no prediction or
+reconciliation in this mode.
+
+M4.7.2G extends only the explicit live visual consumer. Project `jump` and
+`duck` actions from Space and Left Ctrl map through a separate reference-wire
+button policy to Valve `IN_JUMP` (`1 << 1`) and `IN_DUCK` (`1 << 2`), as defined
+by pinned `common/in_buttons.h` revision
+`b1b5cf5892918535619b2937bb927e46cb097ba1`. The old synthetic mapping
+type remains distinct. Other actions remain rejected by the reference adapter;
+the application passes only the jump/duck project mask. A bounded pending press
+is consumed after the command enters history, not at render publication or
+Netchan ACK. `upmove`, impulse, attack and weapon fields remain zero.

@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <initializer_list>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -137,6 +138,186 @@ TEST_CASE("Synthetic usercmd adapter maps movement without vertical preview leak
         240.0F);
 }
 
+TEST_CASE("Controlled reference adapter produces only the bounded E movement axes",
+          "[goldsrc][usercmd][input-adapter][reference][live-usercmd]")
+{
+    auto context = build_context();
+    context.command_msec = 20U;
+    context.command_sample_duration_nanoseconds = 20'000'000U;
+    context.movement_speeds = {100.0F, 100.0F, 100.0F};
+    const auto camera_state = make_camera(0.0, 0.0);
+    const auto build_reference = [&](const auto events) {
+        return goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+            intent_from_events(events), camera_state, context);
+    };
+
+    const auto neutral = build_reference(
+        std::initializer_list<input::InputEvent>{
+            input::InputEvent::focus_gained()});
+    REQUIRE(neutral);
+    CHECK(neutral.command->forward == 0);
+    CHECK(neutral.command->side == 0);
+    CHECK(neutral.command->up == 0);
+    CHECK(neutral.command->buttons == 0U);
+    CHECK(neutral.command->impulse == 0U);
+    CHECK(neutral.command->msec == 20U);
+
+    const auto forward = build_reference(
+        std::initializer_list<input::InputEvent>{
+            input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::w)});
+    REQUIRE(forward);
+    CHECK(forward.command->forward == 100);
+    CHECK(forward.command->side == 0);
+
+    const auto backward = build_reference(
+        std::initializer_list<input::InputEvent>{
+            input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::s)});
+    REQUIRE(backward);
+    CHECK(backward.command->forward == -100);
+    CHECK(backward.command->side == 0);
+}
+
+TEST_CASE("Reference jump/duck policy maps only typed Space and Left Ctrl",
+          "[goldsrc][usercmd][input-adapter][reference][jump-duck]")
+{
+    auto context = build_context();
+    context.command_msec = 20U;
+    context.command_sample_duration_nanoseconds = 20'000'000U;
+    const auto buttons = intent_from_events({
+        input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_pressed(input::PhysicalKey::a),
+        input::InputEvent::key_pressed(input::PhysicalKey::space),
+        input::InputEvent::key_pressed(input::PhysicalKey::left_control)});
+    goldsrc::GoldSrcUserCmdInputAdapter adapter;
+    const auto denied = adapter.build_reference_wire(
+        buttons, make_camera(), context);
+    REQUIRE_FALSE(denied);
+    context.reference_button_policy =
+        goldsrc::GoldSrcReferenceButtonPolicy::jump_duck;
+    const auto allowed = adapter.build_reference_wire(
+        buttons, make_camera(), context);
+    REQUIRE(allowed);
+    CHECK(allowed.command->buttons == 6U); // Valve IN_JUMP | IN_DUCK
+    CHECK(allowed.command->up == 0);
+    CHECK(allowed.command->impulse == 0U);
+    CHECK(allowed.command->forward > 0);
+    CHECK(allowed.command->side < 0);
+
+    const auto use = intent_from_events({
+        input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::e)});
+    CHECK_FALSE(adapter.build_reference_wire(use, make_camera(), context));
+    const auto click = intent_from_events({
+        input::InputEvent::focus_gained(),
+        input::InputEvent::mouse_button_pressed(
+            input::PhysicalMouseButton::left)});
+    const auto capture_gesture = adapter.build_reference_wire(
+        click, make_camera(), context);
+    REQUIRE(capture_gesture);
+    CHECK(capture_gesture.command->buttons == 0U);
+    const auto captured_click = intent_from_events({
+        input::InputEvent::focus_gained(),
+        input::InputEvent::capture_acquired(),
+        input::InputEvent::mouse_button_pressed(
+            input::PhysicalMouseButton::left)});
+    CHECK_FALSE(adapter.build_reference_wire(
+        captured_click, make_camera(), context));
+
+    context.one_shot_buttons = gameplay::gameplay_button_mask(
+        gameplay::GameplayButton::jump);
+    auto tap = adapter.build_reference_wire(
+        intent_from_events({input::InputEvent::focus_gained()}),
+        make_camera(), context);
+    REQUIRE(tap);
+    CHECK(tap.command->buttons == 2U);
+    REQUIRE(tap.one_shot_plan);
+    CHECK(tap.one_shot_plan->commit_after_history_insert(
+        context.command_sequence));
+}
+
+TEST_CASE("Reference live speed key scales before uniform client limit",
+          "[goldsrc][usercmd][input-adapter][reference][speed]")
+{
+    auto context = build_context();
+    context.command_msec = 20U;
+    context.command_sample_duration_nanoseconds = 20'000'000U;
+    context.movement_speeds = {400.0F, 400.0F, 400.0F};
+    context.reference_movement.speed_key_multiplier = 0.3F;
+    context.reference_button_policy = goldsrc::GoldSrcReferenceButtonPolicy::jump_duck;
+    const auto build_wire = [&](const std::initializer_list<input::InputEvent> events) {
+        return goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+            intent_from_events(events), make_camera(), context);
+    };
+    const auto w = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w)});
+    REQUIRE(w);
+    CHECK(w.command->forward == 400);
+    CHECK(w.command->side == 0);
+    const auto s = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::s)});
+    REQUIRE(s);
+    CHECK(s.command->forward == -400);
+    const auto a = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::a)});
+    REQUIRE(a);
+    CHECK(a.command->side == -400);
+    const auto d = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::d)});
+    REQUIRE(d);
+    CHECK(d.command->side == 400);
+    const auto shift = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::left_shift)});
+    REQUIRE(shift);
+    CHECK(shift.command->forward == 0);
+    CHECK(shift.command->buttons == 0U);
+    const auto slow = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_pressed(input::PhysicalKey::left_shift),
+        input::InputEvent::key_pressed(input::PhysicalKey::space),
+        input::InputEvent::key_pressed(input::PhysicalKey::left_control)});
+    REQUIRE(slow);
+    CHECK(slow.requested_forward == 400.0F);
+    CHECK(slow.applied_speed_multiplier == 0.3F);
+    CHECK(slow.command->forward == 120);
+    CHECK(slow.command->buttons == 6U);
+    CHECK(slow.command->impulse == 0U);
+    context.reference_movement.client_maxspeed = 200.0F;
+    const auto normal_limited = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w)});
+    REQUIRE(normal_limited);
+    CHECK(normal_limited.command->forward == 200);
+    const auto slow_after_limit = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_pressed(input::PhysicalKey::left_shift)});
+    REQUIRE(slow_after_limit);
+    CHECK(slow_after_limit.command->forward == 120); // speed key precedes clamp
+    context.reference_movement.client_maxspeed = 320.0F;
+    const auto diagonal = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_pressed(input::PhysicalKey::d)});
+    REQUIRE(diagonal);
+    CHECK(diagonal.command->forward == 226);
+    CHECK(diagonal.command->side == 226);
+    context.reference_movement.client_maxspeed = 0.0F; // Valve sentinel
+    const auto no_limit = build_wire({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_pressed(input::PhysicalKey::d)});
+    REQUIRE(no_limit);
+    CHECK(no_limit.command->forward == 400);
+    CHECK(no_limit.command->side == 400);
+    for (const float invalid : {-1.0F, std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::infinity()}) {
+        context.reference_movement.client_maxspeed = invalid;
+        CHECK_FALSE(build_wire({input::InputEvent::focus_gained()}));
+    }
+    context.reference_movement.client_maxspeed.reset();
+    context.reference_movement.speed_key_multiplier = -0.3F;
+    CHECK_FALSE(build_wire({input::InputEvent::focus_gained()}));
+}
+
 TEST_CASE("Synthetic usercmd adapter uses an explicit button translation table",
           "[goldsrc][usercmd][input-adapter][buttons]")
 {
@@ -202,7 +383,7 @@ TEST_CASE("Focus loss produces a neutral command and cannot consume an impulse",
         input::InputEvent::focus_lost(),
     });
     auto context = build_context();
-    context.impulse = 17U;
+    context.impulse = std::uint8_t{17U};
     const auto result = build(intent, make_camera(), context);
     REQUIRE(result);
     CHECK(result.command->forward_move() == 0.0F);
@@ -215,7 +396,7 @@ TEST_CASE("Impulse consumption is an explicit history-insertion transaction",
           "[goldsrc][usercmd][input-adapter][one-shot]")
 {
     auto context = build_context();
-    context.impulse = 42U;
+    context.impulse = std::uint8_t{42U};
     auto result = build(
         intent_from_events({input::InputEvent::focus_gained()}),
         make_camera(),
@@ -247,7 +428,7 @@ TEST_CASE("Weapon selection and stock mappings fail before command publication",
     const auto intent = intent_from_events({input::InputEvent::focus_gained()});
     const auto camera_state = make_camera();
     auto context = build_context();
-    context.weapon_selection = 1U;
+    context.weapon_selection = std::uint8_t{1U};
     const auto weapon_result = build(intent, camera_state, context);
     REQUIRE_FALSE(weapon_result);
     CHECK_FALSE(weapon_result.command);

@@ -165,6 +165,61 @@ does not consume that opcode, read a body length/count, or scan for a later
 candidate. Success reports `bytes_consumed == 9` and a next cursor that still
 points at 43.
 
+## M4.7.2D production transition dispatch
+
+The historical exact 45+43 API above remains unchanged. The production live
+composition now has a narrow caller-side dispatcher because one transport
+delivery, one owning service payload, and one service message are not
+interchangeable boundaries.
+
+Managed run `a6726b5581a046cd8f0163416f2c0bfa` retained a first transition-scoped
+payload with source sequence/ACK 6/6 before the `sendres` transmit sequence 7.
+After the request was acknowledged at sequence 7, the old caller passed that
+earlier payload directly to the strict opcode-45 parser. Its bounded metadata
+recorded byte value 1 at cursor 0, wire-uncompressed encoding, and an eight-byte
+owning service payload. The run did not retain the other seven bytes, so this
+historical report continues to distinguish `cursor_byte_value=1` from an
+established `actual_opcode`.
+
+The independent protocol cross-check is scoped to the GoldSrc-compatible
+Protocol 48 service stream:
+
+- ReHLDS revision
+  [`c49a6fd0d9f1a460cfeeea1a9d9a576bad178459`](https://github.com/rehlds/ReHLDS/commit/c49a6fd0d9f1a460cfeeea1a9d9a576bad178459),
+  [`rehlds/HLTV/common/net_internal.h`](https://github.com/rehlds/ReHLDS/blob/c49a6fd0d9f1a460cfeeea1a9d9a576bad178459/rehlds/HLTV/common/net_internal.h)
+  places `svc_nop` at numeric opcode 1 and retains resource-list/request at 43
+  and 45. At the same revision,
+  [`rehlds/HLTV/Core/src/Server.cpp`](https://github.com/rehlds/ReHLDS/blob/c49a6fd0d9f1a460cfeeea1a9d9a576bad178459/rehlds/HLTV/Core/src/Server.cpp)
+  dispatches `svc_nop` to a `ParseNop` implementation with no body reads.
+- Xash3D-FWGS revision
+  [`4857b389e6ba32ddaa68582aedcbc950c138f46a`](https://github.com/FWGS/xash3d-fwgs/commit/4857b389e6ba32ddaa68582aedcbc950c138f46a),
+  [`engine/common/net_buffer.c`](https://github.com/FWGS/xash3d-fwgs/blob/4857b389e6ba32ddaa68582aedcbc950c138f46a/engine/common/net_buffer.c)
+  independently exposes the same 1/43/45 command ordering. Its
+  [`engine/client/parse/cl_parse.c`](https://github.com/FWGS/xash3d-fwgs/blob/4857b389e6ba32ddaa68582aedcbc950c138f46a/engine/client/parse/cl_parse.c)
+  handles `svc_nop` with no body consumption in the common GoldSrc-compatible
+  path. No Xash Protocol 49 extension is accepted by this dispatcher.
+- Valve SDK revision
+  [`b1b5cf5892918535619b2937bb927e46cb097ba1`](https://github.com/ValveSoftware/halflife/commit/b1b5cf5892918535619b2937bb927e46cb097ba1)
+  remains only a supplemental engine-API/resource-structure cross-check; its
+  public headers do not supply the numeric service-opcode grammar. The numeric
+  and body-length facts are therefore not attributed to that SDK.
+
+`ResourceTransitionStage` invokes the existing
+`RuntimeControlDecoder::decode_one` at the exact current cursor. Only a decoded
+`svc_nop` is permitted as an intermediate transition message. Its codec-proven
+end cursor becomes the next boundary. If the payload ends there, the stage
+records a bounded intermediate-payload completion and continues waiting on the
+same driver, authentication lifetime, request generation, and deadline. If
+opcode 45 follows in the same payload, the unmodified strict parser is called
+with that exact offset. Unknown, truncated, non-NOP, or non-advancing messages
+fail with typed diagnostics; no scan for byte 45 or silent resynchronization is
+performed.
+
+This production rule does not claim that opcode 43 can validly continue without
+an established opcode-45 contract, and it does not weaken the envelope policy:
+valid raw and BZip2 representations continue through the same logical decoder,
+while an exact corrupt `BZ2\0` marker cannot fall back to raw bytes.
+
 ## Why the historical boundary remains neutral
 
 Stock behavior strongly places numeric opcode 43 after the exact transition
@@ -273,6 +328,22 @@ publication. The fake-HLDS path additionally proves malformed inbound
 user-info fails atomically before the transition request. Deterministic 20/20
 sets cover baseline, dropped-request retransmission, fragmented second
 transfer, and repeated user-info messages.
+
+The M4.7.2D dispatcher regressions additionally cover a decoder-validated NOP
+before opcode 45 in one payload, an eight-NOP pre-ACK payload consumed exactly
+once before a later transition payload, both ACK/payload orderings, a truncated
+known intermediate message, and an unknown message containing byte 45 later in
+its body. The latter fails at the unknown message boundary and never scans or
+resynchronizes to the embedded byte.
+
+Managed project-client run `18b332aec95b4b6181e207ebbeb85b7e`
+live-verified this dispatcher on the retained production driver: transition and
+resource-list progress succeeded and the typed resource response was queued and
+transmitted. The run later stopped at the separate resource-response
+pre-transmit-payload ordering guard. Successful transition metadata did not
+persist the exact owning payload ordinal, cursor, source sequence/ACK, or wire
+encoding, so this observation does not invent those values or broaden the
+transition grammar.
 
 The complete Win32 acceptance commands are:
 

@@ -51,10 +51,10 @@ private:
     std::uint8_t value_{0U};
 };
 
-// Immutable, owning public state. Only differential-capture-confirmed fields
-// are exposed. The unconfirmed fixed fields, ordinal candidate, fixed-binary
-// field, client-slot candidate, and cursor-only string never leave
-// server_info.cpp.
+// Immutable, owning public state. In addition to the differential-capture
+// fields, the three stock sign-on identity fields needed by the typed spawn
+// continuation are exposed according to the pinned server/client protocol
+// references. The fixed-binary field and cursor-only string remain private.
 class ServerInfoState final {
 public:
     ServerInfoState(const ServerInfoState&) = default;
@@ -64,6 +64,9 @@ public:
     ~ServerInfoState() = default;
 
     [[nodiscard]] ProtocolVersion protocol_version() const noexcept;
+    [[nodiscard]] std::uint32_t server_count() const noexcept;
+    [[nodiscard]] std::uint32_t world_map_crc() const noexcept;
+    [[nodiscard]] std::uint8_t client_slot() const noexcept;
     [[nodiscard]] MaximumClients maximum_clients() const noexcept;
     [[nodiscard]] bool multi_client_mode() const noexcept;
 
@@ -82,6 +85,9 @@ private:
 
     ServerInfoState(
         ProtocolVersion protocol_version,
+        std::uint32_t server_count,
+        std::uint32_t world_map_crc,
+        std::uint8_t client_slot,
         MaximumClients maximum_clients,
         bool multi_client_mode,
         std::string game_directory,
@@ -89,6 +95,9 @@ private:
         std::string map_file_path) noexcept;
 
     ProtocolVersion protocol_version_;
+    std::uint32_t server_count_{0U};
+    std::uint32_t world_map_crc_{0U};
+    std::uint8_t client_slot_{0U};
     MaximumClients maximum_clients_;
     bool multi_client_mode_{false};
     std::string game_directory_;

@@ -46,7 +46,25 @@ struct ConnectCompatibilityProfile {
     std::size_t required_protected_authentication_size{32U};
     std::size_t required_binary_authentication_size{kObservedConnectAuthenticationSuffixSize};
     bool protected_authentication_is_ascii_hex{true};
+    // The historical explicit-file profile requires one exact suffix length.
+    // A live platform provider instead supplies an opaque, API-reported
+    // length, bounded by required_binary_authentication_size.
+    bool variable_binary_authentication_size{false};
 };
+
+[[nodiscard]] constexpr ConnectCompatibilityProfile steam_legacy_connect_profile() noexcept
+{
+    // ReHLDS' pinned Protocol 48 parser uses a 1024-byte authentication
+    // buffer and rejects a suffix that reaches that size.  The overall
+    // project datagram bound remains the independently verified 1400 bytes.
+    return ConnectCompatibilityProfile{
+        kMaximumConnectDatagramSize,
+        32U,
+        1'023U,
+        true,
+        true,
+    };
+}
 
 struct ClientConnectionSettings {
     std::string bottom_color{"6"};

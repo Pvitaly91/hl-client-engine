@@ -182,8 +182,10 @@ The evidence scopes remain distinct:
 - project client -> local fake HLDS accept/reject paths: deterministic tests;
 - project client -> local fake HLDS netchan bootstrap: deterministic M2.3.1
   same-socket first-packet/exact-single-ACK integration complete;
-- project client -> stock HLDS acceptance/bootstrap: not claimed or
-  established because no production Steam authentication provider exists.
+- project client -> stock HLDS acceptance/bootstrap: not established; the
+  optional Steam provider exists, but both permitted M4.7.2C runs stopped at
+  orchestration launch boundaries before provider initialization or connect
+  transmission.
 
 See [Connect request](GOLDSRC_CONNECT_REQUEST.md) for the preceding wire stage
 and [Netchan](GOLDSRC_NETCHAN.md) for the strictly later sequenced stage.

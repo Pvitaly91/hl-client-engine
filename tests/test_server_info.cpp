@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/server_info.hpp>
+#include <hlclient/goldsrc/stock_spawn_request.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -48,7 +49,7 @@ constexpr std::array kExactServerInfoBody{
 
 static_assert(kExactServerInfoBody.size() == 81U);
 inline constexpr std::size_t kMaximumClientsOffset = 28U;
-inline constexpr std::size_t kOpaqueSlotCandidateOffset = 29U;
+inline constexpr std::size_t kClientSlotOffset = 29U;
 inline constexpr std::size_t kProfileFlagOffset = 30U;
 inline constexpr std::size_t kGameDirectoryOffset = 31U;
 inline constexpr std::size_t kServerLabelOffset = 38U;
@@ -90,9 +91,15 @@ void check_error(
 void check_public_state(
     const goldsrc::ServerInfoState& state,
     const std::uint8_t maximum_clients,
-    const std::string_view map_path)
+    const std::string_view map_path,
+    const std::uint32_t server_count = 0x1234'5678U,
+    const std::uint32_t world_map_crc = 0x4ae6'ed21U,
+    const std::uint8_t client_slot = 0U)
 {
     CHECK(state.protocol_version() == goldsrc::ProtocolVersion::goldsrc_48);
+    CHECK(state.server_count() == server_count);
+    CHECK(state.world_map_crc() == world_map_crc);
+    CHECK(state.client_slot() == client_slot);
     CHECK(state.maximum_clients().value() == maximum_clients);
     CHECK(state.multi_client_mode() == (maximum_clients > 1U));
     CHECK(state.game_directory() == "sample");
@@ -199,15 +206,16 @@ TEST_CASE("Server-info maximum-clients field is strong, nonzero, and capped at 3
     }
 }
 
-TEST_CASE("Server-info ordinal candidate remains opaque and unvalidated",
-          "[goldsrc][signon][server-info][opaque][ordinal]")
+TEST_CASE("Server-info publishes the current stock server count",
+          "[goldsrc][signon][server-info][server-count]")
 {
     const goldsrc::ServerInfoParser parser;
     auto body = exact_body();
     std::ranges::fill(body.begin() + 4, body.begin() + 8, std::byte{0U});
     const auto zero = parser.parse(body);
     REQUIRE(zero);
-    check_public_state(*zero.state, 8U, "maps/test_alpha.bsp");
+    check_public_state(
+        *zero.state, 8U, "maps/test_alpha.bsp", 0U);
 
     body = exact_body();
     body[4U] = std::byte{2U};
@@ -216,7 +224,8 @@ TEST_CASE("Server-info ordinal candidate remains opaque and unvalidated",
     body[7U] = std::byte{0U};
     const auto second = parser.parse(body);
     REQUIRE(second);
-    check_public_state(*second.state, 8U, "maps/test_alpha.bsp");
+    check_public_state(
+        *second.state, 8U, "maps/test_alpha.bsp", 2U);
 }
 
 TEST_CASE("Server-info strings are bounded and require an in-bound NUL terminator",
@@ -288,20 +297,27 @@ TEST_CASE("Server-info fixed binary field width and final reserved value are str
         invalid_reserved.size());
 }
 
-TEST_CASE("Only differential-confirmed server-info fields enter the public state",
+TEST_CASE("Source-backed spawn identity fields enter the public server-info state",
           "[goldsrc][signon][server-info][differential][evidence]")
 {
     const goldsrc::ServerInfoParser parser;
     const auto baseline = parser.parse(kExactServerInfoBody);
     REQUIRE(baseline);
 
-    auto opaque_variants = exact_body();
-    opaque_variants[8U] = std::byte{0x5aU};
-    opaque_variants[12U] = std::byte{0xffU};
-    opaque_variants[kOpaqueSlotCandidateOffset] = std::byte{0xffU};
-    const auto opaque = parser.parse(opaque_variants);
-    REQUIRE(opaque);
-    check_public_state(*opaque.state, 8U, "maps/test_alpha.bsp");
+    auto identity_variants = exact_body();
+    identity_variants[8U] = std::byte{0x5aU};
+    identity_variants[12U] = std::byte{0xffU};
+    identity_variants[kClientSlotOffset] = std::byte{0xffU};
+    const auto identity = parser.parse(identity_variants);
+    REQUIRE(identity);
+    CHECK(identity.state->server_count() == baseline.state->server_count());
+    CHECK(identity.state->client_slot() == 0xffU);
+    CHECK(
+        identity.state->world_map_crc() ==
+        goldsrc::decode_stock_server_world_map_crc(0xdead'be5aU, 0xffU));
+    CHECK(
+        identity.state->world_map_crc() !=
+        baseline.state->world_map_crc());
 
     auto different_text_metadata = exact_body();
     overwrite_ascii(different_text_metadata, kGameDirectoryOffset, "module");

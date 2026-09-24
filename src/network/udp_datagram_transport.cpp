@@ -1,6 +1,7 @@
 #include <hlclient/network/datagram_transport.hpp>
 
 #include <utility>
+#include <cerrno>
 
 namespace hlclient::network {
 
@@ -21,7 +22,11 @@ DatagramSendResult UdpDatagramTransport::send_to(
     const std::span<const std::byte> payload)
 {
     std::string error;
-    if (!socket_.send_to(destination, payload, error)) {
+    SocketNativeError native;
+    if (!socket_.send_to(destination, payload, error, &native)) {
+        if ((native.domain == SocketNativeErrorDomain::winsock && native.code == 10035U) ||
+            (native.domain == SocketNativeErrorDomain::posix && (native.code == EAGAIN || native.code == EWOULDBLOCK)))
+            return {DatagramSendStatus::would_block, {}};
         return DatagramSendResult{DatagramSendStatus::error, std::move(error)};
     }
     return DatagramSendResult{DatagramSendStatus::sent, {}};

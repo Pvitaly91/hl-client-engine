@@ -282,6 +282,12 @@ void add_history_statistics(HistorySignatureHasher& hash,
     if (const auto anchor = history.anchor().acknowledgement().sequence()) {
         return anchor->value() == UINT32_MAX ? 0U : anchor->value() + 1U;
     }
+    if (history.session().prediction_profile ==
+        PredictionCompatibilityProfile::reference_carrier_dry_walk_v1) {
+        const auto boundary =
+            history.anchor().movement_state()->source_command_sequence();
+        return boundary == UINT32_MAX ? 0U : boundary + 1U;
+    }
     return 1U;
 }
 
@@ -437,7 +443,10 @@ LocalPredictionHistoryState::create_initial(
                 !session.valid() ? "initial prediction session is invalid"
                                  : "prediction-history limits are invalid")};
     }
-    if (initial_state.source_command_sequence() != 0U ||
+    const bool reference = session.prediction_profile ==
+        PredictionCompatibilityProfile::reference_carrier_dry_walk_v1;
+    if ((reference ? initial_state.source_command_sequence() == 0U
+                   : initial_state.source_command_sequence() != 0U) ||
         initial_state.command_profile() != session.command_profile ||
         movement::local_player_movement_state_signature(initial_state) !=
             session.spawn_initial_state_signature) {
@@ -597,9 +606,16 @@ LocalPredictionAppendResult append_local_prediction_commands(
                     "prediction command sequence contains a gap", sequence);
                 return result;
             }
+            const auto required_command_profile =
+                history.session().prediction_profile ==
+                        PredictionCompatibilityProfile::
+                            reference_carrier_dry_walk_v1
+                    ? goldsrc::GoldSrcUserCmdCompatibilityProfile::
+                          public_goldsrc48_dry_walk_prediction_v1
+                    : goldsrc::GoldSrcUserCmdCompatibilityProfile::
+                          synthetic_usercmd_v1;
             if (append.command->compatibility_profile() !=
-                    goldsrc::GoldSrcUserCmdCompatibilityProfile::
-                        synthetic_usercmd_v1 ||
+                    required_command_profile ||
                 append.pre_command_state->command_profile() !=
                     history.session().command_profile ||
                 append.post_command_state->command_profile() !=

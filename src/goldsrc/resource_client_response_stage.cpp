@@ -14,6 +14,7 @@ inline constexpr std::string_view kSupportedResponseWireName{"tempdecal.wad"};
     const ResourceClientResponseStageState state) noexcept
 {
     switch (state) {
+    case ResourceClientResponseStageState::response_completion_ready:
     case ResourceClientResponseStageState::next_server_boundary_reached:
     case ResourceClientResponseStageState::consistency_provider_required:
     case ResourceClientResponseStageState::unsupported_response_profile:
@@ -66,6 +67,7 @@ inline constexpr std::string_view kSupportedResponseWireName{"tempdecal.wad"};
     case ResourceClientResponseStageState::waiting_for_server_continuation:
     case ResourceClientResponseStageState::decoding_server_continuation:
     case ResourceClientResponseStageState::next_server_boundary_reached:
+    case ResourceClientResponseStageState::response_completion_ready:
     case ResourceClientResponseStageState::protocol_error:
         return ResourceClientResponseStageEventType::protocol_error;
     }
@@ -79,6 +81,9 @@ inline constexpr std::string_view kSupportedResponseWireName{"tempdecal.wad"};
     case ResourceClientResponseStageState::next_server_boundary_reached:
         return ResourceClientResponseTraceClassification::
             next_server_boundary_reached;
+    case ResourceClientResponseStageState::response_completion_ready:
+        return ResourceClientResponseTraceClassification::
+            response_completion_ready;
     case ResourceClientResponseStageState::consistency_provider_required:
         return ResourceClientResponseTraceClassification::
             consistency_provider_required;
@@ -153,6 +158,18 @@ inline constexpr std::string_view kSupportedResponseWireName{"tempdecal.wad"};
         .pre_resource.initial_signon.driver;
 }
 
+[[nodiscard]] std::optional<std::size_t> response_semantic_size_for(
+    const ClientResourceAdvertisementProfile profile) noexcept
+{
+    switch (profile) {
+    case ClientResourceAdvertisementProfile::single_custom_decal:
+        return kOpcode5ResourceResponseSemanticSize;
+    case ClientResourceAdvertisementProfile::no_custom_resources:
+        return kOpcode5EmptyResourceResponseSemanticSize;
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] bool fixed_deadline_elapsed(
     const ResourceClientResponseStageTimePoint now,
     const ResourceClientResponseStageTimePoint started_at,
@@ -183,8 +200,15 @@ bool valid_resource_client_response_stage_configuration(
     const ResourceClientResponseStageConfig& config) noexcept
 {
     const auto& driver = response_driver_config(config);
+    const auto semantic_size =
+        response_semantic_size_for(config.advertisement_profile);
     return valid_resource_list_stage_configuration(config.resource_list) &&
            valid_resource_client_response_limits(config.response) &&
+           valid_service_payload_envelope_limits(
+               ServicePayloadEnvelopeLimits{
+                   config.response.maximum_post_response_payload_size,
+                   config.post_response_payload_compression}) &&
+           semantic_size.has_value() && *semantic_size > 0U &&
            config.consistency_provider_timeout.count() > 0 &&
            config.consistency_provider_timeout <=
                kMaximumResourceConsistencyProviderTimeout &&
@@ -197,9 +221,15 @@ bool valid_resource_client_response_stage_configuration(
            config.maximum_driver_events_per_update > 0U &&
            config.maximum_driver_events_per_update <=
                kMaximumResourceResponseDriverEventsPerUpdate &&
+           config.maximum_pre_transmit_control_payloads > 0U &&
+           config.maximum_pre_transmit_control_payloads <=
+               kMaximumPreTransmitControlPayloads &&
+           config.maximum_pre_transmit_control_bytes > 0U &&
+           config.maximum_pre_transmit_control_bytes <=
+               kMaximumPreTransmitControlBytes &&
            driver.maximum_unfragmented_reliable_payload.has_value() &&
            *driver.maximum_unfragmented_reliable_payload ==
-               kOpcode5ResourceResponseSemanticSize - 1U;
+               *semantic_size - 1U;
 }
 
 ResourceResponseReliableLifecycle::ResourceResponseReliableLifecycle(
@@ -272,7 +302,7 @@ ResourceClientResponseSignonState::ResourceClientResponseSignonState(
     std::optional<ResourceResponseCarrierGeometry> source_carrier_geometry,
     std::optional<ResourceResponseConcurrentTail> concurrent_tail,
     ResourceResponseReliableLifecycle reliable_lifecycle,
-    PostResourceResponseBoundary boundary) noexcept
+    std::optional<PostResourceResponseBoundary> boundary) noexcept
     : resource_list_{std::move(resource_list)},
       response_{std::move(response)},
       source_carrier_geometry_{std::move(source_carrier_geometry)},
@@ -314,6 +344,12 @@ ResourceClientResponseSignonState::reliable_lifecycle() const noexcept
 
 const PostResourceResponseBoundary&
 ResourceClientResponseSignonState::boundary() const noexcept
+{
+    return *boundary_;
+}
+
+const std::optional<PostResourceResponseBoundary>&
+ResourceClientResponseSignonState::boundary_optional() const noexcept
 {
     return boundary_;
 }
@@ -606,6 +642,8 @@ void ResourceClientResponseStage::update(
         return;
     }
     if (response_acknowledged_ &&
+        config_.completion_policy ==
+            ResourceResponseCompletionPolicy::require_post_response_boundary &&
         (!post_ack_boundary_started_at_ ||
          fixed_deadline_elapsed(
              now,
@@ -771,11 +809,19 @@ bool ResourceClientResponseStage::response_acknowledged() const noexcept
     return response_acknowledged_;
 }
 
+const std::optional<ResourceResponsePayloadDiagnostic>&
+ResourceClientResponseStage::payload_diagnostic() const noexcept
+{
+    return payload_diagnostic_;
+}
+
 NetchanDriver* ResourceClientResponseStage::retained_driver() noexcept
 {
     if (!retain_connection_at_boundary_ ||
-        state_ !=
-            ResourceClientResponseStageState::next_server_boundary_reached ||
+        (state_ != ResourceClientResponseStageState::
+                       next_server_boundary_reached &&
+         state_ != ResourceClientResponseStageState::
+                       response_completion_ready) ||
         cleanup_done_) {
         return nullptr;
     }
@@ -809,8 +855,10 @@ void ResourceClientResponseStage::finalize_retained_boundary(
     const ResourceClientResponseStageTimePoint now) noexcept
 {
     if (!retain_connection_at_boundary_ ||
-        state_ !=
-            ResourceClientResponseStageState::next_server_boundary_reached) {
+        (state_ != ResourceClientResponseStageState::
+                       next_server_boundary_reached &&
+         state_ != ResourceClientResponseStageState::
+                       response_completion_ready)) {
         return;
     }
     cleanup(now);
@@ -864,7 +912,8 @@ void ResourceClientResponseStage::determine_requirements(
     const ResourceClientResponseStageTimePoint now)
 {
     if (requirements_derivation_count_ != 0U || requirements_ ||
-        consistency_operation_ || response_encoding_ ||
+        consistency_operation_ || response_ ||
+        !response_semantic_bytes_.empty() ||
         response_queue_count_ != 0U) {
         fail(
             ResourceClientResponseStageErrorCode::response_requirements_failed,
@@ -884,6 +933,35 @@ void ResourceClientResponseStage::determine_requirements(
 
     state_ = ResourceClientResponseStageState::preparing_response;
     ++requirements_derivation_count_;
+    if (config_.advertisement_profile ==
+        ClientResourceAdvertisementProfile::no_custom_resources) {
+        push_event(ResourceClientResponseStageEvent{
+            .type = ResourceClientResponseStageEventType::
+                resource_response_requirements_ready,
+            .semantic_byte_count = kOpcode5EmptyResourceResponseSemanticSize,
+            .opcode = kOpcode5ResourceResponseOpcode,
+            .occurred_at = now,
+        });
+        emit_trace(
+            ResourceClientResponseTraceClassification::
+                resource_response_requirements_ready,
+            0U,
+            0U,
+            kOpcode5ResourceResponseOpcode);
+        // Building is observable state.  Preserve the existing transactional
+        // rule by reserving both semantic events and one terminal-failure slot
+        // before constructing the response.
+        if (!can_push_events(3U)) {
+            fail(
+                ResourceClientResponseStageErrorCode::event_backpressure,
+                ResourceClientResponseStageState::backpressure,
+                "No bounded event slots remain for empty response build and queue",
+                now);
+            return;
+        }
+        build_and_queue_empty_response(now);
+        return;
+    }
     auto requirements = resource_consistency::ResourceConsistencyRequirements::
         stock_opcode5_single_resource();
     if (!requirements || requirements->material_count() != 1U ||
@@ -1080,6 +1158,17 @@ void ResourceClientResponseStage::poll_consistency_provider(
     consistency_session_.emplace(std::move(*updated->session));
     consistency_operation_.reset();
     consistency_provider_started_at_.reset();
+    // Do not consume provider-owned material or build a response until its
+    // two semantic publications and a possible terminal failure can be
+    // recorded atomically.
+    if (!can_push_events(3U)) {
+        fail(
+            ResourceClientResponseStageErrorCode::event_backpressure,
+            ResourceClientResponseStageState::backpressure,
+            "No bounded event slots remain for response build and queue",
+            now);
+        return;
+    }
     auto material = consistency_session_->take_material();
     if (!material || material->opaque_byte_count() !=
                          kOpcode5ResourceResponseOpaqueSize) {
@@ -1099,31 +1188,12 @@ void ResourceClientResponseStage::build_and_queue_response(
     resource_consistency::ResourceConsistencyMaterial material,
     const ResourceClientResponseStageTimePoint now)
 {
-    auto* const driver = resource_list_stage_.retained_driver();
-    if (!resource_list_stage_.result() || driver == nullptr) {
-        fail(
-            ResourceClientResponseStageErrorCode::retained_driver_missing,
-            ResourceClientResponseStageState::protocol_error,
-            "Response preparation lost its retained persistent driver",
-            now);
-        return;
-    }
     if (response_build_count_ != 0U || response_queue_count_ != 0U ||
-        response_encoding_) {
+        response_ || !response_semantic_bytes_.empty()) {
         fail(
             ResourceClientResponseStageErrorCode::response_build_failed,
             ResourceClientResponseStageState::protocol_error,
             "Resource response build or semantic queue operation was duplicated",
-            now);
-        return;
-    }
-    // Two semantic events are published below; keep one additional slot for a
-    // terminal failure if a later queue/transport invariant rejects the work.
-    if (!can_push_events(3U)) {
-        fail(
-            ResourceClientResponseStageErrorCode::event_backpressure,
-            ResourceClientResponseStageState::backpressure,
-            "No bounded event slots remain for response build and queue",
             now);
         return;
     }
@@ -1163,23 +1233,121 @@ void ResourceClientResponseStage::build_and_queue_response(
         return;
     }
 
-    response_encoding_.emplace(std::move(*built->encoding));
+    queue_built_response(
+        built->encoding->response(), built->encoding->semantic_bytes(), now);
+}
+
+void ResourceClientResponseStage::build_and_queue_empty_response(
+    const ResourceClientResponseStageTimePoint now)
+{
+    if (response_build_count_ != 0U || response_queue_count_ != 0U ||
+        response_ || !response_semantic_bytes_.empty()) {
+        fail(
+            ResourceClientResponseStageErrorCode::response_build_failed,
+            ResourceClientResponseStageState::protocol_error,
+            "Empty resource response build or queue operation was duplicated",
+            now);
+        return;
+    }
+
+    std::optional<Opcode5EmptyResourceResponseBuildResult> built;
+    ++response_build_count_;
+    try {
+        built.emplace(
+            Opcode5EmptyResourceResponseBuilder{config_.response}.build());
+    } catch (...) {
+        fail(
+            ResourceClientResponseStageErrorCode::response_build_failed,
+            ResourceClientResponseStageState::protocol_error,
+            "Typed empty resource-response builder threw",
+            now);
+        return;
+    }
+    if (!*built || !built->encoding ||
+        built->encoding->semantic_bytes().size() !=
+            kOpcode5EmptyResourceResponseSemanticSize) {
+        fail(
+            ResourceClientResponseStageErrorCode::response_build_failed,
+            ResourceClientResponseStageState::protocol_error,
+            built->error
+                ? std::string_view{built->error->context}
+                : std::string_view{
+                      "Typed empty resource-response builder returned no exact encoding"},
+            now,
+            std::nullopt,
+            std::nullopt,
+            built->error ? std::optional{built->error->code} : std::nullopt);
+        return;
+    }
+
+    queue_built_response(
+        built->encoding->response(), built->encoding->semantic_bytes(), now);
+}
+
+void ResourceClientResponseStage::queue_built_response(
+    Opcode5ResourceResponse response,
+    const std::span<const std::byte> semantic_bytes,
+    const ResourceClientResponseStageTimePoint now)
+{
+    auto* const driver = resource_list_stage_.retained_driver();
+    if (!resource_list_stage_.result() || driver == nullptr) {
+        fail(
+            ResourceClientResponseStageErrorCode::retained_driver_missing,
+            ResourceClientResponseStageState::protocol_error,
+            "Response preparation lost its retained persistent driver",
+            now);
+        return;
+    }
+    if (response_queue_count_ != 0U || response_ ||
+        !response_semantic_bytes_.empty() || semantic_bytes.empty()) {
+        fail(
+            ResourceClientResponseStageErrorCode::response_build_failed,
+            ResourceClientResponseStageState::protocol_error,
+            "Typed resource response queue state is invalid",
+            now);
+        return;
+    }
+    // Two semantic events are published below; keep one additional slot for a
+    // terminal failure if a later queue/transport invariant rejects the work.
+    if (!can_push_events(3U)) {
+        fail(
+            ResourceClientResponseStageErrorCode::event_backpressure,
+            ResourceClientResponseStageState::backpressure,
+            "No bounded event slots remain for response build and queue",
+            now);
+        return;
+    }
+    try {
+        response_.emplace(std::move(response));
+        response_semantic_bytes_.assign(
+            semantic_bytes.begin(), semantic_bytes.end());
+    } catch (...) {
+        response_.reset();
+        response_semantic_bytes_.clear();
+        fail(
+            ResourceClientResponseStageErrorCode::response_build_failed,
+            ResourceClientResponseStageState::protocol_error,
+            "Unable to retain the bounded typed resource response",
+            now);
+        return;
+    }
+
     state_ = ResourceClientResponseStageState::response_ready;
     push_event(ResourceClientResponseStageEvent{
         .type = ResourceClientResponseStageEventType::resource_response_ready,
-        .semantic_byte_count = response_encoding_->semantic_bytes().size(),
-        .opcode = response_encoding_->response().opcode(),
+        .semantic_byte_count = response_semantic_bytes_.size(),
+        .opcode = response_->opcode(),
         .occurred_at = now,
     });
     emit_trace(
         ResourceClientResponseTraceClassification::resource_response_ready,
         0U,
         0U,
-        response_encoding_->response().opcode());
+        response_->opcode());
 
     NetchanDriverOperationResult queued;
     try {
-        queued = driver->queue_reliable(response_encoding_->semantic_bytes());
+        queued = driver->queue_reliable(response_semantic_bytes_);
     } catch (...) {
         fail(
             ResourceClientResponseStageErrorCode::response_queue_failed,
@@ -1210,15 +1378,15 @@ void ResourceClientResponseStage::build_and_queue_response(
     response_acknowledgement_started_at_ = now;
     push_event(ResourceClientResponseStageEvent{
         .type = ResourceClientResponseStageEventType::resource_response_queued,
-        .semantic_byte_count = response_encoding_->semantic_bytes().size(),
-        .opcode = response_encoding_->response().opcode(),
+        .semantic_byte_count = response_semantic_bytes_.size(),
+        .opcode = response_->opcode(),
         .occurred_at = now,
     });
     emit_trace(
         ResourceClientResponseTraceClassification::resource_response_queued,
         0U,
         0U,
-        response_encoding_->response().opcode());
+        response_->opcode());
     state_ = ResourceClientResponseStageState::
         waiting_for_response_transmit;
 }
@@ -1274,7 +1442,11 @@ void ResourceClientResponseStage::drive_transport(
         return;
     }
 
-    server_payloads_admissible_ = response_transmitted_;
+    // Immutable ordering classification for every RX event produced by this
+    // driver update. The driver receives before sending, so observing the TX
+    // after update must not relabel those already-received payloads.
+    current_event_batch_received_after_first_response_transmit_ =
+        response_transmitted_;
     try {
         driver->update(now);
     } catch (...) {
@@ -1311,7 +1483,7 @@ void ResourceClientResponseStage::observe_response_transmit(
         return;
     }
     auto* const driver = resource_list_stage_.retained_driver();
-    if (driver == nullptr || !response_encoding_) {
+    if (driver == nullptr || !response_ || response_semantic_bytes_.empty()) {
         return;
     }
     const auto& transfer = driver->session().outgoing_fragment_transfer();
@@ -1321,7 +1493,7 @@ void ResourceClientResponseStage::observe_response_transmit(
     }
     if (!std::ranges::equal(
             transfer->canonical_bytes,
-            response_encoding_->semantic_bytes()) ||
+            response_semantic_bytes_) ||
         transfer->fragment_count != 1U ||
         transfer->current_fragment_index != 1U ||
         !transfer->transfer_id.valid()) {
@@ -1372,8 +1544,8 @@ void ResourceClientResponseStage::observe_response_transmit(
     push_event(ResourceClientResponseStageEvent{
         .type = ResourceClientResponseStageEventType::
             resource_response_transmitted,
-        .semantic_byte_count = response_encoding_->semantic_bytes().size(),
-        .opcode = response_encoding_->response().opcode(),
+        .semantic_byte_count = response_semantic_bytes_.size(),
+        .opcode = response_->opcode(),
         .reliable_generation = reliable_generation_,
         .transmit_sequence = most_recent_transmit_sequence_->value(),
         .transmit_count = response_transmit_count_,
@@ -1386,7 +1558,7 @@ void ResourceClientResponseStage::observe_response_transmit(
             resource_response_transmitted,
         0U,
         0U,
-        response_encoding_->response().opcode(),
+        response_->opcode(),
         most_recent_transmit_sequence_->value());
 }
 
@@ -1530,15 +1702,16 @@ void ResourceClientResponseStage::handle_response_acknowledgement(
     acknowledgement_ = observation;
     response_acknowledged_ = true;
     response_acknowledgement_started_at_.reset();
-    post_ack_boundary_started_at_ = now;
-    state_ = ResourceClientResponseStageState::
-        waiting_for_server_continuation;
+    if (config_.completion_policy ==
+        ResourceResponseCompletionPolicy::require_post_response_boundary) {
+        post_ack_boundary_started_at_ = now;
+        state_ = ResourceClientResponseStageState::
+            waiting_for_server_continuation;
+    }
     push_event(ResourceClientResponseStageEvent{
         .type = ResourceClientResponseStageEventType::
             resource_response_acknowledged,
-        .semantic_byte_count = response_encoding_
-            ? response_encoding_->semantic_bytes().size()
-            : kOpcode5ResourceResponseSemanticSize,
+        .semantic_byte_count = response_semantic_bytes_.size(),
         .opcode = kOpcode5ResourceResponseOpcode,
         .reliable_generation = reliable_generation_,
         .transmit_sequence = most_recent_transmit_sequence_->value(),
@@ -1557,12 +1730,104 @@ void ResourceClientResponseStage::handle_response_acknowledgement(
         most_recent_transmit_sequence_->value(),
         observation.sequence.value());
 
+    if (config_.completion_policy ==
+        ResourceResponseCompletionPolicy::covering_acknowledgement) {
+        publish_acknowledgement_completion(now);
+        return;
+    }
+
     if (pre_ack_payload_) {
         pending_decode_payload_.emplace(std::move(*pre_ack_payload_));
         pre_ack_payload_.reset();
         state_ = ResourceClientResponseStageState::
             decoding_server_continuation;
     }
+}
+
+void ResourceClientResponseStage::publish_acknowledgement_completion(
+    const ResourceClientResponseStageTimePoint now)
+{
+    if (!resource_list_stage_.result() || !response_ ||
+        response_semantic_bytes_.empty() || !first_transmit_sequence_ ||
+        !most_recent_transmit_sequence_ || !acknowledgement_ ||
+        !response_acknowledged_) {
+        fail(
+            ResourceClientResponseStageErrorCode::
+                response_acknowledgement_invalid,
+            ResourceClientResponseStageState::protocol_error,
+            "ACK-only response completion lost its owning lifecycle prerequisites",
+            now);
+        return;
+    }
+    if (pre_ack_payload_ || pending_decode_payload_) {
+        fail(
+            ResourceClientResponseStageErrorCode::
+                post_response_payload_overflow,
+            ResourceClientResponseStageState::protocol_error,
+            "ACK-only response completion cannot relabel a retained server payload",
+            now);
+        return;
+    }
+    if (!can_push_events()) {
+        fail(
+            ResourceClientResponseStageErrorCode::event_backpressure,
+            ResourceClientResponseStageState::backpressure,
+            "No bounded event slot remains for ACK-only response completion",
+            now);
+        return;
+    }
+
+    try {
+        result_.emplace(ResourceClientResponseSignonState{
+            *resource_list_stage_.result(),
+            *response_,
+            std::nullopt,
+            std::nullopt,
+            ResourceResponseReliableLifecycle{
+                reliable_generation_,
+                true,
+                response_fragment_count_,
+                response_reliable_toggle_,
+                first_transmit_sequence_->value(),
+                most_recent_transmit_sequence_->value(),
+                response_transmit_count_,
+                *acknowledgement_},
+            std::nullopt});
+    } catch (...) {
+        fail(
+            ResourceClientResponseStageErrorCode::
+                response_acknowledgement_invalid,
+            ResourceClientResponseStageState::protocol_error,
+            "Unable to publish bounded ACK-only response completion",
+            now);
+        return;
+    }
+
+    state_ = ResourceClientResponseStageState::response_completion_ready;
+    push_event(ResourceClientResponseStageEvent{
+        .type = ResourceClientResponseStageEventType::
+            response_completion_ready,
+        .semantic_byte_count = response_semantic_bytes_.size(),
+        .opcode = kOpcode5ResourceResponseOpcode,
+        .reliable_generation = reliable_generation_,
+        .transmit_sequence = most_recent_transmit_sequence_->value(),
+        .acknowledgement_sequence = acknowledgement_->sequence.value(),
+        .transmit_count = response_transmit_count_,
+        .reliable = acknowledgement_->reliable,
+        .fragmented = true,
+        .occurred_at = now,
+    });
+    if (!retain_connection_at_boundary_) {
+        cleanup(now);
+    }
+    emit_trace(
+        ResourceClientResponseTraceClassification::
+            response_completion_ready,
+        0U,
+        0U,
+        kOpcode5ResourceResponseOpcode,
+        most_recent_transmit_sequence_->value(),
+        acknowledgement_->sequence.value());
 }
 
 void ResourceClientResponseStage::handle_server_payload(
@@ -1574,7 +1839,35 @@ void ResourceClientResponseStage::handle_server_payload(
     if (payload.bytes.empty()) {
         return;
     }
-    if (!server_payloads_admissible_) {
+    ++payload_ordinal_;
+    if (!current_event_batch_received_after_first_response_transmit_) {
+        if (config_.pre_transmit_payload_policy ==
+            ResourceResponsePreTransmitPayloadPolicy::decode_nop_control) {
+            decode_pre_transmit_control_payload(std::move(payload), now);
+            return;
+        }
+        payload_diagnostic_ = ResourceResponsePayloadDiagnostic{
+            .classification = ResourceResponsePayloadClassification::
+                post_transmit_continuation_candidate,
+            .receive_position = ResourceResponseReceivePosition::
+                before_first_response_transmit,
+            .payload_ordinal = payload_ordinal_,
+            .source_sequence = payload.source_sequence.value(),
+            .source_acknowledgement =
+                payload.source_acknowledgement.value(),
+            .wire_byte_count = payload.bytes.size(),
+            .source_reliable = payload.sequence_flags.reliable,
+            .reassembled = payload.sequence_flags.fragmented,
+            .response_queued = response_queue_count_ == 1U,
+            .response_transmitted = response_transmitted_,
+            .response_acknowledged = response_acknowledged_,
+            .reliable_generation = response_transmitted_
+                ? std::optional{reliable_generation_}
+                : std::nullopt,
+            .first_transmit_sequence = first_transmit_sequence_
+                ? std::optional{first_transmit_sequence_->value()}
+                : std::nullopt,
+        };
         fail(
             ResourceClientResponseStageErrorCode::
                 server_payload_before_response_transmit,
@@ -1583,6 +1876,27 @@ void ResourceClientResponseStage::handle_server_payload(
             now);
         return;
     }
+    payload_diagnostic_ = ResourceResponsePayloadDiagnostic{
+        .classification = ResourceResponsePayloadClassification::
+            post_transmit_continuation_candidate,
+        .receive_position = ResourceResponseReceivePosition::
+            after_first_response_transmit,
+        .payload_ordinal = payload_ordinal_,
+        .source_sequence = payload.source_sequence.value(),
+        .source_acknowledgement = payload.source_acknowledgement.value(),
+        .wire_byte_count = payload.bytes.size(),
+        .source_reliable = payload.sequence_flags.reliable,
+        .reassembled = payload.sequence_flags.fragmented,
+        .response_queued = response_queue_count_ == 1U,
+        .response_transmitted = response_transmitted_,
+        .response_acknowledged = response_acknowledged_,
+        .reliable_generation = response_transmitted_
+            ? std::optional{reliable_generation_}
+            : std::nullopt,
+        .first_transmit_sequence = first_transmit_sequence_
+            ? std::optional{first_transmit_sequence_->value()}
+            : std::nullopt,
+    };
     if (response_queue_count_ != 1U) {
         fail(
             ResourceClientResponseStageErrorCode::
@@ -1667,6 +1981,178 @@ void ResourceClientResponseStage::handle_server_payload(
         decoding_server_continuation;
 }
 
+void ResourceClientResponseStage::decode_pre_transmit_control_payload(
+    OwnedNetchanPayload payload,
+    const ResourceClientResponseStageTimePoint now)
+{
+    const auto wire_size = payload.bytes.size();
+    payload_diagnostic_ = ResourceResponsePayloadDiagnostic{
+        .classification =
+            ResourceResponsePayloadClassification::pre_transmit_control,
+        .receive_position = ResourceResponseReceivePosition::
+            before_first_response_transmit,
+        .payload_ordinal = payload_ordinal_,
+        .source_sequence = payload.source_sequence.value(),
+        .source_acknowledgement = payload.source_acknowledgement.value(),
+        .wire_byte_count = wire_size,
+        .source_reliable = payload.sequence_flags.reliable,
+        .reassembled = payload.sequence_flags.fragmented,
+        .response_queued = response_queue_count_ == 1U,
+        .response_transmitted = response_transmitted_,
+        .response_acknowledged = response_acknowledged_,
+    };
+
+    if (pre_transmit_control_payload_count_ >=
+            config_.maximum_pre_transmit_control_payloads ||
+        wire_size > config_.maximum_pre_transmit_control_bytes -
+                        pre_transmit_control_byte_count_) {
+        fail(
+            ResourceClientResponseStageErrorCode::
+                pre_transmit_control_overflow,
+            ResourceClientResponseStageState::backpressure,
+            "Pre-transmit control traffic exceeded its bounded count or byte budget",
+            now);
+        return;
+    }
+
+    auto decoded = ServicePayloadEnvelopeDecoder{
+        ServicePayloadEnvelopeLimits{
+            config_.response.maximum_post_response_payload_size,
+            config_.post_response_payload_compression}}.decode(
+                std::move(payload));
+    if (!decoded || !decoded.envelope) {
+        payload_diagnostic_->classification =
+            ResourceResponsePayloadClassification::invalid_framing;
+        fail(
+            ResourceClientResponseStageErrorCode::
+                pre_transmit_control_decode_failed,
+            ResourceClientResponseStageState::protocol_error,
+            decoded.error
+                ? std::string_view{decoded.error->context}
+                : std::string_view{
+                      "Pre-transmit service envelope returned no payload"},
+            now,
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            decoded.error ? std::optional{decoded.error->code}
+                          : std::nullopt);
+        return;
+    }
+
+    auto& envelope = *decoded.envelope;
+    auto& service = envelope.payload;
+    payload_diagnostic_->wire_encoding = service.decompressed
+        ? ResourceResponseWireEncodingKind::bzip2
+        : service.wire_uncompressed
+            ? ResourceResponseWireEncodingKind::wire_uncompressed
+            : ResourceResponseWireEncodingKind::unavailable;
+    payload_diagnostic_->decoded_byte_count = service.bytes.size();
+
+    const RuntimeControlDecoder decoder{RuntimeControlDecodeLimits{
+        config_.response.maximum_post_response_payload_size,
+        config_.maximum_pre_transmit_control_payloads}};
+    std::size_t cursor = 0U;
+    std::size_t message_ordinal = 0U;
+    while (cursor < service.bytes.size()) {
+        payload_diagnostic_->cursor_byte_offset = cursor;
+        payload_diagnostic_->cursor_bit_offset = 0U;
+        payload_diagnostic_->validated_message_boundary = true;
+        payload_diagnostic_->actual_opcode =
+            std::to_integer<std::uint8_t>(service.bytes[cursor]);
+        const auto source_cursor = StockRuntimeSourceCursor::create(
+            cursor, 0U, service.bytes.size());
+        if (!source_cursor) {
+            payload_diagnostic_->control_code =
+                RuntimeControlDecodeErrorCode::invalid_cursor;
+            fail(
+                ResourceClientResponseStageErrorCode::
+                    pre_transmit_control_decode_failed,
+                ResourceClientResponseStageState::protocol_error,
+                "Pre-transmit control cursor cannot be represented",
+                now);
+            return;
+        }
+        const auto one = decoder.decode_one(
+            RuntimeControlDecodeInput{
+                service,
+                *source_cursor,
+                1U,
+                payload_ordinal_,
+                {}},
+            message_ordinal);
+        if (!one || !one.event) {
+            payload_diagnostic_->control_code = one.error
+                ? std::optional{one.error->code}
+                : std::nullopt;
+            fail(
+                ResourceClientResponseStageErrorCode::
+                    pre_transmit_control_decode_failed,
+                ResourceClientResponseStageState::protocol_error,
+                one.error
+                    ? std::string_view{one.error->context}
+                    : std::string_view{
+                          "Pre-transmit control decoder returned no event"},
+                now);
+            return;
+        }
+        const auto& event = *one.event;
+        if (event.kind != RuntimeControlMessageKind::nop ||
+            event.opcode != RuntimeControlOpcode::svc_nop) {
+            fail(
+                ResourceClientResponseStageErrorCode::
+                    unexpected_pre_transmit_control_message,
+                ResourceClientResponseStageState::protocol_error,
+                "Only decoder-validated svc_nop is admissible before the first resource-response transmission",
+                now);
+            return;
+        }
+        const auto end = event.provenance.end_cursor.byte_offset();
+        if (end <= cursor || end > service.bytes.size()) {
+            payload_diagnostic_->control_code =
+                RuntimeControlDecodeErrorCode::size_overflow;
+            fail(
+                ResourceClientResponseStageErrorCode::
+                    pre_transmit_control_decode_failed,
+                ResourceClientResponseStageState::protocol_error,
+                "Pre-transmit control decoder did not advance within the owning payload",
+                now);
+            return;
+        }
+        cursor = end;
+        ++message_ordinal;
+        ++pre_transmit_control_message_count_;
+        payload_diagnostic_->consumed_control_message_count =
+            pre_transmit_control_message_count_;
+        payload_diagnostic_->last_successful_handoff_cursor = cursor;
+    }
+
+    ++pre_transmit_control_payload_count_;
+    pre_transmit_control_byte_count_ += wire_size;
+    if (!can_push_events()) {
+        fail(
+            ResourceClientResponseStageErrorCode::event_backpressure,
+            ResourceClientResponseStageState::backpressure,
+            "No bounded event slot remains for a pre-transmit control payload",
+            now);
+        return;
+    }
+    push_event(ResourceClientResponseStageEvent{
+        .type = ResourceClientResponseStageEventType::
+            pre_transmit_control_consumed,
+        .payload_byte_count = wire_size,
+        .remaining_byte_count = 0U,
+        .opcode = static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop),
+        .occurred_at = now,
+    });
+    emit_trace(
+        ResourceClientResponseTraceClassification::
+            pre_transmit_control_consumed,
+        wire_size,
+        0U,
+        static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop));
+}
+
 void ResourceClientResponseStage::decode_pending_server_payload(
     const ResourceClientResponseStageTimePoint now)
 {
@@ -1678,7 +2164,8 @@ void ResourceClientResponseStage::decode_pending_server_payload(
     try {
         const ServicePayloadEnvelopeDecoder decoder{
             ServicePayloadEnvelopeLimits{
-                config_.response.maximum_post_response_payload_size}};
+                config_.response.maximum_post_response_payload_size,
+                config_.post_response_payload_compression}};
         decoded.emplace(decoder.decode(std::move(*pending_decode_payload_)));
     } catch (...) {
         pending_decode_payload_.reset();
@@ -1763,7 +2250,8 @@ void ResourceClientResponseStage::decode_pending_server_payload(
                           : std::nullopt);
         return;
     }
-    if (!resource_list_stage_.result() || !response_encoding_ ||
+    if (!resource_list_stage_.result() || !response_ ||
+        response_semantic_bytes_.empty() ||
         !first_transmit_sequence_ || !most_recent_transmit_sequence_ ||
         !acknowledgement_ || !response_acknowledged_) {
         fail(
@@ -1790,7 +2278,7 @@ void ResourceClientResponseStage::decode_pending_server_payload(
     try {
         auto built_result = ResourceClientResponseSignonState{
             *resource_list_stage_.result(),
-            response_encoding_->response(),
+            *response_,
             std::nullopt,
             std::nullopt,
             ResourceResponseReliableLifecycle{
@@ -1895,7 +2383,12 @@ void ResourceClientResponseStage::fail_from_resource_list(
         std::nullopt,
         std::nullopt,
         std::nullopt,
-        nested_error ? nested_error->driver_code : std::nullopt);
+        nested_error ? nested_error->driver_code : std::nullopt,
+        nested_error ? nested_error->transition_code : std::nullopt,
+        nested_error ? nested_error->transition_control_code : std::nullopt,
+        nested_error
+            ? nested_error->transition_failure_metadata
+            : std::nullopt);
 }
 
 void ResourceClientResponseStage::fail_from_driver(
@@ -1947,7 +2440,13 @@ void ResourceClientResponseStage::fail(
     const std::optional<Opcode5ResourceResponseErrorCode> response_code,
     const std::optional<ServicePayloadEnvelopeErrorCode> envelope_code,
     const std::optional<PostResourceResponseBoundaryErrorCode> boundary_code,
-    const std::optional<NetchanDriverErrorCode> driver_code) noexcept
+    const std::optional<NetchanDriverErrorCode> driver_code,
+    const std::optional<ResourceTransitionStageErrorCode>
+        transition_stage_code,
+    const std::optional<ResourceTransitionControlErrorCode>
+        transition_control_code,
+    std::optional<ResourceTransitionFailureMetadata>
+        transition_failure_metadata) noexcept
 {
     if (terminal_state(state_)) {
         return;
@@ -1959,11 +2458,16 @@ void ResourceClientResponseStage::fail(
         error_.emplace();
         error_->code = code;
         error_->resource_list_code = resource_list_code;
+        error_->transition_stage_code = transition_stage_code;
+        error_->transition_control_code = transition_control_code;
+        error_->transition_failure_metadata =
+            std::move(transition_failure_metadata);
         error_->consistency_code = consistency_code;
         error_->response_code = response_code;
         error_->envelope_code = envelope_code;
         error_->boundary_code = boundary_code;
         error_->driver_code = driver_code;
+        error_->payload_diagnostic = payload_diagnostic_;
         const auto bounded = context.substr(
             0U,
             (std::min)(
@@ -2018,9 +2522,7 @@ void ResourceClientResponseStage::emit_trace(
     event.classification = classification;
     event.state = state_;
     event.endpoint = remote_endpoint();
-    event.semantic_byte_count = response_encoding_
-        ? response_encoding_->semantic_bytes().size()
-        : 0U;
+    event.semantic_byte_count = response_semantic_bytes_.size();
     event.payload_byte_count = payload_byte_count;
     event.remaining_byte_count = remaining_byte_count;
     event.opcode = opcode;
@@ -2033,6 +2535,7 @@ void ResourceClientResponseStage::emit_trace(
     event.reliable = response_transmitted_;
     event.fragmented = response_transmitted_ && response_fragment_count_ != 0U;
     event.transmitted_packet_count = transmitted_packet_count();
+    event.payload_diagnostic = payload_diagnostic_;
     trace_callback_active_ = true;
     try {
         trace_callback_(event);

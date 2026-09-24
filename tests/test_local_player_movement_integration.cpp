@@ -4,6 +4,10 @@
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp>
 #include <hlclient/goldsrc/collision/goldsrc_collision_world_builder.hpp>
 #include <hlclient/goldsrc/movement/local_movement_collision.hpp>
+#include <hlclient/goldsrc/reference_prediction_seed.hpp>
+#include <hlclient/goldsrc/reference_prediction_command.hpp>
+#include <hlclient/goldsrc/reference_prediction_reconciliation.hpp>
+#include <hlclient/prediction/local_prediction.hpp>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -28,6 +32,171 @@ namespace goldsrc_bsp = hlclient::goldsrc::bsp;
 namespace goldsrc_collision = hlclient::goldsrc::collision;
 namespace movement = hlclient::goldsrc::movement;
 namespace player = hlclient::movement;
+
+[[nodiscard]] std::shared_ptr<const hlclient::collision::CollisionWorldPackage>
+literal_world_package();
+
+[[nodiscard]] goldsrc::ReferencePredictionSeed reference_floor_seed(
+    const double z = 36.0, const double velocity_z = 0.0,
+    const std::uint32_t flags = 1U << 9U)
+{
+    goldsrc::ReferencePredictionSeed seed;
+    seed.generation = 1U;
+    seed.record_identity = 10U;
+    seed.command_boundary = *goldsrc::GoldSrcUserCmdSequence::create(7U);
+    seed.origin = {0.0, 0.0, z};
+    seed.velocity = {0.0, 0.0, velocity_z};
+    seed.view_offset = {0.0, 0.0, 28.0};
+    seed.base_velocity = {0.0, 0.0, 0.0};
+    seed.flags = flags;
+    seed.move_type = 3U;
+    seed.use_hull = 0U;
+    seed.water_level = 0U;
+    seed.old_buttons = 0U;
+    seed.gravity_multiplier = 1.0;
+    seed.friction_multiplier = 1.0;
+    return seed;
+}
+
+TEST_CASE("Reference seed categorizes literal world ground without moving server origin",
+    "[goldsrc][movement][prediction][reference-ground]")
+{
+    const movement::WorldOnlyMovementCollision collision{literal_world_package()};
+    movement::GoldSrcLocalMovementScratch scratch;
+    const goldsrc::GoldSrcWireUserCmd neutral{};
+    const auto grounded = goldsrc::derive_reference_prediction_ground(
+        reference_floor_seed(), neutral, collision, scratch);
+    INFO("ground status=" << goldsrc::to_string(grounded.status));
+    REQUIRE(grounded.state);
+    REQUIRE(grounded.ground_evidence);
+    CHECK(grounded.state->origin().z == 36.0F);
+    CHECK(grounded.state->ground_state().grounded());
+    CHECK(grounded.ground_evidence->hit.has_value());
+    CHECK(grounded.ground_evidence->plane.normal.z == Catch::Approx(1.0F));
+    CHECK(grounded.collision_identity == collision.session_identity());
+
+    const auto air = goldsrc::derive_reference_prediction_ground(
+        reference_floor_seed(60.0, 0.0, 0U), neutral, collision, scratch);
+    REQUIRE(air.state);
+    CHECK_FALSE(air.state->ground_state().grounded());
+    CHECK(air.state->origin().z == 60.0F);
+
+    const auto upward = goldsrc::derive_reference_prediction_ground(
+        reference_floor_seed(36.0, 181.0, 0U), neutral, collision, scratch);
+    REQUIRE(upward.state);
+    CHECK_FALSE(upward.state->ground_state().grounded());
+
+    const auto solid = goldsrc::derive_reference_prediction_ground(
+        reference_floor_seed(0.0), neutral, collision, scratch);
+    CHECK(solid.status == goldsrc::ReferencePredictionGroundStatus::solid_start);
+    CHECK_FALSE(solid.state);
+
+    const auto disagreement = goldsrc::derive_reference_prediction_ground(
+        reference_floor_seed(36.0, 0.0, 0U), neutral, collision, scratch);
+    CHECK(disagreement.status ==
+        goldsrc::ReferencePredictionGroundStatus::ground_flag_disagreement);
+}
+
+TEST_CASE("Reference correction rebuilds exact suffix and leaves old publication intact",
+    "[goldsrc][movement][prediction][reference-rebase]")
+{
+    const movement::WorldOnlyMovementCollision collision{literal_world_package()};
+    movement::GoldSrcLocalMovementScratch scratch;
+    const auto environment = fixture::make_environment();
+    goldsrc::GoldSrcWireUserCmd wire;
+    wire.msec = 20U;
+    wire.forward = 400;
+    const auto seed = reference_floor_seed();
+    const auto ground = goldsrc::derive_reference_prediction_ground(
+        seed, wire, collision, scratch);
+    INFO("ground status=" << goldsrc::to_string(ground.status));
+    REQUIRE(ground.state);
+    const auto identity = hlclient::prediction::create_prediction_session_identity(
+        1U, 1U, collision, environment, {}, *ground.state,
+        hlclient::prediction::PredictionCompatibilityProfile::
+            reference_carrier_dry_walk_v1,
+        hlclient::prediction::PredictionAcknowledgementProfile::
+            reference_sent_carrier_boundary_v1);
+    REQUIRE(identity);
+    const auto initial = hlclient::prediction::LocalPredictionHistoryState::
+        create_initial(*ground.state, *identity.session);
+    REQUIRE(initial);
+    auto history = initial.history;
+    std::shared_ptr<const player::LocalPlayerMovementState> first_post;
+    for (const auto number : {8U, 9U}) {
+        const auto command = goldsrc::reference_dry_walk_movement_command(
+            *goldsrc::GoldSrcUserCmdSequence::create(number), wire);
+        REQUIRE(command);
+        const auto before = history->current_predicted_state();
+        const auto simulated = movement::GoldSrcLocalMovementKernel::simulate(
+            *before, *command.state, environment, collision, scratch);
+        REQUIRE(simulated);
+        auto after = std::make_shared<const player::LocalPlayerMovementState>(
+            *simulated.state);
+        if (number == 8U) first_post = after;
+        const auto owned_command =
+            std::make_shared<const goldsrc::GoldSrcUserCmdState>(*command.state);
+        const hlclient::prediction::PredictedCommandAppend append{
+            owned_command, before, after, simulated.statistics,
+            hlclient::prediction::summarize_prediction_touches(
+                simulated.touches, false, false)};
+        const auto published =
+            hlclient::prediction::append_local_prediction_commands(
+                *history, std::span{&append, 1U});
+        REQUIRE(published);
+        history = published.history;
+    }
+    REQUIRE(first_post);
+    const auto old_latest_x = history->current_predicted_state()->origin().x;
+    auto correction_seed = reference_floor_seed(
+        first_post->origin().z, first_post->velocity().z);
+    correction_seed.command_boundary =
+        *goldsrc::GoldSrcUserCmdSequence::create(8U);
+    correction_seed.origin.x = first_post->origin().x + 0.5;
+    correction_seed.velocity.x = first_post->velocity().x;
+    const auto correction = goldsrc::derive_reference_prediction_ground(
+        correction_seed, wire, collision, scratch);
+    REQUIRE(correction.state);
+    const auto rebased = goldsrc::rebase_reference_prediction(
+        *history, *correction.state, environment, collision, scratch);
+    REQUIRE(rebased.history);
+    CHECK(rebased.replayed_commands == 1U);
+    REQUIRE(rebased.raw_position_error);
+    CHECK(*rebased.raw_position_error == Catch::Approx(0.5).margin(0.001));
+    CHECK(rebased.history->anchor().movement_state()->source_command_sequence()
+        == 8U);
+    CHECK(rebased.history->current_predicted_state()->source_command_sequence()
+        == 9U);
+    CHECK(history->current_predicted_state()->origin().x == old_latest_x);
+    CHECK(rebased.history->current_predicted_state()->origin().x != old_latest_x);
+    const auto repeated_anchor = goldsrc::rebase_reference_prediction(
+        *rebased.history, *correction.state, environment, collision, scratch);
+    REQUIRE(repeated_anchor.history);
+    CHECK(repeated_anchor.replayed_commands == 1U);
+    CHECK(repeated_anchor.raw_position_error == Catch::Approx(0.0));
+    correction_seed.origin.x = *correction_seed.origin.x + 0.25;
+    const auto later_record_same_anchor =
+        goldsrc::derive_reference_prediction_ground(
+            correction_seed, wire, collision, scratch);
+    REQUIRE(later_record_same_anchor.state);
+    const auto revised = goldsrc::rebase_reference_prediction(
+        *rebased.history, *later_record_same_anchor.state,
+        environment, collision, scratch);
+    REQUIRE(revised.history);
+    CHECK(revised.replayed_commands == 1U);
+    CHECK(*revised.raw_position_error == Catch::Approx(0.25).margin(0.001));
+
+    auto missing_info = player::local_player_movement_state_create_info(
+        *correction.state);
+    missing_info.source_command_sequence = 15U;
+    const auto missing_state = player::LocalPlayerMovementState::create(missing_info);
+    REQUIRE(missing_state);
+    const auto missing = goldsrc::rebase_reference_prediction(
+        *history, *missing_state.state, environment, collision, scratch);
+    CHECK(missing.status == goldsrc::ReferenceRebaseStatus::boundary_missing);
+    CHECK_FALSE(missing.history);
+    CHECK(history->current_predicted_state()->origin().x == old_latest_x);
+}
 
 [[nodiscard]] std::shared_ptr<const hlclient::collision::CollisionWorldPackage>
 literal_world_package()

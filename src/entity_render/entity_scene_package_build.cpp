@@ -66,24 +66,35 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
             std::nullopt,
             "Runtime entity visual limits are invalid or exceed hard caps");
     }
-    if (!create_info.asset_library) {
-        return scene_fail(EntitySceneRenderErrorCode::missing_asset_library,
-            std::nullopt,
-            "Entity scene package requires an immutable visual asset library");
-    }
-    if (create_info.asset_library_identity.resource_id == 0U ||
-        create_info.asset_library_identity.revision == 0U) {
+    const bool project_generated = create_info.asset_source ==
+        EntitySceneRenderAssetSource::project_generated_diagnostic;
+    if (!project_generated) {
+        if (!create_info.asset_library) {
+            return scene_fail(EntitySceneRenderErrorCode::missing_asset_library,
+                std::nullopt,
+                "Entity scene package requires an immutable visual asset library");
+        }
+        if (create_info.asset_library_identity.resource_id == 0U ||
+            create_info.asset_library_identity.revision == 0U) {
+            return scene_fail(EntitySceneRenderErrorCode::invalid_library_identity,
+                std::nullopt,
+                "Entity visual asset library identity must be exact and nonzero");
+        }
+        if (create_info.asset_library->resource_id() !=
+                create_info.asset_library_identity.resource_id ||
+            create_info.asset_library->resource_revision() !=
+                create_info.asset_library_identity.revision) {
+            return scene_fail(EntitySceneRenderErrorCode::invalid_library_identity,
+                std::nullopt,
+                "Entity scene library identity does not match the retained immutable state");
+        }
+    } else if (create_info.asset_library ||
+               create_info.asset_library_identity.resource_id != 0U ||
+               create_info.asset_library_identity.revision != 0U ||
+               !create_info.sprite_assets.empty()) {
         return scene_fail(EntitySceneRenderErrorCode::invalid_library_identity,
             std::nullopt,
-            "Entity visual asset library identity must be exact and nonzero");
-    }
-    if (create_info.asset_library->resource_id() !=
-            create_info.asset_library_identity.resource_id ||
-        create_info.asset_library->resource_revision() !=
-            create_info.asset_library_identity.revision) {
-        return scene_fail(EntitySceneRenderErrorCode::invalid_library_identity,
-            std::nullopt,
-            "Entity scene library identity does not match the retained immutable state");
+            "Project-generated diagnostic scenes must be path-free Studio-only packages without an imported asset library");
     }
     if (create_info.resource_id == 0U) {
         return scene_fail(EntitySceneRenderErrorCode::invalid_resource_identity,
@@ -115,8 +126,10 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
         statistics.visual_asset_count = visual_asset_count;
         statistics.studio_asset_count = create_info.studio_assets.size();
         statistics.sprite_asset_count = create_info.sprite_assets.size();
-        const auto library_records = create_info.asset_library->records();
-        if (library_records.size() != visual_asset_count) {
+        const auto library_records = create_info.asset_library
+            ? create_info.asset_library->records()
+            : std::span<const entity_visual::EntityVisualAssetRecord>{};
+        if (!project_generated && library_records.size() != visual_asset_count) {
             return scene_fail(EntitySceneRenderErrorCode::invalid_library_identity,
                 std::nullopt,
                 "Entity scene render assets do not exactly cover the retained visual library");
@@ -137,16 +150,19 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
                     index,
                     "Entity scene repeats a visual asset resource ID");
             }
-            const auto record = std::find_if(library_records.begin(),
-                library_records.end(),
-                [&asset](const entity_visual::EntityVisualAssetRecord& value) {
-                    return value.kind() ==
-                            entity_visual::EntityVisualAssetKind::studio_model &&
-                        value.resource_id() == asset->source_identity().resource_id &&
-                        value.resource_revision() ==
-                            asset->source_identity().revision;
-                });
-            if (record == library_records.end()) {
+            const auto record = project_generated
+                ? library_records.end()
+                : std::find_if(library_records.begin(), library_records.end(),
+                      [&asset](
+                          const entity_visual::EntityVisualAssetRecord& value) {
+                          return value.kind() == entity_visual::
+                                  EntityVisualAssetKind::studio_model &&
+                              value.resource_id() ==
+                                  asset->source_identity().resource_id &&
+                              value.resource_revision() ==
+                                  asset->source_identity().revision;
+                      });
+            if (!project_generated && record == library_records.end()) {
                 return scene_fail(EntitySceneRenderErrorCode::invalid_studio_asset,
                     index,
                     "Studio render asset has no exact immutable library record");
@@ -216,6 +232,7 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
 
         StableHasher revision_hash;
         revision_hash.add(create_info.resource_id);
+        revision_hash.add(static_cast<std::uint64_t>(create_info.asset_source));
         revision_hash.add(create_info.asset_library_identity.resource_id);
         revision_hash.add(create_info.asset_library_identity.revision);
         revision_hash.add(static_cast<std::uint64_t>(visual_asset_count));
@@ -237,6 +254,7 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
 
         return {
             EntitySceneRenderPackage{
+                create_info.asset_source,
                 std::move(create_info.asset_library),
                 create_info.asset_library_identity,
                 create_info.resource_id,

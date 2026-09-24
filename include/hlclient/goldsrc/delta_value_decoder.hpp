@@ -40,6 +40,10 @@ struct GoldSrcDeltaValueLimits {
         kDefaultMaximumDeltaObjectCountPerMessage};
     std::size_t maximum_delta_bits{kDefaultMaximumDeltaValueBits};
     double maximum_numeric_magnitude{kDefaultMaximumDeltaNumericMagnitude};
+
+    [[nodiscard]] friend bool operator==(
+        const GoldSrcDeltaValueLimits&,
+        const GoldSrcDeltaValueLimits&) noexcept = default;
 };
 
 [[nodiscard]] bool valid_goldsrc_delta_value_limits(
@@ -51,6 +55,16 @@ struct GoldSrcDeltaValueLimits {
 enum class DeltaValueCompatibilityProfile {
     stock_protocol_48_build_10210_evidence_pending,
     synthetic_neutral_v1,
+    public_goldsrc48_entity_delta_v1,
+    // Generic public GoldSrc delta-field grammar used by non-entity runtime
+    // schemas such as clientdata_t and weapon_data_t.  The older entity name
+    // remains a distinct compatible profile so A/B/C objects keep their
+    // existing evidence identity.
+    public_goldsrc48_delta_v1,
+    // Separate usercmd boundary retained for its schema/evidence identity. All
+    // public GoldSrc profiles use the protocol's sign-first magnitude scalar
+    // encoding; synthetic_neutral_v1 deliberately retains two's-complement.
+    public_goldsrc48_usercmd_delta_v1,
 };
 
 using DeltaScalarValue =
@@ -102,6 +116,8 @@ public:
         const DeltaSchema& schema) const noexcept;
     [[nodiscard]] bool has_same_schema_as(
         const DeltaObjectState& other) const noexcept;
+    [[nodiscard]] bool has_equal_values_as(
+        const DeltaObjectState& other) const noexcept;
 
 private:
     friend class DeltaObjectBuilder;
@@ -134,6 +150,8 @@ struct DeltaValueDecodeContext {
     std::size_t start_bit_offset{0U};
     std::size_t bit_length{static_cast<std::size_t>(-1)};
     std::optional<DeltaTimeReference> time_reference;
+    std::optional<double> server_time_seconds;
+    bool require_exact_end{true};
 };
 
 enum class DeltaValueErrorCode {
@@ -192,7 +210,8 @@ struct DeltaObjectBuildResult {
     }
 };
 
-// Publishes only fully specified states; it never invents no-base defaults.
+// Publishes fully schema-typed states. build_default is for wire grammars that
+// explicitly select a null/default base, never for failed reference lookup.
 class DeltaObjectBuilder final {
 public:
     explicit DeltaObjectBuilder(
@@ -207,6 +226,8 @@ public:
     [[nodiscard]] DeltaObjectBuildResult build(
         const DeltaSchema& schema,
         std::span<const DeltaScalarValue> values) const;
+    [[nodiscard]] DeltaObjectBuildResult build_default(
+        const DeltaSchema& schema) const;
 
 private:
     GoldSrcDeltaValueLimits limits_;
@@ -251,6 +272,12 @@ private:
         return "stock_protocol_48_build_10210_evidence_pending";
     case DeltaValueCompatibilityProfile::synthetic_neutral_v1:
         return "synthetic_neutral_v1";
+    case DeltaValueCompatibilityProfile::public_goldsrc48_entity_delta_v1:
+        return "public_goldsrc48_entity_delta_v1";
+    case DeltaValueCompatibilityProfile::public_goldsrc48_delta_v1:
+        return "public_goldsrc48_delta_v1";
+    case DeltaValueCompatibilityProfile::public_goldsrc48_usercmd_delta_v1:
+        return "public_goldsrc48_usercmd_delta_v1";
     }
     return "unknown";
 }

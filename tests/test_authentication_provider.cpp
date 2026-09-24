@@ -1,9 +1,11 @@
 #include <hlclient/app/authentication_material_file.hpp>
 #include <hlclient/app/explicit_file_authentication_provider.hpp>
+#include <hlclient/app/steam_authentication_provider.hpp>
 #include <hlclient/auth/authentication_provider.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -266,6 +268,96 @@ public:
     void cancel() noexcept override {}
 };
 
+struct MockSteamApiState {
+    bool initialize_result{true};
+    bool logged_on{true};
+    std::uint32_t app_id{app::kHalfLifeSteamAppId};
+    int material_size{333};
+    std::size_t initialize_calls{0U};
+    std::size_t shutdown_calls{0U};
+    std::size_t callback_calls{0U};
+    std::size_t initiate_calls{0U};
+    std::size_t terminate_calls{0U};
+    std::uint64_t server_steam_id{0U};
+    network::NetworkAddress endpoint;
+    bool secure{false};
+};
+
+class MockSteamApi final : public app::ISteamLegacyClientApi {
+public:
+    explicit MockSteamApi(std::shared_ptr<MockSteamApiState> state)
+        : state_{std::move(state)}
+    {
+    }
+
+    [[nodiscard]] bool initialize() noexcept override
+    {
+        ++state_->initialize_calls;
+        return state_->initialize_result;
+    }
+    void shutdown() noexcept override { ++state_->shutdown_calls; }
+    void run_callbacks() noexcept override { ++state_->callback_calls; }
+    [[nodiscard]] std::uint32_t app_id() const noexcept override
+    {
+        return state_->app_id;
+    }
+    [[nodiscard]] bool logged_on() const noexcept override
+    {
+        return state_->logged_on;
+    }
+    [[nodiscard]] int initiate_game_connection(
+        const std::span<std::byte> output,
+        const std::uint64_t server_steam_id,
+        const std::uint32_t ipv4,
+        const std::uint16_t port,
+        const bool secure) noexcept override
+    {
+        ++state_->initiate_calls;
+        state_->server_steam_id = server_steam_id;
+        state_->endpoint = network::NetworkAddress{ipv4, port};
+        state_->secure = secure;
+        if (state_->material_size > 0 &&
+            static_cast<std::size_t>(state_->material_size) <= output.size()) {
+            std::ranges::fill(
+                output.first(static_cast<std::size_t>(state_->material_size)),
+                std::byte{0x5a});
+        }
+        return state_->material_size;
+    }
+    void terminate_game_connection(
+        const std::uint32_t ipv4,
+        const std::uint16_t port) noexcept override
+    {
+        ++state_->terminate_calls;
+        state_->endpoint = network::NetworkAddress{ipv4, port};
+    }
+
+private:
+    std::shared_ptr<MockSteamApiState> state_;
+};
+
+[[nodiscard]] auth::AuthenticationRequestContext steam_request_context()
+{
+    auth::AuthenticationRequestContext context;
+    context.remote_endpoint = network::NetworkAddress::loopback(27'015U);
+    context.protocol = goldsrc::ProtocolVersion::goldsrc_48;
+    context.compatibility_profile = goldsrc::steam_legacy_connect_profile();
+    context.challenge = goldsrc::ChallengeToken{123'456'789U};
+    context.game_server_steam_id = 90'071'992'547'410'001ULL;
+    context.game_server_secure = true;
+    return context;
+}
+
+[[nodiscard]] app::SteamAuthenticationProviderConfig mock_steam_config(
+    const std::shared_ptr<MockSteamApiState>& state)
+{
+    app::SteamAuthenticationProviderConfig config;
+    config.api_factory = [state](const std::filesystem::path&) {
+        return std::make_unique<MockSteamApi>(state);
+    };
+    return config;
+}
+
 TEST_CASE("Authentication provider supports deferred success and a minimal context",
           "[auth][provider]")
 {
@@ -372,6 +464,181 @@ TEST_CASE("Authentication provider reports typed provider failures", "[auth][pro
     REQUIRE(result.error);
     CHECK(result.error->code == auth::AuthenticationErrorCode::provider_error);
     check_sanitized(*result.error);
+}
+
+TEST_CASE("Steam provider polls fresh variable-length legacy material and owns its session",
+          "[auth][provider][steam]")
+{
+    auto state = std::make_shared<MockSteamApiState>();
+    std::vector<app::SteamAuthenticationTraceStatus> trace_statuses;
+    {
+        auto config = mock_steam_config(state);
+        config.trace = [&trace_statuses](
+            const app::SteamAuthenticationTraceEvent& event) {
+            trace_statuses.push_back(event.status);
+        };
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        const auto context = steam_request_context();
+        auto begun = provider.begin(context);
+        REQUIRE(begun.operation);
+        REQUIRE(trace_statuses.size() == 1U);
+        CHECK(trace_statuses[0] ==
+              app::SteamAuthenticationTraceStatus::operation_started);
+
+        const auto pending = begun.operation->update();
+        CHECK(pending.state == auth::AuthenticationUpdateState::pending);
+        CHECK(state->initialize_calls == 1U);
+        CHECK(state->initiate_calls == 0U);
+        REQUIRE(trace_statuses.size() == 4U);
+        CHECK(trace_statuses[1] ==
+              app::SteamAuthenticationTraceStatus::api_initializing);
+        CHECK(trace_statuses[2] ==
+              app::SteamAuthenticationTraceStatus::api_initialized);
+        CHECK(trace_statuses[3] ==
+              app::SteamAuthenticationTraceStatus::material_pending);
+
+        auto completed = begun.operation->update();
+        REQUIRE(completed.state == auth::AuthenticationUpdateState::succeeded);
+        REQUIRE(completed.session);
+        REQUIRE(trace_statuses.size() == 5U);
+        CHECK(trace_statuses[4] ==
+              app::SteamAuthenticationTraceStatus::material_acquired);
+        CHECK(completed.session->material_suffix_size() == 333U);
+        CHECK(completed.session->material_size() == 365U);
+        CHECK(state->callback_calls == 1U);
+        CHECK(state->initiate_calls == 1U);
+        CHECK(state->server_steam_id == *context.game_server_steam_id);
+        CHECK(state->endpoint == context.remote_endpoint);
+        CHECK(state->secure);
+        CHECK(state->terminate_calls == 0U);
+
+        auto material = completed.session->take_material();
+        REQUIRE(material);
+        material.reset();
+        CHECK(state->terminate_calls == 0U);
+        completed.session.reset();
+        CHECK(state->terminate_calls == 1U);
+
+        auto second = provider.begin(context);
+        REQUIRE(second.operation);
+        CHECK(second.operation->update().state ==
+              auth::AuthenticationUpdateState::pending);
+        auto second_completed = second.operation->update();
+        REQUIRE(second_completed.state ==
+                auth::AuthenticationUpdateState::succeeded);
+        CHECK(state->initiate_calls == 2U);
+        second_completed.session.reset();
+        CHECK(state->terminate_calls == 2U);
+        CHECK(state->shutdown_calls == 0U);
+    }
+    CHECK(state->shutdown_calls == 1U);
+}
+
+TEST_CASE("Steam provider reports context, runtime, callback, size, cancel, and timeout failures",
+          "[auth][provider][steam]")
+{
+    SECTION("fresh server identity is required")
+    {
+        auto state = std::make_shared<MockSteamApiState>();
+        app::SteamAuthenticationProvider provider{mock_steam_config(state)};
+        auto context = steam_request_context();
+        context.game_server_steam_id.reset();
+        const auto begun = provider.begin(context);
+        REQUIRE_FALSE(begun);
+        REQUIRE(begun.error);
+        CHECK(begun.error->code ==
+              auth::AuthenticationErrorCode::configuration_error);
+        CHECK(state->initialize_calls == 0U);
+    }
+
+    SECTION("runtime initialization failure is typed unavailable")
+    {
+        auto state = std::make_shared<MockSteamApiState>();
+        state->initialize_result = false;
+        app::SteamAuthenticationProvider provider{mock_steam_config(state)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::unavailable);
+        CHECK(state->initiate_calls == 0U);
+    }
+
+    SECTION("wrong app context does not acquire material")
+    {
+        auto state = std::make_shared<MockSteamApiState>();
+        state->app_id = 480U;
+        app::SteamAuthenticationProvider provider{mock_steam_config(state)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code ==
+              auth::AuthenticationErrorCode::configuration_error);
+        CHECK(state->initiate_calls == 0U);
+    }
+
+    SECTION("callback-observed logout after pending is unavailable")
+    {
+        auto state = std::make_shared<MockSteamApiState>();
+        app::SteamAuthenticationProvider provider{mock_steam_config(state)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        REQUIRE(begun.operation->update().state ==
+                auth::AuthenticationUpdateState::pending);
+        state->logged_on = false;
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::unavailable);
+        CHECK(state->initiate_calls == 0U);
+    }
+
+    SECTION("oversized API output is terminated once")
+    {
+        auto state = std::make_shared<MockSteamApiState>();
+        state->material_size = 1'024;
+        app::SteamAuthenticationProvider provider{mock_steam_config(state)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        REQUIRE(begun.operation->update().state ==
+                auth::AuthenticationUpdateState::pending);
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code ==
+              auth::AuthenticationErrorCode::material_too_large);
+        CHECK(state->terminate_calls == 1U);
+    }
+
+    SECTION("cancel before initialization does not create a session")
+    {
+        auto state = std::make_shared<MockSteamApiState>();
+        app::SteamAuthenticationProvider provider{mock_steam_config(state)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        begun.operation->cancel();
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::cancelled);
+        CHECK(state->initialize_calls == 0U);
+        CHECK(state->terminate_calls == 0U);
+    }
+
+    SECTION("bounded timeout happens before API work")
+    {
+        auto state = std::make_shared<MockSteamApiState>();
+        auto now = app::SteamAuthenticationClock::time_point{};
+        auto config = mock_steam_config(state);
+        config.timeout = std::chrono::milliseconds{25};
+        config.now = [&now] { return now; };
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        now += std::chrono::milliseconds{25};
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::timed_out);
+        CHECK(state->initialize_calls == 0U);
+    }
 }
 
 TEST_CASE("Explicit file authentication provider requires a configured path",

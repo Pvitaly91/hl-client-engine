@@ -312,8 +312,10 @@ LocalPlayerMovementState::CreationResult LocalPlayerMovementState::create(
         create_info.evidence_profile !=
             GoldSrcMovementEvidenceProfile::
                 public_valve_pm_shared_and_independent_fixtures ||
-        create_info.command_profile !=
-            GoldSrcMovementCommandProfile::synthetic_usercmd_semantics_v1) {
+        (create_info.command_profile !=
+             GoldSrcMovementCommandProfile::synthetic_usercmd_semantics_v1 &&
+         create_info.command_profile !=
+             GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1)) {
         return failure(LocalPlayerMovementStateErrorCode::unsupported_profile,
             "movement state profile is unsupported");
     }
@@ -515,6 +517,8 @@ std::string_view to_string(const GoldSrcMovementCommandProfile profile) noexcept
     switch (profile) {
     case GoldSrcMovementCommandProfile::synthetic_usercmd_semantics_v1:
         return "synthetic_usercmd_semantics_v1";
+    case GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1:
+        return "reference_wire_dry_walk_v1";
     case GoldSrcMovementCommandProfile::stock_usercmd_semantics_evidence_pending:
         return "stock_usercmd_semantics_evidence_pending";
     }

@@ -3,6 +3,7 @@
 #include <hlclient/gameplay_camera/first_person_camera.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
 #include <hlclient/goldsrc/usercmd_state.hpp>
+#include <hlclient/goldsrc/reference_client_move.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -16,6 +17,18 @@ struct GoldSrcUserCmdMovementSpeedConfig {
     float side_speed{400.0F};
 };
 
+// A missing client limit is unknown. Valve's explicit zero means no client
+// clamp; a positive value limits the complete movement vector.
+struct GoldSrcReferenceMovementPolicy final {
+    float speed_key_multiplier{1.0F};
+    std::optional<float> client_maxspeed;
+};
+
+enum class GoldSrcReferenceButtonPolicy : std::uint8_t {
+    none,
+    jump_duck,
+};
+
 struct GoldSrcUserCmdBuildContext {
     GoldSrcUserCmdSequence command_sequence{};
     std::uint8_t command_msec{0U};
@@ -23,11 +36,14 @@ struct GoldSrcUserCmdBuildContext {
     std::int64_t command_sample_time_nanoseconds{0};
     std::uint16_t lerp_msec{0U};
     GoldSrcUserCmdMovementSpeedConfig movement_speeds{};
+    GoldSrcReferenceMovementPolicy reference_movement{};
     std::uint8_t light_level{0U};
     // Project gameplay-button edges retained by the caller until this exact
     // command is published to history. They are mapped explicitly and are
     // never treated as native GoldSrc button bits.
     gameplay_input::GameplayButtonMask one_shot_buttons{0U};
+    GoldSrcReferenceButtonPolicy reference_button_policy{
+        GoldSrcReferenceButtonPolicy::none};
     std::optional<std::uint8_t> impulse;
     std::optional<std::uint8_t> weapon_selection;
     std::int32_t impact_index{0};
@@ -103,6 +119,21 @@ struct GoldSrcUserCmdBuildResult {
     }
 };
 
+struct GoldSrcReferenceWireUserCmdBuildResult {
+    std::optional<GoldSrcWireUserCmd> command;
+    float requested_forward{0.0F};
+    float requested_side{0.0F};
+    float applied_speed_multiplier{1.0F};
+    std::optional<float> client_maxspeed;
+    std::optional<GoldSrcUserCmdOneShotPlan> one_shot_plan;
+    std::optional<GoldSrcUserCmdInputAdapterError> error;
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return command.has_value() && !error.has_value();
+    }
+};
+
 class GoldSrcUserCmdButtonMapping final {
 public:
     struct Result {
@@ -117,6 +148,15 @@ public:
 class GoldSrcUserCmdInputAdapter final {
 public:
     [[nodiscard]] GoldSrcUserCmdBuildResult build(
+        const gameplay_input::GameplayInputIntent& intent,
+        const gameplay_camera::GameplayCameraState& camera,
+        const GoldSrcUserCmdBuildContext& context,
+        const GoldSrcUserCmdLimits& limits = {}) const noexcept;
+
+    // Production-controlled adapter for the already verified public
+    // reference wire value. It deliberately exposes no keyboard/mouse,
+    // arbitrary button, impulse, weapon-select, or impact surface.
+    [[nodiscard]] GoldSrcReferenceWireUserCmdBuildResult build_reference_wire(
         const gameplay_input::GameplayInputIntent& intent,
         const gameplay_camera::GameplayCameraState& camera,
         const GoldSrcUserCmdBuildContext& context,

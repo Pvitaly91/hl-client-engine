@@ -1358,6 +1358,76 @@ TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",
     CHECK(glGetError() == GL_NO_ERROR);
 }
 
+TEST_CASE("OpenGL framebuffer observer reads the completed default back frame",
+          "[renderer][opengl][framebuffer-observer]")
+{
+    auto context = try_create_context();
+    if (!context) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    context->initialize_renderer();
+
+    constexpr renderer::RenderExtent extent{96, 96};
+    auto& gl_renderer = context->renderer();
+
+    // Loading/clear-only is a valid observation, not an unavailable readback.
+    renderer::RenderScene loading_scene;
+    gl_renderer.render(loading_scene, extent);
+    const auto loading = gl_renderer.observe_framebuffer(
+        extent, loading_scene.clear_color);
+    REQUIRE(loading);
+    CHECK(loading.status ==
+        opengl::OpenGlFramebufferObservationStatus::valid);
+    CHECK(loading.read_framebuffer == 0U);
+    CHECK(loading.read_buffer == GL_BACK);
+    CHECK(loading.sampled_pixel_count == 96U * 96U);
+    CHECK(loading.non_clear_pixel_count == 0U);
+
+    // The next scene uses the real renderer upload/draw path and must not be
+    // confused with the preceding loading frame.
+    auto package = make_frame_package(false, false, 1U, 0U, 0xC0U);
+    auto scene = make_scene(package);
+    gl_renderer.render(scene, extent);
+
+    GLint original_pack_alignment = 0;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &original_pack_alignment);
+    glPixelStorei(GL_PACK_ALIGNMENT, 8);
+    GLuint unrelated_read_framebuffer = 0U;
+    glGenFramebuffers(1, &unrelated_read_framebuffer);
+    REQUIRE(unrelated_read_framebuffer != 0U);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, unrelated_read_framebuffer);
+
+    const auto visible =
+        gl_renderer.observe_framebuffer(extent, scene.clear_color);
+    REQUIRE(visible);
+    CHECK(visible.status ==
+        opengl::OpenGlFramebufferObservationStatus::valid);
+    CHECK(visible.read_framebuffer == 0U);
+    CHECK(visible.read_buffer == GL_BACK);
+    CHECK(visible.non_clear_pixel_count > 0U);
+    CHECK(visible.has_non_clear_bounds);
+
+    GLint restored_read_framebuffer = 0;
+    GLint restored_pack_alignment = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &restored_read_framebuffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &restored_pack_alignment);
+    CHECK(restored_read_framebuffer ==
+        static_cast<GLint>(unrelated_read_framebuffer));
+    CHECK(restored_pack_alignment == 8);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0U);
+    glDeleteFramebuffers(1, &unrelated_read_framebuffer);
+    glPixelStorei(GL_PACK_ALIGNMENT, original_pack_alignment);
+    CHECK(glGetError() == GL_NO_ERROR);
+
+    context->release_renderer();
+}
+
 TEST_CASE("OpenGL scene visibility changes commands without resource reupload",
     "[renderer][opengl][m4.4][visibility-frame]")
 {

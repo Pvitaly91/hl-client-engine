@@ -169,12 +169,56 @@ TEST_CASE("Service payload envelope limits are positive and hard capped",
     CHECK_FALSE(goldsrc::valid_service_payload_envelope_limits({0U}));
     CHECK_FALSE(goldsrc::valid_service_payload_envelope_limits(
         {goldsrc::kMaximumDecompressedServicePayloadSize + 1U}));
+    CHECK_FALSE(goldsrc::valid_service_payload_envelope_limits({
+        goldsrc::kDefaultMaximumDecompressedServicePayloadSize,
+        static_cast<goldsrc::ServicePayloadCompressionPolicy>(0xffU)}));
 
     const goldsrc::ServicePayloadEnvelopeDecoder zero{{0U}};
     check_error(
         zero.decode(service_payload(independent_envelope_fixture())),
         goldsrc::ServicePayloadEnvelopeErrorCode::invalid_configuration,
         independent_envelope_fixture().size());
+}
+
+TEST_CASE("Live service payload profile preserves bounded uncompressed input",
+          "[goldsrc][signon][envelope][uncompressed][live]")
+{
+    const auto raw = bytes(std::array<std::uint8_t, 5U>{
+        0x08U, 0x41U, 0x00U, 0x0bU, 0xaaU});
+    const goldsrc::ServicePayloadEnvelopeDecoder decoder{{
+        raw.size(),
+        goldsrc::ServicePayloadCompressionPolicy::
+            accept_bzip2_or_uncompressed}};
+    const auto decoded = decoder.decode(service_payload(raw));
+
+    REQUIRE(decoded);
+    REQUIRE(decoded.envelope);
+    CHECK(decoded.envelope->payload.bytes == raw);
+    CHECK_FALSE(decoded.envelope->payload.decompressed);
+    CHECK(decoded.envelope->payload.wire_uncompressed);
+    CHECK(goldsrc::service_payload_decode_ready(
+        decoded.envelope->payload));
+    CHECK(decoded.envelope->compressed_byte_count == 0U);
+    CHECK(decoded.envelope->decompressed_byte_count == raw.size());
+    CHECK_FALSE(decoded.error);
+
+    const goldsrc::ServicePayloadEnvelopeDecoder too_small{{
+        raw.size() - 1U,
+        goldsrc::ServicePayloadCompressionPolicy::
+            accept_bzip2_or_uncompressed}};
+    check_error(
+        too_small.decode(service_payload(raw)),
+        goldsrc::ServicePayloadEnvelopeErrorCode::
+            decompressed_payload_too_large,
+        raw.size());
+
+    auto malformed_envelope = bytes(std::array<std::uint8_t, 6U>{
+        0x42U, 0x5aU, 0x32U, 0x00U, 0x42U, 0x5aU});
+    check_error(
+        decoder.decode(service_payload(malformed_envelope)),
+        goldsrc::ServicePayloadEnvelopeErrorCode::
+            truncated_compressed_stream,
+        malformed_envelope.size());
 }
 
 TEST_CASE("Service payload envelope magic is exact and bounded",

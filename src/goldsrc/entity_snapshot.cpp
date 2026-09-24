@@ -1,6 +1,7 @@
 #include <hlclient/goldsrc/entity_snapshot.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <new>
 #include <utility>
@@ -28,6 +29,19 @@ namespace {
     return profile == EntitySnapshotCompatibilityProfile::synthetic_neutral_v1;
 }
 
+[[nodiscard]] bool is_public_reference(
+    const EntitySnapshotCompatibilityProfile profile) noexcept
+{
+    return profile == EntitySnapshotCompatibilityProfile::public_goldsrc48_entity_delta_v1;
+}
+
+[[nodiscard]] bool is_public_packet_entities(
+    const EntitySnapshotCompatibilityProfile profile) noexcept
+{
+    return profile ==
+           EntitySnapshotCompatibilityProfile::public_goldsrc48_packet_entities_v1;
+}
+
 [[nodiscard]] bool valid_profile(
     const EntitySnapshotCompatibilityProfile profile) noexcept
 {
@@ -35,6 +49,8 @@ namespace {
     case EntitySnapshotCompatibilityProfile::
         stock_protocol_48_build_10210_evidence_pending:
     case EntitySnapshotCompatibilityProfile::synthetic_neutral_v1:
+    case EntitySnapshotCompatibilityProfile::public_goldsrc48_entity_delta_v1:
+    case EntitySnapshotCompatibilityProfile::public_goldsrc48_packet_entities_v1:
         return true;
     }
     return false;
@@ -58,6 +74,13 @@ namespace {
 {
     return reference.policy() ==
            EntitySnapshotReferencePolicy::synthetic_uint32_non_wrapping;
+}
+
+[[nodiscard]] bool is_goldsrc_transport(
+    const EntitySnapshotReference& reference) noexcept
+{
+    return reference.policy() ==
+           EntitySnapshotReferencePolicy::goldsrc_transport_sequence_30bit;
 }
 
 [[nodiscard]] EntityBaselineInsertResult baseline_failure(
@@ -141,14 +164,24 @@ namespace {
     const EntitySnapshotReference& left,
     const EntitySnapshotReference& right) noexcept
 {
-    return left.policy() == right.policy() && left.value() < right.value();
+    if (left.policy() != right.policy()) {
+        return false;
+    }
+    if (is_goldsrc_transport(left)) {
+        const auto left_sequence = NetchanSequence::from_numeric(left.value());
+        const auto right_sequence = NetchanSequence::from_numeric(right.value());
+        return left_sequence && right_sequence &&
+               compare_sequences(*left_sequence, *right_sequence) ==
+                   NetchanSequenceComparison::older;
+    }
+    return left.value() < right.value();
 }
 
 [[nodiscard]] bool reference_less_equal(
     const EntitySnapshotReference& left,
     const EntitySnapshotReference& right) noexcept
 {
-    return left.policy() == right.policy() && left.value() <= right.value();
+    return left == right || reference_less(left, right);
 }
 
 } // namespace
@@ -236,6 +269,18 @@ EntitySnapshotReference EntitySnapshotReference::synthetic(
         EntitySnapshotReferencePolicy::synthetic_uint32_non_wrapping};
 }
 
+std::optional<EntitySnapshotReference>
+EntitySnapshotReference::goldsrc_transport_sequence(
+    const std::uint32_t value) noexcept
+{
+    if (!NetchanSequence::from_numeric(value).has_value()) {
+        return std::nullopt;
+    }
+    return EntitySnapshotReference{
+        value,
+        EntitySnapshotReferencePolicy::goldsrc_transport_sequence_30bit};
+}
+
 std::uint32_t EntitySnapshotReference::value() const noexcept
 {
     return value_;
@@ -251,9 +296,23 @@ EntityServerTime::EntityServerTime(const std::int64_t value) noexcept
 {
 }
 
+EntityServerTime::EntityServerTime(const double value) noexcept
+    : goldsrc_seconds_{value}
+{
+}
+
 EntityServerTime EntityServerTime::synthetic_raw(
     const std::int64_t value) noexcept
 {
+    return EntityServerTime{value};
+}
+
+std::optional<EntityServerTime> EntityServerTime::public_goldsrc_seconds(
+    const double value) noexcept
+{
+    if (!std::isfinite(value)) {
+        return std::nullopt;
+    }
     return EntityServerTime{value};
 }
 
@@ -262,10 +321,17 @@ std::int64_t EntityServerTime::raw_value() const noexcept
     return raw_value_;
 }
 
+std::optional<double> EntityServerTime::goldsrc_seconds() const noexcept
+{
+    return goldsrc_seconds_;
+}
+
 EntitySnapshotEvidenceProfile EntityServerTime::evidence_profile()
     const noexcept
 {
-    return EntitySnapshotEvidenceProfile::caller_supplied_typed_records;
+    return goldsrc_seconds_.has_value()
+               ? EntitySnapshotEvidenceProfile::public_protocol_reference
+               : EntitySnapshotEvidenceProfile::caller_supplied_typed_records;
 }
 
 GoldSrcEntityProjectionStatus GoldSrcEntityStateProjection::status()
@@ -329,10 +395,12 @@ EntityBaselineState::compatibility_profile() const noexcept
 EntitySnapshotEvidenceProfile EntityBaselineState::evidence_profile()
     const noexcept
 {
-    return is_synthetic(compatibility_profile_)
-               ? EntitySnapshotEvidenceProfile::caller_supplied_typed_records
-               : EntitySnapshotEvidenceProfile::
-                     stock_runtime_grammar_evidence_pending;
+    if (is_synthetic(compatibility_profile_)) {
+        return EntitySnapshotEvidenceProfile::caller_supplied_typed_records;
+    }
+    return is_public_reference(compatibility_profile_)
+               ? EntitySnapshotEvidenceProfile::public_protocol_reference
+               : EntitySnapshotEvidenceProfile::stock_runtime_grammar_evidence_pending;
 }
 
 EntityBaselineRegistryState::EntityBaselineRegistryState(
@@ -382,10 +450,12 @@ EntityBaselineRegistryState::compatibility_profile() const noexcept
 EntitySnapshotEvidenceProfile EntityBaselineRegistryState::evidence_profile()
     const noexcept
 {
-    return is_synthetic(compatibility_profile_)
-               ? EntitySnapshotEvidenceProfile::caller_supplied_typed_records
-               : EntitySnapshotEvidenceProfile::
-                     stock_runtime_grammar_evidence_pending;
+    if (is_synthetic(compatibility_profile_)) {
+        return EntitySnapshotEvidenceProfile::caller_supplied_typed_records;
+    }
+    return is_public_reference(compatibility_profile_)
+               ? EntitySnapshotEvidenceProfile::public_protocol_reference
+               : EntitySnapshotEvidenceProfile::stock_runtime_grammar_evidence_pending;
 }
 
 EntityBaselineRegistryBuilder::EntityBaselineRegistryBuilder(
@@ -428,7 +498,7 @@ EntityBaselineInsertResult EntityBaselineRegistryBuilder::insert(
             key_kind,
             key_value);
     }
-    if (!is_synthetic(profile_)) {
+    if (!is_synthetic(profile_) && !is_public_reference(profile_)) {
         return baseline_failure(
             EntityBaselineErrorCode::evidence_pending,
             "Stock baseline grammar and schema selection remain evidence pending",
@@ -497,10 +567,16 @@ EntityBaselineInsertResult EntityBaselineRegistryBuilder::insert(
             key_kind,
             key_value);
     }
-    if (!object_matches_neutral_profile(object)) {
+    const auto object_profile = object.decode_profile();
+    const bool object_profile_matches =
+        (is_synthetic(profile_) &&
+         object_profile == DeltaValueCompatibilityProfile::synthetic_neutral_v1) ||
+        (is_public_reference(profile_) &&
+         object_profile == DeltaValueCompatibilityProfile::public_goldsrc48_entity_delta_v1);
+    if (!object_profile_matches) {
         return baseline_failure(
             EntityBaselineErrorCode::object_profile_mismatch,
-            "Synthetic entity baselines require a synthetic delta object",
+            "Entity baseline and delta-object compatibility profiles differ",
             key_kind,
             key_value);
     }
@@ -561,7 +637,7 @@ EntityBaselinePublishResult EntityBaselineRegistryBuilder::publish() &&
             EntityBaselineErrorCode::invalid_configuration,
             "Invalid entity baseline safety limits");
     }
-    if (!is_synthetic(profile_)) {
+    if (!is_synthetic(profile_) && !is_public_reference(profile_)) {
         return baseline_publish_failure(
             EntityBaselineErrorCode::evidence_pending,
             "Stock entity baseline publication remains evidence pending");
@@ -623,6 +699,47 @@ EntitySnapshotEntityInput::decoded_state() const noexcept
     return object_;
 }
 
+EntityStateBaseReference::EntityStateBaseReference(
+    const EntityStateBaseReferenceKind kind,
+    const std::uint32_t value) noexcept : kind_{kind}, value_{value}
+{
+}
+
+EntityStateBaseReference EntityStateBaseReference::entity_baseline(
+    const std::uint32_t entity_number) noexcept
+{
+    return {EntityStateBaseReferenceKind::entity_baseline, entity_number};
+}
+
+EntityStateBaseReference EntityStateBaseReference::instanced_baseline(
+    const std::uint32_t slot) noexcept
+{
+    return {EntityStateBaseReferenceKind::instanced_baseline, slot};
+}
+
+EntityStateBaseReference EntityStateBaseReference::intra_message_entity(
+    const std::uint32_t entity_number) noexcept
+{
+    return {EntityStateBaseReferenceKind::intra_message_entity, entity_number};
+}
+
+EntityStateBaseReference EntityStateBaseReference::previous_snapshot_entity(
+    const std::uint32_t entity_number) noexcept
+{
+    return {EntityStateBaseReferenceKind::previous_snapshot_entity,
+            entity_number};
+}
+
+EntityStateBaseReferenceKind EntityStateBaseReference::kind() const noexcept
+{
+    return kind_;
+}
+
+std::uint32_t EntityStateBaseReference::value() const noexcept
+{
+    return value_;
+}
+
 EntitySnapshotEntityState::EntitySnapshotEntityState(
     const std::uint32_t entity_number,
     EntityBaselineKey baseline_key,
@@ -632,8 +749,28 @@ EntitySnapshotEntityState::EntitySnapshotEntityState(
     : entity_number_{entity_number},
       baseline_key_{std::move(baseline_key)},
       schema_category_{schema_category},
+      state_base_reference_{
+          baseline_key_.kind() == EntityBaselineKeyKind::alternate_slot
+              ? EntityStateBaseReference::instanced_baseline(
+                    baseline_key_.value())
+              : EntityStateBaseReference::entity_baseline(
+                    baseline_key_.value())},
       object_{std::move(object)},
       semantic_projection_{std::move(semantic_projection)}
+{
+}
+
+EntitySnapshotEntityState::EntitySnapshotEntityState(
+    const std::uint32_t entity_number,
+    EntityBaselineKey baseline_key,
+    const EntitySchemaCategory schema_category,
+    EntityStateBaseReference state_base_reference,
+    std::shared_ptr<const DeltaObjectState> object) noexcept
+    : entity_number_{entity_number},
+      baseline_key_{std::move(baseline_key)},
+      schema_category_{schema_category},
+      state_base_reference_{std::move(state_base_reference)},
+      object_{std::move(object)}
 {
 }
 
@@ -652,6 +789,12 @@ EntitySchemaCategory EntitySnapshotEntityState::schema_category()
     const noexcept
 {
     return schema_category_;
+}
+
+const EntityStateBaseReference&
+EntitySnapshotEntityState::state_base_reference() const noexcept
+{
+    return state_base_reference_;
 }
 
 const DeltaObjectState& EntitySnapshotEntityState::object() const noexcept
@@ -767,10 +910,12 @@ EntitySnapshotState::compatibility_profile() const noexcept
 EntitySnapshotEvidenceProfile EntitySnapshotState::evidence_profile()
     const noexcept
 {
-    return is_synthetic(compatibility_profile_)
-               ? EntitySnapshotEvidenceProfile::caller_supplied_typed_records
-               : EntitySnapshotEvidenceProfile::
-                     stock_runtime_grammar_evidence_pending;
+    if (is_synthetic(compatibility_profile_)) {
+        return EntitySnapshotEvidenceProfile::caller_supplied_typed_records;
+    }
+    return is_public_packet_entities(compatibility_profile_)
+               ? EntitySnapshotEvidenceProfile::public_protocol_reference
+               : EntitySnapshotEvidenceProfile::stock_runtime_grammar_evidence_pending;
 }
 
 EntitySnapshotHistoryState::EntitySnapshotHistoryState(
@@ -778,12 +923,14 @@ EntitySnapshotHistoryState::EntitySnapshotHistoryState(
     std::vector<EntitySnapshotReference> required_base_references,
     std::optional<EntitySnapshotReference> evicted_through,
     const std::size_t accounted_value_bytes,
-    const EntitySnapshotCompatibilityProfile compatibility_profile) noexcept
+    const EntitySnapshotCompatibilityProfile compatibility_profile,
+    std::optional<std::uint64_t> source_generation) noexcept
     : snapshots_{std::move(snapshots)},
       required_base_references_{std::move(required_base_references)},
       evicted_through_{std::move(evicted_through)},
       accounted_value_bytes_{accounted_value_bytes},
-      compatibility_profile_{compatibility_profile}
+      compatibility_profile_{compatibility_profile},
+      source_generation_{std::move(source_generation)}
 {
 }
 
@@ -817,15 +964,17 @@ EntitySnapshotHistoryReferenceStatus EntitySnapshotHistoryState::classify(
         return EntitySnapshotHistoryReferenceStatus::retained;
     }
     if (reference.policy() !=
-        EntitySnapshotReferencePolicy::synthetic_uint32_non_wrapping) {
+            EntitySnapshotReferencePolicy::synthetic_uint32_non_wrapping &&
+        reference.policy() !=
+            EntitySnapshotReferencePolicy::goldsrc_transport_sequence_30bit) {
         return EntitySnapshotHistoryReferenceStatus::missing;
     }
     if (!snapshots_.empty() &&
-        reference.value() > snapshots_.back().reference().value()) {
+        reference_less(snapshots_.back().reference(), reference)) {
         return EntitySnapshotHistoryReferenceStatus::future;
     }
     if (evicted_through_ &&
-        reference.value() <= evicted_through_->value()) {
+        reference_less_equal(reference, *evicted_through_)) {
         return EntitySnapshotHistoryReferenceStatus::evicted;
     }
     return EntitySnapshotHistoryReferenceStatus::missing;
@@ -872,10 +1021,29 @@ EntitySnapshotHistoryState::compatibility_profile() const noexcept
     return compatibility_profile_;
 }
 
+std::optional<std::uint64_t>
+EntitySnapshotHistoryState::source_generation() const noexcept
+{
+    return source_generation_;
+}
+
 EntitySnapshotHistoryBuilder::EntitySnapshotHistoryBuilder(
     const EntitySnapshotLimits limits,
     const EntitySnapshotCompatibilityProfile profile) noexcept
     : limits_{limits}, profile_{profile}
+{
+}
+
+EntitySnapshotHistoryBuilder::EntitySnapshotHistoryBuilder(
+    const EntitySnapshotHistoryState& state,
+    const EntitySnapshotLimits limits)
+    : limits_{limits},
+      profile_{state.compatibility_profile_},
+      snapshots_{state.snapshots_},
+      required_base_references_{state.required_base_references_},
+      evicted_through_{state.evicted_through_},
+      accounted_value_bytes_{state.accounted_value_bytes_},
+      source_generation_{state.source_generation_}
 {
 }
 
@@ -923,18 +1091,32 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
             "Invalid entity snapshot history safety limits",
             reference_value);
     }
-    if (!is_synthetic(profile_)) {
+    if (!is_synthetic(profile_) && !is_public_packet_entities(profile_)) {
         return history_failure(
             EntitySnapshotHistoryErrorCode::wrap_policy_evidence_pending,
             "Stock snapshot reference width and wrap policy remain evidence pending",
             reference_value);
     }
-    if (snapshot.compatibility_profile() != profile_ ||
-        !is_synthetic(snapshot.reference())) {
+    const bool reference_matches =
+        (is_synthetic(profile_) && is_synthetic(snapshot.reference())) ||
+        (is_public_packet_entities(profile_) &&
+         is_goldsrc_transport(snapshot.reference()));
+    if (snapshot.compatibility_profile() != profile_ || !reference_matches) {
         return history_failure(
             EntitySnapshotHistoryErrorCode::incompatible_snapshot_profile,
             "Snapshot and history compatibility profiles differ",
             reference_value);
+    }
+    if (is_public_packet_entities(profile_)) {
+        const auto generation = snapshot.source_geometry().source_generation;
+        if (generation == 0U ||
+            (source_generation_.has_value() &&
+             *source_generation_ != generation)) {
+            return history_failure(
+                EntitySnapshotHistoryErrorCode::incompatible_snapshot_profile,
+                "Packet-entity history cannot cross a server generation",
+                reference_value);
+        }
     }
     if (snapshot.entity_count() > limits_.maximum_entities_per_snapshot ||
         snapshot.removed_entity_numbers().size() >
@@ -967,8 +1149,14 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
                 "Snapshot entity field count exceeds the configured history limit",
                 reference_value);
         }
+        const bool object_profile_matches =
+            (is_synthetic(profile_) &&
+             object_matches_neutral_profile(entity.object())) ||
+            (is_public_packet_entities(profile_) &&
+             entity.object().decode_profile() ==
+                 DeltaValueCompatibilityProfile::public_goldsrc48_entity_delta_v1);
         if (!valid_schema_category(entity.schema_category()) ||
-            !object_matches_neutral_profile(entity.object())) {
+            !object_profile_matches) {
             return history_failure(
                 EntitySnapshotHistoryErrorCode::incompatible_snapshot_profile,
                 "Snapshot contains an incompatible schema category or object profile",
@@ -993,10 +1181,10 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
             reference_value);
     }
     if (!snapshots_.empty() &&
-        reference_value < snapshots_.back().reference().value()) {
+        !reference_less(snapshots_.back().reference(), snapshot.reference())) {
         return history_failure(
             EntitySnapshotHistoryErrorCode::old_snapshot,
-            "Non-wrapping synthetic snapshot reference moved backwards",
+            "Snapshot transport reference is old or modularly ambiguous",
             reference_value);
     }
     if (snapshot.kind() == EntitySnapshotKind::delta) {
@@ -1015,14 +1203,14 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
         }
         if (find_candidate_exact(base) == nullptr) {
             if (!snapshots_.empty() &&
-                base.value() > snapshots_.back().reference().value()) {
+                reference_less(snapshots_.back().reference(), base)) {
                 return history_failure(
                     EntitySnapshotHistoryErrorCode::future_base_reference,
                     "Delta snapshot base is newer than retained history",
                     base.value());
             }
             if (evicted_through_ &&
-                base.value() <= evicted_through_->value()) {
+                reference_less_equal(base, *evicted_through_)) {
                 return history_failure(
                     EntitySnapshotHistoryErrorCode::evicted_snapshot_base,
                     "Delta snapshot base was evicted from bounded history",
@@ -1103,6 +1291,10 @@ EntitySnapshotHistoryMutationResult EntitySnapshotHistoryBuilder::insert(
         if (next_evicted) {
             evicted_through_.emplace(*next_evicted);
         }
+        if (!source_generation_.has_value() &&
+            is_public_packet_entities(profile_)) {
+            source_generation_ = snapshot.source_geometry().source_generation;
+        }
         return EntitySnapshotHistoryMutationResult{true, std::nullopt};
     } catch (const std::bad_alloc&) {
         return history_failure(
@@ -1127,7 +1319,7 @@ EntitySnapshotHistoryBuilder::retain_required_base(
             "Invalid entity snapshot history safety limits",
             reference.value());
     }
-    if (!is_synthetic(profile_)) {
+    if (!is_synthetic(profile_) && !is_public_packet_entities(profile_)) {
         return history_failure(
             EntitySnapshotHistoryErrorCode::wrap_policy_evidence_pending,
             "Stock snapshot base retention remains evidence pending",
@@ -1135,7 +1327,7 @@ EntitySnapshotHistoryBuilder::retain_required_base(
     }
     if (find_candidate_exact(reference) == nullptr) {
         if (evicted_through_ &&
-            reference.value() <= evicted_through_->value()) {
+            reference_less_equal(reference, *evicted_through_)) {
             return history_failure(
                 EntitySnapshotHistoryErrorCode::evicted_snapshot_base,
                 "Cannot retain an already evicted snapshot base",
@@ -1202,7 +1394,7 @@ EntitySnapshotHistoryPublishResult EntitySnapshotHistoryBuilder::publish()
             EntitySnapshotHistoryErrorCode::invalid_configuration,
             "Invalid entity snapshot history safety limits");
     }
-    if (!is_synthetic(profile_)) {
+    if (!is_synthetic(profile_) && !is_public_packet_entities(profile_)) {
         return history_publish_failure(
             EntitySnapshotHistoryErrorCode::wrap_policy_evidence_pending,
             "Stock snapshot history policy remains evidence pending");
@@ -1214,7 +1406,8 @@ EntitySnapshotHistoryPublishResult EntitySnapshotHistoryBuilder::publish()
                 required_base_references_,
                 evicted_through_,
                 accounted_value_bytes_,
-                profile_},
+                profile_,
+                source_generation_},
             std::nullopt,
         };
     } catch (...) {

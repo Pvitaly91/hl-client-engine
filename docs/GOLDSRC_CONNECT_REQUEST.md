@@ -147,12 +147,14 @@ IAuthenticationProvider
     -> ConnectRequestBuilder
 ```
 
-The only concrete implementation is an explicit user-file provider for
-development/manual runs. It is not Steamworks: there is no ticket generation,
-SteamID construction, discovery, cache, reuse policy, or bypass. The move-only
-session can retain a provider-specific lifetime guard after material is
-transferred into request preparation; the application keeps that guard through
-the configured terminal handshake state. See
+Concrete implementations are the explicit user-file adapter and an optional
+Steam provider. The latter invokes the legacy Steamworks
+`InitiateGameConnection` contract with the fresh challenge's server SteamID and
+secure flag, exact IPv4 endpoint, and App ID 70. It performs no discovery,
+cache, historical-ticket reuse, or bypass. The move-only session retains the
+matching terminate lifetime after material is transferred into request
+preparation; the application keeps that guard through the configured terminal
+handshake state. See
 [Authentication provider](AUTHENTICATION_PROVIDER.md) for the async contract,
 lifetime requirements, and sensitive-data limitations.
 
@@ -167,8 +169,11 @@ The owning authentication type additionally enforces absolute implementation
 ceilings of 127 protected bytes and 1,200 binary-suffix bytes. These permit
 bounded synthetic/profile tests but do not relax the production stock profile:
 that profile requires exactly 32 protected ASCII-hex bytes and exactly 213
-binary suffix bytes. The complete encoded connect datagram is always capped at
-1,400 bytes; 490 bytes remains the largest observed stock request.
+binary suffix bytes. The separate Steam profile requires the same 32-byte
+lowercase hexadecimal protocol metadata and accepts the actual opaque suffix
+length from 1 through 1,023 bytes—never padding or truncating it to 213. The
+complete encoded connect datagram is always capped at 1,400 bytes; 490 bytes
+remains the largest historical captured request, not a universal ticket size.
 
 Tests use only the explicit synthetic `TEST_AUTH_MATERIAL` marker (including
 bounded repetitions where the captured profile requires a fixed length). Their
@@ -229,8 +234,9 @@ this project's `hlclient` executable. Therefore:
 - stock-HLDS immediate accept/reject layouts: observed and sanitized;
 - project `hlclient` -> fake HLDS accept/reject handling: passed
   deterministically;
-- project `hlclient` -> stock HLDS transmission or acceptance: not performed or
-  claimed.
+- project `hlclient` -> stock HLDS fresh-auth transmission or acceptance:
+  pending; the two bounded M4.7.2C attempts stopped before Steam initialization
+  and sent no connect request.
 
 M2.2 connectionless accept/reject and the authentication-provider boundary are
 complete. M2.3.1 owns the strict netchan wire/bootstrap and first ACK only;

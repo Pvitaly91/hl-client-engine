@@ -42,22 +42,17 @@ namespace {
         entry.evidence_profile()};
 }
 
-} // namespace
-
-EntityVisualModelSlotResolution SyntheticModelSlotResolver::resolve(
+EntityVisualModelSlotResolution resolve_exact_model_slot(
     const EntityVisualModelReference& reference,
-    const goldsrc::PrecacheManifestState& manifest) const
+    const goldsrc::PrecacheManifestState& manifest,
+    const EntityVisualModelResolutionEvidenceProfile evidence)
 {
-    constexpr auto evidence = EntityVisualModelResolutionEvidenceProfile::
-        exact_synthetic_type_local_model_slot;
-    if (reference.profile() != EntityVisualModelReferenceProfile::
-                                   synthetic_type_local_model_slot ||
-        reference.value() > std::numeric_limits<std::uint16_t>::max()) {
+    if (reference.value() > std::numeric_limits<std::uint16_t>::max()) {
         return resolution_failure(
             EntityVisualModelResolutionStatus::invalid_model_reference,
             reference,
             evidence,
-            "Synthetic references must be exact uint16 model-slot indices");
+            "Model references must be exact uint16 model-slot indices");
     }
 
     const auto slot = static_cast<std::uint16_t>(reference.value());
@@ -113,6 +108,20 @@ EntityVisualModelSlotResolution SyntheticModelSlotResolver::resolve(
         {}};
 }
 
+} // namespace
+
+EntityVisualModelSlotResolution SyntheticModelSlotResolver::resolve(
+    const EntityVisualModelReference& reference,
+    const goldsrc::PrecacheManifestState& manifest) const
+{
+    constexpr auto evidence = EntityVisualModelResolutionEvidenceProfile::exact_synthetic_type_local_model_slot;
+    if (reference.profile() != EntityVisualModelReferenceProfile::synthetic_type_local_model_slot) {
+        return resolution_failure(EntityVisualModelResolutionStatus::invalid_model_reference,
+            reference,evidence,"Synthetic resolver requires its explicit reference profile");
+    }
+    return resolve_exact_model_slot(reference,manifest,evidence);
+}
+
 EntityVisualModelSlotResolution EvidencePendingStockModelResolver::resolve(
     const EntityVisualModelReference& reference,
     const goldsrc::PrecacheManifestState&) const
@@ -124,6 +133,19 @@ EntityVisualModelSlotResolution EvidencePendingStockModelResolver::resolve(
         EntityVisualModelResolutionEvidenceProfile::
             stock_modelindex_mapping_pending,
         "Stock Protocol 48 modelindex mapping remains evidence pending");
+}
+
+EntityVisualModelSlotResolution PublicGoldSrc48ModelResolver::resolve(
+    const EntityVisualModelReference& reference,
+    const goldsrc::PrecacheManifestState& manifest) const
+{
+    constexpr auto evidence = EntityVisualModelResolutionEvidenceProfile::public_goldsrc48_type_local_model_slot;
+    if (reference.profile() != EntityVisualModelReferenceProfile::public_goldsrc48_model_slot ||
+        reference.value() == 0U || reference.value() > 65535U) {
+        return resolution_failure(EntityVisualModelResolutionStatus::invalid_model_reference,
+            reference, evidence, "Absent/zero/out-of-range GoldSrc model reference has no visible model");
+    }
+    return resolve_exact_model_slot(reference,manifest,evidence);
 }
 
 EntityVisualBindingState::EntityVisualBindingState(

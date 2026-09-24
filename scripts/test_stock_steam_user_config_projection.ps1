@@ -71,8 +71,8 @@ try {
     $script:StockSteamAcceptedVolatilePathSetSha256 =
         $difference.changed_path_set_sha256
     $promotedExact = Compare-StockSteamUserConfigProjection $before $after
-    Assert-True $promotedExact.eligible `
-        'An explicitly promoted exact volatile path set was not accepted.'
+    Assert-True (-not $promotedExact.eligible) `
+        'Legacy strict behavior trusted an arbitrary injected fingerprint.'
 } finally {
     $script:StockSteamAcceptedVolatilePathSetSha256 = $originalAcceptedPathSet
 }
@@ -86,6 +86,31 @@ Assert-True ($appInfoDifference.candidate_eligible -and
         'unrelated_steam_metadata' -and
     $appInfoDifference.non_monotonic_changes -eq 0) `
     'The exact global app-info generation counter was not projected.'
+$appInfoPolicy = Compare-StockSteamUserConfigProjection $before `
+    (ConvertFrom-StockValveKeyValuesBytes (Convert-TestText $appInfoAfterText)) `
+    -PolicyId steam-appinfo-change-number-v1
+Assert-True ($appInfoPolicy.eligible -and
+    $appInfoPolicy.policy_id -ceq 'steam-appinfo-change-number-v1' -and
+    $appInfoPolicy.policy_decision -ceq 'explicit_advisory' -and
+    $appInfoPolicy.changed_leaf_count -eq 1 -and
+    $appInfoPolicy.narrow_numeric_shape_valid -and
+    $appInfoPolicy.bounded_source_complete) `
+    'The exact versioned AppInfoChangeNumber policy was not accepted.'
+$mixedAppInfoText = $appInfoAfterText.Replace('"Playtime" "200"',
+    '"Playtime" "201"')
+$mixedAppInfo = Compare-StockSteamUserConfigProjection $before `
+    (ConvertFrom-StockValveKeyValuesBytes (Convert-TestText $mixedAppInfoText)) `
+    -PolicyId steam-appinfo-change-number-v1
+Assert-True (-not $mixedAppInfo.eligible -and
+    $mixedAppInfo.policy_decision -ceq 'reject' -and
+    $mixedAppInfo.changed_leaf_count -eq 2) `
+    'The exact-key policy admitted an additional Steam field.'
+$unknownPolicyRejected = $false
+try {
+    [void](Compare-StockSteamUserConfigProjection $before $after `
+        -PolicyId steam-unreviewed-v9)
+} catch { $unknownPolicyRejected = $true }
+Assert-True $unknownPolicyRejected 'An unknown Steam policy ID was accepted.'
 $appInfoReverseText = $beforeText.Replace(
     '"AppInfoChangeNumber" "500"', '"AppInfoChangeNumber" "499"')
 $appInfoReverse = Compare-StockSteamUserConfigProjection $before `
@@ -118,6 +143,63 @@ $unknown = Compare-StockSteamUserConfigProjection $before `
     (ConvertFrom-StockValveKeyValuesBytes (Convert-TestText $unknownAfterText))
 Assert-True ($unknown.unknown_changes -eq 1 -and
     -not $unknown.candidate_eligible) 'An unknown leaf change was accepted.'
+
+# A sanitized analogue of run 20: four existing string leaves under one
+# root-global parent change values while their order changes.  Topology alone
+# must not hide the value changes, and non-monotonicity is not applicable to
+# unknown strings.
+$fourUnknownBeforeText = @'
+"UserLocalConfigStore"
+{
+    "Software" { "Valve" { "Steam" { "apps" { "70" { "Stable" "same" } } } } }
+    "AuxiliaryState"
+    {
+        "OpaqueA" "alpha"
+        "OpaqueB" "bravo"
+        "OpaqueC" "charlie"
+        "OpaqueD" "delta"
+    }
+}
+'@
+$fourUnknownAfterText = @'
+"UserLocalConfigStore"
+{
+    "Software" { "Valve" { "Steam" { "apps" { "70" { "Stable" "same" } } } } }
+    "AuxiliaryState"
+    {
+        "OpaqueD" "changed-delta"
+        "OpaqueC" "changed-charlie"
+        "OpaqueB" "changed-bravo"
+        "OpaqueA" "changed-alpha"
+    }
+}
+'@
+$fourUnknownBefore = ConvertFrom-StockValveKeyValuesBytes `
+    (Convert-TestText $fourUnknownBeforeText)
+$fourUnknownAfter = ConvertFrom-StockValveKeyValuesBytes `
+    (Convert-TestText $fourUnknownAfterText)
+$fourUnknownLegacy = Compare-StockSteamUserConfigProjection `
+    $fourUnknownBefore $fourUnknownAfter
+$fourUnknownNarrow = Compare-StockSteamUserConfigProjection `
+    $fourUnknownBefore $fourUnknownAfter `
+    -PolicyId steam-appinfo-change-number-v1
+Assert-True (-not $fourUnknownBefore.duplicate_path_ambiguity -and
+    -not $fourUnknownAfter.duplicate_path_ambiguity -and
+    $fourUnknownBefore.node_count -eq $fourUnknownAfter.node_count) `
+    'The four-unknown fixture did not retain equal unambiguous topology.'
+foreach ($fourUnknownDifference in @($fourUnknownLegacy, $fourUnknownNarrow)) {
+    Assert-True ($fourUnknownDifference.status -ceq 'mismatch' -and
+        $fourUnknownDifference.changed_leaf_count -eq 4 -and
+        $fourUnknownDifference.unknown_changes -eq 4 -and
+        $fourUnknownDifference.fatal_changes -eq 4 -and
+        $fourUnknownDifference.non_monotonic_changes -eq 0 -and
+        $fourUnknownDifference.volatile_classes.Count -eq 0 -and
+        -not $fourUnknownDifference.candidate_eligible -and
+        -not $fourUnknownDifference.eligible) `
+        'Four unknown value changes were lost or treated as numeric evidence.'
+}
+Assert-True ($fourUnknownNarrow.policy_decision -ceq 'reject') `
+    'The narrow policy admitted four root-global unknown leaves.'
 
 $duplicateInsertion = '"Playtime" "200"' + "`r`n" + '"Playtime" "201"'
 $duplicateText = $beforeText.Replace('"Playtime" "200"', $duplicateInsertion)
@@ -187,6 +269,7 @@ Assert-True (($public -join "`n") -notmatch
 
 Write-Output '[steam-user-config-test] bounded-parser=success'
 Write-Output '[steam-user-config-test] duplicate-keys=retained'
+Write-Output '[steam-user-config-test] four-unknown-leaves=fail-closed'
 Write-Output '[steam-user-config-test] protected-projection=match'
 Write-Output '[steam-user-config-test] sensitive-values=absent'
 Write-Output '[steam-user-config-test] result=success'

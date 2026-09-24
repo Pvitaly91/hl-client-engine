@@ -34,6 +34,13 @@ Reserved `runtime_v1` and `delta_v1` profiles remain fail-closed until the
 minimum accepted-run gates and an independently reviewed sanitized evidence
 record exist. Merely selecting a profile value cannot enable decoding.
 
+M4.7.1.2A now also has a deliberately separate
+`public_goldsrc48_runtime_control_v1` implementation for four revision-pinned
+public-reference layouts. Its types and
+`not_verified_against_stock_runtime_payload` status cannot promote this strict
+catalog or reinterpret historical captures. See
+[reference-driven runtime control](GOLDSRC_RUNTIME_CONTROL.md).
+
 ## Research boundary
 
 M4.7.1.1 adds a separate Windows-only research transaction. It is off by

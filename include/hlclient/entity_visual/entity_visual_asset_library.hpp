@@ -515,6 +515,14 @@ struct EntityVisualAssetLibraryBuildResult {
 
 class EntityVisualAssetLibraryBuilder final {
 public:
+    [[nodiscard]] EntityVisualAssetLibraryPlanResult plan_references(
+        std::uint64_t resource_id,
+        std::span<const EntityVisualModelReference> references,
+        const goldsrc::PrecacheManifestState& manifest,
+        const IEntityVisualModelReferenceResolver& resolver,
+        std::shared_ptr<const EntityVisualAssetLibraryState> previous_library = {},
+        EntityVisualAssetLibraryLimits limits = {},
+        std::span<const EntityVisualAssetReuseEvidence> reuse_evidence = {}) const noexcept;
     [[nodiscard]] EntityVisualAssetLibraryPlanResult plan(
         std::uint64_t resource_id,
         std::span<const EntityVisualProjectionState> previous_projections,

@@ -176,14 +176,25 @@ TEST_CASE("Challenge parser rejects wrong response and profile variants", "[gold
     CHECK(unsupported_parameter_1.error->code ==
           goldsrc::ChallengeProtocolErrorCode::unsupported_variant);
 
-    const auto unsupported_parameter_2 = goldsrc::parse_challenge_response(
+    const auto alternate_server_identity = goldsrc::parse_challenge_response(
         make_response("A00000000 1 3 72057594037927937 0"));
+    REQUIRE(alternate_server_identity);
+    CHECK(alternate_server_identity.response->profile_parameter_2 ==
+          72'057'594'037'927'937ULL);
+
+    const auto secure_server = goldsrc::parse_challenge_response(
+        make_response("A00000000 1 3 72057594037927936 1"));
+    REQUIRE(secure_server);
+    CHECK(secure_server.response->profile_parameter_3 == 1U);
+
+    const auto unsupported_parameter_2 = goldsrc::parse_challenge_response(
+        make_response("A00000000 1 3 0 0"));
     REQUIRE_FALSE(unsupported_parameter_2);
     CHECK(unsupported_parameter_2.error->code ==
           goldsrc::ChallengeProtocolErrorCode::unsupported_variant);
 
     const auto unsupported_parameter_3 = goldsrc::parse_challenge_response(
-        make_response("A00000000 1 3 72057594037927936 1"));
+        make_response("A00000000 1 3 72057594037927936 2"));
     REQUIRE_FALSE(unsupported_parameter_3);
     CHECK(unsupported_parameter_3.error->code ==
           goldsrc::ChallengeProtocolErrorCode::unsupported_variant);

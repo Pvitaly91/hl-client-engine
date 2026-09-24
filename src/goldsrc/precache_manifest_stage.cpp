@@ -137,6 +137,7 @@ namespace {
     case ResourceClientResponseStageState::waiting_for_response_ack:
     case ResourceClientResponseStageState::waiting_for_server_continuation:
     case ResourceClientResponseStageState::decoding_server_continuation:
+    case ResourceClientResponseStageState::response_completion_ready:
     case ResourceClientResponseStageState::next_server_boundary_reached:
     case ResourceClientResponseStageState::consistency_provider_required:
     case ResourceClientResponseStageState::protocol_error:

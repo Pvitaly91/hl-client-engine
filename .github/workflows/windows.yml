@@ -27,7 +27,8 @@ jobs:
         run: cmake --build --preset vs2022-win32-debug
 
       - name: Test Debug
-        run: ctest --preset vs2022-win32-debug
+        shell: pwsh
+        run: .\scripts\build_source.ps1 -TestOnly -Configuration Debug
 
       - name: Verify reparse and source gates with PowerShell 7
         shell: pwsh
@@ -74,7 +75,8 @@ jobs:
         run: cmake --build --preset vs2022-win32-release
 
       - name: Test Release
-        run: ctest --preset vs2022-win32-release
+        shell: pwsh
+        run: .\scripts\build_source.ps1 -TestOnly -Configuration Release
 
       - name: Compare Debug and Release prediction hashes
         shell: pwsh
@@ -208,6 +210,8 @@ jobs:
           & .\build-asan\bin\Debug\hlclient_tests.exe '[prediction][reconciliation][wall][.stress]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\build-asan\bin\Debug\hlclient_tests.exe '[goldsrc][movement][wall-contact]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build-asan\bin\Debug\hlclient_tests.exe '[reference-transmission],[reference-ground],[reference-rebase],[live-runtime]'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run AddressSanitizer prediction verifier campaign

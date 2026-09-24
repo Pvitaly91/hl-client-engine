@@ -13,6 +13,13 @@
 
 namespace hlclient::entity_render {
 
+// Shared discrete/interpolated composition primitives. No protocol knowledge.
+[[nodiscard]] std::optional<StudioEntityMaterialSupportStatus>
+studio_entity_material_support(const StudioModelRenderAsset& asset,
+    std::uint32_t body_value, std::uint32_t skin_family_index);
+[[nodiscard]] std::optional<assets::WorldBounds> transform_entity_render_bounds(
+    const assets::WorldBounds& bounds, const EntityRenderTransform& transform) noexcept;
+
 // Caller-owned identity and visibility context for one atomic composition.
 // The expected package identity prevents an interpolated frame from being
 // paired with a different immutable asset package. The frame identity is also

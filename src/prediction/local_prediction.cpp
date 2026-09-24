@@ -124,16 +124,23 @@ PredictionSessionCreateResult create_prediction_session_identity(
                 "stock prediction acknowledgement and player-state evidence is pending"}};
     }
     const auto collision_identity = collision.session_identity();
+    const bool reference = profile ==
+            PredictionCompatibilityProfile::reference_carrier_dry_walk_v1 &&
+        acknowledgement_profile == PredictionAcknowledgementProfile::
+            reference_sent_carrier_boundary_v1;
     if (session_generation == 0U || prediction_generation == 0U ||
         !collision.valid() || !collision_identity ||
         !collision_identity->valid() ||
         collision.profile() != collision_identity->profile ||
         !goldsrc::movement::valid_goldsrc_local_movement_config(
             movement_config) ||
-        initial_state.source_command_sequence() != 0U ||
+        (reference ? initial_state.source_command_sequence() == 0U
+                   : initial_state.source_command_sequence() != 0U) ||
         initial_state.command_profile() !=
-            movement::GoldSrcMovementCommandProfile::
-                synthetic_usercmd_semantics_v1) {
+            (reference ? movement::GoldSrcMovementCommandProfile::
+                             reference_wire_dry_walk_v1
+                       : movement::GoldSrcMovementCommandProfile::
+                             synthetic_usercmd_semantics_v1)) {
         return {std::nullopt,
             PredictionError{PredictionErrorCode::invalid_session_identity,
                 std::nullopt,

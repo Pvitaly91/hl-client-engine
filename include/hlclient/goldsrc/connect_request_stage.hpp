@@ -6,6 +6,7 @@
 #include <hlclient/goldsrc/connect_response_wait.hpp>
 #include <hlclient/goldsrc/delta_description_stage.hpp>
 #include <hlclient/goldsrc/initial_signon_stage.hpp>
+#include <hlclient/goldsrc/live_runtime_stage.hpp>
 #include <hlclient/goldsrc/movement_environment_stage.hpp>
 #include <hlclient/goldsrc/netchan_bootstrap_stage.hpp>
 #include <hlclient/goldsrc/pre_resource_signon_stage.hpp>
@@ -53,6 +54,7 @@ enum class HandshakeStopPoint {
     usercmd_boundary,
     server_baselines,
     entity_snapshot,
+    live_runtime_state,
     precache_manifest,
     asset_dispatch,
     world_textures,
@@ -152,6 +154,9 @@ enum class GoldSrcHandshakeState {
     idle,
     waiting_for_challenge,
     challenge_received,
+    waiting_for_authentication,
+    authentication_failed,
+    authentication_timed_out,
     building_request,
     request_ready,
     sending_request,
@@ -220,6 +225,11 @@ enum class GoldSrcHandshakeState {
     post_resource_timed_out,
     post_resource_backpressure,
     post_resource_secondary_stream_pending,
+    waiting_for_live_runtime_state,
+    live_runtime_state_ready,
+    live_runtime_timed_out,
+    live_runtime_backpressure,
+    live_runtime_secondary_stream_pending,
     waiting_for_precache_manifest,
     precache_manifest_ready,
     local_resources_incomplete,
@@ -311,7 +321,16 @@ public:
         WorldRenderPackageStageConfig world_render_package_config = {},
         WorldRenderPackageTraceCallback world_render_package_trace_callback = {},
         PostResourceEntitySnapshotStageConfig post_resource_config = {},
-        PostResourceEntitySnapshotTraceCallback post_resource_trace_callback = {});
+        PostResourceEntitySnapshotTraceCallback post_resource_trace_callback = {},
+        // Optional deferred provider for challenge-derived live
+        // authentication. It is polled on this coordinator's update thread and
+        // must outlive the coordinator.
+        auth::IAuthenticationProvider* authentication_provider = nullptr,
+        ClientConnectionSettings authentication_settings = {},
+        ConnectCompatibilityProfile authentication_profile = {},
+        client::ClientWorldState* live_runtime_target = nullptr,
+        LiveRuntimeStageConfig live_runtime_config = {},
+        LiveRuntimeStageTraceCallback live_runtime_trace_callback = {});
 
     GoldSrcHandshakeCoordinator(const GoldSrcHandshakeCoordinator&) = delete;
     GoldSrcHandshakeCoordinator& operator=(const GoldSrcHandshakeCoordinator&) = delete;
@@ -369,6 +388,24 @@ public:
     post_resource_result() const noexcept;
     [[nodiscard]] const std::optional<PostResourceEntitySnapshotStageError>&
     post_resource_error() const noexcept;
+    [[nodiscard]] const std::optional<LiveRuntimeState>&
+    live_runtime_result() const noexcept;
+    [[nodiscard]] const std::optional<LiveRuntimeStageError>&
+    live_runtime_error() const noexcept;
+    [[nodiscard]] bool live_visual_input_ready() const noexcept;
+    [[nodiscard]] const ResourceListState* live_resource_list() const noexcept;
+    [[nodiscard]] const ServerInfoState* live_server_info() const noexcept;
+    [[nodiscard]] bool submit_live_visual_input(
+        const LiveVisualControlInput& input,
+        ChallengeExchangeTimePoint now) noexcept;
+    [[nodiscard]] bool activate_live_visual_control(
+        ChallengeExchangeTimePoint now) noexcept;
+    [[nodiscard]] std::optional<LiveUserCmdCheckState>
+    live_usercmd_snapshot() const;
+    [[nodiscard]] bool attach_reference_prediction_collision(
+        std::shared_ptr<const hlclient::collision::CollisionWorldPackage> package);
+    [[nodiscard]] LiveReferencePredictionSnapshot
+    live_reference_prediction_snapshot(ChallengeExchangeTimePoint now) const;
     [[nodiscard]] const std::optional<PrecacheManifestSignonState>&
     precache_manifest_result() const noexcept;
     [[nodiscard]] const std::optional<PrecacheManifestStageError>&
@@ -403,12 +440,16 @@ public:
     [[nodiscard]] const NetchanSession* netchan_session() const noexcept;
     [[nodiscard]] const std::optional<network::NetworkAddress>& local_endpoint() const noexcept;
     [[nodiscard]] std::size_t connect_send_attempts() const noexcept;
+    [[nodiscard]] const std::optional<auth::AuthenticationError>&
+    authentication_error() const noexcept;
     [[nodiscard]] std::string_view error_context() const noexcept;
 
 private:
     friend class detail::GoldSrcHandshakeCoordinatorTestAccess;
 
     void synchronize_from_challenge(ChallengeExchangeTimePoint now);
+    void synchronize_from_authentication(ChallengeExchangeTimePoint now);
+    void start_connect_after_challenge(ChallengeExchangeTimePoint now);
     void synchronize_from_response(ChallengeExchangeTimePoint now);
     void synchronize_from_netchan();
     void synchronize_from_signon();
@@ -420,14 +461,23 @@ private:
     void synchronize_from_resource_list();
     void synchronize_from_resource_client_response();
     void synchronize_from_post_resource_entity_snapshot();
+    void synchronize_from_live_runtime();
     void synchronize_from_precache_manifest(ChallengeExchangeTimePoint now);
     void synchronize_from_asset_dispatch();
     void synchronize_from_world_textures();
     void synchronize_from_world_render_package();
     void release_authentication_session_if_terminal();
 
+    network::IDatagramTransport& transport_;
+    network::NetworkAddress remote_endpoint_;
     HandshakeStopPoint stop_point_;
     ChallengeExchange challenge_exchange_;
+    ConnectRequestTraceCallback deferred_connect_trace_callback_;
+    auth::IAuthenticationProvider* authentication_provider_{nullptr};
+    ClientConnectionSettings authentication_settings_;
+    ConnectCompatibilityProfile authentication_profile_;
+    std::unique_ptr<auth::IAuthenticationOperation> authentication_operation_;
+    std::optional<auth::AuthenticationError> authentication_error_;
     std::optional<ConnectRequestStage> connect_stage_;
     std::optional<ConnectResponseWaitStage> response_stage_;
     std::optional<NetchanBootstrapStage> netchan_stage_;
@@ -441,6 +491,7 @@ private:
     std::unique_ptr<ResourceClientResponseStage> resource_client_response_stage_;
     std::unique_ptr<PostResourceEntitySnapshotStage>
         post_resource_entity_snapshot_stage_;
+    std::unique_ptr<LiveRuntimeStage> live_runtime_stage_;
     std::unique_ptr<PrecacheManifestStage> precache_manifest_stage_;
     std::unique_ptr<PrecacheAssetDispatchStage> asset_dispatch_stage_;
     std::unique_ptr<WorldTextureImportStage> world_texture_stage_;

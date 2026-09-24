@@ -662,15 +662,8 @@ struct SpriteQuad {
 [[nodiscard]] RenderMatrix4 entity_matrix(
     const entity_render::EntityRenderTransform& transform) noexcept
 {
-    auto result = rotation_matrix(transform.rotation_degrees);
-    for (std::size_t column = 0U; column < 3U; ++column) {
-        for (std::size_t row = 0U; row < 3U; ++row) {
-            result.values[column * 4U + row] *= transform.uniform_scale;
-        }
-    }
-    result.values[12U] = transform.origin.x;
-    result.values[13U] = transform.origin.y;
-    result.values[14U] = transform.origin.z;
+    RenderMatrix4 result;
+    result.values = entity_render::entity_render_model_matrix(transform);
     return result;
 }
 

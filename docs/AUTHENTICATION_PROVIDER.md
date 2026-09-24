@@ -7,12 +7,14 @@ GoldSrc connect codec. The provider API does not give an implementation access
 to the renderer, world state, filesystem abstraction, or UDP socket, and the
 codec does not discover files or call platform authentication services.
 
-The repository currently supplies only
-`ExplicitFileAuthenticationProvider`, a development/manual adapter for a path
-the user names explicitly. There is no Steam authentication provider, ticket
-generator, account discovery, credential recovery, authentication bypass, or
-fallback search. Supplying bytes does not prove that a stock server will accept
-them or authorize their use.
+The repository supplies `ExplicitFileAuthenticationProvider`, a
+development/manual adapter for a path the user names explicitly, and the
+optional `SteamAuthenticationProvider`. The Steam adapter calls the legacy
+endpoint-bound `InitiateGameConnection` family only when explicitly selected;
+it performs no account discovery, credential recovery, authentication bypass,
+or fallback search. Acquiring bytes or receiving a GoldSrc `ACCEPT` does not by
+itself prove the server's later asynchronous Steam authorization result. See
+[Steam authentication](STEAM_AUTHENTICATION.md).
 
 ## Asynchronous contract
 
@@ -22,6 +24,8 @@ them or authorize their use.
 - the requested remote IPv4 endpoint;
 - the GoldSrc protocol version and bounded compatibility profile;
 - an optional challenge token.
+- optional server SteamID and secure flag, populated only from the accepted
+  fresh challenge grammar.
 
 It returns either a typed start error or one owned
 `IAuthenticationOperation`. The operation is deliberately poll-based:
@@ -40,7 +44,7 @@ blocking the frame loop. The returned operation owns pending work and must not
 depend on the caller retaining the provider or request-context object.
 `pending`, `succeeded`, and `failed` results are explicit; failure categories
 distinguish unavailable input, configuration, provider failure, invalid
-material, oversized material, and cancellation.
+material, oversized material, timeout, and cancellation.
 
 Result fields remain public, so consumers validate the state together with its
 required session/error payload. The generic API does not impose a deadline,
@@ -49,11 +53,14 @@ not automatically bound or redact `AuthenticationError::context`; every
 provider must keep diagnostics bounded and free of credentials, ticket bytes,
 file contents, and other secrets.
 
-The current explicit-file operation is synchronous but still implements the
+The explicit-file operation is synchronous but still implements the
 same interface: its first `update()` loads once and completes, cancellation
 before that update yields a typed cancelled result, and later updates return a
 typed provider error. Each new `begin()` creates a fresh operation and rereads
-the configured file; material is not cached.
+the configured file; material is not cached. The Steam operation initializes
+lazily after the fresh challenge, returns `pending` before acquisition, pumps
+callbacks on the application update thread, and applies its own bounded
+deadline.
 
 ## Session and sensitive lifetime
 
@@ -83,8 +90,8 @@ its provider lifetime guard.
 
 The driver clears channel state and destroys its opaque lifetime exactly once
 on every terminal path. Netchan code sees neither `AuthenticationSession` nor
-authentication bytes. That ordering lets a future provider keep an external
-ticket or session handle valid through the complete selected handshake stop,
+authentication bytes. That ordering lets the Steam provider keep its external
+game-connection session valid through the complete selected handshake stop,
 including fragment reassembly and its final ACK. The lifetime object's
 destructor must not log authentication data.
 
@@ -149,8 +156,10 @@ form for any connect stage is:
 --auth-provider file --auth-material-file <explicit-local-path>
 ```
 
-`file` is the only accepted provider name. `none`, `steam`, `bypass`, and every
-other name are rejected; there is no silent fallback. For M2.1/M2.2 command-line
+`file` and `steam` are the only accepted provider names. `steam` additionally
+requires one explicit absolute `--steam-api-runtime` path; file and Steam
+settings cannot be mixed and there is no silent fallback. `none`, `bypass`, and
+every other name are rejected. For M2.1/M2.2 command-line
 compatibility, `connect-request` and `connect-response` still accept the legacy
 spelling with `--auth-material-file` alone and infer the same file provider.
 The netchan documentation and examples use the explicit provider spelling.
@@ -162,7 +171,7 @@ explicit `--connect` endpoint.
 The current response path is:
 
 ```text
-ExplicitFileAuthenticationProvider
+selected IAuthenticationProvider (explicit file or Steam)
     -> IAuthenticationOperation
     -> AuthenticationSession
     -> take AuthenticationMaterial once
@@ -185,10 +194,11 @@ before logging.
 
 The provider boundary is in-process modularity, not a security sandbox. No part
 of M2.2–M2.4.2 authorizes bypassing Steam, server policy, VAC, access control,
-or third-party terms. The absence of a production Steam provider is why a
-project-client-to-stock-HLDS bootstrap remains pending. A legitimate future
-provider requires its own platform, legal, storage, cancellation, and teardown
-review.
+or third-party terms. The optional Steam provider has explicit platform,
+storage, cancellation, and teardown boundaries; its first live stock sign-on
+remains pending because both permitted M4.7.2C attempts stopped before Steam API
+initialization. This is not an authentication rejection or stock acceptance
+result.
 
 The retained provider guard does not give netchan access to authentication
 bytes. Reliable queues, retransmission, fragmentation/reassembly, and the

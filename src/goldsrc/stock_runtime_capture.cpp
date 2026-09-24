@@ -317,6 +317,9 @@ parse_stock_runtime_capture_output_role(const std::string_view value) noexcept
     if (value == "pre-campaign-canary") {
         return StockRuntimeCaptureOutputRole::pre_campaign_canary;
     }
+    if (value == "functional-runtime-capture") {
+        return StockRuntimeCaptureOutputRole::functional_runtime_capture;
+    }
     if (value == "server-profile-diagnostic") {
         return StockRuntimeCaptureOutputRole::server_profile_diagnostic;
     }
@@ -333,6 +336,8 @@ std::string_view to_string(const StockRuntimeCaptureOutputRole role) noexcept
         return "normal-campaign-run";
     case StockRuntimeCaptureOutputRole::pre_campaign_canary:
         return "pre-campaign-canary";
+    case StockRuntimeCaptureOutputRole::functional_runtime_capture:
+        return "functional-runtime-capture";
     case StockRuntimeCaptureOutputRole::server_profile_diagnostic:
         return "server-profile-diagnostic";
     case StockRuntimeCaptureOutputRole::server_profile_private_diagnostic:
@@ -349,12 +354,78 @@ std::string_view stock_runtime_capture_output_parent_directory(
         return "stock-runtime";
     case StockRuntimeCaptureOutputRole::pre_campaign_canary:
         return "stock-runtime-canary";
+    case StockRuntimeCaptureOutputRole::functional_runtime_capture:
+        return "research-runtime-capture";
     case StockRuntimeCaptureOutputRole::server_profile_diagnostic:
         return "stock-runtime-server-profile-diagnostic";
     case StockRuntimeCaptureOutputRole::server_profile_private_diagnostic:
         return "stock-runtime-server-profile-private";
     }
     return {};
+}
+
+bool stock_runtime_capture_waits_until_requested_deadline(
+    const StockRuntimeCaptureOutputRole role) noexcept
+{
+    return role != StockRuntimeCaptureOutputRole::functional_runtime_capture;
+}
+
+StockRuntimeCaptureLifecycleDecision stock_runtime_capture_lifecycle_decision(
+    const StockRuntimeCaptureOutputRole role,
+    const std::chrono::milliseconds elapsed_since_start,
+    const std::optional<std::chrono::milliseconds> elapsed_since_map_entry,
+    const std::chrono::milliseconds requested_maximum_duration,
+    const std::chrono::milliseconds required_functional_interval,
+    const bool capture_sources_healthy) noexcept
+{
+    if (!capture_sources_healthy || elapsed_since_start.count() < 0 ||
+        requested_maximum_duration.count() <= 0 ||
+        required_functional_interval.count() <= 0 ||
+        (elapsed_since_map_entry && elapsed_since_map_entry->count() < 0)) {
+        return StockRuntimeCaptureLifecycleDecision::incomplete;
+    }
+    if (role == StockRuntimeCaptureOutputRole::functional_runtime_capture) {
+        if (elapsed_since_map_entry &&
+            *elapsed_since_map_entry >= required_functional_interval) {
+            return StockRuntimeCaptureLifecycleDecision::
+                functional_interval_complete;
+        }
+        return elapsed_since_start >= requested_maximum_duration
+            ? StockRuntimeCaptureLifecycleDecision::incomplete
+            : StockRuntimeCaptureLifecycleDecision::continue_capture;
+    }
+    return elapsed_since_start >= requested_maximum_duration
+        ? StockRuntimeCaptureLifecycleDecision::requested_duration_complete
+        : StockRuntimeCaptureLifecycleDecision::continue_capture;
+}
+
+bool is_functional_runtime_auxiliary_query(
+    const std::span<const std::byte> payload) noexcept
+{
+    static constexpr std::array query{
+        std::byte{0xffU}, std::byte{0xffU}, std::byte{0xffU},
+        std::byte{0xffU}, std::byte{0x54U}, std::byte{'S'},
+        std::byte{'o'}, std::byte{'u'}, std::byte{'r'}, std::byte{'c'},
+        std::byte{'e'}, std::byte{' '}, std::byte{'E'}, std::byte{'n'},
+        std::byte{'g'}, std::byte{'i'}, std::byte{'n'}, std::byte{'e'},
+        std::byte{' '}, std::byte{'Q'}, std::byte{'u'}, std::byte{'e'},
+        std::byte{'r'}, std::byte{'y'}, std::byte{0x00U}};
+    return std::ranges::equal(payload, query);
+}
+
+bool is_functional_runtime_auxiliary_observation(
+    const std::span<const std::byte> payload,
+    const bool functional_capture,
+    const bool source_is_loopback,
+    const bool owning_endpoint_learned,
+    const bool source_matches_owning_endpoint,
+    const std::size_t auxiliary_observations_so_far) noexcept
+{
+    return functional_capture && source_is_loopback &&
+           owning_endpoint_learned && !source_matches_owning_endpoint &&
+           auxiliary_observations_so_far <
+               kMaximumFunctionalRuntimeAuxiliaryQueries &&
+           is_functional_runtime_auxiliary_query(payload);
 }
 
 std::optional<StockRuntimeCaptureScenario> parse_stock_runtime_capture_scenario(
@@ -514,6 +585,27 @@ StockRuntimeCaptureBudgetResult stock_runtime_capture_observe_datagram(
     return {};
 }
 
+std::string_view to_string(
+    const StockRuntimeCaptureBudgetErrorCode code) noexcept
+{
+    switch (code) {
+    case StockRuntimeCaptureBudgetErrorCode::none: return "none";
+    case StockRuntimeCaptureBudgetErrorCode::payload_limit:
+        return "payload-limit";
+    case StockRuntimeCaptureBudgetErrorCode::datagram_limit:
+        return "datagram-limit";
+    case StockRuntimeCaptureBudgetErrorCode::total_raw_byte_limit:
+        return "total-raw-byte-limit";
+    case StockRuntimeCaptureBudgetErrorCode::client_packet_limit:
+        return "client-packet-limit";
+    case StockRuntimeCaptureBudgetErrorCode::server_packet_limit:
+        return "server-packet-limit";
+    case StockRuntimeCaptureBudgetErrorCode::emitted_counter_overflow:
+        return "emitted-counter-overflow";
+    }
+    return "unknown";
+}
+
 StockRuntimeCaptureBudgetResult stock_runtime_capture_record_emission(
     StockRuntimeCaptureCounters& counters,
     const std::size_t payload_bytes) noexcept
@@ -561,6 +653,8 @@ std::string serialize_stock_runtime_capture_metadata(
     write_number(stream, "delayed_datagrams", metadata.counters.delayed_datagrams);
     write_number(stream, "ignored_wrong_source_datagrams",
                  metadata.counters.ignored_wrong_source_datagrams);
+    write_number(stream, "auxiliary_observed_datagrams",
+                 metadata.counters.auxiliary_observed_datagrams);
     write_number(stream, "perturbation_count", metadata.perturbation_count);
     write_boolean(stream, "bounded_transport_complete", metadata.bounded_transport_complete);
     write_boolean(stream, "byte_preserving", metadata.byte_preserving);
@@ -603,13 +697,23 @@ StockRuntimeCaptureMetadataParseResult parse_stock_runtime_capture_metadata(
         "one_upstream_socket", "exact_source_validation", "payload_rewritten",
         "raw_datagrams_stored", "accepted_evidence_run",
     };
-    if (properties.size() != required.size()) {
+    // The auxiliary counter was added without renaming the metadata schema so
+    // already-recorded incomplete diagnostics remain readable. New writers
+    // always emit it; an absent value means zero for the legacy representation.
+    if (properties.size() != required.size() &&
+        properties.size() != required.size() + 1U) {
         return {std::nullopt, "metadata property count is not exact"};
     }
     for (const auto name : required) {
         if (find_property(properties, name) == nullptr) {
             return {std::nullopt, "metadata lacks an exact required property"};
         }
+    }
+    const auto* auxiliary_counter =
+        find_property(properties, "auxiliary_observed_datagrams");
+    if ((properties.size() == required.size() + 1U) !=
+        (auxiliary_counter != nullptr)) {
+        return {std::nullopt, "metadata contains an unknown property"};
     }
 
     std::string_view schema;
@@ -688,6 +792,11 @@ StockRuntimeCaptureMetadataParseResult parse_stock_runtime_capture_metadata(
                                value.perturbation_count)) {
         return {std::nullopt, "metadata counters are invalid"};
     }
+    if (auxiliary_counter != nullptr &&
+        !read_integer_property(properties, "auxiliary_observed_datagrams",
+                               value.counters.auxiliary_observed_datagrams)) {
+        return {std::nullopt, "metadata auxiliary counter is invalid"};
+    }
     if (value.counters.observed_datagrams > value.limits.maximum_datagrams ||
         value.counters.observed_raw_bytes > value.limits.maximum_total_raw_bytes ||
         value.counters.client_packets > value.limits.maximum_client_packets ||
@@ -698,13 +807,19 @@ StockRuntimeCaptureMetadataParseResult parse_stock_runtime_capture_metadata(
         return {std::nullopt, "metadata counters violate capture bounds"};
     }
     if (value.counters.dropped_datagrams > value.counters.observed_datagrams ||
+        value.counters.auxiliary_observed_datagrams >
+            value.counters.observed_datagrams -
+                value.counters.dropped_datagrams ||
         value.counters.duplicated_datagrams > value.counters.observed_datagrams ||
         value.counters.delayed_datagrams > value.counters.observed_datagrams ||
         value.counters.ignored_wrong_source_datagrams >
             value.limits.maximum_datagrams ||
+        value.counters.auxiliary_observed_datagrams >
+            value.counters.ignored_wrong_source_datagrams ||
         value.counters.emitted_datagrams !=
             value.counters.observed_datagrams -
-                value.counters.dropped_datagrams +
+                value.counters.dropped_datagrams -
+                value.counters.auxiliary_observed_datagrams +
                 value.counters.duplicated_datagrams ||
         value.counters.emitted_bytes >
             value.limits.maximum_total_raw_bytes * 2U ||
@@ -738,11 +853,14 @@ StockRuntimeCaptureMetadataParseResult parse_stock_runtime_capture_metadata(
         !value.raw_datagrams_stored || value.accepted_evidence_run) {
         return {std::nullopt, "metadata attempts to bypass the pending evidence gate"};
     }
+    // Metadata is role-neutral. A functional corpus may retain exact,
+    // non-delivered auxiliary A2S_INFO observations while its owning session
+    // transport is complete. The corpus loader validates those raw bytes and
+    // keeps the strict campaign policy fail-closed.
     if (value.bounded_transport_complete &&
         (value.counters.observed_datagrams == 0U ||
          value.counters.client_packets == 0U ||
-         value.counters.server_packets == 0U ||
-         value.counters.ignored_wrong_source_datagrams != 0U)) {
+         value.counters.server_packets == 0U)) {
         return {std::nullopt, "complete transport metadata lacks both directions"};
     }
     return {std::move(value), {}};
@@ -762,6 +880,7 @@ std::string canonical_stock_runtime_capture_structure(
            << metadata.counters.dropped_datagrams << '|'
            << metadata.counters.duplicated_datagrams << '|'
            << metadata.counters.delayed_datagrams << '|'
+           << metadata.counters.auxiliary_observed_datagrams << '|'
            << metadata.perturbation_count << '|'
            << (metadata.bounded_transport_complete ? 1 : 0) << '|'
            << "runtime=evidence_pending|authority=evidence_pending|ack=evidence_pending";

@@ -167,6 +167,7 @@ PreResourceSourcePayloadMetadata::PreResourceSourcePayloadMetadata(
     const bool source_reliable,
     const bool reassembled,
     const bool decompressed,
+    const bool wire_uncompressed,
     const bool acknowledgement_reliable,
     const NetchanDirection direction,
     const NetchanDriverTimePoint received_at,
@@ -179,6 +180,7 @@ PreResourceSourcePayloadMetadata::PreResourceSourcePayloadMetadata(
       source_reliable_{source_reliable},
       reassembled_{reassembled},
       decompressed_{decompressed},
+      wire_uncompressed_{wire_uncompressed},
       acknowledgement_reliable_{acknowledgement_reliable},
       direction_{direction},
       received_at_{received_at},
@@ -216,6 +218,11 @@ bool PreResourceSourcePayloadMetadata::reassembled() const noexcept
 bool PreResourceSourcePayloadMetadata::decompressed() const noexcept
 {
     return decompressed_;
+}
+
+bool PreResourceSourcePayloadMetadata::wire_uncompressed() const noexcept
+{
+    return wire_uncompressed_;
 }
 
 bool PreResourceSourcePayloadMetadata::acknowledgement_reliable() const noexcept
@@ -300,6 +307,7 @@ OwnedServicePayload make_owned_service_payload(OwnedNetchanPayload&& payload) no
         payload.sequence_flags.reliable,
         payload.sequence_flags.fragmented,
         false,
+        false,
         payload.acknowledgement_reliable,
         payload.direction,
         payload.received_at,
@@ -332,7 +340,7 @@ ServiceMessageDecodeResult ServiceMessageStreamDecoder::decode(
             std::nullopt,
             "Service-message limits are outside project hard caps");
     }
-    if (!payload.decompressed) {
+    if (!service_payload_decode_ready(payload)) {
         return failure(
             ServiceMessageErrorCode::payload_not_decompressed,
             0U,
@@ -493,7 +501,7 @@ PreResourceServiceDecodeResult ServiceMessageStreamDecoder::continue_to_pre_reso
             std::nullopt,
             "Service-message limits are outside project hard caps");
     }
-    if (!payload.decompressed) {
+    if (!service_payload_decode_ready(payload)) {
         return pre_resource_failure(
             PreResourceServiceErrorCode::payload_not_decompressed,
             0U,
@@ -694,6 +702,7 @@ PreResourceServiceDecodeResult ServiceMessageStreamDecoder::continue_to_pre_reso
         payload.source_reliable,
         payload.reassembled,
         payload.decompressed,
+        payload.wire_uncompressed,
         payload.acknowledgement_reliable,
         payload.direction,
         payload.received_at,

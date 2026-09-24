@@ -179,6 +179,48 @@ TEST_CASE("Incomplete journal policy preserves but never accepts unresolved evid
           goldsrc::StockRuntimeTransportJournalErrorCode::unresolved_hold);
 }
 
+TEST_CASE("Incomplete journal retains only a terminal observation whose send failed",
+          "[goldsrc][stock-runtime][journal][incomplete]")
+{
+    auto failed_send = entry(
+        0U, goldsrc::StockRuntimeCaptureDirection::client_to_server, 1U,
+        goldsrc::StockRuntimeCaptureAction::forward,
+        goldsrc::StockRuntimeTransportHoldState::none, {});
+    const std::array terminal{failed_send};
+
+    const auto retained = goldsrc::validate_stock_runtime_transport_journal(
+        terminal, {},
+        goldsrc::StockRuntimeTransportJournalValidationPolicy::
+            incomplete_capture);
+    REQUIRE(retained);
+    CHECK_FALSE(retained.transport_complete);
+    CHECK(retained.emitted_datagram_count == 0U);
+
+    const auto complete_rejected =
+        goldsrc::validate_stock_runtime_transport_journal(terminal);
+    REQUIRE_FALSE(complete_rejected);
+    REQUIRE(complete_rejected.error);
+    CHECK(complete_rejected.error->code ==
+          goldsrc::StockRuntimeTransportJournalErrorCode::
+              invalid_emitted_ordinals);
+
+    auto successor = entry(
+        1U, goldsrc::StockRuntimeCaptureDirection::client_to_server, 2U,
+        goldsrc::StockRuntimeCaptureAction::forward,
+        goldsrc::StockRuntimeTransportHoldState::none, {0U});
+    successor.delivered = true;
+    const std::array nonterminal{failed_send, successor};
+    const auto gap_rejected = goldsrc::validate_stock_runtime_transport_journal(
+        nonterminal, {},
+        goldsrc::StockRuntimeTransportJournalValidationPolicy::
+            incomplete_capture);
+    REQUIRE_FALSE(gap_rejected);
+    REQUIRE(gap_rejected.error);
+    CHECK(gap_rejected.error->code ==
+          goldsrc::StockRuntimeTransportJournalErrorCode::
+              invalid_emitted_ordinals);
+}
+
 TEST_CASE("Journal rejects reordered duplicate references and unexpected sources",
           "[goldsrc][stock-runtime][journal][mutation]")
 {
@@ -224,6 +266,41 @@ TEST_CASE("Journal rejects reordered duplicate references and unexpected sources
         CHECK(rejected.error->code ==
               goldsrc::StockRuntimeTransportJournalErrorCode::
                   invalid_wrong_source_state);
+    }
+
+    SECTION("functional complete accepts only the exact bounded auxiliary query")
+    {
+        auto auxiliary = entry(
+            0U, goldsrc::StockRuntimeCaptureDirection::client_to_server, 1U,
+            goldsrc::StockRuntimeCaptureAction::auxiliary_observation,
+            goldsrc::StockRuntimeTransportHoldState::none, {});
+        auxiliary.payload_byte_count = 25U;
+        auxiliary.source_role =
+            goldsrc::StockRuntimeTransportRole::unexpected_source;
+        auxiliary.wrong_source = true;
+        auxiliary.sha256 =
+            std::string{goldsrc::kFunctionalRuntimeAuxiliaryQuerySha256};
+        const std::array entries{auxiliary};
+
+        const auto functional =
+            goldsrc::validate_stock_runtime_transport_journal(
+                entries, {},
+                goldsrc::StockRuntimeTransportJournalValidationPolicy::
+                    functional_complete_capture);
+        REQUIRE(functional);
+        CHECK(functional.transport_complete);
+
+        const auto strict =
+            goldsrc::validate_stock_runtime_transport_journal(entries);
+        REQUIRE_FALSE(strict);
+        auxiliary.sha256.front() = 'a';
+        const std::array changed{auxiliary};
+        const auto changed_functional =
+            goldsrc::validate_stock_runtime_transport_journal(
+                changed, {},
+                goldsrc::StockRuntimeTransportJournalValidationPolicy::
+                    functional_complete_capture);
+        REQUIRE_FALSE(changed_functional);
     }
 
     SECTION("unknown JSON fields fail closed")

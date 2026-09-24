@@ -531,6 +531,24 @@ const UserInfoUpdateLimits& UserInfoUpdateParser::limits() const noexcept
 UserInfoUpdateParseResult UserInfoUpdateParser::parse(
     const std::span<const std::byte> message) const
 {
+    auto parsed = parse_prefix(message, 0U);
+    if (!parsed) {
+        return parsed;
+    }
+    if (parsed.next_byte_offset != message.size()) {
+        return parser_failure(make_error(
+            UserInfoUpdateErrorCode::unexpected_trailing_bytes,
+            parsed.next_byte_offset,
+            std::nullopt,
+            "Exact user-info message contains trailing bytes"));
+    }
+    return parsed;
+}
+
+UserInfoUpdateParseResult UserInfoUpdateParser::parse_prefix(
+    const std::span<const std::byte> service_payload,
+    const std::size_t opcode_offset) const
+{
     if (!valid_configuration()) {
         return parser_failure(make_error(
             UserInfoUpdateErrorCode::invalid_configuration,
@@ -539,20 +557,21 @@ UserInfoUpdateParseResult UserInfoUpdateParser::parse(
             "User-info limits or compatibility profile are unsupported"));
     }
 
-    auto parsed = parse_message_prefix(message, 0U, limits_);
+    auto parsed = parse_message_prefix(service_payload, opcode_offset, limits_);
     if (!parsed.message) {
         return parser_failure(std::move(*parsed.error));
-    }
-    if (parsed.message->message_bytes != message.size()) {
-        return parser_failure(make_error(
-            UserInfoUpdateErrorCode::unexpected_trailing_bytes,
-            parsed.message->message_bytes,
-            std::nullopt,
-            "Exact user-info message contains trailing bytes"));
     }
 
     auto fields = std::move(*parsed.message);
     const auto bytes_consumed = fields.message_bytes;
+    std::size_t next_byte_offset = 0U;
+    if (!checked_add(opcode_offset, bytes_consumed, next_byte_offset)) {
+        return parser_failure(make_error(
+            UserInfoUpdateErrorCode::size_overflow,
+            opcode_offset,
+            std::nullopt,
+            "User-info next-message cursor overflowed"));
+    }
     return UserInfoUpdateParseResult{
         UserInfoUpdateState{
             fields.client_index,
@@ -564,13 +583,13 @@ UserInfoUpdateParseResult UserInfoUpdateParser::parse(
             fields.info.player_model_length,
             fields.opaque_suffix,
             fields.info_string_length,
-            0U,
+            opcode_offset,
             fields.message_bytes,
             profile_,
         },
         std::nullopt,
         bytes_consumed,
-        bytes_consumed,
+        next_byte_offset,
     };
 }
 

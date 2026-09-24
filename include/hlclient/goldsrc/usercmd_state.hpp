@@ -24,12 +24,14 @@ inline constexpr std::uint16_t kSyntheticGoldSrcButtonReload = 1U << 13U;
 
 enum class GoldSrcUserCmdCompatibilityProfile : std::uint8_t {
     synthetic_usercmd_v1,
+    public_goldsrc48_dry_walk_prediction_v1,
     stock_protocol_48_build_10210,
     stock_protocol_48_evidence_pending,
 };
 
 enum class GoldSrcUserCmdInputMappingProfile : std::uint8_t {
     synthetic_explicit_v1,
+    reference_immutable_wire_v1,
     stock_protocol_48_controlled_profile_v1,
     stock_protocol_48_evidence_pending,
 };
@@ -38,6 +40,7 @@ enum class GoldSrcUserCmdSchemaBindingProfile : std::uint8_t {
     synthetic_usercmd_schema_v1,
     stock_protocol_48_build_10210_schema_only,
     stock_protocol_48_evidence_pending,
+    public_goldsrc48_usercmd_schema_v1,
 };
 
 class GoldSrcUserCmdSequence final {
@@ -222,6 +225,8 @@ struct GoldSrcUserCmdState::CreationResult {
     switch (profile) {
     case GoldSrcUserCmdCompatibilityProfile::synthetic_usercmd_v1:
         return "synthetic_usercmd_v1";
+    case GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_dry_walk_prediction_v1:
+        return "public_goldsrc48_dry_walk_prediction_v1";
     case GoldSrcUserCmdCompatibilityProfile::stock_protocol_48_build_10210:
         return "stock_protocol_48_build_10210";
     case GoldSrcUserCmdCompatibilityProfile::stock_protocol_48_evidence_pending:

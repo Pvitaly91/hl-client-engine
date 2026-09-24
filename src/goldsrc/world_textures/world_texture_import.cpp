@@ -552,7 +552,8 @@ private:
                 return;
             }
             fail(WorldTextureImportErrorCode::wad_source_resolution_failed,
-                "Declared WAD could not be resolved safely in approved roots",
+                "Declared WAD " + reference.basename + " could not be resolved safely in approved roots: " +
+                    std::string{local_resources::to_string(resolved.code)},
                 WorldTextureImportState::failed,
                 std::nullopt,
                 std::nullopt,

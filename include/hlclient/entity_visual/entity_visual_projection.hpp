@@ -70,6 +70,7 @@ enum class EntityVisualProjectionEvidenceProfile {
 enum class EntityVisualModelReferenceProfile {
     synthetic_type_local_model_slot,
     stock_modelindex_mapping_evidence_pending,
+    public_goldsrc48_model_slot,
 };
 
 class EntityVisualModelReference final {
@@ -78,6 +79,7 @@ public:
         std::uint32_t slot) noexcept;
     [[nodiscard]] static EntityVisualModelReference
     stock_modelindex_evidence_pending(std::uint32_t raw_value) noexcept;
+    [[nodiscard]] static EntityVisualModelReference public_goldsrc48_model_slot(std::uint32_t value) noexcept;
 
     [[nodiscard]] EntityVisualModelReferenceProfile profile() const noexcept;
     [[nodiscard]] std::uint32_t value() const noexcept;

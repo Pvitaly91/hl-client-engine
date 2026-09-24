@@ -1,6 +1,7 @@
 #include <hlclient/goldsrc/server_info.hpp>
 
 #include <hlclient/goldsrc/byte_reader.hpp>
+#include <hlclient/goldsrc/stock_spawn_request.hpp>
 
 #include <algorithm>
 #include <limits>
@@ -129,12 +130,18 @@ bool valid_server_info_limits(const ServerInfoLimits& limits) noexcept
 
 ServerInfoState::ServerInfoState(
     const ProtocolVersion protocol_version,
+    const std::uint32_t server_count,
+    const std::uint32_t world_map_crc,
+    const std::uint8_t client_slot,
     const MaximumClients maximum_clients,
     const bool multi_client_mode,
     std::string game_directory,
     std::string server_label,
     std::string map_file_path) noexcept
     : protocol_version_{protocol_version},
+      server_count_{server_count},
+      world_map_crc_{world_map_crc},
+      client_slot_{client_slot},
       maximum_clients_{maximum_clients},
       multi_client_mode_{multi_client_mode},
       game_directory_{std::move(game_directory)},
@@ -146,6 +153,21 @@ ServerInfoState::ServerInfoState(
 ProtocolVersion ServerInfoState::protocol_version() const noexcept
 {
     return protocol_version_;
+}
+
+std::uint32_t ServerInfoState::server_count() const noexcept
+{
+    return server_count_;
+}
+
+std::uint32_t ServerInfoState::world_map_crc() const noexcept
+{
+    return world_map_crc_;
+}
+
+std::uint8_t ServerInfoState::client_slot() const noexcept
+{
+    return client_slot_;
 }
 
 MaximumClients ServerInfoState::maximum_clients() const noexcept
@@ -229,19 +251,20 @@ ServerInfoParseResult ServerInfoParser::parse(
             "Server-info protocol does not match the supported stock profile");
     }
 
-    // A controlled same-process map start changed this ordinal candidate from
-    // 1 to 2, but one differential is not enough to publish or validate a
-    // server/session semantic. Preserve only its confirmed width and cursor.
-    if (!reader.read_uint32_le()) {
+    // Stock SV_SendServerinfo writes the current spawn count here. It is the
+    // session identity consumed later by SV_Spawn_f.
+    const auto server_count = reader.read_uint32_le();
+    if (!server_count) {
         return failure(
             ServerInfoErrorCode::truncated_fixed_field,
             reader.position(),
-            "Server-info opaque ordinal candidate is truncated");
+            "Server-info server-count field is truncated");
     }
 
-    // One fixed little-endian field and one fixed-width binary field have a
-    // confirmed width and position, but not enough evidence for public names.
-    if (!reader.read_uint32_le() || !reader.read_bytes(kOpaqueFixedBinaryWidth)) {
+    // The next word is the COM_Munge3-protected map CRC. The assigned client
+    // slot needed to recover it follows the fixed client-DLL digest.
+    const auto munged_world_map_crc = reader.read_uint32_le();
+    if (!munged_world_map_crc || !reader.read_bytes(kOpaqueFixedBinaryWidth)) {
         return failure(
             ServerInfoErrorCode::truncated_fixed_field,
             reader.position(),
@@ -262,14 +285,12 @@ ServerInfoParseResult ServerInfoParser::parse(
             "Server-info maximum-clients value is outside the supported 1..32 range");
     }
 
-    // Second-client probes never reached canonical getchallenge, so this byte
-    // was observed only as zero. Its width is confirmed, but its semantics and
-    // range are not; consume it without publication or validation.
-    if (!reader.read_uint8()) {
+    const auto client_slot = reader.read_uint8();
+    if (!client_slot) {
         return failure(
             ServerInfoErrorCode::truncated_fixed_field,
             reader.position(),
-            "Server-info opaque one-byte field is truncated");
+            "Server-info client-slot field is truncated");
     }
 
     const auto profile_flag = reader.read_uint8();
@@ -330,6 +351,10 @@ ServerInfoParseResult ServerInfoParser::parse(
     return ServerInfoParseResult{
         ServerInfoState{
             ProtocolVersion::goldsrc_48,
+            *server_count,
+            decode_stock_server_world_map_crc(
+                *munged_world_map_crc, *client_slot),
+            *client_slot,
             MaximumClients{*maximum_clients},
             multi_client_mode,
             std::move(*game_directory.value),

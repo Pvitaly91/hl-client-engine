@@ -28,6 +28,14 @@ inline constexpr std::array kSequencedClientDatagram{
 inline constexpr std::array kSequencedServerDatagram{
     std::byte{0x02U}, std::byte{0x00U}, std::byte{0x00U}, std::byte{0x00U},
     std::byte{0x00U}, std::byte{0x00U}, std::byte{0x00U}, std::byte{0x00U}};
+inline constexpr std::array kFunctionalAuxiliaryQuery{
+    std::byte{0xffU}, std::byte{0xffU}, std::byte{0xffU},
+    std::byte{0xffU}, std::byte{0x54U}, std::byte{'S'},
+    std::byte{'o'}, std::byte{'u'}, std::byte{'r'}, std::byte{'c'},
+    std::byte{'e'}, std::byte{' '}, std::byte{'E'}, std::byte{'n'},
+    std::byte{'g'}, std::byte{'i'}, std::byte{'n'}, std::byte{'e'},
+    std::byte{' '}, std::byte{'Q'}, std::byte{'u'}, std::byte{'e'},
+    std::byte{'r'}, std::byte{'y'}, std::byte{0x00U}};
 
 class TemporaryCorpus final {
 public:
@@ -83,6 +91,23 @@ void write_bytes(
 void write_text(const fs::path& path, const std::string_view text)
 {
     write_bytes(path, std::as_bytes(std::span{text.data(), text.size()}));
+}
+
+[[nodiscard]] std::vector<std::byte> read_bytes(const fs::path& path)
+{
+    std::ifstream input{path, std::ios::binary};
+    REQUIRE(input);
+    const std::vector<char> characters{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{}};
+    REQUIRE_FALSE(input.bad());
+    std::vector<std::byte> bytes;
+    bytes.reserve(characters.size());
+    for (const auto character : characters) {
+        bytes.push_back(static_cast<std::byte>(
+            static_cast<unsigned char>(character)));
+    }
+    return bytes;
 }
 
 void replace_text_once(
@@ -181,11 +206,13 @@ void populate_corpus_bytes(
         "\"client_file_version\":\"1.1.1.1\","
         "\"client_pe_machine\":\"x86\","
         "\"client_signature\":\"valid\","
-        "\"client_profile_fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+               "\"client_profile_fingerprint\":"
+               "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
         "\"server_launcher_version\":\"4.1.1.1\","
         "\"server_pe_machine\":\"x86\","
         "\"server_signature\":\"valid\","
-        "\"server_profile_fingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+               "\"server_profile_fingerprint\":"
+               "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
         "\"steam_app_id\":70,\"steam_build_id\":15961492,"
         "\"server_engine_version\":\"1.1.2.2\","
         "\"protocol\":48,\"server_build\":10210,"
@@ -202,15 +229,62 @@ void populate_corpus_bytes(
         run / "restoration-attestation.staged.json",
         "{\"schema\":\"hlclient.stock-runtime-restoration.v1\","
         "\"external_file_drift\":\"none\",\"snapshot_entry_count\":12,"
-        "\"pre_manifest_sha256\":\"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\","
-        "\"post_manifest_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\","
+               "\"pre_manifest_sha256\":"
+               "\"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\","
+               "\"post_manifest_sha256\":"
+               "\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\","
         "\"external_snapshot_entry_count\":3,"
-        "\"external_pre_manifest_sha256\":\"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD\","
-        "\"external_post_manifest_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\","
+               "\"external_pre_manifest_sha256\":"
+               "\"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD\","
+               "\"external_post_manifest_sha256\":"
+               "\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\","
         "\"created_files_removed\":true,\"protected_paths_included\":true,"
         "\"owned_processes_stopped\":true,\"input_automation_used\":false,"
         "\"input_events_injected\":0,\"orchestrator_exit_code\":0,"
         "\"restoration_status\":\"exact\"}");
+}
+
+void add_functional_auxiliary_query(const fs::path& run)
+{
+    const auto raw_name = std::string{"00000002-c2s.bin"};
+    write_bytes(run / "raw" / raw_name, kFunctionalAuxiliaryQuery);
+    goldsrc::StockRuntimeTransportJournalEntry auxiliary{
+        2U,
+        goldsrc::StockRuntimeCaptureDirection::client_to_server,
+        2U,
+        30'000'001U,
+        kFunctionalAuxiliaryQuery.size(),
+        raw_name,
+        goldsrc::StockRuntimeTransportRole::unexpected_source,
+        goldsrc::StockRuntimeTransportRole::research_server,
+        goldsrc::StockRuntimeCaptureAction::auxiliary_observation,
+        goldsrc::StockRuntimeTransportHoldState::none,
+        {},
+        false,
+        true,
+        digest(kFunctionalAuxiliaryQuery),
+    };
+    std::ofstream journal{
+        run / "transport-journal.jsonl", std::ios::binary | std::ios::app};
+    REQUIRE(journal);
+    journal << goldsrc::serialize_stock_runtime_transport_journal_entry(auxiliary)
+            << '\n';
+    journal.close();
+    REQUIRE(journal);
+
+    const auto capture_metadata = read_bytes(run / "capture-metadata.json");
+    const auto parsed = goldsrc::parse_stock_runtime_capture_metadata(
+        std::string{reinterpret_cast<const char*>(capture_metadata.data()),
+                    capture_metadata.size()});
+    REQUIRE(parsed);
+    auto metadata = *parsed.metadata;
+    ++metadata.counters.observed_datagrams;
+    metadata.counters.observed_raw_bytes += kFunctionalAuxiliaryQuery.size();
+    ++metadata.counters.client_packets;
+    ++metadata.counters.ignored_wrong_source_datagrams;
+    ++metadata.counters.auxiliary_observed_datagrams;
+    write_text(run / "capture-metadata.json",
+               goldsrc::serialize_stock_runtime_capture_metadata(metadata));
 }
 
 void populate_corpus(
@@ -221,7 +295,63 @@ void populate_corpus(
     populate_corpus_bytes(run, c2s, s2c);
 }
 
-void publish_manifest(const fs::path& run)
+void use_v2_restoration_policy(const fs::path& run, const bool advisory)
+{
+    const auto external_status = advisory ? "changed" : "none";
+    const auto raw_state = advisory ? "changed" : "unchanged";
+    const auto projection = advisory ? "match" : "none";
+    const auto decision = advisory ? "explicit_advisory" : "strict_pass";
+    const auto external_after =
+        advisory ? "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                 : "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    write_text(run / "restoration-attestation.staged.json",
+               "{\"schema\":\"hlclient.stock-runtime-restoration.v2\","
+               "\"external_file_drift\":\"" +
+                   std::string{external_status} +
+                   "\","
+                   "\"raw_external_state\":\"" +
+                   std::string{raw_state} +
+                   "\","
+                   "\"protected_projection\":\"" +
+                   std::string{projection} +
+                   "\","
+                   "\"steam_rewrite_policy_id\":\"steam-appinfo-change-number-v1\","
+                   "\"policy_decision\":\"" +
+                   std::string{decision} +
+                   "\","
+                   "\"snapshot_entry_count\":12,"
+                   "\"pre_manifest_sha256\":"
+                   "\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\""
+                   ","
+                   "\"post_manifest_sha256\":"
+                   "\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\""
+                   ","
+                   "\"external_snapshot_entry_count\":3,"
+                   "\"external_pre_manifest_sha256\":"
+                   "\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\""
+                   ","
+                   "\"external_post_manifest_sha256\":\"" +
+                   std::string{external_after} +
+                   "\","
+                   "\"external_drift_phase\":\"post-run\","
+                   "\"external_changed_scope_count\":" +
+                   std::string{advisory ? "1" : "0"} +
+                   ","
+                   "\"external_content_change_count\":" +
+                   std::string{advisory ? "1" : "0"} +
+                   ","
+                   "\"external_metadata_only_count\":0,"
+                   "\"external_identity_replacement_count\":0,"
+                   "\"external_created_count\":0,\"external_removed_count\":0,"
+                   "\"external_unreadable_count\":0,"
+                   "\"created_files_removed\":true,\"protected_paths_included\":true,"
+                   "\"owned_processes_stopped\":true,\"input_automation_used\":false,"
+                   "\"input_events_injected\":0,\"orchestrator_exit_code\":0,"
+                   "\"restoration_status\":\"exact\"}");
+}
+
+void publish_manifest(const fs::path& run, const bool version_two = false,
+                      const bool advisory = false)
 {
     const auto prepublication = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
         run, goldsrc::StockRuntimeCaptureCorpusLoadPolicy::prepublication);
@@ -240,21 +370,36 @@ void publish_manifest(const fs::path& run)
         run / "restoration-attestation.json"));
     write_text(
         run / "research-run-metadata.json",
-        "{\"schema\":\"hlclient.stock-runtime-research-run.v1\","
+               "{\"schema\":\"" +
+                   std::string{version_two ? "hlclient.stock-runtime-research-run.v2"
+                                           : "hlclient.stock-runtime-research-run.v1"} +
+                   "\","
         "\"run_id\":\"0123456789abcdef0123456789abcdef\","
         "\"scenario\":\"baseline\",\"map_category\":\"boot_camp\","
         "\"duration_ms\":30000,\"isolation_status\":\"verified\","
         "\"process_ownership_status\":\"verified-cleanup\","
         "\"version_profile_status\":\"verified\","
         "\"relay_status\":\"true\",\"client_ready_status\":\"true\","
-        "\"restoration_status\":\"exact\",\"external_drift_status\":\"none\","
+                   "\"restoration_status\":\"exact\",\"external_drift_status\":\"" +
+                   std::string{advisory ? "changed" : "none"} + "\"," +
+                   (version_two
+                        ? "\"raw_external_state\":\"" +
+                              std::string{advisory ? "changed" : "unchanged"} + "\"," +
+                              "\"protected_projection\":\"" +
+                              std::string{advisory ? "match" : "none"} + "\"," +
+                              "\"steam_rewrite_policy_id\":\"steam-appinfo-"
+                              "change-number-v1\"," +
+                              "\"policy_decision\":\"" +
+                              std::string{advisory ? "explicit_advisory" : "strict_pass"} + "\","
+                        : std::string{}) +
         "\"external_target_profile\":\"none\",\"external_target_count\":0,"
         "\"raw_datagram_count\":2,\"journal_entry_count\":2,"
         "\"delivered_sequenced_c2s_count\":1,"
         "\"delivered_sequenced_s2c_count\":1,"
         "\"delivered_fragment_datagram_count\":0,"
         "\"reassembled_payload_count\":0,"
-        "\"decompressed_payload_count\":0,\"offline_replay_status\":\"success\","
+                   "\"decompressed_payload_count\":0,\"offline_replay_status\":"
+                   "\"success\","
         "\"post_resource_boundary_status\":\"observed\","
         "\"post_resource_replay_payload_ordinal\":1,"
         "\"post_resource_corpus_observed_ordinal\":1,"
@@ -272,11 +417,79 @@ void publish_manifest(const fs::path& run)
         "\"first_candidate_recurrence\":1,"
         "\"candidate_stability\":\"single_observation\","
         "\"transport_structural_sha256\":\"" + transport_hash + "\","
-        "\"replay_structural_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+                   "\"replay_structural_sha256\":"
+                   "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
+                   ","
         "\"last_observed_transport_timestamp_us\":30000000,"
         "\"last_delivered_sequenced_s2c_timestamp_us\":30000000,"
         "\"accepted_transport_run\":true,\"accepted_evidence_run\":true,"
         "\"failure_category\":\"none\"}");
+}
+
+void publish_functional_capture(const fs::path& run)
+{
+    const auto capture = read_bytes(run / "capture-metadata.json");
+    const auto journal = read_bytes(run / "transport-journal.jsonl");
+    const auto version = read_bytes(run / "version-observation.staged.json");
+    const auto isolation = read_bytes(run / "isolation-attestation.staged.json");
+    std::error_code remove_error;
+    REQUIRE(fs::remove(
+        run / "restoration-attestation.staged.json", remove_error));
+    REQUIRE_FALSE(remove_error);
+
+    write_text(
+        run / "restoration-attestation.functional.json",
+        "{\"schema\":\"hlclient.functional-runtime-restoration.v1\","
+        "\"run_id\":\"0123456789abcdef0123456789abcdef\","
+        "\"owned_process_cleanup\":\"exact\","
+        "\"research_restoration\":\"exact\","
+        "\"before_manifest_sha256\":"
+        "\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\","
+        "\"after_manifest_sha256\":"
+        "\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}");
+    write_text(
+        run / "functional-runtime-capture.json",
+        "{\"schema\":\"hlclient.functional-runtime-capture.v1\","
+        "\"purpose\":\"functional_runtime_capture\","
+        "\"campaign_evidence_eligible\":false,"
+        "\"run_id\":\"0123456789abcdef0123456789abcdef\","
+        "\"recorded_by_stock_pair\":true,"
+        "\"validated_by_our_decoder\":false,"
+        "\"route\":\"stock_client_loopback_relay_stock_hlds\","
+        "\"relay_policy\":\"byte_preserving_owning_session_no_perturbation\","
+        "\"game\":\"valve\",\"map\":\"boot_camp\","
+        "\"maximum_duration_seconds\":90,"
+        "\"output_role\":\"functional-runtime-capture\","
+        "\"server_profile_id\":\"fixture-profile-v1\","
+        "\"client_steam_argument\":\"present\","
+        "\"external_steam_state\":\"not_assessed\","
+        "\"lifecycle_clock\":\"scaled-steady-clock\","
+        "\"lifecycle_unit\":\"milliseconds\","
+        "\"requested_maximum_duration_ms\":90000,"
+        "\"required_runtime_interval_ms\":15000,"
+        "\"client_map_entry_observed_ms\":15000,"
+        "\"functional_interval_completed_ms\":30000,"
+        "\"shutdown_requested_ms\":30000,"
+        "\"relay_stop_requested_ms\":30001,"
+        "\"relay_finalization_completed_ms\":30002,"
+        "\"stop_reason\":\"functional-interval-complete\","
+        "\"stock_shutdown_method\":\"owned-process-terminate\","
+        "\"capture_status\":\"complete\","
+        "\"owned_process_cleanup\":\"exact\","
+        "\"research_restoration\":\"exact\","
+        "\"capture_metadata_byte_length\":" +
+            std::to_string(capture.size()) +
+        ",\"capture_metadata_sha256\":\"" + digest(capture) +
+        "\",\"transport_journal_byte_length\":" +
+            std::to_string(journal.size()) +
+        ",\"transport_journal_sha256\":\"" + digest(journal) +
+        "\",\"version_observation_byte_length\":" +
+            std::to_string(version.size()) +
+        ",\"version_observation_sha256\":\"" + digest(version) +
+        "\",\"isolation_attestation_byte_length\":" +
+            std::to_string(isolation.size()) +
+        ",\"isolation_attestation_sha256\":\"" + digest(isolation) +
+        "\",\"result\":\"functional_runtime_capture_complete\"}");
 }
 
 void populate_reconnect_documents(const fs::path& run)
@@ -520,6 +733,96 @@ TEST_CASE("Corpus prepublication is a fail-closed transaction boundary",
     });
 }
 
+TEST_CASE("Functional capture is complete but never strict campaign evidence",
+          "[goldsrc][stock-runtime][corpus][functional-capture]")
+{
+    SECTION("the dedicated policy accepts the exact byte-bound publication") {
+        TemporaryCorpus fixture;
+        populate_corpus_bytes(
+            fixture.run(), kSequencedClientDatagram,
+            kSequencedServerDatagram);
+        publish_functional_capture(fixture.run());
+
+        const auto loaded = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::functional_capture);
+        if (loaded.error) {
+            INFO(loaded.error->context);
+        }
+        REQUIRE(loaded);
+        REQUIRE(loaded.state);
+        CHECK(loaded.state->publication_state() ==
+              goldsrc::StockRuntimeCaptureCorpusPublicationState::
+                  functional_complete);
+        CHECK_FALSE(loaded.state->accepted_evidence_run());
+        CHECK_FALSE(loaded.state->research_run_metadata());
+        CHECK(loaded.state->delivered_datagrams().size() == 2U);
+        CHECK(loaded.state->delivered_client_to_server().size() == 1U);
+        CHECK(loaded.state->delivered_server_to_client().size() == 1U);
+
+        const auto strict = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published);
+        REQUIRE_FALSE(strict);
+        REQUIRE(strict.error);
+        CHECK(strict.error->code ==
+              goldsrc::StockRuntimeCaptureCorpusErrorCode::
+                  unexpected_manifest);
+    }
+
+    SECTION("a valid-looking manifest cannot conceal changed captured bytes") {
+        TemporaryCorpus fixture;
+        populate_corpus_bytes(
+            fixture.run(), kSequencedClientDatagram,
+            kSequencedServerDatagram);
+        publish_functional_capture(fixture.run());
+        const auto capture = read_bytes(fixture.run() / "capture-metadata.json");
+        replace_text_once(
+            fixture.run() / "functional-runtime-capture.json",
+            digest(capture), std::string(64U, '0'));
+
+        const auto loaded = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::functional_capture);
+        REQUIRE_FALSE(loaded);
+        REQUIRE(loaded.error);
+        CHECK(loaded.error->code ==
+              goldsrc::StockRuntimeCaptureCorpusErrorCode::raw_hash_mismatch);
+    }
+
+    SECTION("an exact auxiliary query stays observed but outside delivered session") {
+        TemporaryCorpus fixture;
+        populate_corpus_bytes(
+            fixture.run(), kSequencedClientDatagram,
+            kSequencedServerDatagram);
+        add_functional_auxiliary_query(fixture.run());
+        publish_functional_capture(fixture.run());
+
+        const auto loaded = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::functional_capture);
+        if (loaded.error) INFO(loaded.error->context);
+        REQUIRE(loaded);
+        REQUIRE(loaded.state);
+        CHECK(loaded.state->observed_datagrams().size() == 3U);
+        CHECK(loaded.state->delivered_datagrams().size() == 2U);
+        CHECK(loaded.state->capture_metadata().counters.
+                  ignored_wrong_source_datagrams == 1U);
+        CHECK(loaded.state->capture_metadata().counters.
+                  auxiliary_observed_datagrams == 1U);
+        CHECK(loaded.state->capture_metadata().counters.dropped_datagrams == 0U);
+        CHECK(loaded.state->capture_metadata().perturbation_count == 0U);
+
+        auto changed = kFunctionalAuxiliaryQuery;
+        changed.back() = std::byte{0x01U};
+        write_bytes(fixture.run() / "raw" / "00000002-c2s.bin", changed);
+        const auto rejected = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(),
+            goldsrc::StockRuntimeCaptureCorpusLoadPolicy::functional_capture);
+        REQUIRE_FALSE(rejected);
+    }
+}
+
 TEST_CASE("Raw integrity is local and excluded from corpus structural identity",
           "[goldsrc][stock-runtime][corpus][privacy][mutation]")
 {
@@ -648,20 +951,28 @@ TEST_CASE("Private restoration digests do not fingerprint public transport ident
         second.run() / "restoration-attestation.staged.json";
     replace_text_once(
         private_restoration,
-        "\"pre_manifest_sha256\":\"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\"",
-        "\"pre_manifest_sha256\":\"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE\"");
+                      "\"pre_manifest_sha256\":"
+                      "\"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\"",
+                      "\"pre_manifest_sha256\":"
+                      "\"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE\"");
     replace_text_once(
         private_restoration,
-        "\"post_manifest_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"",
-        "\"post_manifest_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"");
+                      "\"post_manifest_sha256\":"
+                      "\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"",
+                      "\"post_manifest_sha256\":"
+                      "\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"");
     replace_text_once(
         private_restoration,
-        "\"external_pre_manifest_sha256\":\"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD\"",
-        "\"external_pre_manifest_sha256\":\"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\"");
+                      "\"external_pre_manifest_sha256\":"
+                      "\"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD\"",
+                      "\"external_pre_manifest_sha256\":"
+                      "\"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\"");
     replace_text_once(
         private_restoration,
-        "\"external_post_manifest_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"",
-        "\"external_post_manifest_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"");
+                      "\"external_post_manifest_sha256\":"
+                      "\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"",
+                      "\"external_post_manifest_sha256\":"
+                      "\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"");
 
     const goldsrc::StockRuntimeCaptureCorpusLoader loader;
     const auto left = loader.load(
@@ -675,6 +986,45 @@ TEST_CASE("Private restoration digests do not fingerprint public transport ident
     CHECK(left.state->restoration_attestation().structural_sha256 !=
           right.state->restoration_attestation().structural_sha256);
     CHECK(left.state->structural_sha256() == right.state->structural_sha256());
+}
+
+TEST_CASE("Versioned Steam rewrite policy remains exact across corpus documents",
+          "[goldsrc][stock-runtime][corpus][steam-policy]")
+{
+    SECTION("strict and explicit advisory v2 publications are accepted")
+    {
+        for (const bool advisory : {false, true}) {
+            TemporaryCorpus fixture;
+            populate_corpus_bytes(fixture.run(), kSequencedClientDatagram,
+                                  kSequencedServerDatagram);
+            use_v2_restoration_policy(fixture.run(), advisory);
+            publish_manifest(fixture.run(), true, advisory);
+
+            const auto loaded = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+                fixture.run(), goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published);
+            REQUIRE(loaded);
+            REQUIRE(loaded.state);
+            CHECK(loaded.state->publication_state() ==
+                  goldsrc::StockRuntimeCaptureCorpusPublicationState::published_accepted);
+        }
+    }
+
+    SECTION("unknown policy identifiers are rejected")
+    {
+        TemporaryCorpus fixture;
+        populate_corpus_bytes(fixture.run(), kSequencedClientDatagram, kSequencedServerDatagram);
+        use_v2_restoration_policy(fixture.run(), false);
+        publish_manifest(fixture.run(), true, false);
+        for (const auto leaf : {"restoration-attestation.staged.json",
+                                "restoration-attestation.json", "research-run-metadata.json"}) {
+            replace_text_once(fixture.run() / leaf, "steam-appinfo-change-number-v1",
+                              "unknown-policy-v9");
+        }
+
+        const auto rejected = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
+            fixture.run(), goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published);
+        REQUIRE_FALSE(rejected);
+    }
 }
 
 TEST_CASE("Published corpus binds scenario and map to immutable observations",
@@ -858,7 +1208,8 @@ TEST_CASE("Published corpus binds scenario and map to immutable observations",
         replace_text_once(
             fixture.run() / "research-run-metadata.json",
             "\"transport_structural_sha256\":\"" + hash + "\"",
-            "\"transport_structural_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"");
+                          "\"transport_structural_sha256\":"
+                          "\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"");
 
         const auto rejected = goldsrc::StockRuntimeCaptureCorpusLoader{}.load(
             fixture.run(),

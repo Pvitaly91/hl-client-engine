@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -209,13 +210,49 @@ struct StockRuntimeStartupState final {
     StockRuntimeStartupFailure failure{StockRuntimeStartupFailure::none};
 };
 
-// Pure, allocation-free startup ordering boundary shared by active orchestration
-// and fake failure-path tests.
+// Pure, allocation-free startup ordering boundary shared by active
+// orchestration and fake failure-path tests.
 [[nodiscard]] bool apply_stock_runtime_startup_event(
     StockRuntimeStartupState& state,
     StockRuntimeStartupEvent event) noexcept;
 [[nodiscard]] std::string_view to_string(
     StockRuntimeStartupFailure failure) noexcept;
+
+enum class WriterTraceHandoffErrorCode {
+    none,
+    invalid_capability,
+    prelaunch_signal_failed,
+    trace_ready_timeout,
+    launch_release_wait_failed,
+    stock_stopped_signal_failed,
+};
+
+struct WriterTraceHandoffResult final {
+    WriterTraceHandoffErrorCode code{WriterTraceHandoffErrorCode::none};
+    std::uint32_t native_error{0U};
+    bool prelaunch_ready{false};
+    bool launch_released{false};
+    bool stock_processes_stopped{false};
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return code == WriterTraceHandoffErrorCode::none;
+    }
+};
+
+// The handles are wrapper-owned, inheritable manual-reset event capabilities.
+// This boundary performs no process launch and is directly exercised with
+// fake release barriers by the offline lifecycle tests.
+[[nodiscard]] WriterTraceHandoffResult
+signal_writer_trace_prelaunch_and_wait(
+    void* prelaunch_ready_handle,
+    void* launch_release_handle,
+    std::chrono::milliseconds timeout) noexcept;
+[[nodiscard]] WriterTraceHandoffResult
+signal_writer_trace_stock_processes_stopped(
+    void* stock_processes_stopped_handle) noexcept;
+[[nodiscard]] std::string_view to_string(
+    WriterTraceHandoffErrorCode error) noexcept;
 
 class OwnedProcess final {
 public:
@@ -230,6 +267,25 @@ public:
     [[nodiscard]] std::uint32_t process_id() const noexcept;
     [[nodiscard]] void* native_process_handle() const noexcept;
     [[nodiscard]] bool running() const noexcept;
+    enum class WaitStatus {
+        exited,
+        timeout,
+        wait_failed,
+        exit_query_failed,
+        invalid_process,
+    };
+    struct WaitResult final {
+        WaitStatus status{WaitStatus::invalid_process};
+        std::optional<std::uint32_t> exit_code;
+        std::optional<std::uint32_t> native_error;
+
+        [[nodiscard]] explicit operator bool() const noexcept
+        {
+            return status == WaitStatus::exited && exit_code.has_value();
+        }
+    };
+    [[nodiscard]] WaitResult wait_result(
+        std::chrono::milliseconds timeout) noexcept;
     [[nodiscard]] std::optional<std::uint32_t> wait(
         std::chrono::milliseconds timeout) noexcept;
     void terminate(std::uint32_t exit_code) noexcept;
@@ -315,6 +371,12 @@ find_processes_with_exact_image_identity(
     const WindowsBinaryIdentity& identity) noexcept;
 
 struct HldsRuntimeProfile final {
+    enum class Id {
+        legacy_stdio_hlds_banner_v1,
+        steam_hlds_10210_no_mode_banner_v1,
+    };
+
+    Id id{Id::legacy_stdio_hlds_banner_v1};
     WindowsFileVersion engine_version{};
     std::uint32_t protocol{0U};
     std::uint32_t build{0U};
@@ -366,6 +428,7 @@ enum class HldsRuntimeEndpointAddressCategory {
 
 enum class HldsRuntimeModeCategory {
     stdio,
+    not_advertised,
     other,
     malformed,
     absent,
@@ -476,6 +539,65 @@ struct HldsBannerParseResult final {
     }
 };
 
+enum class HldsLocalReadinessStatus {
+    ready,
+    invalid_argument,
+    process_exited,
+    process_identity_mismatch,
+    continuity_failed,
+    endpoint_observation_unavailable,
+    endpoint_table_malformed,
+    endpoint_not_owned,
+    endpoint_not_loopback_ipv4,
+    query_socket_failed,
+    query_endpoint_conflict,
+    query_timeout,
+    query_source_mismatch,
+    query_response_oversized,
+    query_response_malformed,
+    repeated_challenge,
+    protocol_mismatch,
+    application_id_mismatch,
+    map_mismatch,
+    game_mismatch,
+};
+
+enum class HldsEndpointProofSource {
+    absent,
+    windows_udp_owner_table_and_loopback_query,
+};
+
+enum class HldsMapProofSource {
+    absent,
+    goldsrc_server_info_query,
+};
+
+// Value-only result. It deliberately retains no endpoint text, process path,
+// packet bytes, server strings, account identifiers, or challenge bytes.
+struct HldsLocalReadinessResult final {
+    HldsLocalReadinessStatus status{HldsLocalReadinessStatus::invalid_argument};
+    HldsEndpointProofSource endpoint_proof_source{HldsEndpointProofSource::absent};
+    HldsMapProofSource map_proof_source{HldsMapProofSource::absent};
+    bool owned_process_running{false};
+    bool process_identity_matches{false};
+    bool endpoint_owner_matches{false};
+    bool endpoint_address_matches{false};
+    bool endpoint_port_matches{false};
+    bool query_socket_loopback_bound{false};
+    bool query_socket_excludes_relay_and_server{false};
+    bool response_source_matches{false};
+    bool map_matches{false};
+    bool game_matches{false};
+    bool challenge_observed{false};
+    std::size_t request_attempt_count{0U};
+    std::size_t response_byte_count{0U};
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return status == HldsLocalReadinessStatus::ready;
+    }
+};
+
 // Parses only literal bounded profile lines known to be printed by HLDS. It
 // does not infer a version/build from a filename or arbitrary substrings.
 [[nodiscard]] HldsBannerParseResult parse_required_hlds_runtime_banner(
@@ -486,9 +608,23 @@ struct HldsBannerParseResult final {
     const BoundedProcessLogSnapshot& snapshot,
     std::string_view requested_map,
     std::uint16_t requested_port) noexcept;
+// Separate observed profile: the legacy /Stdio parser above is unchanged.
+[[nodiscard]] HldsBannerParseResult
+parse_observed_hlds_runtime_banner(std::string_view output) noexcept;
+[[nodiscard]] HldsBannerParseResult
+diagnose_observed_hlds_runtime_banner(const BoundedProcessLogSnapshot& snapshot) noexcept;
 [[nodiscard]] HldsPrivateBannerShape analyze_hlds_private_banner_streams(
     std::string_view stdout_bytes,
     std::string_view stderr_bytes) noexcept;
+
+[[nodiscard]] HldsLocalReadinessResult
+parse_hlds_local_info_response( std::span<const std::byte> response, std::string_view requested_map,
+                               std::string_view requested_game = "valve") noexcept;
+[[nodiscard]] HldsLocalReadinessResult observe_hlds_local_readiness(
+    const OwnedProcess& process, const WindowsBinaryIdentity& expected_identity,
+    std::uint16_t requested_port, std::uint16_t excluded_relay_port, std::string_view requested_map,
+    std::chrono::steady_clock::time_point deadline, const std::function<bool()>& continuity_check,
+    WindowsBinaryObservationPolicy identity_policy = {}) noexcept;
 
 [[nodiscard]] std::string_view to_string(OwnedProcessErrorCode code) noexcept;
 [[nodiscard]] std::string_view to_string(OwnedJobCleanupErrorCode code) noexcept;
@@ -504,6 +640,10 @@ struct HldsBannerParseResult final {
     HldsRuntimeEndpointAddressCategory category) noexcept;
 [[nodiscard]] std::string_view to_string(
     HldsRuntimeModeCategory category) noexcept;
+[[nodiscard]] std::string_view to_string(HldsRuntimeProfile::Id id) noexcept;
+[[nodiscard]] std::string_view to_string(HldsLocalReadinessStatus status) noexcept;
+[[nodiscard]] std::string_view to_string(HldsEndpointProofSource source) noexcept;
+[[nodiscard]] std::string_view to_string(HldsMapProofSource source) noexcept;
 [[nodiscard]] std::string_view to_string(
     HldsPrivateStreamAttribution attribution) noexcept;
 

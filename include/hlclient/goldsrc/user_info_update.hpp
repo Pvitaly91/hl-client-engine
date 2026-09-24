@@ -208,6 +208,12 @@ public:
     [[nodiscard]] UserInfoUpdateParseResult parse(
         std::span<const std::byte> message) const;
 
+    // Parses one opcode-13 message at an exact service-payload boundary and
+    // leaves any following service message unconsumed.
+    [[nodiscard]] UserInfoUpdateParseResult parse_prefix(
+        std::span<const std::byte> service_payload,
+        std::size_t opcode_offset) const;
+
 private:
     UserInfoUpdateLimits limits_;
     UserInfoUpdateCompatibilityProfile profile_;

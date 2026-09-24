@@ -24,8 +24,7 @@ public:
         const std::uint32_t backup_count) noexcept
     {
         for (auto& entry : history.entries_) {
-            if (entry.command &&
-                entry.command->command_sequence() == sequence) {
+            if (entry.has_command() && entry.sequence() == sequence) {
                 entry.new_transmission_count = new_count;
                 entry.backup_transmission_count = backup_count;
                 return true;

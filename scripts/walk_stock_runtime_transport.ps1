@@ -102,6 +102,44 @@ function Test-ExternalTargetMetadata {
             $Profile -ceq 'reviewed-non-executable-v1'))
 }
 
+function Test-ResearchRunSteamPolicy {
+    param([object]$Manifest, [bool]$RequireAccepted)
+    $schema = [string]$Manifest.schema
+    if ($schema -ceq 'hlclient.stock-runtime-research-run.v1') {
+        return (-not $RequireAccepted) -or
+            [string]$Manifest.external_drift_status -ceq 'none'
+    }
+    if ($schema -cne 'hlclient.stock-runtime-research-run.v2') {
+        return $false
+    }
+    foreach ($name in @('raw_external_state', 'protected_projection',
+            'steam_rewrite_policy_id', 'policy_decision')) {
+        if ($null -eq $Manifest.PSObject.Properties[$name]) { return $false }
+    }
+    if (@('unchanged', 'changed', 'incomplete') -cnotcontains
+            [string]$Manifest.raw_external_state -or
+        @('none', 'match', 'mismatch', 'incomplete') -cnotcontains
+            [string]$Manifest.protected_projection -or
+        @('legacy-strict-v1', 'steam-appinfo-change-number-v1') -cnotcontains
+            [string]$Manifest.steam_rewrite_policy_id -or
+        @('strict_pass', 'explicit_advisory', 'reject') -cnotcontains
+            [string]$Manifest.policy_decision) {
+        return $false
+    }
+    if (-not $RequireAccepted) { return $true }
+    return (
+        ([string]$Manifest.raw_external_state -ceq 'unchanged' -and
+         [string]$Manifest.external_drift_status -ceq 'none' -and
+         [string]$Manifest.protected_projection -ceq 'none' -and
+         [string]$Manifest.policy_decision -ceq 'strict_pass') -or
+        ([string]$Manifest.raw_external_state -ceq 'changed' -and
+         [string]$Manifest.external_drift_status -ceq 'changed' -and
+         [string]$Manifest.protected_projection -ceq 'match' -and
+         [string]$Manifest.steam_rewrite_policy_id -ceq
+            'steam-appinfo-change-number-v1' -and
+         [string]$Manifest.policy_decision -ceq 'explicit_advisory'))
+}
+
 function Initialize-StockRuntimeWalkerBoundedReader {
     if ($null -ne ('Hlclient.StockRuntimeWalkerBoundedReader' -as [type])) {
         return
@@ -1286,7 +1324,7 @@ $finalManifestPath = Join-Path $root 'research-run-metadata.json'
 if (Test-Path -LiteralPath $finalManifestPath -PathType Leaf) {
     $manifest = Read-BoundedJson $finalManifestPath 131072 `
         'research run manifest'
-    if ([string]$manifest.schema -cne 'hlclient.stock-runtime-research-run.v1' -or
+    if (-not (Test-ResearchRunSteamPolicy $manifest $false) -or
         [string]$manifest.run_id -cne $runId) {
         throw 'Research run manifest identity is invalid.'
     }
@@ -1344,7 +1382,7 @@ if (Test-Path -LiteralPath $finalManifestPath -PathType Leaf) {
             -not $manifest.accepted_transport_run -or -not $transportComplete -or
             $wrongSourceCount -ne 0 -or
             [string]$manifest.restoration_status -cne 'exact' -or
-            [string]$manifest.external_drift_status -cne 'none' -or
+            -not (Test-ResearchRunSteamPolicy $manifest $true) -or
             [string]$manifest.post_resource_boundary_status -cne 'observed' -or
             $manifest.post_resource_reassembled -isnot [bool] -or
             $manifest.post_resource_decompressed -isnot [bool] -or

@@ -117,13 +117,14 @@ public:
 [[nodiscard]] std::vector<std::byte> server_packet(
     const std::uint32_t packet_sequence,
     const std::uint32_t acknowledgement,
-    std::vector<std::byte> payload)
+    std::vector<std::byte> payload,
+    const bool reliable = false)
 {
     const goldsrc::ServerToClientNetchanPacket packet{
         goldsrc::NetchanHeader{
             goldsrc::NetchanSequenceWord{
                 sequence(packet_sequence),
-                goldsrc::NetchanSequenceFlags{false, false},
+                goldsrc::NetchanSequenceFlags{reliable, false},
             },
             goldsrc::NetchanAcknowledgementWord{
                 sequence(acknowledgement),
@@ -185,6 +186,7 @@ TEST_CASE("Netchan outgoing context binds the exact next sequence and sends befo
     const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
     goldsrc::NetchanDriver driver{transport, remote, context_config()};
     require_runtime_ready(driver, transport, remote, epoch);
+    while (driver.poll_event()) {}
 
     auto prepared = driver.prepare_unreliable_context();
     REQUIRE(prepared);
@@ -213,7 +215,13 @@ TEST_CASE("Netchan outgoing context binds the exact next sequence and sends befo
     driver.update(epoch + 2ms);
 
     REQUIRE(transport.sent.size() == 1U);
-    CHECK(transport.receive_calls == receive_calls_before);
+    CHECK(transport.receive_calls > receive_calls_before);
+    CHECK(transport.incoming.empty());
+    auto received = driver.poll_event();
+    REQUIRE(received);
+    CHECK(received->type == goldsrc::NetchanDriverEventType::payload_ready);
+    REQUIRE(received->payload);
+    CHECK(received->payload->bytes == bytes("LATER_ACK"));
     auto decoded = goldsrc::decode_client_to_server_netchan_packet(
         transport.sent.front().payload);
     REQUIRE(decoded);
@@ -225,6 +233,66 @@ TEST_CASE("Netchan outgoing context binds the exact next sequence and sends befo
         std::span<const std::byte>{decoded.packet->payload}.first(payload.size())));
     CHECK(driver.session().state().next_outgoing_sequence == sequence(3U));
     CHECK(driver.last_sent_unreliable_context_identity() == plan_identity);
+}
+
+TEST_CASE("Persistent contextual send still polls owning RX with a one-packet TX budget",
+          "[goldsrc][netchan][unreliable-context][rx-after-context]")
+{
+    ContextTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'015U);
+    const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+    goldsrc::NetchanDriver driver{transport, remote, context_config()};
+    require_runtime_ready(driver, transport, remote, epoch);
+    while (driver.poll_event()) {}
+
+    auto prepared = driver.prepare_unreliable_context();
+    REQUIRE(prepared);
+    REQUIRE(prepared.plan);
+    REQUIRE(driver.commit_unreliable(std::move(*prepared.plan), bytes("MOVE")));
+    transport.queue(remote, server_packet(2U, 1U, bytes("CLIENTDATA")));
+    const auto received_before = transport.receive_calls;
+    driver.update(epoch + 2ms);
+
+    REQUIRE(driver.state() == goldsrc::NetchanDriverState::active);
+    REQUIRE(transport.sent.size() == 1U);
+    CHECK(transport.receive_calls > received_before);
+    CHECK(transport.incoming.empty());
+    auto event = driver.poll_event();
+    REQUIRE(event);
+    REQUIRE(event->type == goldsrc::NetchanDriverEventType::payload_ready);
+    REQUIRE(event->payload);
+    CHECK(event->payload->bytes == bytes("CLIENTDATA"));
+}
+
+TEST_CASE("Contextual TX defers a reliable RX acknowledgement without discarding its payload",
+          "[goldsrc][netchan][unreliable-context][rx-after-context]")
+{
+    ContextTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'015U);
+    const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+    goldsrc::NetchanDriver driver{transport, remote, context_config()};
+    require_runtime_ready(driver, transport, remote, epoch);
+    while (driver.poll_event()) {}
+    auto prepared = driver.prepare_unreliable_context();
+    REQUIRE(prepared);
+    REQUIRE(prepared.plan);
+    REQUIRE(driver.commit_unreliable(std::move(*prepared.plan), bytes("MOVE")));
+    transport.queue(remote, server_packet(2U, 1U, bytes("RELIABLE"), true));
+    driver.update(epoch + 2ms);
+    REQUIRE(driver.state() == goldsrc::NetchanDriverState::active);
+    REQUIRE(transport.sent.size() == 1U);
+    auto event = driver.poll_event();
+    REQUIRE(event);
+    REQUIRE(event->payload);
+    CHECK(event->payload->bytes == bytes("RELIABLE"));
+    driver.update(epoch + 3ms);
+    REQUIRE(driver.state() == goldsrc::NetchanDriverState::active);
+    REQUIRE(transport.sent.size() == 2U);
+    const auto acknowledgement = goldsrc::decode_client_to_server_netchan_packet(
+        transport.sent.back().payload);
+    REQUIRE(acknowledgement);
+    REQUIRE(acknowledgement.packet);
+    CHECK(acknowledgement.packet->header.acknowledgement.sequence == sequence(2U));
 }
 
 TEST_CASE("Netchan outgoing context abandon is non-mutating and consumption is typed",

@@ -1,5 +1,7 @@
 #include <hlclient/core/command_line.hpp>
 
+#include <charconv>
+#include <limits>
 #include <utility>
 
 namespace hlclient::core {
@@ -15,11 +17,35 @@ namespace {
     return argument == "--basedir" || argument == "--game" || argument == "--connect" ||
            argument == "+connect" || argument == "--renderer" ||
            argument == "--stop-after" || argument == "--auth-provider" ||
-           argument == "--auth-material-file" ||
+           argument == "--auth-material-file" || argument == "--steam-api-runtime" ||
            argument == "--resource-consistency-provider" ||
            argument == "--name" || argument == "--model" ||
            argument == "--visibility" || argument == "--brush-submodels" ||
-           argument == "--camera";
+           argument == "--camera" ||
+           argument == "--runtime-replay-fixture" ||
+           argument == "--runtime-replay-capture" ||
+           argument == "--runtime-replay-visuals" ||
+           argument == "--runtime-replay-screenshot" ||
+           argument == "--runtime-replay-record-budget" ||
+           argument == "--runtime-replay-byte-budget" ||
+           argument == "--live-input" || argument == "--prediction" ||
+           argument == "--live-session-seconds";
+}
+
+[[nodiscard]] std::optional<std::size_t> positive_size(
+    const std::string_view text,
+    const std::size_t maximum) noexcept
+{
+    std::uint64_t parsed = 0U;
+    const auto converted = std::from_chars(
+        text.data(), text.data() + text.size(), parsed, 10);
+    if (converted.ec != std::errc{} ||
+        converted.ptr != text.data() + text.size() || parsed == 0U ||
+        parsed > maximum ||
+        parsed > (std::numeric_limits<std::size_t>::max)()) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(parsed);
 }
 
 } // namespace
@@ -33,6 +59,14 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     bool visibility_seen = false;
     bool brush_submodels_seen = false;
     bool camera_seen = false;
+    bool runtime_replay_fixture_seen = false;
+    bool runtime_replay_capture_seen = false;
+    bool runtime_replay_visuals_seen = false;
+    bool runtime_replay_record_budget_seen = false;
+    bool runtime_replay_byte_budget_seen = false;
+    bool live_input_seen = false;
+    bool prediction_seen = false;
+    bool live_session_seconds_seen = false;
 
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
@@ -118,6 +152,12 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.stop_after = ConnectionStopPoint::server_baselines;
             } else if (value == "entity-snapshot") {
                 options.stop_after = ConnectionStopPoint::entity_snapshot;
+            } else if (value == "live-runtime-state") {
+                options.stop_after = ConnectionStopPoint::live_runtime_state;
+            } else if (value == "live-usercmd-check") {
+                options.stop_after = ConnectionStopPoint::live_usercmd_check;
+            } else if (value == "live-visual-control") {
+                options.stop_after = ConnectionStopPoint::live_visual_control;
             } else if (value == "usercmd-boundary") {
                 options.stop_after = ConnectionStopPoint::usercmd_boundary;
             } else if (value == "precache-manifest") {
@@ -143,20 +183,65 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                                "delta-schemas, movevars, user-info, or "
                                "resource-list-boundary, resource-list, or "
                                "resource-response-boundary, server-baselines, "
-                               "entity-snapshot, usercmd-boundary, precache-manifest, or "
+                                "entity-snapshot, live-runtime-state, live-usercmd-check, live-visual-control, usercmd-boundary, precache-manifest, or "
                                "asset-dispatch, world-geometry, collision-world, world-textures, or "
                                "world-render-package, or world-spatial-scene)");
             }
+        } else if (argument == "--prediction") {
+            if (prediction_seen)
+                return failure("--prediction may be specified only once");
+            prediction_seen = true;
+            if (value == "reference")
+                options.reference_prediction = true;
+            else if (value != "off")
+                return failure("Unsupported --prediction value (expected off or reference)");
+        } else if (argument == "--live-input") {
+            if (live_input_seen) {
+                return failure("--live-input may be specified only once");
+            }
+            live_input_seen = true;
+            if (value == "keyboard-mouse") {
+                options.live_input = LiveInputMode::keyboard_mouse;
+            } else if (value == "scripted-check") {
+                options.live_input = LiveInputMode::scripted_check;
+            } else if (value == "scripted-side-check") {
+                options.live_input = LiveInputMode::scripted_side_check;
+            } else if (value == "scripted-jump-duck-check") {
+                options.live_input = LiveInputMode::scripted_jump_duck_check;
+            } else if (value == "scripted-speed-check") {
+                options.live_input = LiveInputMode::scripted_speed_check;
+            } else {
+                return failure(
+                    "Unsupported --live-input value: " + std::string{value} +
+                    " (expected keyboard-mouse, scripted-check, scripted-side-check, scripted-jump-duck-check or scripted-speed-check)");
+            }
+        } else if (argument == "--live-session-seconds") {
+            if (live_session_seconds_seen) {
+                return failure(
+                    "--live-session-seconds may be specified only once");
+            }
+            live_session_seconds_seen = true;
+            options.live_session_seconds = positive_size(value, 300U);
+            if (!options.live_session_seconds) {
+                return failure(
+                    "--live-session-seconds must be in range 1..300");
+            }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
-            if (value != "file") {
+            if (value == "file") {
+                options.authentication_provider = AuthenticationProviderKind::file;
+            } else if (value == "steam") {
+                options.authentication_provider = AuthenticationProviderKind::steam;
+            } else {
                 return failure("Unsupported authentication provider: " + std::string{value} +
-                               " (expected file)");
+                               " (expected file or steam)");
             }
-            options.authentication_provider = AuthenticationProviderKind::file;
         } else if (argument == "--auth-material-file") {
             connect_request_setting_seen = true;
             options.authentication_material_file = std::string{value};
+        } else if (argument == "--steam-api-runtime") {
+            connect_request_setting_seen = true;
+            options.steam_api_runtime = std::string{value};
         } else if (argument == "--resource-consistency-provider") {
             resource_consistency_provider_seen = true;
             if (value != "local") {
@@ -220,9 +305,162 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                     "Unsupported --camera value: " + std::string{value} +
                     " (expected static, orbit, or spawn)");
             }
+        } else if (argument == "--runtime-replay-fixture") {
+            if (runtime_replay_fixture_seen) {
+                return failure(
+                    "--runtime-replay-fixture may be specified only once");
+            }
+            runtime_replay_fixture_seen = true;
+            if (value == "basic-mixed") {
+                options.runtime_replay_fixture =
+                    RuntimeReplayFixtureOption::basic_mixed;
+            } else if (value == "missing-entity-base") {
+                options.runtime_replay_fixture =
+                    RuntimeReplayFixtureOption::missing_entity_base;
+            } else if (value == "visual-entities") {
+                options.runtime_replay_fixture =
+                    RuntimeReplayFixtureOption::visual_entities;
+            } else {
+                return failure(
+                    "Unsupported --runtime-replay-fixture value: " +
+                    std::string{value} +
+                    " (expected basic-mixed, missing-entity-base, or visual-entities)");
+            }
+        } else if (argument == "--runtime-replay-capture") {
+            if (runtime_replay_capture_seen) {
+                return failure(
+                    "--runtime-replay-capture may be specified only once");
+            }
+            runtime_replay_capture_seen = true;
+            if (value.empty()) {
+                return failure("--runtime-replay-capture requires a run path");
+            }
+            options.runtime_replay_capture = std::string{value};
+        } else if (argument == "--runtime-replay-screenshot") {
+            if (options.runtime_replay_screenshot) { return failure("Replay screenshot output may be specified only once"); }
+            options.runtime_replay_screenshot=std::string{value};
+        } else if (argument == "--runtime-replay-visuals") {
+            if (runtime_replay_visuals_seen) {
+                return failure(
+                    "--runtime-replay-visuals may be specified only once");
+            }
+            runtime_replay_visuals_seen = true;
+            if (value != "diagnostic" && value != "local-assets") {
+                return failure(
+                    "Unsupported --runtime-replay-visuals value: " +
+                    std::string{value} + " (expected diagnostic or local-assets)");
+            }
+            options.runtime_replay_visuals =
+                value == "diagnostic" ? RuntimeReplayVisualOption::diagnostic : RuntimeReplayVisualOption::local_assets;
+        } else if (argument == "--runtime-replay-record-budget") {
+            if (runtime_replay_record_budget_seen) {
+                return failure(
+                    "--runtime-replay-record-budget may be specified only once");
+            }
+            runtime_replay_record_budget_seen = true;
+            const auto parsed = positive_size(value, 1'024U);
+            if (!parsed) {
+                return failure(
+                    "Invalid --runtime-replay-record-budget value "
+                    "(expected 1..1024)");
+            }
+            options.runtime_replay_record_budget = *parsed;
+        } else if (argument == "--runtime-replay-byte-budget") {
+            if (runtime_replay_byte_budget_seen) {
+                return failure(
+                    "--runtime-replay-byte-budget may be specified only once");
+            }
+            runtime_replay_byte_budget_seen = true;
+            const auto parsed = positive_size(value, 16U * 1'024U * 1'024U);
+            if (!parsed) {
+                return failure(
+                    "Invalid --runtime-replay-byte-budget value "
+                    "(expected 1..16777216)");
+            }
+            options.runtime_replay_byte_budget = *parsed;
         } else {
             options.connect_endpoint = std::string{value};
         }
+    }
+
+    if (options.runtime_replay_fixture || options.runtime_replay_capture) {
+        if (options.runtime_replay_fixture && options.runtime_replay_capture) {
+            return failure(
+                "--runtime-replay-fixture and --runtime-replay-capture are mutually exclusive");
+        }
+        const bool local_assets=options.runtime_replay_visuals==RuntimeReplayVisualOption::local_assets;
+        if (options.runtime_replay_screenshot && (!local_assets || options.renderer!=RendererBackend::opengl)) {
+            return failure("Replay screenshot requires local-assets OpenGL replay");
+        }
+        if (local_assets && (!options.runtime_replay_capture || !options.base_directory || options.game_directory!="valve")) {
+            return failure("local-assets requires capture replay, explicit --basedir, and --game valve");
+        }
+        if (options.runtime_replay_capture && options.runtime_replay_visuals && !local_assets) {
+            return failure(
+                "--runtime-replay-visuals is not enabled for capture-backed replay");
+        }
+        if (options.runtime_replay_visuals && !local_assets &&
+            (!options.runtime_replay_fixture ||
+             *options.runtime_replay_fixture !=
+                RuntimeReplayFixtureOption::visual_entities)) {
+            return failure(
+                "--runtime-replay-visuals diagnostic requires the visual-entities fixture");
+        }
+        if (options.runtime_replay_fixture &&
+            *options.runtime_replay_fixture ==
+                RuntimeReplayFixtureOption::visual_entities &&
+            !options.runtime_replay_visuals) {
+            return failure(
+                "The visual-entities fixture requires --runtime-replay-visuals diagnostic");
+        }
+        if (!options.runtime_replay_visuals &&
+            options.renderer != RendererBackend::null) {
+            return failure("Non-visual runtime replay requires --renderer null");
+        }
+        if (options.connect_endpoint || (options.base_directory && !local_assets) ||
+            options.authentication_provider ||
+            options.authentication_material_file ||
+            options.resource_consistency_provider || stop_after_seen ||
+            options.view_world || options.view_entity_snapshot ||
+            connect_request_setting_seen || resource_consistency_provider_seen ||
+            visibility_seen || brush_submodels_seen || camera_seen ||
+            live_input_seen || live_session_seconds_seen) {
+            return failure(
+                "Offline runtime replay is incompatible with connect, asset, "
+                "authentication, stop, view, visibility, brush, and camera options");
+        }
+        return CommandLineParseResult{std::move(options), {}};
+    }
+    if (options.runtime_replay_screenshot) { return failure("Replay screenshot requires capture replay"); }
+    if (runtime_replay_visuals_seen) {
+        return failure(
+            "--runtime-replay-visuals requires --runtime-replay-fixture");
+    }
+    if (runtime_replay_record_budget_seen || runtime_replay_byte_budget_seen) {
+        return failure(
+            "Runtime replay budgets require --runtime-replay-fixture or "
+            "--runtime-replay-capture");
+    }
+    if (options.stop_after == ConnectionStopPoint::live_visual_control) {
+        if (!options.live_input) {
+            return failure(
+                "--stop-after live-visual-control requires --live-input");
+        }
+        if (options.renderer != RendererBackend::opengl) {
+            return failure("live-visual-control requires --renderer opengl");
+        }
+        if (!options.base_directory || options.game_directory != "valve") {
+            return failure(
+                "live-visual-control requires explicit --basedir and --game valve");
+        }
+        if (options.live_session_seconds &&
+            options.live_input != LiveInputMode::keyboard_mouse) {
+            return failure(
+                "--live-session-seconds requires keyboard-mouse live input");
+        }
+    } else if (live_input_seen || live_session_seconds_seen || prediction_seen) {
+        return failure(
+            "live input options require --stop-after live-visual-control");
     }
 
     if (options.view_world) {
@@ -277,19 +515,32 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                        "signon-boundary/pre-resource/delta-schemas/movevars/"
                        "user-info/resource-list-boundary/resource-list/"
                        "resource-response-boundary/server-baselines/"
-                       "entity-snapshot/usercmd-boundary/precache-manifest/"
+                        "entity-snapshot/live-runtime-state/live-usercmd-check/live-visual-control/usercmd-boundary/precache-manifest/"
                        "asset-dispatch/world-geometry/collision-world/world-textures/"
                        "world-render-package/world-spatial-scene/"
                        "entity-visual-scene stop point or a preview option");
     }
-    if (options.authentication_provider && !options.authentication_material_file) {
+    if (options.authentication_provider == AuthenticationProviderKind::file &&
+        !options.authentication_material_file) {
         return failure("The file authentication provider requires --auth-material-file");
     }
+    if (options.authentication_provider == AuthenticationProviderKind::steam &&
+        !options.steam_api_runtime) {
+        return failure("The Steam authentication provider requires --steam-api-runtime");
+    }
+    if (options.authentication_provider == AuthenticationProviderKind::steam &&
+        options.authentication_material_file) {
+        return failure("The Steam authentication provider does not accept --auth-material-file");
+    }
+    if (options.authentication_provider != AuthenticationProviderKind::steam &&
+        options.steam_api_runtime) {
+        return failure("--steam-api-runtime requires --auth-provider steam");
+    }
     if (options.stop_after != ConnectionStopPoint::challenge &&
-        !options.authentication_material_file) {
+        !options.authentication_provider && !options.authentication_material_file) {
         return failure(
             "Connect request, response, netchan, and sign-on modes require "
-            "--auth-material-file");
+            "an explicit authentication provider");
     }
     if ((options.stop_after == ConnectionStopPoint::netchan_bootstrap ||
          options.stop_after == ConnectionStopPoint::signon_boundary ||
@@ -301,8 +552,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
          options.stop_after == ConnectionStopPoint::resource_list ||
          options.stop_after == ConnectionStopPoint::resource_response_boundary ||
          options.stop_after == ConnectionStopPoint::server_baselines ||
-         options.stop_after == ConnectionStopPoint::entity_snapshot ||
-         options.stop_after == ConnectionStopPoint::usercmd_boundary ||
+          options.stop_after == ConnectionStopPoint::entity_snapshot ||
+          options.stop_after == ConnectionStopPoint::live_runtime_state ||
+          options.stop_after == ConnectionStopPoint::live_usercmd_check ||
+          options.stop_after == ConnectionStopPoint::live_visual_control ||
+          options.stop_after == ConnectionStopPoint::usercmd_boundary ||
          options.stop_after == ConnectionStopPoint::precache_manifest ||
          options.stop_after == ConnectionStopPoint::asset_dispatch ||
          options.stop_after == ConnectionStopPoint::world_geometry ||
@@ -314,7 +568,7 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         !options.authentication_provider) {
         return failure(
             "Netchan bootstrap and sign-on require the explicit "
-            "--auth-provider file selection");
+            "--auth-provider file or steam selection");
     }
     if (options.authentication_material_file && !options.authentication_provider) {
         // Preserve the M2.1/M2.2 spelling where the explicit material path
@@ -336,6 +590,14 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         return failure(
             "The server-baselines, entity-snapshot, and usercmd-boundary stop points require "
             "--resource-consistency-provider local");
+    }
+    if ((options.stop_after == ConnectionStopPoint::live_runtime_state ||
+         options.stop_after == ConnectionStopPoint::live_usercmd_check ||
+         options.stop_after == ConnectionStopPoint::live_visual_control) &&
+        options.resource_consistency_provider) {
+        return failure(
+            "The live runtime stops advertise no client custom resource "
+            "and does not accept --resource-consistency-provider");
     }
     if (options.stop_after == ConnectionStopPoint::asset_dispatch &&
         options.resource_consistency_provider !=
@@ -433,16 +695,21 @@ Options:
                        delta-schemas, movevars, user-info, or
                        resource-list-boundary, resource-list, or
                        resource-response-boundary, server-baselines,
-                       entity-snapshot, usercmd-boundary, precache-manifest, or
+                       entity-snapshot, live-runtime-state, live-usercmd-check,
+                       live-visual-control,
+                       usercmd-boundary, precache-manifest, or
                        asset-dispatch, world-geometry, collision-world,
                        world-textures, or
                        world-render-package, world-spatial-scene, or
                        entity-visual-scene
                        (default: challenge)
   --auth-provider <name>
-                      Authentication provider for connect stages: file
+                      Authentication provider for connect stages: file or steam
   --auth-material-file <path>
                       Local 245-byte auth input for file provider; never logged
+  --steam-api-runtime <path>
+                      Absolute path to the user's compatible 32-bit steam_api.dll;
+                      used only with --auth-provider steam and never copied
   --resource-consistency-provider <name>
                       Explicit read-only response provider: local; requires
                       --basedir and is prepared only for resource-response-boundary,
@@ -454,6 +721,32 @@ Options:
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
+  --live-input <mode> Input for live-visual-control: keyboard-mouse,
+  --prediction <mode> Live visual movement view: off (default) or reference
+                      scripted-check, scripted-side-check,
+                      scripted-jump-duck-check or scripted-speed-check
+  --live-session-seconds <seconds>
+                      Optional 1..300 second bound for keyboard-mouse mode;
+                      expiry reports timed_session_complete and shuts down
+  --runtime-replay-fixture <name>
+                      Run an owning offline replay in the normal application
+                      update loop: basic-mixed, missing-entity-base, or
+                      visual-entities; non-visual replay requires --renderer null
+                      and all replay modes are incompatible with live/resource modes
+  --runtime-replay-capture <run-root>
+                      Replay one structurally validated functional stock capture
+                      through the normal application loop; headless requires null
+                      and is incompatible with fixture/live/authentication modes
+  --runtime-replay-visuals <mode>
+                      diagnostic: project-generated visual-entities fixture
+                      local-assets: capture + explicit --basedir + --game valve
+  --runtime-replay-screenshot <png>
+                      Save final local-assets OpenGL backbuffer to this output
+  --runtime-replay-record-budget <count>
+                      Application records per update, 1..1024 (default: 2)
+  --runtime-replay-byte-budget <bytes>
+                      Total payload bytes per update, 1..16777216
+                      (default: 1048576)
   --view-world        Build the world render package, disconnect, then run the
                       local diagnostic OpenGL preview
   --view-entity-snapshot
@@ -491,6 +784,14 @@ available, then stop at the first opcode of the following complete server
 payload. The local provider validates explicit roots and prepares fixed-target
 material read-only before networking. Without provider selection it exits with
 a typed provider-required outcome and sends no incomplete or captured response.
+Live-runtime-state continues that same connection through a typed zero-entry
+client-resource advertisement because this headless project client has no
+custom-logo feature. It uses no captured or fabricated tempdecal material,
+decodes the exact post-resource controls and baseline registry, then feeds owning
+live service payloads through the existing runtime dispatcher into the
+application-owned ClientWorldState. It requires observed time, clientdata and
+entities to remain valid for a bounded two-second interval, sends no usercmd,
+and closes the retained connection at the selected stop.
 Precache-manifest continues from that exact retained boundary without sending a
 new packet. It correlates path-free local metadata, selects the exact ServerInfo
 map entry, and publishes a bounded immutable metadata-only manifest. It does not
@@ -517,7 +818,8 @@ after the bounded snapshot stage, stock visual-field and model-index mapping
 return a typed evidence-pending outcome. Evidence-ready synthetic playback is
 provided by the network-free entity viewer and project-owned integration
 fixtures; it closes every network owner before local import or rendering.
-No mode implements authentication generation.
+Steam mode obtains fresh legacy game-server material after the owning server's
+challenge; file mode remains the explicit historical-profile adapter.
 Usercmd-boundary retains the explicit post-resource-response usercmd handoff on
 that same session, reports the exact runtime/checksum evidence-pending status,
 sends zero usercmd packets, and exits nonzero. Synthetic usercmd transmission

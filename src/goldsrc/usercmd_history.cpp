@@ -15,7 +15,7 @@ namespace {
     return {GoldSrcUserCmdHistoryError{code, sequence, context}, 0U};
 }
 
-inline constexpr std::size_t kMaximumSubmissionCommands = 32U;
+inline constexpr std::size_t kMaximumSubmissionCommands = 62U;
 using SelectedSubmissionIndexes =
     std::array<std::size_t, kMaximumSubmissionCommands>;
 
@@ -47,8 +47,7 @@ using SelectedSubmissionIndexes =
     for (const auto sequence : ordered_sequences) {
         const auto found = std::ranges::find_if(
             entries, [sequence](const auto& entry) {
-                return entry.command &&
-                       entry.command->command_sequence() == sequence;
+                return entry.has_command() && entry.sequence() == sequence;
             });
         if (found == entries.end()) {
             return failure(
@@ -57,6 +56,10 @@ using SelectedSubmissionIndexes =
                 sequence);
         }
         const auto submission_index = selected_count;
+        if (submission_index < backup_count && found->new_transmission_count == 0U) {
+            return failure(GoldSrcUserCmdHistoryErrorCode::stale_submission,
+                "Backup must have a successful local new submission", sequence);
+        }
         const auto count = submission_index < backup_count
             ? found->backup_transmission_count
             : found->new_transmission_count;
@@ -99,8 +102,10 @@ using SelectedSubmissionIndexes =
 
 GoldSrcUserCmdHistoryState::GoldSrcUserCmdHistoryState(
     std::vector<GoldSrcUserCmdHistoryEntry> entries,
-    const std::uint64_t revision) noexcept
-    : entries_{std::move(entries)}, revision_{revision}
+    const std::uint64_t revision, GoldSrcUserCmdHistoryProfile profile,
+    std::uint64_t generation, std::shared_ptr<const std::uint8_t> owner) noexcept
+    : entries_{std::move(entries)}, revision_{revision}, profile_{profile},
+      generation_{generation}, owner_{std::move(owner)}
 {
 }
 
@@ -124,7 +129,7 @@ const GoldSrcUserCmdHistoryEntry* GoldSrcUserCmdHistoryState::find(
     const GoldSrcUserCmdSequence sequence) const noexcept
 {
     const auto found = std::ranges::find_if(entries_, [sequence](const auto& entry) {
-        return entry.command && entry.command->command_sequence() == sequence;
+        return entry.has_command() && entry.sequence() == sequence;
     });
     return found == entries_.end() ? nullptr : &*found;
 }
@@ -135,8 +140,8 @@ GoldSrcUserCmdHistoryState::unsent_sequences() const
     std::vector<GoldSrcUserCmdSequence> result;
     result.reserve(entries_.size());
     for (const auto& entry : entries_) {
-        if (entry.command && entry.new_transmission_count == 0U) {
-            result.push_back(entry.command->command_sequence());
+        if (entry.has_command() && entry.new_transmission_count == 0U) {
+            result.push_back(entry.sequence());
         }
     }
     return result;
@@ -164,7 +169,9 @@ GoldSrcUserCmdHistoryBuilder::GoldSrcUserCmdHistoryBuilder(
     GoldSrcUserCmdHistoryConfig config)
     : config_{config},
       valid_configuration_{
-          config_.maximum_entries > 0U &&
+          (config_.profile == GoldSrcUserCmdHistoryProfile::synthetic_v1 ||
+           config_.profile == GoldSrcUserCmdHistoryProfile::reference_wire_v1) &&
+          config_.generation != 0 && config_.maximum_entries > 0U &&
           config_.maximum_entries <= kMaximumGoldSrcUserCmdHistoryEntries &&
           config_.protected_backup_window < config_.maximum_entries}
 {
@@ -187,19 +194,38 @@ GoldSrcUserCmdHistoryBuilder::config() const noexcept
 GoldSrcUserCmdHistoryOperationResult GoldSrcUserCmdHistoryBuilder::insert(
     const GoldSrcUserCmdState& command)
 {
+    if (config_.profile != GoldSrcUserCmdHistoryProfile::synthetic_v1) {
+        return failure(GoldSrcUserCmdHistoryErrorCode::invalid_command, "Synthetic command in reference history");
+    }
+    return insert_owned({std::make_shared<const GoldSrcUserCmdState>(command), 0, 0, {}, {}, {}});
+}
+
+GoldSrcUserCmdHistoryOperationResult GoldSrcUserCmdHistoryBuilder::insert(
+    GoldSrcUserCmdSequence identity, const GoldSrcWireUserCmd& command, std::uint64_t generation)
+{
+    if (config_.profile != GoldSrcUserCmdHistoryProfile::reference_wire_v1 ||
+        generation != config_.generation || !valid_wire_usercmd(command)) {
+        return failure(GoldSrcUserCmdHistoryErrorCode::invalid_command, "Reference history profile, generation or wire command mismatch");
+    }
+    return insert_owned({{}, 0, 0, {}, std::make_shared<const GoldSrcWireUserCmd>(command), identity});
+}
+
+GoldSrcUserCmdHistoryOperationResult GoldSrcUserCmdHistoryBuilder::insert_owned(
+    GoldSrcUserCmdHistoryEntry entry)
+{
     if (!valid_configuration_) {
         return failure(
             GoldSrcUserCmdHistoryErrorCode::invalid_configuration,
             "Usercmd history configuration is invalid");
     }
-    const auto sequence = command.command_sequence();
+    const auto sequence = entry.sequence();
     if (!sequence.valid()) {
         return failure(
             GoldSrcUserCmdHistoryErrorCode::invalid_command,
             "Usercmd history insertion requires a valid command sequence");
     }
     if (!entries_.empty()) {
-        const auto last_sequence = entries_.back().command->command_sequence();
+        const auto last_sequence = entries_.back().sequence();
         if (sequence == last_sequence || find(sequence) != nullptr) {
             return failure(
                 GoldSrcUserCmdHistoryErrorCode::duplicate_sequence,
@@ -221,7 +247,7 @@ GoldSrcUserCmdHistoryOperationResult GoldSrcUserCmdHistoryBuilder::insert(
 
     // Allocate immutable ownership before any possible eviction so allocation
     // failure cannot leave a partially mutated history.
-    auto owned_command = std::make_shared<const GoldSrcUserCmdState>(command);
+    entries_.reserve(config_.maximum_entries);
 
     std::size_t evicted = 0U;
     if (entries_.size() == config_.maximum_entries) {
@@ -244,19 +270,14 @@ GoldSrcUserCmdHistoryOperationResult GoldSrcUserCmdHistoryBuilder::insert(
         evicted = 1U;
     }
 
-    entries_.push_back(GoldSrcUserCmdHistoryEntry{
-        std::move(owned_command),
-        0U,
-        0U,
-        std::nullopt,
-    });
+    entries_.push_back(std::move(entry));
     ++revision_;
     return {std::nullopt, evicted};
 }
 
 GoldSrcUserCmdHistoryState GoldSrcUserCmdHistoryBuilder::publish() const
 {
-    return GoldSrcUserCmdHistoryState{entries_, revision_};
+    return GoldSrcUserCmdHistoryState{entries_, revision_, config_.profile, config_.generation, owner_};
 }
 
 std::size_t GoldSrcUserCmdHistoryBuilder::size() const noexcept
@@ -273,7 +294,7 @@ const GoldSrcUserCmdHistoryEntry* GoldSrcUserCmdHistoryBuilder::find(
     const GoldSrcUserCmdSequence sequence) const noexcept
 {
     const auto found = std::ranges::find_if(entries_, [sequence](const auto& entry) {
-        return entry.command && entry.command->command_sequence() == sequence;
+        return entry.has_command() && entry.sequence() == sequence;
     });
     return found == entries_.end() ? nullptr : &*found;
 }
@@ -282,8 +303,19 @@ std::size_t GoldSrcUserCmdHistoryBuilder::unsent_count() const noexcept
 {
     return static_cast<std::size_t>(std::ranges::count_if(
         entries_, [](const auto& entry) {
-            return entry.command && entry.new_transmission_count == 0U;
+            return entry.has_command() && entry.new_transmission_count == 0U;
         }));
+}
+
+GoldSrcUserCmdHistoryOperationResult
+GoldSrcUserCmdHistoryBuilder::preflight_submission(
+    std::uint64_t expected_revision, std::span<const GoldSrcUserCmdSequence> sequences,
+    std::size_t backups) const noexcept
+{
+    SelectedSubmissionIndexes indexes{};
+    std::size_t count = 0;
+    return validate_submission_preflight(entries_, revision_, expected_revision,
+        sequences, backups, indexes, count);
 }
 
 GoldSrcUserCmdHistoryOperationResult

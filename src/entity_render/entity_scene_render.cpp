@@ -98,8 +98,10 @@ void hash_transform(
 [[nodiscard]] bool finite_interpolation(
     const EntityRenderInterpolationMetadata& interpolation) noexcept
 {
-    if (interpolation.profile !=
-            EntityRenderInterpolationProfile::synthetic_seconds_v1 ||
+    if ((interpolation.profile !=
+             EntityRenderInterpolationProfile::synthetic_seconds_v1 &&
+         interpolation.profile != EntityRenderInterpolationProfile::
+             decoded_discrete_runtime_replay_v1) ||
         !std::isfinite(interpolation.sample_time_seconds) ||
         !std::isfinite(interpolation.previous_time_seconds) ||
         !std::isfinite(interpolation.current_time_seconds) ||
@@ -332,6 +334,7 @@ std::string_view to_string(const EntitySceneRenderErrorCode code) noexcept
 }
 
 EntitySceneRenderPackage::EntitySceneRenderPackage(
+    const EntitySceneRenderAssetSource asset_source,
     std::shared_ptr<const entity_visual::EntityVisualAssetLibraryState>
         asset_library,
     const EntityRenderResourceIdentity asset_library_identity,
@@ -341,7 +344,8 @@ EntitySceneRenderPackage::EntitySceneRenderPackage(
     std::vector<std::shared_ptr<const StudioModelRenderAsset>> studio_assets,
     std::vector<std::shared_ptr<const SpriteRenderAsset>> sprite_assets,
     const EntitySceneRenderStatistics statistics) noexcept
-    : asset_library_(std::move(asset_library)),
+    : asset_source_(asset_source),
+      asset_library_(std::move(asset_library)),
       asset_library_identity_(asset_library_identity),
       resource_id_(resource_id),
       resource_revision_(resource_revision),
@@ -350,6 +354,12 @@ EntitySceneRenderPackage::EntitySceneRenderPackage(
       sprite_assets_(std::move(sprite_assets)),
       statistics_(statistics)
 {
+}
+
+EntitySceneRenderAssetSource EntitySceneRenderPackage::asset_source()
+    const noexcept
+{
+    return asset_source_;
 }
 
 const std::shared_ptr<const entity_visual::EntityVisualAssetLibraryState>&

@@ -70,6 +70,7 @@ struct StockRuntimeTransportJournalLimits final {
 
 enum class StockRuntimeTransportJournalValidationPolicy {
     complete_capture,
+    functional_complete_capture,
     incomplete_capture,
 };
 

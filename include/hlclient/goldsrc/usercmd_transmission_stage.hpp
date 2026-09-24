@@ -17,6 +17,8 @@ namespace hlclient::goldsrc {
 enum class GoldSrcUserCmdSessionPrerequisiteProfile : std::uint8_t {
     synthetic_runtime_ready_v1,
     stock_runtime_ready_evidence_pending,
+    reference_loopback_test_ready_v1,
+    production_live_runtime_ready_v1,
 };
 
 struct GoldSrcUserCmdSessionPrerequisite {
@@ -24,6 +26,9 @@ struct GoldSrcUserCmdSessionPrerequisite {
         GoldSrcUserCmdSessionPrerequisiteProfile::
             stock_runtime_ready_evidence_pending};
     bool runtime_ready{false};
+    // Nonzero only for the production handoff. It must equal the retained
+    // history/schema session generation supplied to this exact driver.
+    std::uint64_t session_generation{0U};
 };
 
 enum class GoldSrcUserCmdTransmissionState : std::uint8_t {
@@ -83,6 +88,8 @@ struct GoldSrcUserCmdTransmissionEvent {
     std::size_t changed_field_count{0U};
     std::optional<std::uint32_t> outgoing_netchan_sequence;
     std::size_t history_size{0U};
+    std::optional<std::uint32_t> first_new_command_sequence;
+    std::optional<std::uint32_t> last_new_command_sequence;
 };
 
 struct GoldSrcUserCmdTransmissionConfig {
@@ -101,6 +108,10 @@ struct GoldSrcUserCmdTransmissionConfig {
     // Two preserves the ordinary single-update path; one lets an event-loop
     // yield at the owning outgoing-context boundary without copying plans.
     std::size_t maximum_transmission_phases_per_update{2U};
+    // The enclosing live-runtime stage performs the one driver update and
+    // drains every RX event. This stage only binds a prepared unreliable
+    // suffix before that update and accounts its exact send receipt after it.
+    bool externally_owned_driver_update{false};
 };
 
 enum class GoldSrcUserCmdTransmissionErrorCode : std::uint8_t {
@@ -156,6 +167,8 @@ public:
     [[nodiscard]] bool terminal() const noexcept;
     [[nodiscard]] std::size_t sampled_command_count() const noexcept;
     [[nodiscard]] std::size_t transmitted_packet_count() const noexcept;
+    [[nodiscard]] std::size_t new_command_submission_count() const noexcept;
+    [[nodiscard]] std::size_t backup_command_submission_count() const noexcept;
     [[nodiscard]] GoldSrcUserCmdHistoryState history() const;
     [[nodiscard]] const std::optional<GoldSrcUserCmdTransmissionError>&
     last_error() const noexcept;
@@ -163,6 +176,10 @@ public:
 
     [[nodiscard]] GoldSrcUserCmdTransmissionOperationResult queue_impulse(
         std::uint8_t impulse) noexcept;
+    [[nodiscard]] GoldSrcUserCmdHistoryOperationResult queue_reference_command(
+        GoldSrcUserCmdSequence identity, const GoldSrcWireUserCmd& command,
+        std::uint64_t generation);
+    [[nodiscard]] GoldSrcUserCmdTransmissionOperationResult update_reference(NetchanDriverTimePoint now);
     [[nodiscard]] GoldSrcUserCmdTransmissionOperationResult update(
         NetchanDriverTimePoint now,
         const gameplay_input::GameplayInputIntent& intent,
@@ -181,9 +198,14 @@ private:
         std::size_t encoded_bits{0U};
         std::size_t changed_field_count{0U};
         std::uint32_t outgoing_sequence{0U};
+        bool driver_owned{false};
+        std::optional<std::uint32_t> first_new_command_sequence;
+        std::optional<std::uint32_t> last_new_command_sequence;
     };
 
     [[nodiscard]] bool push_event(GoldSrcUserCmdTransmissionEvent event) noexcept;
+    [[nodiscard]] bool reference_ready() const noexcept;
+    [[nodiscard]] GoldSrcUserCmdTransmissionOperationResult transmit_pending(NetchanDriverTimePoint now);
     [[nodiscard]] GoldSrcUserCmdTransmissionOperationResult commit_prepared_move(
         NetchanDriverTimePoint now);
     void abandon_prepared_move() noexcept;
@@ -215,6 +237,8 @@ private:
     std::size_t next_event_index_{0U};
     std::size_t sampled_command_count_{0U};
     std::size_t transmitted_packet_count_{0U};
+    std::size_t new_command_submission_count_{0U};
+    std::size_t backup_command_submission_count_{0U};
 };
 
 } // namespace hlclient::goldsrc

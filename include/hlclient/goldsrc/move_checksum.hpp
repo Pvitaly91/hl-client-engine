@@ -14,6 +14,7 @@ inline constexpr std::size_t kMaximumSyntheticMoveChecksumCoverageBytes = 8'192U
 enum class GoldSrcMoveChecksumProfile : std::uint8_t {
     synthetic_crc8_v1,
     stock_protocol_48_build_10210_evidence_pending,
+    public_goldsrc48_crc32_low8_v1,
 };
 
 struct GoldSrcMoveChecksumContext {

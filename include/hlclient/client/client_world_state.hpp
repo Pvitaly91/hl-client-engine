@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/assets/asset_types.hpp>
+#include <hlclient/client/runtime_observation.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -138,6 +139,10 @@ public:
     void clear_interactive_camera_metadata() noexcept;
     [[nodiscard]] bool set_preview_render_options(
         const PreviewRenderOptions& options) noexcept;
+    [[nodiscard]] bool publish_runtime_observation(
+        std::shared_ptr<const RuntimeClientObservationState> observation)
+        noexcept;
+    void clear_runtime_observation() noexcept;
 
     [[nodiscard]] double elapsed_seconds() const noexcept;
     [[nodiscard]] bool connection_requested() const noexcept;
@@ -166,6 +171,9 @@ public:
     [[nodiscard]] std::uint64_t entity_scene_revision() const noexcept;
     [[nodiscard]] std::uint64_t entity_frame_revision() const noexcept;
     [[nodiscard]] const PreviewRenderOptions& preview_render_options() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const RuntimeClientObservationState>&
+    runtime_observation() const noexcept;
+    [[nodiscard]] std::uint64_t runtime_publication_revision() const noexcept;
 
 private:
     double elapsed_seconds_{0.0};
@@ -184,6 +192,7 @@ private:
     std::uint64_t entity_scene_revision_{0U};
     std::uint64_t entity_frame_revision_{0U};
     PreviewRenderOptions preview_render_options_{};
+    std::shared_ptr<const RuntimeClientObservationState> runtime_observation_;
 };
 
 } // namespace hlclient::client

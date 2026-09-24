@@ -1,21 +1,43 @@
 # hl-client-engine
 
+For the complete accumulated H2 source checkpoint, clone branch
+`codex/stock-runtime-campaign-5e48b7c1` (not historical `main`) and run
+`pwsh -NoProfile -File .\scripts\build_source.ps1`.
+See [clean source recovery and external game prerequisites](docs/BUILDING.md).
+No Steam account, game assets or private capture is needed to build/offline-test.
+
 `hl-client-engine` is an independent, clean-room implementation of a
 GoldSrc-compatible game client. Its first interoperability goal is to connect
 to an original Half-Life Dedicated Server (HLDS) while keeping protocol,
 simulation, and rendering concerns separated enough to support a future
 `hl.exe` injection bridge.
 
-The repository has implemented M4.7.1's exact-cursor evidence boundary and
+The repository has implemented M4.7.1's exact-cursor evidence boundary,
+M4.7.1.2A's independently authored reference-driven runtime-control decoder,
+M4.7.1.2B's sign-on entity-baseline/reference delta-value decoder, and
+M4.7.1.2C's owning full/delta packet-entity snapshot decoder with bounded,
+generation-aware history. M4.7.1.2D adds owning `svc_clientdata` and embedded
+weapon-slot reconstruction, exact client-frame history, and atomic mixed
+control/client/entity dispatch. M4.7.1.2E replays ordered owning service
+payloads through those same decoders and publishes an immutable,
+renderer-neutral runtime observation in `ClientWorldState`. These executable
+public-reference profiles and their project-owned literal fixtures are not
+stock build 10210 verification. It also
+retains
 M4.7.1.1's Windows-only, explicit-opt-in stock-runtime capture/offline-replay
 boundary. This checkout still has zero accepted signed-stock runtime sessions
 and no tracked first-observation evidence. The code provides bounded
 metadata/catalog, identity, ACK-candidate, partial-authority and runtime-frame
-APIs while keeping all unconfirmed wire grammar fail-closed. A capture can run
+APIs while keeping the strict unconfirmed stock wire grammar fail-closed. The
+separate executable `public_goldsrc48_runtime_control_v1` profile decodes a
+revision-pinned public-reference subset into owning events and transactional
+control state, including canonical time/view/signon observations and inert
+exact-boundary handling for normal post-spawn sound/text/fixed controls; it is
+explicitly not stock-corpus verification. A capture can run
 only on an elevated host that proves signed stock binaries, temporary dynamic
 WFP isolation, process ownership and exact restoration; capability absence is
 a typed failure, not a bypass. It does not activate stock runtime decoding,
-visual projection or prediction. The project
+strict stock runtime decoding, visual projection or prediction. The project
 also retains M4.6.3.2's deterministic local dry-walk movement kernel and
 player-walk viewer, M4.6.3.2.1's bounded wall-contact stability layer, and
 M4.6.3.3's synthetic-authority local prediction, retained-command replay,
@@ -63,21 +85,50 @@ grammar. The pinned public Valve SDK independently
 cross-checks resource categories and fields but contains no numeric opcode-43
 constant or wire serializer; the semantic gate instead also relies on exact
 repeated grammar, coherent map differentials, and exact list endpoints. Live
-`hlclient` to stock HLDS, slot-1/file semantics, general `svc_*` parsing, a
-Steam authentication provider, custom-resource list bodies, live-stock
+`hlclient` to stock HLDS remains pending even though the optional legacy Steam
+authentication provider is implemented; both bounded M4.7.2C attempts stopped
+before its initialization. Slot-1/file semantics, general `svc_*` parsing,
+custom-resource list bodies, live-stock
 readiness/precache interoperability validation, resource downloads/cache,
 stock runtime snapshots/gameplay, and a public
 raw payload/command CLI remain unavailable.
 `--connect` remains challenge-only by default; later stop points are explicit.
 
+See [reference-driven runtime control](docs/GOLDSRC_RUNTIME_CONTROL.md) for the
+source revisions, exact supported layouts, cursor/error contract, offline
+checker, and remaining stock-verification boundary.
+See [GoldSrc entity baselines](docs/GOLDSRC_ENTITY_BASELINES.md) and
+[packet-entity snapshots](docs/GOLDSRC_ENTITY_SNAPSHOTS.md) for the M4.7.1.2B/C
+wire contracts, owning state, exact-base history, and offline checkers.
+See [GoldSrc clientdata and weapondata](docs/GOLDSRC_CLIENTDATA.md) for the
+M4.7.1.2D ordinary-client contract, separate client-frame history, embedded
+weapon slots, mixed transaction, and offline checker.
+See [GoldSrc runtime replay and client-state bridge](docs/GOLDSRC_RUNTIME_REPLAY.md)
+for the M4.7.1.2E owning service-payload session, atomic A/B/C/D replay,
+renderer-neutral `ClientWorldState` attachment, semantic bindings and checker.
+See [application-owned runtime replay](docs/APPLICATION_RUNTIME_REPLAY.md) for
+the M4.7.1.2F explicit `hlclient.exe` NullRenderer mode, bounded update-loop
+scheduling, terminal behavior, process exit codes and deterministic summary.
+See [functional stock capture replay](docs/STOCK_RUNTIME_CAPTURE_REPLAY.md) for
+the separate non-campaign capture publication, structural loader, retained
+sign-on context and offline `hlclient.exe --runtime-replay-capture` adapter.
+See [captured scene with explicit local assets](docs/STOCK_CAPTURE_LOCAL_ASSET_REPLAY.md)
+for M4.7.1.2I: verified offline Boot Camp world and supported ordinary Studio
+instances from the completed H capture, exact model-slot binding, real OpenGL
+evidence, explicit unsupported coverage and ready-to-run commands.
+
 M4.6.2 adds a separate bounded usercmd boundary: immutable fixed-width command
 state, an exact 15-field descriptor binding, duration/scheduling/history/backup
 planning, and a synthetic delta/envelope/checksum transmitted as an unreliable
 suffix through a sequence-bound context on the same retained driver/socket.
-Only project-owned synthetic profiles are executable. The clean-room stock
-usercmd corpus remains at zero accepted runs and zero verified move packets, so
-stock opcode, envelope, checksum, cadence, input mapping, runtime readiness,
-and server acceptance fail closed. M4.6.3.1 now supplies canonical BSP
+That transmission path remains synthetic-only. M4.7.2A adds a separate
+[offline reference client-move codec](docs/GOLDSRC_REFERENCE_CLIENT_MOVE.md):
+768 original-client messages with 768 checksum matches, owning decode/encode,
+and a read-only capture mode. M4.7.2B adds a separate
+[reference planner/transmission path](docs/GOLDSRC_REFERENCE_MOVE_TRANSMISSION.md)
+validated with an invocation-owned UDP loopback peer, not stock HLDS.
+Strict stock cadence, input mapping, runtime
+readiness and server acceptance still fail closed. M4.6.3.1 now supplies canonical BSP
 collision planes, the hull-0 node/leaf domain, hulls 1–3 in the
 clipnode/contents domain, exact compiler hull extents, typed contents,
 point/stationary queries, bounded iterative traces, and explicit rigid
@@ -579,8 +630,11 @@ are currently zero, so both spellings deliberately stop at the exact unconsumed
 post-response boundary, send no invented continuation request, report
 evidence-pending, and return non-success. The reusable generic delta,
 baseline, snapshot and bounded-history mechanics are exercised only by the
-sealed independently authored synthetic profile. No entity state reaches asset
-loading, `ClientWorldState`, interpolation or rendering. See
+sealed independently authored synthetic profile. The strict evidence-pending
+path still reaches none of asset loading, `ClientWorldState`, interpolation or
+rendering. The separate public-reference offline replay can publish a
+renderer-neutral observation to `ClientWorldState` without invoking those
+systems. See
 [post-resource sign-on](docs/GOLDSRC_POST_RESOURCE_SIGNON.md),
 [runtime delta values](docs/GOLDSRC_RUNTIME_DELTA_VALUES.md),
 [entity baselines](docs/GOLDSRC_ENTITY_BASELINES.md), and
@@ -842,8 +896,10 @@ and [resource-consistency provider boundary](docs/RESOURCE_CONSISTENCY_PROVIDER.
 The captured stock request and response layouts were discovered with
 unmodified stock components and bounded, sanitized relay observations. The
 project client exercises request plus accept/reject behavior against
-deterministic local fake HLDS tests. A separate `hlclient` -> stock HLDS
-acceptance proof has not been performed and is not claimed.
+deterministic local fake HLDS tests. The optional Steam provider and stock
+launcher integration now exist, but two bounded M4.7.2C runs ended before
+provider initialization; a separate `hlclient` -> stock HLDS acceptance proof
+therefore remains pending and is not claimed.
 
 For an explicit manual check against a user-run original HLDS:
 
@@ -1154,6 +1210,8 @@ See [Architecture](docs/ARCHITECTURE.md),
 [GoldSrc usercmd delta](docs/GOLDSRC_USERCMD_DELTA.md),
 [GoldSrc client-move message](docs/GOLDSRC_CLIENT_MOVE_MESSAGE.md),
 [GoldSrc usercmd checksum](docs/GOLDSRC_USERCMD_CHECKSUM.md),
+[GoldSrc reference client-move codec](docs/GOLDSRC_REFERENCE_CLIENT_MOVE.md),
+[GoldSrc reference move transmission](docs/GOLDSRC_REFERENCE_MOVE_TRANSMISSION.md),
 [GoldSrc usercmd transmission](docs/GOLDSRC_USERCMD_TRANSMISSION.md),
 [GoldSrc movement environment](docs/GOLDSRC_MOVEVARS.md),
 [GoldSrc user info](docs/GOLDSRC_USERINFO.md),

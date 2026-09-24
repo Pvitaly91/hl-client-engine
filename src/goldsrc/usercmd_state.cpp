@@ -40,6 +40,22 @@ namespace {
                GoldSrcUserCmdSchemaBindingProfile::synthetic_usercmd_schema_v1;
 }
 
+[[nodiscard]] bool reference_dry_walk_profile_tuple(
+    const GoldSrcUserCmdCreateInfo& info) noexcept
+{
+    return info.compatibility_profile ==
+               GoldSrcUserCmdCompatibilityProfile::
+                   public_goldsrc48_dry_walk_prediction_v1 &&
+           info.input_mapping_profile ==
+               GoldSrcUserCmdInputMappingProfile::reference_immutable_wire_v1 &&
+           info.schema_binding_profile ==
+               GoldSrcUserCmdSchemaBindingProfile::
+                   public_goldsrc48_usercmd_schema_v1 &&
+           info.up_move == 0.0F && info.buttons == 0U &&
+           info.impulse == 0U && info.weapon_select == 0U &&
+           info.impact_index == 0;
+}
+
 } // namespace
 
 bool valid_goldsrc_usercmd_limits(const GoldSrcUserCmdLimits& limits) noexcept
@@ -110,7 +126,8 @@ GoldSrcUserCmdState::CreationResult GoldSrcUserCmdState::create(
             GoldSrcUserCmdErrorCode::stock_evidence_pending,
             "A controlled stock usercmd profile requires accepted wire evidence");
     }
-    if (!synthetic_profile_tuple(create_info)) {
+    if (!synthetic_profile_tuple(create_info) &&
+        !reference_dry_walk_profile_tuple(create_info)) {
         return failure(
             create_info.compatibility_profile ==
                     GoldSrcUserCmdCompatibilityProfile::

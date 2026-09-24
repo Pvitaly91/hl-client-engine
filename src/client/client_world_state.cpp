@@ -58,6 +58,7 @@ void ClientWorldState::reset() noexcept
     camera_ = {};
     interactive_camera_metadata_.reset();
     preview_render_options_ = {};
+    clear_runtime_observation();
 }
 
 void ClientWorldState::advance(const std::chrono::duration<double> elapsed) noexcept
@@ -239,6 +240,26 @@ bool ClientWorldState::set_preview_render_options(
     return true;
 }
 
+bool ClientWorldState::publish_runtime_observation(
+    std::shared_ptr<const RuntimeClientObservationState> observation) noexcept
+{
+    if (!observation || !valid_runtime_observation(*observation)) {
+        return false;
+    }
+    if (runtime_observation_ &&
+        observation->publication_revision !=
+            runtime_observation_->publication_revision + 1U) {
+        return false;
+    }
+    runtime_observation_ = std::move(observation);
+    return true;
+}
+
+void ClientWorldState::clear_runtime_observation() noexcept
+{
+    runtime_observation_.reset();
+}
+
 double ClientWorldState::elapsed_seconds() const noexcept
 {
     return elapsed_seconds_;
@@ -338,6 +359,17 @@ std::uint64_t ClientWorldState::entity_frame_revision() const noexcept
 const PreviewRenderOptions& ClientWorldState::preview_render_options() const noexcept
 {
     return preview_render_options_;
+}
+
+const std::shared_ptr<const RuntimeClientObservationState>&
+ClientWorldState::runtime_observation() const noexcept
+{
+    return runtime_observation_;
+}
+
+std::uint64_t ClientWorldState::runtime_publication_revision() const noexcept
+{
+    return runtime_observation_ ? runtime_observation_->publication_revision : 0U;
 }
 
 } // namespace hlclient::client

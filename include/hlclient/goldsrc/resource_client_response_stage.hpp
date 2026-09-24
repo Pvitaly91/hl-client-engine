@@ -2,6 +2,7 @@
 
 #include <hlclient/goldsrc/resource_client_response.hpp>
 #include <hlclient/goldsrc/resource_list_stage.hpp>
+#include <hlclient/goldsrc/runtime_control_decoder.hpp>
 #include <hlclient/goldsrc/service_payload_envelope.hpp>
 
 #include <chrono>
@@ -10,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,6 +20,7 @@ namespace hlclient::goldsrc {
 
 class PrecacheManifestStage;
 class PostResourceEntitySnapshotStage;
+class LiveRuntimeStage;
 
 using ResourceClientResponseStageClock = ResourceListStageClock;
 using ResourceClientResponseStageTimePoint = ResourceListStageTimePoint;
@@ -41,6 +44,11 @@ inline constexpr auto kDefaultPostResourceResponseBoundaryTimeout =
     std::chrono::seconds{5};
 inline constexpr auto kMaximumPostResourceResponseBoundaryTimeout =
     std::chrono::seconds{60};
+inline constexpr std::size_t
+    kDefaultMaximumPreTransmitControlPayloads = 32U;
+inline constexpr std::size_t kMaximumPreTransmitControlPayloads = 256U;
+inline constexpr std::size_t kDefaultMaximumPreTransmitControlBytes = 4'096U;
+inline constexpr std::size_t kMaximumPreTransmitControlBytes = 65'536U;
 
 // The supported 41-byte response is intentionally admitted as one normal
 // fragment (rather than an ordinary unfragmented reliable prefix), matching
@@ -49,10 +57,33 @@ inline constexpr auto kMaximumPostResourceResponseBoundaryTimeout =
 [[nodiscard]] ResourceListStageConfig
 default_resource_client_response_resource_list_stage_config();
 
+enum class ClientResourceAdvertisementProfile : std::uint8_t {
+    single_custom_decal,
+    no_custom_resources,
+};
+
+enum class ResourceResponsePreTransmitPayloadPolicy : std::uint8_t {
+    reject,
+    decode_nop_control,
+};
+
+enum class ResourceResponseCompletionPolicy : std::uint8_t {
+    require_post_response_boundary,
+    covering_acknowledgement,
+};
+
 struct ResourceClientResponseStageConfig {
     ResourceListStageConfig resource_list{
         default_resource_client_response_resource_list_stage_config()};
     ResourceClientResponseLimits response;
+    ClientResourceAdvertisementProfile advertisement_profile{
+        ClientResourceAdvertisementProfile::single_custom_decal};
+    ResourceResponsePreTransmitPayloadPolicy pre_transmit_payload_policy{
+        ResourceResponsePreTransmitPayloadPolicy::reject};
+    ResourceResponseCompletionPolicy completion_policy{
+        ResourceResponseCompletionPolicy::require_post_response_boundary};
+    ServicePayloadCompressionPolicy post_response_payload_compression{
+        ServicePayloadCompressionPolicy::require_bzip2_envelope};
     std::chrono::milliseconds consistency_provider_timeout{
         kDefaultResourceConsistencyProviderTimeout};
     std::chrono::milliseconds response_acknowledgement_timeout{
@@ -61,6 +92,10 @@ struct ResourceClientResponseStageConfig {
         kDefaultPostResourceResponseBoundaryTimeout};
     std::size_t maximum_driver_events_per_update{
         kDefaultMaximumResourceResponseDriverEventsPerUpdate};
+    std::size_t maximum_pre_transmit_control_payloads{
+        kDefaultMaximumPreTransmitControlPayloads};
+    std::size_t maximum_pre_transmit_control_bytes{
+        kDefaultMaximumPreTransmitControlBytes};
 };
 
 [[nodiscard]] bool valid_resource_client_response_stage_configuration(
@@ -76,6 +111,7 @@ enum class ResourceClientResponseStageState {
     waiting_for_response_ack,
     waiting_for_server_continuation,
     decoding_server_continuation,
+    response_completion_ready,
     next_server_boundary_reached,
     consistency_provider_required,
     unsupported_response_profile,
@@ -104,6 +140,9 @@ enum class ResourceClientResponseStageErrorCode {
     response_acknowledgement_invalid,
     response_acknowledgement_timed_out,
     server_payload_before_response_transmit,
+    pre_transmit_control_decode_failed,
+    unexpected_pre_transmit_control_message,
+    pre_transmit_control_overflow,
     server_payload_acknowledgement_invalid,
     pre_ack_server_payload_overflow,
     post_response_payload_overflow,
@@ -115,16 +154,72 @@ enum class ResourceClientResponseStageErrorCode {
     time_moved_backwards,
 };
 
+enum class ResourceResponsePayloadClassification : std::uint8_t {
+    unavailable,
+    pre_transmit_control,
+    post_transmit_continuation_candidate,
+    invalid_framing,
+};
+
+enum class ResourceResponseReceivePosition : std::uint8_t {
+    unavailable,
+    before_first_response_transmit,
+    after_first_response_transmit,
+};
+
+enum class ResourceResponseWireEncodingKind : std::uint8_t {
+    unavailable,
+    bzip2,
+    wire_uncompressed,
+};
+
+// Bounded, body-free metadata retained across cleanup and propagated through
+// the native failure. A numeric zero opcode remains a value; absence is null.
+struct ResourceResponsePayloadDiagnostic final {
+    ResourceResponsePayloadClassification classification{
+        ResourceResponsePayloadClassification::unavailable};
+    ResourceResponseReceivePosition receive_position{
+        ResourceResponseReceivePosition::unavailable};
+    ResourceResponseWireEncodingKind wire_encoding{
+        ResourceResponseWireEncodingKind::unavailable};
+    std::size_t payload_ordinal{0U};
+    std::optional<std::uint32_t> source_sequence;
+    std::optional<std::uint32_t> source_acknowledgement;
+    std::size_t wire_byte_count{0U};
+    std::size_t decoded_byte_count{0U};
+    std::size_t cursor_byte_offset{0U};
+    std::size_t cursor_bit_offset{0U};
+    bool validated_message_boundary{false};
+    std::optional<std::uint8_t> actual_opcode;
+    bool source_reliable{false};
+    bool reassembled{false};
+    bool response_queued{false};
+    bool response_transmitted{false};
+    bool response_acknowledged{false};
+    std::optional<std::uint64_t> reliable_generation;
+    std::optional<std::uint32_t> first_transmit_sequence;
+    std::size_t consumed_control_message_count{0U};
+    std::size_t pending_payload_count{0U};
+    std::size_t pending_byte_count{0U};
+    std::optional<std::size_t> last_successful_handoff_cursor;
+    std::optional<RuntimeControlDecodeErrorCode> control_code;
+};
+
 struct ResourceClientResponseStageError {
     ResourceClientResponseStageErrorCode code{
         ResourceClientResponseStageErrorCode::invalid_configuration};
     std::optional<ResourceListStageErrorCode> resource_list_code;
+    std::optional<ResourceTransitionStageErrorCode> transition_stage_code;
+    std::optional<ResourceTransitionControlErrorCode> transition_control_code;
+    std::optional<ResourceTransitionFailureMetadata>
+        transition_failure_metadata;
     std::optional<resource_consistency::ResourceConsistencyErrorCode>
         consistency_code;
     std::optional<Opcode5ResourceResponseErrorCode> response_code;
     std::optional<ServicePayloadEnvelopeErrorCode> envelope_code;
     std::optional<PostResourceResponseBoundaryErrorCode> boundary_code;
     std::optional<NetchanDriverErrorCode> driver_code;
+    std::optional<ResourceResponsePayloadDiagnostic> payload_diagnostic;
     std::string context;
 };
 
@@ -187,6 +282,8 @@ public:
     [[nodiscard]] const ResourceResponseReliableLifecycle& reliable_lifecycle()
         const noexcept;
     [[nodiscard]] const PostResourceResponseBoundary& boundary() const noexcept;
+    [[nodiscard]] const std::optional<PostResourceResponseBoundary>&
+    boundary_optional() const noexcept;
     [[nodiscard]] ResourceClientResponseCompatibilityProfile
     compatibility_profile() const noexcept;
     [[nodiscard]] ResourceClientResponseEvidenceProfile evidence_profile()
@@ -201,14 +298,14 @@ private:
         std::optional<ResourceResponseCarrierGeometry> source_carrier_geometry,
         std::optional<ResourceResponseConcurrentTail> concurrent_tail,
         ResourceResponseReliableLifecycle reliable_lifecycle,
-        PostResourceResponseBoundary boundary) noexcept;
+        std::optional<PostResourceResponseBoundary> boundary) noexcept;
 
     ResourceListSignonState resource_list_;
     Opcode5ResourceResponse response_;
     std::optional<ResourceResponseCarrierGeometry> source_carrier_geometry_;
     std::optional<ResourceResponseConcurrentTail> concurrent_tail_;
     ResourceResponseReliableLifecycle reliable_lifecycle_;
-    PostResourceResponseBoundary boundary_;
+    std::optional<PostResourceResponseBoundary> boundary_;
 };
 
 enum class ResourceClientResponseStageEventType {
@@ -218,6 +315,8 @@ enum class ResourceClientResponseStageEventType {
     resource_response_queued,
     resource_response_transmitted,
     resource_response_acknowledged,
+    pre_transmit_control_consumed,
+    response_completion_ready,
     concurrent_tail_observed,
     server_continuation_received,
     next_server_boundary_reached,
@@ -257,6 +356,8 @@ enum class ResourceClientResponseTraceClassification {
     resource_response_queued,
     resource_response_transmitted,
     resource_response_acknowledged,
+    pre_transmit_control_consumed,
+    response_completion_ready,
     concurrent_tail_observed,
     server_continuation_received,
     next_server_boundary_reached,
@@ -286,6 +387,7 @@ struct ResourceClientResponseTraceEvent {
     bool reliable{false};
     bool fragmented{false};
     std::size_t transmitted_packet_count{0U};
+    std::optional<ResourceResponsePayloadDiagnostic> payload_diagnostic;
 };
 
 using ResourceClientResponseTraceCallback =
@@ -347,11 +449,14 @@ public:
     [[nodiscard]] std::size_t provider_begin_count() const noexcept;
     [[nodiscard]] bool response_transmitted() const noexcept;
     [[nodiscard]] bool response_acknowledged() const noexcept;
+    [[nodiscard]] const std::optional<ResourceResponsePayloadDiagnostic>&
+    payload_diagnostic() const noexcept;
 
 private:
     friend class GoldSrcHandshakeCoordinator;
     friend class PrecacheManifestStage;
     friend class PostResourceEntitySnapshotStage;
+    friend class LiveRuntimeStage;
 
     // Only explicit internal continuation stages may keep the already-started
     // driver alive across the post-response boundary. Public callers retain
@@ -423,6 +528,12 @@ private:
     void build_and_queue_response(
         resource_consistency::ResourceConsistencyMaterial material,
         ResourceClientResponseStageTimePoint now);
+    void build_and_queue_empty_response(
+        ResourceClientResponseStageTimePoint now);
+    void queue_built_response(
+        Opcode5ResourceResponse response,
+        std::span<const std::byte> semantic_bytes,
+        ResourceClientResponseStageTimePoint now);
     void drive_transport(ResourceClientResponseStageTimePoint now);
     void observe_response_transmit(ResourceClientResponseStageTimePoint now);
     void drain_driver_events(
@@ -436,6 +547,11 @@ private:
         ResourceClientResponseStageTimePoint now);
     void handle_server_payload(
         OwnedNetchanPayload payload,
+        ResourceClientResponseStageTimePoint now);
+    void decode_pre_transmit_control_payload(
+        OwnedNetchanPayload payload,
+        ResourceClientResponseStageTimePoint now);
+    void publish_acknowledgement_completion(
         ResourceClientResponseStageTimePoint now);
     void decode_pending_server_payload(
         ResourceClientResponseStageTimePoint now);
@@ -458,7 +574,13 @@ private:
             std::nullopt,
         std::optional<PostResourceResponseBoundaryErrorCode> boundary_code =
             std::nullopt,
-        std::optional<NetchanDriverErrorCode> driver_code = std::nullopt)
+        std::optional<NetchanDriverErrorCode> driver_code = std::nullopt,
+        std::optional<ResourceTransitionStageErrorCode>
+            transition_stage_code = std::nullopt,
+        std::optional<ResourceTransitionControlErrorCode>
+            transition_control_code = std::nullopt,
+        std::optional<ResourceTransitionFailureMetadata>
+            transition_failure_metadata = std::nullopt)
         noexcept;
     void cleanup(ResourceClientResponseStageTimePoint now) noexcept;
     void emit_trace(
@@ -486,13 +608,15 @@ private:
         ResourceClientResponseStageState::idle};
     std::optional<ResourceClientResponseSignonState> result_;
     std::optional<ResourceClientResponseStageError> error_;
+    std::optional<ResourceResponsePayloadDiagnostic> payload_diagnostic_;
     std::optional<resource_consistency::ResourceConsistencyRequirements>
         requirements_;
     std::unique_ptr<resource_consistency::ResourceConsistencyOperation>
         consistency_operation_;
     std::optional<resource_consistency::ResourceConsistencySession>
         consistency_session_;
-    std::optional<EncodedOpcode5ResourceResponse> response_encoding_;
+    std::optional<Opcode5ResourceResponse> response_;
+    std::vector<std::byte> response_semantic_bytes_;
     std::optional<OwnedNetchanPayload> pre_ack_payload_;
     std::optional<OwnedNetchanPayload> pending_decode_payload_;
     std::optional<OwnedServicePayload> retained_source_payload_;
@@ -514,9 +638,13 @@ private:
     std::size_t response_build_count_{0U};
     std::size_t requirements_derivation_count_{0U};
     std::size_t provider_begin_count_{0U};
+    std::size_t payload_ordinal_{0U};
+    std::size_t pre_transmit_control_payload_count_{0U};
+    std::size_t pre_transmit_control_byte_count_{0U};
+    std::size_t pre_transmit_control_message_count_{0U};
     bool response_transmitted_{false};
     bool response_acknowledged_{false};
-    bool server_payloads_admissible_{false};
+    bool current_event_batch_received_after_first_response_transmit_{false};
     bool cleanup_done_{false};
 };
 
@@ -556,6 +684,12 @@ private:
         return "response_acknowledgement_timed_out";
     case ResourceClientResponseStageErrorCode::server_payload_before_response_transmit:
         return "server_payload_before_response_transmit";
+    case ResourceClientResponseStageErrorCode::pre_transmit_control_decode_failed:
+        return "pre_transmit_control_decode_failed";
+    case ResourceClientResponseStageErrorCode::unexpected_pre_transmit_control_message:
+        return "unexpected_pre_transmit_control_message";
+    case ResourceClientResponseStageErrorCode::pre_transmit_control_overflow:
+        return "pre_transmit_control_overflow";
     case ResourceClientResponseStageErrorCode::server_payload_acknowledgement_invalid:
         return "server_payload_acknowledgement_invalid";
     case ResourceClientResponseStageErrorCode::pre_ack_server_payload_overflow:
@@ -576,6 +710,50 @@ private:
         return "time_moved_backwards";
     }
     return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const ResourceResponsePayloadClassification value) noexcept
+{
+    switch (value) {
+    case ResourceResponsePayloadClassification::unavailable:
+        return "unavailable";
+    case ResourceResponsePayloadClassification::pre_transmit_control:
+        return "pre_transmit_control";
+    case ResourceResponsePayloadClassification::post_transmit_continuation_candidate:
+        return "post_transmit_continuation_candidate";
+    case ResourceResponsePayloadClassification::invalid_framing:
+        return "invalid_framing";
+    }
+    return "unavailable";
+}
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const ResourceResponseReceivePosition value) noexcept
+{
+    switch (value) {
+    case ResourceResponseReceivePosition::unavailable:
+        return "unavailable";
+    case ResourceResponseReceivePosition::before_first_response_transmit:
+        return "before_first_response_transmit";
+    case ResourceResponseReceivePosition::after_first_response_transmit:
+        return "after_first_response_transmit";
+    }
+    return "unavailable";
+}
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const ResourceResponseWireEncodingKind value) noexcept
+{
+    switch (value) {
+    case ResourceResponseWireEncodingKind::unavailable:
+        return "unavailable";
+    case ResourceResponseWireEncodingKind::bzip2:
+        return "bzip2";
+    case ResourceResponseWireEncodingKind::wire_uncompressed:
+        return "wire_uncompressed";
+    }
+    return "unavailable";
 }
 
 } // namespace hlclient::goldsrc

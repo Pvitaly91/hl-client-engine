@@ -31,7 +31,7 @@ constexpr std::string_view kUsage =
     "Usage: hlclient_stock_runtime_check --capture-root <ignored run directory> "
     "--scenario transcript|baselines|entities|clientdata|authority|ack|transport|"
     "netchan|signon-replay|post-resource-first|first-observation|campaign-summary "
-    "[--publication-stage prepublication] "
+    "[--publication-stage prepublication|functional] "
     "[--campaign-refresh-implementation-commit <40-lower-hex>] "
     "[--campaign-external-target-profile none|reviewed-non-executable-v1] "
     "[--campaign-external-target-count <0..4096>] "
@@ -56,6 +56,7 @@ struct Options final {
     fs::path capture_root;
     Scenario scenario{Scenario::transcript};
     bool prepublication{false};
+    bool functional_publication{false};
     std::optional<std::string> campaign_refresh_implementation_commit;
     std::optional<std::string> campaign_external_target_profile;
     std::optional<std::size_t> campaign_external_target_count;
@@ -116,11 +117,13 @@ struct Options final {
             scenario_seen = true;
             options.scenario = *parsed;
         } else if (argument == "--publication-stage") {
-            if (publication_seen || value != "prepublication") {
+            if (publication_seen ||
+                (value != "prepublication" && value != "functional")) {
                 return std::nullopt;
             }
             publication_seen = true;
-            options.prepublication = true;
+            options.prepublication = value == "prepublication";
+            options.functional_publication = value == "functional";
         } else if (argument == "--campaign-refresh-implementation-commit") {
             if (campaign_refresh_seen || value.size() != 40U ||
                 !std::ranges::all_of(value, [](const char character) {
@@ -174,6 +177,9 @@ struct Options final {
     return root_seen && scenario_seen &&
             (!options.prepublication ||
              options.scenario == Scenario::first_observation) &&
+            (!options.functional_publication ||
+             options.scenario == Scenario::transport ||
+             options.scenario == Scenario::netchan) &&
             (!options.campaign_refresh_implementation_commit ||
              options.scenario == Scenario::campaign_summary) &&
             (campaign_external_profile_seen == campaign_external_count_seen) &&
@@ -229,13 +235,16 @@ struct Options final {
 }
 
 [[nodiscard]] std::optional<fs::path> validate_capture_root(
-    const fs::path& requested)
+    const fs::path& requested,
+    const bool functional_capture = false)
 {
     std::error_code error;
     const auto repository = fs::weakly_canonical(fs::current_path(), error);
     if (error) return std::nullopt;
     const auto approved = fs::weakly_canonical(
-        repository / "manual-artifacts" / "stock-runtime", error);
+        repository / "manual-artifacts" /
+            (functional_capture ? "research-runtime-capture" : "stock-runtime"),
+        error);
     if (error || !fs::is_directory(approved, error) || error ||
         has_symlink_component(approved)) {
         return std::nullopt;
@@ -764,6 +773,8 @@ delivered_netchan_counts(
 {
     const auto policy = options.prepublication
         ? goldsrc::StockRuntimeCaptureCorpusLoadPolicy::prepublication
+        : options.functional_publication
+        ? goldsrc::StockRuntimeCaptureCorpusLoadPolicy::functional_capture
         : goldsrc::StockRuntimeCaptureCorpusLoadPolicy::published;
     const goldsrc::StockRuntimeCaptureCorpusLoader loader;
     const auto corpus_result = loader.load(capture_root, policy);
@@ -781,6 +792,10 @@ delivered_netchan_counts(
         ? corpus.publication_state() ==
               goldsrc::StockRuntimeCaptureCorpusPublicationState::
                   ready_for_manifest_publication
+        : options.functional_publication
+        ? corpus.publication_state() ==
+              goldsrc::StockRuntimeCaptureCorpusPublicationState::
+                  functional_complete
         : published_accepted;
     if (!publication_ready) {
         return offline_failure("corpus", "publication_state_mismatch", 21);
@@ -820,6 +835,13 @@ delivered_netchan_counts(
         std::cout << "[stock-runtime] profile="
                   << goldsrc::kStockRuntimePendingProfile << '\n'
                   << "[stock-runtime] transport-valid=true\n"
+                  << "[stock-runtime] observed-datagrams="
+                  << corpus.observed_datagrams().size() << '\n'
+                  << "[stock-runtime] auxiliary-observed="
+                  << corpus.capture_metadata().counters.
+                         auxiliary_observed_datagrams << '\n'
+                  << "[stock-runtime] delivered-datagrams="
+                  << corpus.delivered_datagrams().size() << '\n'
                   << "[stock-runtime] sequenced-c2s="
                   << transport.state->sequenced_client_to_server_count() << '\n'
                   << "[stock-runtime] sequenced-s2c="
@@ -830,6 +852,8 @@ delivered_netchan_counts(
                   << transport.state->reassembled_payload_count() << '\n'
                   << "[stock-runtime] decompressed="
                   << transport.state->decompressed_payload_count() << '\n'
+                  << "[stock-runtime] structural-hash="
+                  << corpus.structural_sha256() << '\n'
                   << "[stock-runtime] accepted-run=false\n"
                   << "[stock-runtime] result=netchan\n";
         return 0;
@@ -2112,8 +2136,25 @@ campaign_observation_from_run(
         manifest, "external_drift_status", TopLevelJsonKind::string);
     const auto* replay_status = top_level_property(
         manifest, "offline_replay_status", TopLevelJsonKind::string);
+    const auto* raw_external_state = top_level_property(
+        manifest, "raw_external_state", TopLevelJsonKind::string);
+    const auto* protected_projection = top_level_property(
+        manifest, "protected_projection", TopLevelJsonKind::string);
+    const auto* rewrite_policy = top_level_property(
+        manifest, "steam_rewrite_policy_id", TopLevelJsonKind::string);
+    const auto* policy_decision = top_level_property(
+        manifest, "policy_decision", TopLevelJsonKind::string);
+    const bool version_two = schema != nullptr &&
+        schema->value == "hlclient.stock-runtime-research-run.v2";
+    const bool policy_shape_valid = !version_two ||
+        (raw_external_state != nullptr && protected_projection != nullptr &&
+         rewrite_policy != nullptr && policy_decision != nullptr &&
+         (rewrite_policy->value == "legacy-strict-v1" ||
+          rewrite_policy->value == "steam-appinfo-change-number-v1"));
     if (schema == nullptr ||
-        schema->value != "hlclient.stock-runtime-research-run.v1" ||
+        (schema->value != "hlclient.stock-runtime-research-run.v1" &&
+         !version_two) ||
+        !policy_shape_valid ||
         manifest_run_id == nullptr || manifest_run_id->value != run_id ||
         scenario == nullptr || map == nullptr || !accepted ||
         !accepted_transport ||
@@ -2139,7 +2180,20 @@ campaign_observation_from_run(
         return campaign_rejected_observation(run_id);
     }
     const auto& corpus = *loaded.state;
+    const bool policy_accepted =
+        (!version_two && drift != nullptr && drift->value == "none") ||
+        (version_two &&
+         ((raw_external_state->value == "unchanged" &&
+           drift != nullptr && drift->value == "none" &&
+           protected_projection->value == "none" &&
+           policy_decision->value == "strict_pass") ||
+          (raw_external_state->value == "changed" &&
+           drift != nullptr && drift->value == "changed" &&
+           protected_projection->value == "match" &&
+           rewrite_policy->value == "steam-appinfo-change-number-v1" &&
+           policy_decision->value == "explicit_advisory")));
     if (!*accepted_transport || failure->value != "none" ||
+        !policy_accepted ||
         corpus.publication_state() !=
             goldsrc::StockRuntimeCaptureCorpusPublicationState::
                 published_accepted ||
@@ -2149,7 +2203,6 @@ campaign_observation_from_run(
         version == nullptr || version->value != "verified" ||
         ready == nullptr || ready->value != "true" ||
         restoration == nullptr || restoration->value != "exact" ||
-        drift == nullptr || drift->value != "none" ||
         replay_status == nullptr || replay_status->value != "success") {
         return campaign_rejected_observation(run_id);
     }
@@ -2777,7 +2830,8 @@ int main(const int argc, const char* const* argv)
                 "campaign", "bounded_internal_failure", 31);
         }
     }
-    const auto capture_root = validate_capture_root(options->capture_root);
+    const auto capture_root = validate_capture_root(
+        options->capture_root, options->functional_publication);
     if (!capture_root) {
         std::cerr << "[stock-runtime] result=unsafe-capture-root\n";
         return 3;

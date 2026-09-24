@@ -17,6 +17,7 @@ inline constexpr std::size_t kMaximumUserCmdsPerSchedulerUpdate = 64U;
 
 enum class GoldSrcUserCmdSamplingProfile : std::uint8_t {
     stock_protocol_48_controlled_profile_v1,
+    stock_protocol_48_live_usercmd_check_v1,
     synthetic_fixed_step_v1,
     stock_evidence_pending,
 };
@@ -55,6 +56,9 @@ enum class GoldSrcUserCmdSchedulerErrorCode : std::uint8_t {
     allocation_failed,
 };
 
+[[nodiscard]] std::string_view to_string(
+    GoldSrcUserCmdSchedulerErrorCode code) noexcept;
+
 struct GoldSrcUserCmdSchedulerError {
     GoldSrcUserCmdSchedulerErrorCode code{
         GoldSrcUserCmdSchedulerErrorCode::invalid_configuration};
@@ -73,6 +77,14 @@ struct GoldSrcUserCmdSchedulerUpdateResult {
     }
 };
 
+struct GoldSrcUserCmdSchedulerState final {
+    bool initialized{false};
+    std::int64_t last_update_time_nanoseconds{0};
+    std::int64_t next_sample_time_nanoseconds{0};
+    std::int64_t duration_remainder_nanoseconds{0};
+    std::uint64_t next_command_sequence{1U};
+};
+
 class GoldSrcUserCmdScheduler final {
 public:
     explicit GoldSrcUserCmdScheduler(
@@ -80,6 +92,7 @@ public:
 
     [[nodiscard]] bool valid_configuration() const noexcept;
     [[nodiscard]] const GoldSrcUserCmdSchedulerConfig& config() const noexcept;
+    [[nodiscard]] GoldSrcUserCmdSchedulerState state() const noexcept;
     [[nodiscard]] GoldSrcUserCmdSchedulerUpdateResult update(
         std::int64_t monotonic_time_nanoseconds,
         const gameplay_input::GameplayInputIntent& intent,

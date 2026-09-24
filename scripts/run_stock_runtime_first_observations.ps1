@@ -48,6 +48,8 @@ param(
     [int]$BaselineDurationSeconds = 45,
     [Parameter(ParameterSetName = 'Capture')][ValidateRange(30, 300)]
     [int]$IdleDurationSeconds = 60,
+    [Parameter(ParameterSetName = 'Capture')]
+    [switch]$CanaryOnly,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Policy')]
     [switch]$ValidateCampaignAggregationPolicy,
@@ -318,6 +320,49 @@ function Get-CanaryResumeDisposition {
     if ($CampaignHasState) { return 'campaign-without-canary' }
     if ($RunCount -eq 1) { return 'unbound-quarantine' }
     return 'fresh-capture'
+}
+
+function Test-ResearchRunSteamPolicy {
+    param([object]$Manifest, [bool]$RequireAccepted)
+    $schema = [string]$Manifest.schema
+    if ($schema -ceq 'hlclient.stock-runtime-research-run.v1') {
+        return (-not $RequireAccepted) -or
+            [string]$Manifest.external_drift_status -ceq 'none'
+    }
+    if ($schema -cne 'hlclient.stock-runtime-research-run.v2') { return $false }
+    foreach ($name in @('raw_external_state', 'protected_projection',
+            'steam_rewrite_policy_id', 'policy_decision')) {
+        if ($null -eq $Manifest.PSObject.Properties[$name]) { return $false }
+    }
+    if (@('unchanged', 'changed', 'incomplete') -cnotcontains
+            [string]$Manifest.raw_external_state -or
+        @('none', 'match', 'mismatch', 'incomplete') -cnotcontains
+            [string]$Manifest.protected_projection -or
+        @('legacy-strict-v1', 'steam-appinfo-change-number-v1') -cnotcontains
+            [string]$Manifest.steam_rewrite_policy_id -or
+        @('strict_pass', 'explicit_advisory', 'reject') -cnotcontains
+            [string]$Manifest.policy_decision) { return $false }
+    if (-not $RequireAccepted) { return $true }
+    return (
+        ([string]$Manifest.raw_external_state -ceq 'unchanged' -and
+         [string]$Manifest.external_drift_status -ceq 'none' -and
+         [string]$Manifest.protected_projection -ceq 'none' -and
+         [string]$Manifest.policy_decision -ceq 'strict_pass') -or
+        ([string]$Manifest.raw_external_state -ceq 'changed' -and
+         [string]$Manifest.external_drift_status -ceq 'changed' -and
+         [string]$Manifest.protected_projection -ceq 'match' -and
+         [string]$Manifest.steam_rewrite_policy_id -ceq
+            'steam-appinfo-change-number-v1' -and
+         [string]$Manifest.policy_decision -ceq 'explicit_advisory'))
+}
+
+function Get-CanaryOnlyCompletionDisposition {
+    param(
+        [bool]$BindingValid,
+        [int]$MatrixRunCount)
+    if (-not $BindingValid -or $MatrixRunCount -lt 0) { return 'reject' }
+    if ($MatrixRunCount -ne 0) { return 'campaign-already-started' }
+    return 'canary_complete_campaign_pending'
 }
 
 function Get-PreCampaignCanaryFailureCategory {
@@ -592,6 +637,37 @@ if ($PSCmdlet.ParameterSetName -ceq 'Policy') {
         (Get-CanaryResumeDisposition 1 1 $true) -cne 'bound-reuse') {
         throw 'Pre-campaign canary resume policy failed open.'
     }
+    if ((Get-CanaryOnlyCompletionDisposition $true 0) -cne
+            'canary_complete_campaign_pending' -or
+        (Get-CanaryOnlyCompletionDisposition $true 1) -cne
+            'campaign-already-started' -or
+        (Get-CanaryOnlyCompletionDisposition $false 0) -cne 'reject') {
+        throw 'CanaryOnly completion policy failed open.'
+    }
+    $strictPolicyFixture = [pscustomobject]@{
+        schema = 'hlclient.stock-runtime-research-run.v2'
+        external_drift_status = 'none'
+        raw_external_state = 'unchanged'
+        protected_projection = 'none'
+        steam_rewrite_policy_id = 'legacy-strict-v1'
+        policy_decision = 'strict_pass'
+    }
+    $advisoryPolicyFixture = [pscustomobject]@{
+        schema = 'hlclient.stock-runtime-research-run.v2'
+        external_drift_status = 'changed'
+        raw_external_state = 'changed'
+        protected_projection = 'match'
+        steam_rewrite_policy_id = 'steam-appinfo-change-number-v1'
+        policy_decision = 'explicit_advisory'
+    }
+    $unknownPolicyFixture = $advisoryPolicyFixture |
+        ConvertTo-Json -Compress | ConvertFrom-Json
+    $unknownPolicyFixture.steam_rewrite_policy_id = 'unknown-policy-v9'
+    if (-not (Test-ResearchRunSteamPolicy $strictPolicyFixture $true) -or
+        -not (Test-ResearchRunSteamPolicy $advisoryPolicyFixture $true) -or
+        (Test-ResearchRunSteamPolicy $unknownPolicyFixture $false)) {
+        throw 'Versioned research-run Steam policy failed open.'
+    }
     Write-Output '[stock-runtime-campaign-policy] attributed-reconnect-packets=verified'
     Write-Output '[stock-runtime-campaign-policy] retired-tail-inflation-rejections=1'
     Write-Output '[stock-runtime-campaign-policy] run-reparse-rejections=1'
@@ -604,6 +680,9 @@ if ($PSCmdlet.ParameterSetName -ceq 'Policy') {
     Write-Output "[stock-runtime-campaign-policy] mixed-external-target-binding-rejections=$mixedExternalTargetBindingRejections"
     Write-Output '[stock-runtime-campaign-policy] canary-mutation-rejections=4'
     Write-Output '[stock-runtime-campaign-policy] unbound-canary-rebind-rejections=1'
+    Write-Output '[stock-runtime-campaign-policy] canary-only-matrix-runs=0'
+    Write-Output '[stock-runtime-campaign-policy] canary-only-resume-binding=verified'
+    Write-Output '[stock-runtime-campaign-policy] versioned-steam-policy=verified'
     Write-Output '[stock-runtime-campaign-policy] files-written=0'
     Write-Output '[stock-runtime-campaign-policy] result=success'
     return
@@ -617,8 +696,12 @@ if (-not $EnableActiveCapture -or $ConfirmActiveCapture -cne $requiredToken) {
 }
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\', '/')
-$requiredImplementationSubject =
-    'Complete stock runtime capture campaign lifecycle'
+$requiredImplementationSubjects = @(
+    'Complete stock runtime capture campaign lifecycle',
+    'Add verified Steam rewrite policy and HLDS readiness',
+    'Prepare gated stock HLDS readiness and canary-only mode')
+$activationImplementationSubject =
+    'Add verified Steam rewrite policy and HLDS readiness'
 $requiredOutputRoot = [IO.Path]::GetFullPath(
     (Join-Path $repositoryRoot 'manual-artifacts\stock-runtime')).TrimEnd('\', '/')
 $requiredCanaryOutputRoot = [IO.Path]::GetFullPath(
@@ -754,7 +837,7 @@ function Assert-CampaignImplementationCommit {
     $subject = @(& $git.Source -C $repositoryRoot show -s --format=%s `
         $Commit 2>$null)
     if ($LASTEXITCODE -ne 0 -or $subject.Count -ne 1 -or
-        $subject[0] -cne $requiredImplementationSubject) {
+        $requiredImplementationSubjects -cnotcontains $subject[0]) {
         throw 'Campaign implementation commit has the wrong exact subject.'
     }
     & $git.Source -C $repositoryRoot merge-base --is-ancestor $Commit HEAD `
@@ -786,7 +869,7 @@ function Resolve-CampaignImplementationCommit {
 
     $git = Get-Command git.exe -ErrorAction Stop
     $candidates = @(& $git.Source -C $repositoryRoot log HEAD --format=%H `
-        --fixed-strings --grep=$requiredImplementationSubject 2>$null)
+        2>$null)
     if ($LASTEXITCODE -ne 0 -or $candidates.Count -gt 4096) {
         throw 'Campaign implementation commit search failed.'
     }
@@ -795,7 +878,7 @@ function Resolve-CampaignImplementationCommit {
         $subject = @(& $git.Source -C $repositoryRoot show -s --format=%s `
             $candidate 2>$null)
         if ($LASTEXITCODE -eq 0 -and $subject.Count -eq 1 -and
-            $subject[0] -ceq $requiredImplementationSubject) {
+            $requiredImplementationSubjects -ccontains $subject[0]) {
             Assert-CampaignImplementationCommit $candidate
             return $candidate
         }
@@ -1093,7 +1176,7 @@ function Get-CanaryBindingForRun {
         $manifest = Read-CapabilityJson $runCapability `
             'research-run-metadata.json' 262144 `
             'pre-campaign canary run manifest'
-        if ([string]$manifest.schema -cne 'hlclient.stock-runtime-research-run.v1' -or
+        if (-not (Test-ResearchRunSteamPolicy $manifest $true) -or
             [string]$manifest.run_id -cne $Directory.Name -or
             [string]$manifest.map_category -cne 'boot_camp' -or
             [string]$manifest.scenario -cne 'baseline' -or
@@ -1251,6 +1334,7 @@ function Confirm-PreCampaignCanary {
             -Game valve `
             -Map boot_camp `
             -Scenario baseline `
+            -ServerProfileId steam-hlds-10210-no-mode-banner-v1 `
             -RelayPort $FirstRelayPort `
             -ServerPort ($FirstRelayPort + 1) `
             -OutputRoot $canaryOutput `
@@ -1407,7 +1491,7 @@ function Get-CampaignState {
                 'Campaign run'
             $manifest = Read-CapabilityJson $runCapability `
                 'research-run-metadata.json' 262144 'research run manifest'
-            if ([string]$manifest.schema -cne 'hlclient.stock-runtime-research-run.v1' -or
+            if (-not (Test-ResearchRunSteamPolicy $manifest $false) -or
                 [string]$manifest.run_id -cne $directory.Name -or
                 $manifest.accepted_evidence_run -isnot [bool] -or
                 $manifest.accepted_transport_run -isnot [bool]) {
@@ -1821,6 +1905,15 @@ function Test-LoopbackUdpPortPairAvailable {
 }
 
 $implementationCommit = Resolve-CampaignImplementationCommit
+$git = Get-Command git.exe -ErrorAction Stop
+$implementationSubject = @(& $git.Source -C $repositoryRoot show -s `
+    --format=%s $implementationCommit 2>$null)
+if ($LASTEXITCODE -ne 0 -or $implementationSubject.Count -ne 1 -or
+    $implementationSubject[0] -cne $activationImplementationSubject) {
+    Write-Output '[stock-runtime-campaign] activation-gate=pending'
+    Write-Output '[stock-runtime-campaign] attempted-runs=0'
+    throw 'Stock client launch is blocked until the verified policy/readiness activation commit is bound.'
+}
 try {
     $canaryBinding = Confirm-PreCampaignCanary $implementationCommit
 } catch {
@@ -1844,6 +1937,19 @@ Assert-CampaignResumeAllowed $state
 Assert-CampaignProfileMatchesCanary $state $canaryBinding
 $publicationSession = New-CampaignPublicationSession $state
 try {
+    if ($CanaryOnly) {
+        $canaryOnlyDisposition = Get-CanaryOnlyCompletionDisposition `
+            $true ([int]$state.Runs.Count)
+        if ($canaryOnlyDisposition -cne 'canary_complete_campaign_pending') {
+            throw 'CanaryOnly requires a valid binding before the first matrix run.'
+        }
+        Write-Output '[stock-runtime-campaign] matrix-runs-started=0'
+        Write-Output '[stock-runtime-campaign] attempted-runs=0'
+        Write-Output '[stock-runtime-campaign] accepted-runs=0'
+        Write-Output '[stock-runtime-campaign] evidence-json-written=false'
+        Write-Output '[stock-runtime-campaign] result=canary_complete_campaign_pending'
+        return
+    }
     if ($state.Threshold -ceq 'passed') {
         Write-Output '[stock-runtime-campaign] resume=already-complete'
     }
@@ -1885,6 +1991,7 @@ try {
             -Game valve `
             -Map $case.Map `
             -Scenario $case.Scenario `
+            -ServerProfileId steam-hlds-10210-no-mode-banner-v1 `
             -RelayPort $relayPort `
             -ServerPort $serverPort `
             -OutputRoot $output `

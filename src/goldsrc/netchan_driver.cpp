@@ -507,6 +507,7 @@ public:
             return;
         }
         last_update_ = now;
+        ++receive_statistics_.updates;
         if (!validate_local_continuity(now)) {
             return;
         }
@@ -516,6 +517,7 @@ public:
         }
 
         std::size_t outgoing_packets_this_update = 0U;
+        bool contextual_packet_sent = false;
         if (pending_contextual_plan_) {
             // A committed context owns the exact current sequence/reliable
             // composition. Send it before RX can admit an ACK and invalidate
@@ -539,15 +541,19 @@ public:
             if (!send_contextual_pending(now, outgoing_packets_this_update)) {
                 return;
             }
+            contextual_packet_sent = true;
         }
         for (std::size_t received_count = 0U;
              received_count < config_.maximum_datagrams_per_update &&
              state_ == NetchanDriverState::active &&
-             outgoing_packets_this_update <
-                 config_.maximum_outgoing_packets_per_update;
+             (outgoing_packets_this_update <
+                  config_.maximum_outgoing_packets_per_update ||
+              (contextual_packet_sent &&
+               session_.first_acknowledgement_sent()));
              ++received_count) {
             network::DatagramTransportReceiveResult received;
             try {
+                ++receive_statistics_.receive_polls;
                 received = transport_.receive(config_.maximum_datagram_size);
             } catch (...) {
                 enter_terminal(
@@ -982,6 +988,10 @@ public:
     {
         return transmitted_packet_count_;
     }
+    [[nodiscard]] NetchanDriverReceiveStatistics receive_statistics() const noexcept
+    {
+        return receive_statistics_;
+    }
     [[nodiscard]] std::optional<std::uint64_t>
     last_sent_unreliable_context_identity() const noexcept
     {
@@ -1085,6 +1095,7 @@ private:
     {
         using Status = network::DatagramTransportReceiveStatus;
         if (received.status == Status::would_block) {
+            ++receive_statistics_.would_block;
             if (received.datagram || received.source || received.payload_size != 0U ||
                 !received.error.empty()) {
                 enter_terminal(
@@ -1125,6 +1136,7 @@ private:
             return false;
         }
         if (*received.source != remote_endpoint_) {
+            ++receive_statistics_.wrong_endpoint;
             emit_trace(
                 NetchanDriverTraceClassification::wrong_endpoint_ignored,
                 *received.source,
@@ -1156,6 +1168,7 @@ private:
                 NetchanDriverEventType::network_error);
             return false;
         }
+        ++receive_statistics_.owning_datagrams;
         return process_target_datagram(
             std::move(received.datagram->payload),
             now,
@@ -1404,6 +1417,10 @@ private:
         }
 
         last_valid_packet_time_ = now;
+        ++receive_statistics_.accepted_sequences;
+        if (!receive_statistics_.first_accepted_sequence)
+            receive_statistics_.first_accepted_sequence = packet.header.sequence.sequence.value();
+        receive_statistics_.last_accepted_sequence = packet.header.sequence.sequence.value();
         if (completes_reliable) {
             events_.push(NetchanDriverEvent{
                 NetchanDriverEventType::reliable_payload_acknowledged,
@@ -1427,6 +1444,10 @@ private:
             payload_size,
             now,
         });
+        ++receive_statistics_.payloads_created;
+        if (!receive_statistics_.first_payload_sequence)
+            receive_statistics_.first_payload_sequence = packet.header.sequence.sequence.value();
+        receive_statistics_.last_payload_sequence = packet.header.sequence.sequence.value();
         emit_trace(
             NetchanDriverTraceClassification::payload_ready,
             remote_endpoint_,
@@ -1436,9 +1457,7 @@ private:
         // An unfragmented datagram contributes at most one owning payload.
         // A completed fragment unit may separately contribute one completed
         // transfer and one contemporaneous suffix.
-        return !config_.yield_after_owning_payload &&
-               outgoing_packets_this_update <
-                   config_.maximum_outgoing_packets_per_update;
+        return !config_.yield_after_owning_payload;
     }
 
     [[nodiscard]] bool process_fragment_packet(
@@ -1683,6 +1702,10 @@ private:
         }
 
         last_valid_packet_time_ = now;
+        ++receive_statistics_.accepted_sequences;
+        if (!receive_statistics_.first_accepted_sequence)
+            receive_statistics_.first_accepted_sequence = packet.header.sequence.sequence.value();
+        receive_statistics_.last_accepted_sequence = packet.header.sequence.sequence.value();
         const auto& receipt = *inserted.receipt;
         if (completes_reliable) {
             events_.push(NetchanDriverEvent{
@@ -1745,6 +1768,10 @@ private:
                 completion_size,
                 now,
             });
+            ++receive_statistics_.payloads_created;
+            if (!receive_statistics_.first_payload_sequence)
+                receive_statistics_.first_payload_sequence = packet.header.sequence.sequence.value();
+            receive_statistics_.last_payload_sequence = packet.header.sequence.sequence.value();
             emit_trace(
                 NetchanDriverTraceClassification::normal_transfer_completed,
                 remote_endpoint_,
@@ -1766,9 +1793,7 @@ private:
                 now,
             });
         }
-        return !(config_.yield_after_owning_payload && emits_owning_payload) &&
-               outgoing_packets_this_update <
-                   config_.maximum_outgoing_packets_per_update;
+        return !(config_.yield_after_owning_payload && emits_owning_payload);
     }
 
     [[nodiscard]] bool send_first_acknowledgement(
@@ -1842,14 +1867,11 @@ private:
     {
         if (outgoing_packets_this_update >=
             config_.maximum_outgoing_packets_per_update) {
-            enter_terminal(
-                NetchanDriverState::protocol_error,
-                NetchanDriverErrorCode::invalid_configuration,
-                "Required fragment acknowledgement exceeds the bounded TX budget",
-                now,
-                NetchanDriverTraceClassification::protocol_failure,
-                NetchanDriverEventType::protocol_error);
-            return false;
+            // The contextual packet already consumed this update's TX slot.
+            // Its next sequence (or a later bounded send) can acknowledge the
+            // committed incoming reliable generation without dropping RX.
+            acknowledgement_pending_ = true;
+            return true;
         }
 
         auto prepared = session_.prepare_outgoing_packet();
@@ -1952,7 +1974,7 @@ private:
                 packet.payload.size(),
                 now,
                 fragment_plan,
-                fragment_transfer_size)) {
+                fragment_transfer_size, true)) {
             return false;
         }
         last_sent_unreliable_context_identity_ = sent_plan_identity;
@@ -2053,7 +2075,8 @@ private:
                     packet.payload.size(),
                     now,
                     fragment_plan,
-                    fragment_transfer_size)) {
+                    fragment_transfer_size,
+                    true)) {
                 static_cast<void>(session_.abandon_outgoing_packet(
                     std::move(*prepared.plan)));
                 return;
@@ -2121,7 +2144,8 @@ private:
         const std::size_t payload_size,
         const NetchanDriverTimePoint now,
         const NetchanFragmentBuildPlan* const fragment_plan = nullptr,
-        const std::size_t fragment_transfer_size = 0U)
+        const std::size_t fragment_transfer_size = 0U,
+        const bool retain_on_would_block = false)
     {
         if (transmitted_packet_count_ ==
             std::numeric_limits<std::size_t>::max()) {
@@ -2146,6 +2170,9 @@ private:
                 NetchanDriverTraceClassification::network_failure,
                 NetchanDriverEventType::network_error);
             return false;
+        }
+        if (retain_on_would_block && sent.status == network::DatagramSendStatus::would_block && sent.error.empty()) {
+            return false; // Context remains owned; stop before RX can revise it.
         }
         if (!sent || !sent.error.empty()) {
             enter_terminal(
@@ -2259,6 +2286,10 @@ private:
         const std::size_t transfer_size = 0U,
         const NetchanFragmentBuildPlan* const fragment_plan = nullptr)
     {
+        if (classification == NetchanDriverTraceClassification::duplicate_sequence_ignored ||
+                   classification == NetchanDriverTraceClassification::older_sequence_ignored) {
+            ++receive_statistics_.rejected_sequences;
+        }
         if (!trace_callback_ || trace_callback_active_) {
             return;
         }
@@ -2328,6 +2359,7 @@ private:
     bool acknowledgement_pending_{false};
     bool cleanup_done_{false};
     std::size_t transmitted_packet_count_{0U};
+    NetchanDriverReceiveStatistics receive_statistics_{};
     std::size_t cleanup_count_{0U};
     std::uint64_t outgoing_context_revision_{0U};
     std::uint64_t next_outgoing_context_plan_identity_{1U};
@@ -2454,6 +2486,11 @@ std::size_t NetchanDriver::pending_event_count() const noexcept
 std::size_t NetchanDriver::transmitted_packet_count() const noexcept
 {
     return implementation_->transmitted_packet_count();
+}
+
+NetchanDriverReceiveStatistics NetchanDriver::receive_statistics() const noexcept
+{
+    return implementation_->receive_statistics();
 }
 
 std::optional<std::uint64_t>

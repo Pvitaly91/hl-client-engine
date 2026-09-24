@@ -365,6 +365,7 @@ private:
     case ResourceClientResponseStageState::waiting_for_server_continuation:
     case ResourceClientResponseStageState::decoding_server_continuation:
         return GoldSrcHandshakeState::waiting_for_resource_response;
+    case ResourceClientResponseStageState::response_completion_ready:
     case ResourceClientResponseStageState::next_server_boundary_reached:
         return GoldSrcHandshakeState::resource_response_boundary_reached;
     case ResourceClientResponseStageState::consistency_provider_required:
@@ -424,6 +425,38 @@ private:
     case PostResourceEntitySnapshotStageState::network_error:
         return GoldSrcHandshakeState::network_error;
     case PostResourceEntitySnapshotStageState::protocol_error:
+        return GoldSrcHandshakeState::protocol_error;
+    }
+    return GoldSrcHandshakeState::protocol_error;
+}
+
+[[nodiscard]] GoldSrcHandshakeState map_live_runtime_state(
+    const LiveRuntimeStageState state) noexcept
+{
+    switch (state) {
+    case LiveRuntimeStageState::idle:
+    case LiveRuntimeStageState::waiting_for_resource_response:
+    case LiveRuntimeStageState::waiting_for_baselines:
+    case LiveRuntimeStageState::receiving_runtime:
+    case LiveRuntimeStageState::waiting_for_live_visual_input:
+    case LiveRuntimeStageState::running_usercmd_scenario:
+    case LiveRuntimeStageState::running_live_visual_control:
+        return GoldSrcHandshakeState::waiting_for_live_runtime_state;
+    case LiveRuntimeStageState::stable_runtime_state_ready:
+    case LiveRuntimeStageState::live_usercmd_check_ready:
+    case LiveRuntimeStageState::live_visual_control_ready:
+        return GoldSrcHandshakeState::live_runtime_state_ready;
+    case LiveRuntimeStageState::timed_out:
+        return GoldSrcHandshakeState::live_runtime_timed_out;
+    case LiveRuntimeStageState::cancelled:
+        return GoldSrcHandshakeState::cancelled;
+    case LiveRuntimeStageState::backpressure:
+        return GoldSrcHandshakeState::live_runtime_backpressure;
+    case LiveRuntimeStageState::secondary_stream_pending:
+        return GoldSrcHandshakeState::live_runtime_secondary_stream_pending;
+    case LiveRuntimeStageState::network_error:
+        return GoldSrcHandshakeState::network_error;
+    case LiveRuntimeStageState::protocol_error:
         return GoldSrcHandshakeState::protocol_error;
     }
     return GoldSrcHandshakeState::protocol_error;
@@ -825,26 +858,40 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
     WorldRenderPackageStageConfig world_render_package_config,
     WorldRenderPackageTraceCallback world_render_package_trace_callback,
     PostResourceEntitySnapshotStageConfig post_resource_config,
-    PostResourceEntitySnapshotTraceCallback post_resource_trace_callback)
-    : stop_point_{stop_point},
+    PostResourceEntitySnapshotTraceCallback post_resource_trace_callback,
+    auth::IAuthenticationProvider* authentication_provider,
+    ClientConnectionSettings authentication_settings,
+    ConnectCompatibilityProfile authentication_profile,
+    client::ClientWorldState* live_runtime_target,
+    LiveRuntimeStageConfig live_runtime_config,
+    LiveRuntimeStageTraceCallback live_runtime_trace_callback)
+    : transport_{transport},
+      remote_endpoint_{remote_endpoint},
+      stop_point_{stop_point},
       challenge_exchange_{
           transport,
           remote_endpoint,
           challenge_config,
           std::move(challenge_trace_callback)},
+      deferred_connect_trace_callback_{std::move(connect_trace_callback)},
+      authentication_provider_{authentication_provider},
+      authentication_settings_{std::move(authentication_settings)},
+      authentication_profile_{authentication_profile},
       authentication_session_{std::move(authentication_session)}
 {
     if (stop_point_ != HandshakeStopPoint::challenge) {
-        if (!prepared_request) {
+        if (!prepared_request && authentication_provider_ == nullptr) {
             configuration_error_ =
                 "Connect request/response mode requires prepared authentication and user info";
             state_ = GoldSrcHandshakeState::configuration_error;
         } else {
-            connect_stage_.emplace(
-                transport,
-                remote_endpoint,
-                std::move(*prepared_request),
-                std::move(connect_trace_callback));
+            if (prepared_request) {
+                connect_stage_.emplace(
+                    transport,
+                    remote_endpoint,
+                    std::move(*prepared_request),
+                    std::move(deferred_connect_trace_callback_));
+            }
             if (stop_point_ == HandshakeStopPoint::connect_response ||
                 stop_point_ == HandshakeStopPoint::netchan_bootstrap ||
                 stop_point_ == HandshakeStopPoint::signon_boundary ||
@@ -858,6 +905,7 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                 stop_point_ == HandshakeStopPoint::usercmd_boundary ||
                 stop_point_ == HandshakeStopPoint::server_baselines ||
                 stop_point_ == HandshakeStopPoint::entity_snapshot ||
+                stop_point_ == HandshakeStopPoint::live_runtime_state ||
                 stop_point_ == HandshakeStopPoint::precache_manifest ||
                 stop_point_ == HandshakeStopPoint::asset_dispatch ||
                 stop_point_ == HandshakeStopPoint::world_textures ||
@@ -980,6 +1028,33 @@ GoldSrcHandshakeCoordinator::GoldSrcHandshakeCoordinator(
                         std::move(post_resource_config),
                         resource_consistency_provider,
                         std::move(post_resource_trace_callback));
+            }
+            if (stop_point_ == HandshakeStopPoint::live_runtime_state) {
+                if (live_runtime_target == nullptr) {
+                    configuration_error_ =
+                        "Live-runtime mode requires an application-owned ClientWorldState";
+                    state_ = GoldSrcHandshakeState::configuration_error;
+                } else {
+                    live_runtime_config.resource_response =
+                        std::move(resource_response_config);
+                    apply_live_runtime_compatibility_profile(
+                        live_runtime_config);
+                    live_runtime_stage_ = std::make_unique<LiveRuntimeStage>(
+                        transport,
+                        remote_endpoint,
+                        *live_runtime_target,
+                        std::move(live_runtime_config),
+                        resource_consistency_provider,
+                        std::move(live_runtime_trace_callback),
+                        std::move(signon_trace_callback),
+                        std::move(pre_resource_trace_callback),
+                        std::move(delta_trace_callback),
+                        std::move(movement_environment_trace_callback),
+                        std::move(user_info_trace_callback),
+                        std::move(resource_transition_trace_callback),
+                        std::move(resource_list_trace_callback),
+                        std::move(resource_response_trace_callback));
+                }
             }
             if (stop_point_ == HandshakeStopPoint::precache_manifest) {
                 if (!local_resource_environment) {
@@ -1132,6 +1207,18 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
     if (terminal()) {
         return;
     }
+    if (state_ == GoldSrcHandshakeState::waiting_for_authentication) {
+        synchronize_from_authentication(now);
+        release_authentication_session_if_terminal();
+        return;
+    }
+    if (live_runtime_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_live_runtime_state) {
+        live_runtime_stage_->update(now);
+        synchronize_from_live_runtime();
+        release_authentication_session_if_terminal();
+        return;
+    }
     if (post_resource_entity_snapshot_stage_ &&
         state_ == GoldSrcHandshakeState::
                       waiting_for_post_resource_entity_snapshot) {
@@ -1244,6 +1331,22 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
+        return;
+    }
+    if (state_ == GoldSrcHandshakeState::waiting_for_authentication) {
+        if (authentication_operation_) {
+            authentication_operation_->cancel();
+            authentication_operation_.reset();
+        }
+        state_ = GoldSrcHandshakeState::cancelled;
+        release_authentication_session_if_terminal();
+        return;
+    }
+    if (live_runtime_stage_ &&
+        state_ == GoldSrcHandshakeState::waiting_for_live_runtime_state) {
+        live_runtime_stage_->cancel(now);
+        synchronize_from_live_runtime();
+        release_authentication_session_if_terminal();
         return;
     }
     if (post_resource_entity_snapshot_stage_ &&
@@ -1373,6 +1476,8 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::accepted:
         return stop_point_ == HandshakeStopPoint::connect_response;
     case GoldSrcHandshakeState::rejected:
+    case GoldSrcHandshakeState::authentication_failed:
+    case GoldSrcHandshakeState::authentication_timed_out:
     case GoldSrcHandshakeState::connect_response_timed_out:
     case GoldSrcHandshakeState::netchan_bootstrap_complete:
     case GoldSrcHandshakeState::netchan_timed_out:
@@ -1424,6 +1529,10 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::post_resource_timed_out:
     case GoldSrcHandshakeState::post_resource_backpressure:
     case GoldSrcHandshakeState::post_resource_secondary_stream_pending:
+    case GoldSrcHandshakeState::live_runtime_state_ready:
+    case GoldSrcHandshakeState::live_runtime_timed_out:
+    case GoldSrcHandshakeState::live_runtime_backpressure:
+    case GoldSrcHandshakeState::live_runtime_secondary_stream_pending:
     case GoldSrcHandshakeState::precache_manifest_ready:
     case GoldSrcHandshakeState::local_resources_incomplete:
     case GoldSrcHandshakeState::unsafe_local_resources:
@@ -1462,6 +1571,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
         return true;
     case GoldSrcHandshakeState::idle:
     case GoldSrcHandshakeState::waiting_for_challenge:
+    case GoldSrcHandshakeState::waiting_for_authentication:
     case GoldSrcHandshakeState::building_request:
     case GoldSrcHandshakeState::request_ready:
     case GoldSrcHandshakeState::sending_request:
@@ -1476,6 +1586,7 @@ bool GoldSrcHandshakeCoordinator::terminal() const noexcept
     case GoldSrcHandshakeState::waiting_for_resource_list:
     case GoldSrcHandshakeState::waiting_for_resource_response:
     case GoldSrcHandshakeState::waiting_for_post_resource_entity_snapshot:
+    case GoldSrcHandshakeState::waiting_for_live_runtime_state:
     case GoldSrcHandshakeState::waiting_for_precache_manifest:
     case GoldSrcHandshakeState::waiting_for_asset_dispatch:
     case GoldSrcHandshakeState::waiting_for_world_textures:
@@ -1630,6 +1741,68 @@ GoldSrcHandshakeCoordinator::post_resource_error() const noexcept
         ? post_resource_entity_snapshot_stage_->error()
         : empty;
 }
+const std::optional<LiveRuntimeState>&
+GoldSrcHandshakeCoordinator::live_runtime_result() const noexcept
+{
+    static const std::optional<LiveRuntimeState> empty;
+    return live_runtime_stage_ ? live_runtime_stage_->result() : empty;
+}
+const std::optional<LiveRuntimeStageError>&
+GoldSrcHandshakeCoordinator::live_runtime_error() const noexcept
+{
+    static const std::optional<LiveRuntimeStageError> empty;
+    return live_runtime_stage_ ? live_runtime_stage_->error() : empty;
+}
+bool GoldSrcHandshakeCoordinator::live_visual_input_ready() const noexcept
+{
+    return live_runtime_stage_ && live_runtime_stage_->live_visual_input_ready();
+}
+const ResourceListState*
+GoldSrcHandshakeCoordinator::live_resource_list() const noexcept
+{
+    return live_runtime_stage_ ? live_runtime_stage_->live_resource_list()
+                               : nullptr;
+}
+const ServerInfoState*
+GoldSrcHandshakeCoordinator::live_server_info() const noexcept
+{
+    return live_runtime_stage_ ? live_runtime_stage_->live_server_info()
+                               : nullptr;
+}
+bool GoldSrcHandshakeCoordinator::submit_live_visual_input(
+    const LiveVisualControlInput& input,
+    const ChallengeExchangeTimePoint now) noexcept
+{
+    return live_runtime_stage_ &&
+        live_runtime_stage_->submit_live_visual_input(input, now);
+}
+bool GoldSrcHandshakeCoordinator::activate_live_visual_control(
+    const ChallengeExchangeTimePoint now) noexcept
+{
+    return live_runtime_stage_ &&
+        live_runtime_stage_->activate_live_visual_control(now);
+}
+std::optional<LiveUserCmdCheckState>
+GoldSrcHandshakeCoordinator::live_usercmd_snapshot() const
+{
+    return live_runtime_stage_ ? live_runtime_stage_->live_usercmd_snapshot()
+                               : std::nullopt;
+}
+bool GoldSrcHandshakeCoordinator::attach_reference_prediction_collision(
+    std::shared_ptr<const hlclient::collision::CollisionWorldPackage> package)
+{
+    return live_runtime_stage_ &&
+        live_runtime_stage_->attach_reference_prediction_collision(
+            std::move(package));
+}
+LiveReferencePredictionSnapshot
+GoldSrcHandshakeCoordinator::live_reference_prediction_snapshot(
+    const ChallengeExchangeTimePoint now) const
+{
+    return live_runtime_stage_
+        ? live_runtime_stage_->live_reference_prediction_snapshot(now)
+        : LiveReferencePredictionSnapshot{};
+}
 const std::optional<PrecacheManifestSignonState>&
 GoldSrcHandshakeCoordinator::precache_manifest_result() const noexcept
 {
@@ -1729,10 +1902,18 @@ std::size_t GoldSrcHandshakeCoordinator::connect_send_attempts() const noexcept
 {
     return connect_stage_ ? connect_stage_->send_attempts() : 0U;
 }
+const std::optional<auth::AuthenticationError>&
+GoldSrcHandshakeCoordinator::authentication_error() const noexcept
+{
+    return authentication_error_;
+}
 std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
 {
     if (!configuration_error_.empty()) {
         return configuration_error_;
+    }
+    if (authentication_error_) {
+        return authentication_error_->context;
     }
     if (connect_stage_ && connect_stage_->error()) {
         return connect_stage_->error()->context;
@@ -1772,6 +1953,9 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
         post_resource_entity_snapshot_stage_->error()) {
         return post_resource_entity_snapshot_stage_->error()->context;
     }
+    if (live_runtime_stage_ && live_runtime_stage_->error()) {
+        return live_runtime_stage_->error()->context;
+    }
     if (precache_manifest_stage_ && precache_manifest_stage_->error()) {
         return precache_manifest_stage_->error()->context;
     }
@@ -1798,10 +1982,111 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
         stop_point_ == HandshakeStopPoint::challenge) {
         return;
     }
+    if (!challenge_exchange_.challenge() || !challenge_exchange_.local_endpoint()) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ = "Challenge completed without a parsed response or local endpoint";
+        return;
+    }
+    if (!connect_stage_) {
+        if (authentication_provider_ == nullptr) {
+            state_ = GoldSrcHandshakeState::configuration_error;
+            configuration_error_ =
+                "Challenge completed without a prepared request or authentication provider";
+            return;
+        }
+        const auto& challenge = *challenge_exchange_.challenge();
+        auth::AuthenticationRequestContext context;
+        context.remote_endpoint = remote_endpoint_;
+        context.protocol = ProtocolVersion::goldsrc_48;
+        context.compatibility_profile = authentication_profile_;
+        context.challenge = challenge.challenge;
+        context.game_server_steam_id = challenge.profile_parameter_2;
+        context.game_server_secure = challenge.profile_parameter_3 != 0U;
+        auto begun = authentication_provider_->begin(context);
+        if (!begun || !begun.operation) {
+            authentication_error_ = begun.error.value_or(auth::AuthenticationError{
+                auth::AuthenticationErrorCode::provider_error,
+                "Authentication provider did not start an operation"});
+            state_ = authentication_error_->code ==
+                             auth::AuthenticationErrorCode::timed_out
+                         ? GoldSrcHandshakeState::authentication_timed_out
+                         : GoldSrcHandshakeState::authentication_failed;
+            return;
+        }
+        authentication_operation_ = std::move(begun.operation);
+        state_ = GoldSrcHandshakeState::waiting_for_authentication;
+        synchronize_from_authentication(now);
+        return;
+    }
+    start_connect_after_challenge(now);
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_authentication(
+    const ChallengeExchangeTimePoint now)
+{
+    if (!authentication_operation_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Authentication wait has no owning provider operation";
+        return;
+    }
+    auto update = authentication_operation_->update();
+    if (update.state == auth::AuthenticationUpdateState::pending) {
+        state_ = GoldSrcHandshakeState::waiting_for_authentication;
+        return;
+    }
+    authentication_operation_.reset();
+    if (update.state != auth::AuthenticationUpdateState::succeeded ||
+        !update.session) {
+        authentication_error_ = update.error.value_or(auth::AuthenticationError{
+            auth::AuthenticationErrorCode::provider_error,
+            "Authentication provider completed without a session"});
+        state_ = authentication_error_->code ==
+                         auth::AuthenticationErrorCode::timed_out
+                     ? GoldSrcHandshakeState::authentication_timed_out
+                     : GoldSrcHandshakeState::authentication_failed;
+        return;
+    }
+
+    auto session = std::move(*update.session);
+    auto material = session.take_material();
+    if (!material) {
+        authentication_error_ = auth::AuthenticationError{
+            auth::AuthenticationErrorCode::invalid_material,
+            "Authentication session completed without wire material"};
+        state_ = GoldSrcHandshakeState::authentication_failed;
+        return;
+    }
+    auto prepared = prepare_connect_request(
+        authentication_settings_,
+        std::move(*material),
+        authentication_profile_);
+    if (!prepared) {
+        authentication_error_ = auth::AuthenticationError{
+            auth::AuthenticationErrorCode::invalid_material,
+            prepared.error ? prepared.error->context
+                           : "Authentication material could not be serialized"};
+        state_ = GoldSrcHandshakeState::authentication_failed;
+        return;
+    }
+
+    authentication_session_.emplace(std::move(session));
+    connect_stage_.emplace(
+        transport_,
+        remote_endpoint_,
+        std::move(*prepared.value),
+        std::move(deferred_connect_trace_callback_));
+    start_connect_after_challenge(now);
+}
+
+void GoldSrcHandshakeCoordinator::start_connect_after_challenge(
+    const ChallengeExchangeTimePoint now)
+{
     if (!connect_stage_ || !challenge_exchange_.challenge() ||
         !challenge_exchange_.local_endpoint()) {
         state_ = GoldSrcHandshakeState::configuration_error;
-        configuration_error_ = "Challenge completed without a prepared connect stage or endpoint";
+        configuration_error_ =
+            "Connect send requires a prepared request, challenge, and local endpoint";
         return;
     }
     static_cast<void>(connect_stage_->start(
@@ -1822,6 +2107,7 @@ void GoldSrcHandshakeCoordinator::synchronize_from_challenge(
          stop_point_ != HandshakeStopPoint::usercmd_boundary &&
          stop_point_ != HandshakeStopPoint::server_baselines &&
          stop_point_ != HandshakeStopPoint::entity_snapshot &&
+         stop_point_ != HandshakeStopPoint::live_runtime_state &&
          stop_point_ != HandshakeStopPoint::precache_manifest &&
          stop_point_ != HandshakeStopPoint::asset_dispatch &&
          stop_point_ != HandshakeStopPoint::world_textures &&
@@ -1865,6 +2151,7 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
           stop_point_ != HandshakeStopPoint::usercmd_boundary &&
           stop_point_ != HandshakeStopPoint::server_baselines &&
           stop_point_ != HandshakeStopPoint::entity_snapshot &&
+          stop_point_ != HandshakeStopPoint::live_runtime_state &&
            stop_point_ != HandshakeStopPoint::precache_manifest &&
            stop_point_ != HandshakeStopPoint::asset_dispatch &&
            stop_point_ != HandshakeStopPoint::world_textures &&
@@ -1891,6 +2178,8 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
          ((stop_point_ == HandshakeStopPoint::server_baselines ||
            stop_point_ == HandshakeStopPoint::entity_snapshot) &&
           !post_resource_entity_snapshot_stage_) ||
+         (stop_point_ == HandshakeStopPoint::live_runtime_state &&
+          !live_runtime_stage_) ||
          (stop_point_ == HandshakeStopPoint::precache_manifest &&
           !precache_manifest_stage_) ||
          (stop_point_ == HandshakeStopPoint::asset_dispatch &&
@@ -2020,6 +2309,18 @@ void GoldSrcHandshakeCoordinator::synchronize_from_response(
         if (!post_resource_started &&
             state_ == GoldSrcHandshakeState::
                           waiting_for_post_resource_entity_snapshot) {
+            state_ = GoldSrcHandshakeState::protocol_error;
+        }
+        return;
+    }
+    if (stop_point_ == HandshakeStopPoint::live_runtime_state) {
+        const bool live_runtime_started = live_runtime_stage_->start(
+            now,
+            *challenge_exchange_.local_endpoint(),
+            std::move(driver_lifetime));
+        synchronize_from_live_runtime();
+        if (!live_runtime_started &&
+            state_ == GoldSrcHandshakeState::waiting_for_live_runtime_state) {
             state_ = GoldSrcHandshakeState::protocol_error;
         }
         return;
@@ -2375,6 +2676,24 @@ synchronize_from_post_resource_entity_snapshot()
              ResourceClientResponseStageErrorCode::invalid_configuration ||
          stage_error->driver_code ==
              NetchanDriverErrorCode::invalid_configuration)) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+    }
+}
+
+void GoldSrcHandshakeCoordinator::synchronize_from_live_runtime()
+{
+    if (!live_runtime_stage_) {
+        state_ = GoldSrcHandshakeState::configuration_error;
+        configuration_error_ =
+            "Live-runtime mode has no persistent continuation stage";
+        return;
+    }
+    while (live_runtime_stage_->poll_event()) {
+    }
+    state_ = map_live_runtime_state(live_runtime_stage_->state());
+    if (live_runtime_stage_->error() &&
+        live_runtime_stage_->error()->code ==
+            LiveRuntimeStageErrorCode::invalid_configuration) {
         state_ = GoldSrcHandshakeState::configuration_error;
     }
 }

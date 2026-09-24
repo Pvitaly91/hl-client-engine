@@ -1676,4 +1676,153 @@ const OpenGlEntityRendererStatistics& OpenGlRenderer::entity_statistics()
     return implementation_->entity_statistics();
 }
 
+std::string_view to_string(
+    const OpenGlFramebufferObservationStatus status) noexcept
+{
+    switch (status) {
+    case OpenGlFramebufferObservationStatus::valid:
+        return "valid";
+    case OpenGlFramebufferObservationStatus::default_back_buffer_unavailable:
+        return "default_back_buffer_unavailable";
+    }
+    return "unknown";
+}
+
+OpenGlFramebufferObservation OpenGlRenderer::observe_framebuffer(
+    const RenderExtent extent,
+    const ClearColor expected_clear_color, const bool retain_pixels) const
+{
+    constexpr std::uint64_t maximum_pixels = 16U * 1'024U * 1'024U;
+    if (extent.width <= 0 || extent.height <= 0) {
+        throw std::invalid_argument{
+            "Framebuffer observation requires a positive extent"};
+    }
+    const auto width = static_cast<std::uint64_t>(extent.width);
+    const auto height = static_cast<std::uint64_t>(extent.height);
+    if (height > maximum_pixels / width) {
+        throw std::length_error{
+            "Framebuffer observation exceeds the bounded pixel limit"};
+    }
+    const auto pixel_count = width * height;
+    std::vector<std::uint8_t> rgba(
+        static_cast<std::size_t>(pixel_count * 4U));
+
+    GLboolean double_buffered = GL_FALSE;
+    glGetBooleanv(GL_DOUBLEBUFFER, &double_buffered);
+    require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+        "OpenGL replay framebuffer capability query");
+    if (double_buffered != GL_TRUE) {
+        return OpenGlFramebufferObservation{
+            .status = OpenGlFramebufferObservationStatus::
+                default_back_buffer_unavailable};
+    }
+
+    GLint previous_read_framebuffer = 0;
+    GLint previous_pack_buffer = 0;
+    GLint previous_pack_alignment = 0;
+    GLint previous_pack_row_length = 0;
+    GLint previous_pack_skip_pixels = 0;
+    GLint previous_pack_skip_rows = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &previous_pack_buffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &previous_pack_row_length);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &previous_pack_skip_pixels);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &previous_pack_skip_rows);
+    require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+        "OpenGL replay framebuffer state query");
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0U);
+    GLint previous_default_read_buffer = GL_BACK;
+    glGetIntegerv(GL_READ_BUFFER, &previous_default_read_buffer);
+    glReadBuffer(GL_BACK);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0U);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    glReadPixels(0, 0, extent.width, extent.height, GL_RGBA,
+        GL_UNSIGNED_BYTE, rgba.data());
+    const GLenum read_error = glGetError();
+
+    glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
+    glPixelStorei(GL_PACK_ROW_LENGTH, previous_pack_row_length);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, previous_pack_skip_pixels);
+    glPixelStorei(GL_PACK_SKIP_ROWS, previous_pack_skip_rows);
+    glBindBuffer(
+        GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(previous_pack_buffer));
+    glReadBuffer(static_cast<GLenum>(previous_default_read_buffer));
+    glBindFramebuffer(
+        GL_READ_FRAMEBUFFER,
+        static_cast<GLuint>(previous_read_framebuffer));
+    require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+        "OpenGL replay framebuffer state restoration");
+    if (read_error != GL_NO_ERROR) {
+        fail(OpenGlRendererErrorCode::gl_operation_failed,
+            "OpenGL replay framebuffer observation failed: " +
+                std::string{gl_error_name(read_error)});
+    }
+
+    const auto channel = [](const float value) {
+        return static_cast<std::uint8_t>(std::lround(
+            std::clamp(value, 0.0F, 1.0F) * 255.0F));
+    };
+    const std::array clear{
+        channel(expected_clear_color.red),
+        channel(expected_clear_color.green),
+        channel(expected_clear_color.blue),
+        channel(expected_clear_color.alpha)};
+    OpenGlFramebufferObservation result;
+    result.status = OpenGlFramebufferObservationStatus::valid;
+    result.read_framebuffer = 0U;
+    result.read_buffer = GL_BACK;
+    result.sampled_pixel_count = pixel_count;
+    std::uint64_t signature = 14'695'981'039'346'656'037ULL;
+    const auto mix = [&signature](const std::uint8_t value) {
+        signature ^= value;
+        signature *= 1'099'511'628'211ULL;
+    };
+    for (std::uint64_t index = 0U; index < pixel_count; ++index) {
+        const auto offset = static_cast<std::size_t>(index * 4U);
+        bool differs = false;
+        for (std::size_t component = 0U; component < 3U; ++component) {
+            const auto actual = rgba[offset + component];
+            const auto expected = clear[component];
+            const auto difference = actual > expected
+                ? actual - expected
+                : expected - actual;
+            differs = differs || difference > 2U;
+        }
+        if (!differs) {
+            continue;
+        }
+        const int x = static_cast<int>(index % width);
+        const int y = static_cast<int>(index / width);
+        if (!result.has_non_clear_bounds) {
+            result.minimum_x = x;
+            result.maximum_x = x;
+            result.minimum_y = y;
+            result.maximum_y = y;
+            result.has_non_clear_bounds = true;
+        } else {
+            result.minimum_x = std::min(result.minimum_x, x);
+            result.maximum_x = std::max(result.maximum_x, x);
+            result.minimum_y = std::min(result.minimum_y, y);
+            result.maximum_y = std::max(result.maximum_y, y);
+        }
+        ++result.non_clear_pixel_count;
+        mix(static_cast<std::uint8_t>(x & 0xff));
+        mix(static_cast<std::uint8_t>((x >> 8) & 0xff));
+        mix(static_cast<std::uint8_t>(y & 0xff));
+        mix(static_cast<std::uint8_t>((y >> 8) & 0xff));
+        mix(rgba[offset]);
+        mix(rgba[offset + 1U]);
+        mix(rgba[offset + 2U]);
+        mix(rgba[offset + 3U]);
+    }
+    result.color_signature = signature == 0U ? 1U : signature;
+    if (retain_pixels) { result.rgba8=std::move(rgba); }
+    return result;
+}
+
 } // namespace hlclient::renderer::opengl

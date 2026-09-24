@@ -607,6 +607,46 @@ TEST_CASE("Stock profile requires the captured 32-byte ASCII-hex protected regio
           goldsrc::ConnectRequestErrorCode::invalid_authentication);
 }
 
+TEST_CASE("Live Steam profile serializes the actual bounded opaque length",
+          "[goldsrc][connect-request][authentication][steam]")
+{
+    const std::string protected_hex(32U, 'b');
+    auto profile = goldsrc::steam_legacy_connect_profile();
+
+    for (const std::size_t suffix_size : {1U, 333U, 1'023U}) {
+        std::vector<std::byte> suffix(suffix_size, std::byte{0x5a});
+        auto authentication = goldsrc::AuthenticationMaterial::create(
+            text_bytes(protected_hex), suffix);
+        REQUIRE(authentication);
+        auto prepared = goldsrc::prepare_connect_request(
+            goldsrc::ClientConnectionSettings{},
+            std::move(*authentication.value),
+            profile);
+        INFO("suffix size " << suffix_size);
+        REQUIRE(prepared);
+        auto request = std::move(*prepared.value).make_request(17U);
+        const auto built = goldsrc::ConnectRequestBuilder::build(request, profile);
+        REQUIRE(built);
+        REQUIRE(built.datagram);
+        const auto parsed = goldsrc::parse_connect_request(*built.datagram, profile);
+        REQUIRE(parsed);
+        CHECK(parsed.request->authentication_suffix_size() == suffix_size);
+    }
+
+    std::vector<std::byte> oversized(1'024U, std::byte{0x5a});
+    auto authentication = goldsrc::AuthenticationMaterial::create(
+        text_bytes(protected_hex), oversized);
+    REQUIRE(authentication);
+    const auto rejected = goldsrc::prepare_connect_request(
+        goldsrc::ClientConnectionSettings{},
+        std::move(*authentication.value),
+        profile);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error);
+    CHECK(rejected.error->code ==
+          goldsrc::ConnectRequestErrorCode::invalid_configuration);
+}
+
 TEST_CASE("Connect parser and builder round-trip the synthetic fixture",
           "[goldsrc][connect-request]")
 {

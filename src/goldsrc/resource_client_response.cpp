@@ -129,6 +129,8 @@ inline constexpr std::size_t kMaximumDecodedDescriptorAreaSize =
     case Opcode5ResourceResponseSourceProfile::
         independently_authored_synthetic_fixture:
     case Opcode5ResourceResponseSourceProfile::canonical_builder_output:
+    case Opcode5ResourceResponseSourceProfile::
+        canonical_empty_list_builder_output:
         return true;
     }
     return false;
@@ -400,13 +402,19 @@ Opcode5ResourceResponse::Opcode5ResourceResponse(
     const std::uint32_t byte_count,
     std::array<std::byte, kOpcode5ResourceResponseOpaqueSize> opaque_bytes,
     const Opcode5ResourceResponseSourceGeometry source_geometry,
-    const Opcode5ResourceResponseSourceProfile source_profile) noexcept
+    const Opcode5ResourceResponseSourceProfile source_profile,
+    const std::uint16_t entry_count,
+    const ResourceClientResponseCompatibilityProfile compatibility_profile,
+    const ResourceClientResponseEvidenceProfile evidence_profile) noexcept
     : wire_name_{std::move(wire_name)},
+      entry_count_{entry_count},
       field_index_{field_index},
       byte_count_{byte_count},
       opaque_bytes_{opaque_bytes},
       source_geometry_{source_geometry},
-      source_profile_{source_profile}
+      source_profile_{source_profile},
+      compatibility_profile_{compatibility_profile},
+      evidence_profile_{evidence_profile}
 {
 }
 
@@ -417,7 +425,7 @@ std::uint8_t Opcode5ResourceResponse::opcode() const noexcept
 
 std::uint16_t Opcode5ResourceResponse::entry_count() const noexcept
 {
-    return kOpcode5ResourceResponseEntryCount;
+    return entry_count_;
 }
 
 std::string_view Opcode5ResourceResponse::wire_name() const noexcept
@@ -427,7 +435,7 @@ std::string_view Opcode5ResourceResponse::wire_name() const noexcept
 
 std::uint8_t Opcode5ResourceResponse::field_type() const noexcept
 {
-    return kOpcode5ResourceResponseFieldType;
+    return entry_count_ == 0U ? 0U : kOpcode5ResourceResponseFieldType;
 }
 
 std::uint16_t Opcode5ResourceResponse::field_index() const noexcept
@@ -442,17 +450,17 @@ std::uint32_t Opcode5ResourceResponse::byte_count() const noexcept
 
 std::uint8_t Opcode5ResourceResponse::field_flags() const noexcept
 {
-    return kOpcode5ResourceResponseFieldFlags;
+    return entry_count_ == 0U ? 0U : kOpcode5ResourceResponseFieldFlags;
 }
 
 std::size_t Opcode5ResourceResponse::opaque_byte_count() const noexcept
 {
-    return opaque_bytes_.size();
+    return entry_count_ == 0U ? 0U : opaque_bytes_.size();
 }
 
 std::size_t Opcode5ResourceResponse::bytes_consumed() const noexcept
 {
-    return kOpcode5ResourceResponseSemanticSize;
+    return source_geometry_.semantic_byte_count;
 }
 
 const Opcode5ResourceResponseSourceGeometry&
@@ -470,15 +478,13 @@ Opcode5ResourceResponse::source_profile() const noexcept
 ResourceClientResponseCompatibilityProfile
 Opcode5ResourceResponse::compatibility_profile() const noexcept
 {
-    return ResourceClientResponseCompatibilityProfile::
-        stock_protocol_48_build_10210_opcode5_single_entry;
+    return compatibility_profile_;
 }
 
 ResourceClientResponseEvidenceProfile
 Opcode5ResourceResponse::evidence_profile() const noexcept
 {
-    return ResourceClientResponseEvidenceProfile::
-        controlled_stock_exact_41_byte_layout_semantics_pending;
+    return evidence_profile_;
 }
 
 Opcode5ResourceResponseParser::Opcode5ResourceResponseParser(
@@ -770,6 +776,84 @@ Opcode5ResourceResponseBuildResult Opcode5ResourceResponseBuilder::build(
         EncodedOpcode5ResourceResponse{std::move(response), bytes},
         std::nullopt,
     };
+}
+
+EncodedOpcode5EmptyResourceResponse::EncodedOpcode5EmptyResourceResponse(
+    Opcode5ResourceResponse response,
+    std::array<std::byte, kOpcode5EmptyResourceResponseSemanticSize>
+        semantic_bytes) noexcept
+    : response_{std::move(response)}, semantic_bytes_{semantic_bytes}
+{
+}
+
+const Opcode5ResourceResponse&
+EncodedOpcode5EmptyResourceResponse::response() const noexcept
+{
+    return response_;
+}
+
+std::span<const std::byte>
+EncodedOpcode5EmptyResourceResponse::semantic_bytes() const noexcept
+{
+    return semantic_bytes_;
+}
+
+Opcode5EmptyResourceResponseBuilder::Opcode5EmptyResourceResponseBuilder(
+    const ResourceClientResponseLimits limits) noexcept
+    : limits_{limits}
+{
+}
+
+bool Opcode5EmptyResourceResponseBuilder::valid_configuration() const noexcept
+{
+    return valid_resource_client_response_limits(limits_) &&
+           limits_.maximum_resource_response_size >=
+               kOpcode5EmptyResourceResponseSemanticSize;
+}
+
+Opcode5EmptyResourceResponseBuildResult
+Opcode5EmptyResourceResponseBuilder::build() const
+{
+    if (!valid_configuration()) {
+        return Opcode5EmptyResourceResponseBuildResult{
+            std::nullopt,
+            response_error(
+                Opcode5ResourceResponseErrorCode::invalid_configuration,
+                0U,
+                "Empty resource-response limits are invalid")};
+    }
+
+    std::array<std::byte, kOpcode5EmptyResourceResponseSemanticSize> bytes{};
+    ByteWriter writer{bytes};
+    if (!writer.write_uint8(kOpcode5ResourceResponseOpcode) ||
+        !writer.write_uint16_le(0U) || writer.position() != bytes.size()) {
+        return Opcode5EmptyResourceResponseBuildResult{
+            std::nullopt,
+            response_error(
+                Opcode5ResourceResponseErrorCode::internal_encoding_error,
+                writer.position(),
+                "Unable to encode the bounded empty resource response")};
+    }
+
+    Opcode5ResourceResponse response{
+        {},
+        0U,
+        0U,
+        {},
+        Opcode5ResourceResponseSourceGeometry{
+            0U,
+            kOpcode5EmptyResourceResponseSemanticSize,
+            kOpcode5EmptyResourceResponseSemanticSize},
+        Opcode5ResourceResponseSourceProfile::
+            canonical_empty_list_builder_output,
+        0U,
+        ResourceClientResponseCompatibilityProfile::
+            stock_protocol_48_build_10210_opcode5_empty_list,
+        ResourceClientResponseEvidenceProfile::
+            source_backed_stock_empty_custom_resource_list};
+    return Opcode5EmptyResourceResponseBuildResult{
+        EncodedOpcode5EmptyResourceResponse{std::move(response), bytes},
+        std::nullopt};
 }
 
 ResourceResponseByteRange::ResourceResponseByteRange(

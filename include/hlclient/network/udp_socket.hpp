@@ -3,6 +3,7 @@
 #include <hlclient/network/network_address.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
@@ -18,6 +19,22 @@ struct Datagram {
     std::vector<std::byte> payload;
 };
 
+enum class SocketNativeErrorDomain {
+    none,
+    winsock,
+    posix,
+};
+
+struct SocketNativeError final {
+    SocketNativeErrorDomain domain{SocketNativeErrorDomain::none};
+    std::uint32_t code{0U};
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return domain != SocketNativeErrorDomain::none;
+    }
+};
+
 enum class ReceiveStatus {
     received,
     would_block,
@@ -31,6 +48,7 @@ struct ReceiveResult {
     std::string error;
     std::optional<NetworkAddress> source;
     std::size_t payload_size_lower_bound{0};
+    SocketNativeError native_error{};
 };
 
 class UdpSocket final {
@@ -51,7 +69,8 @@ public:
     [[nodiscard]] bool send_to(
         const NetworkAddress& destination,
         std::span<const std::byte> payload,
-        std::string& error);
+        std::string& error,
+        SocketNativeError* native_error = nullptr);
     [[nodiscard]] ReceiveResult receive(std::size_t maximum_size = 65'507);
 
 private:

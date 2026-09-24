@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -26,9 +27,16 @@ inline constexpr std::size_t kMaximumDecompressedServicePayloadSize = 1'048'576U
 inline constexpr std::size_t kMaximumCompressedServiceEnvelopeSize = 1'048'576U;
 inline constexpr std::size_t kServicePayloadEnvelopeDiagnosticTextLimit = 256U;
 
+enum class ServicePayloadCompressionPolicy : std::uint8_t {
+    require_bzip2_envelope,
+    accept_bzip2_or_uncompressed,
+};
+
 struct ServicePayloadEnvelopeLimits {
     std::size_t maximum_decompressed_payload_size{
         kDefaultMaximumDecompressedServicePayloadSize};
+    ServicePayloadCompressionPolicy compression_policy{
+        ServicePayloadCompressionPolicy::require_bzip2_envelope};
 };
 
 [[nodiscard]] bool valid_service_payload_envelope_limits(

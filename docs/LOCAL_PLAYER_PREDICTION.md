@@ -152,3 +152,78 @@ candidates and a partial movement observation. It cannot manufacture a
 `AuthoritativePlayerState`. Consequently the controller remains strictly
 synthetic and no stock frame triggers replay or camera correction. See
 [stock authoritative projection](GOLDSRC_AUTHORITATIVE_STATE_PROJECTION.md).
+
+## H2 reference carrier and seed adapter (partial)
+
+The live usercmd stage now retains a bounded, byte-free receipt ledger after
+actual `move_packet_submitted` events. Each receipt binds a 30-bit outgoing
+packet sequence to its ordered, immutable new and backup command identities and
+wire values. Prepared packets and `would_block` do not enter the ledger. A
+fresh clientdata record can bind only to an exact retained move carrier in the
+same generation, using the ACK and source sequence copied from that record's
+own payload metadata. The resulting boundary is the last **new** command in
+that carrier; backup commands keep their earlier identities. An ACK for an
+unknown or non-move carrier does not choose the closest command. Old reliable
+or reassembled bodies are excluded because their completion header may not
+date the body. Stale/duplicate records and ambiguous modular sequence order
+are rejected. This is a reference-derived carrier/history boundary, not a
+separate wire field or direct observation of internal HLDS execution.
+
+The basis is pinned [ReHLDS `sv_user.cpp` and `sv_main.cpp`](https://github.com/rehlds/ReHLDS/tree/6266cd23faee4a6e9cf3974f9605b2cadd86f0a4/rehlds/engine), plus the [Xash3D GoldSrc-compatible prediction receive path](https://github.com/FWGS/xash3d-fwgs/blob/7500a6b3647e71d9b21691671957a0e06731019e/engine/client/dll_int/cl_pmove.c). ReHLDS parses backup/new commands in a received move and later constructs a clientdata response; Xash uses the incoming carrier ACK to index its command/frame history. Packet sequence and command ordinal remain distinct domains.
+
+The H2 observation projection retains optional clientdata `flags`, `maxspeed`,
+`flDuckTime`, `bInDuck`, `waterlevel`, and `deadflag`, and optional
+`entity_state_player_t` `movetype`, `usehull`, `gravity`, `friction`,
+`basevelocity`, and `spectator`. Types come from pinned [Valve `network/delta.lst`](https://github.com/ValveSoftware/halflife/blob/b1b5cf5892918535619b2937bb927e46cb097ba1/network/delta.lst); missing descriptors stay unavailable. These fields are outside the stable canonical replay hash. A strict seed candidate requires fresh, same-record clientdata and the player entity mapped from the zero-based ServerInfo client slot to entity `slot + 1`, complete movement fields, and a supported dry walk context. Its origin/velocity/view offset/flags are server-observed; the player fields are observed from the matching entity snapshot. Old buttons require an exact retained prediction slot, or a neutral command at the bound history boundary. This follows pinned [Valve `HUD_TxferPredictionData`](https://github.com/ValveSoftware/halflife/blob/b1b5cf5892918535619b2937bb927e46cb097ba1/cl_dll/entity.cpp), which retains client-only prediction fields from the matching prior prediction state.
+
+The seed is deliberately not a complete movement state: ground/contents and
+collision scene identity still require collision queries. An explicit
+`reference_wire_dry_walk_v1` movement profile adapts immutable quantized wire
+commands and executes ordinary action-free commands of at most 50 ms as one
+collision-aware kernel step, following the pinned Xash split threshold. It
+does not execute jump/duck transitions or establish full stock PM_Move
+equivalence. The reconciliation authority remains synthetic-only. The live
+stage publishes passive readiness counters but keeps the existing
+server-sample camera. There is no `--prediction reference` option or active
+live predictor at this partial boundary.
+
+## H2 continuation: executable reference dry-walk path
+
+The later H2 continuation adds an explicit `--prediction reference` option for
+`live-visual-control`; the default remains `off`. The managed wrapper passes
+`-ProjectClientPrediction reference` through the native orchestrator into that
+same client process. The current map's already imported collision package is
+attached to the live owner after the first rendered scene is installed. The
+sign-on MoveVars construct the movement environment. No second BSP parse,
+socket, scheduler, or input sampler is used.
+
+Ground is derived read-only at the observed origin with the active hull. The
+world-only collision query checks start position and contents, probes down two
+units, and requires a walkable plane and agreement with the received
+`FL_ONGROUND` flag. The contact hit, normal, fraction, hull, and collision
+identity are retained separately from server-observed origin and velocity.
+Solid starts, unsupported contents and disagreement suspend prediction without
+moving the observed player. A pair of omitted lateral `view_ofs` fields is
+handled by the existing vertical-only camera policy, with its own provenance;
+an isolated missing component remains unavailable.
+
+The reference prediction history starts at a valid current-session carrier
+boundary, which may have a nonzero command identity. Each later locally
+committed immutable wire command is adapted once and simulated by the existing
+collision-aware kernel. A fresh coherent server correction is compared to the
+predicted post-state at exactly the bound command. The replacement history is
+built from that correction and the exact retained suffix, then published only
+after all replay succeeds. A newer server record with the same command
+boundary may rebase again; an identical source record is ignored. This carrier
+boundary is reference-derived, not a direct HLDS execution ACK.
+
+Presentation may interpolate two adjacent local predicted states with one
+command interval of lag when a world hull trace leaves the segment clear.
+Blocked interpolation chooses the latest validated endpoint. It never commits
+simulation, changes the canonical receiving-client state or alters a usercmd.
+Prediction suspends for jump/duck commands, invalid ground/authority, missing
+history, collision failure, or a raw correction above the stated 16-unit
+presentation scope. The server-sample camera resumes, and a later valid anchor
+may reactivate prediction. Dry walk/air on world collision is the supported
+slice; dynamic support, ladders, liquids and full PM_Move equivalence are not
+claimed. Live verification and manual feel remain separate results.

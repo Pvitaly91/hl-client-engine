@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -24,7 +25,10 @@
 #ifndef NOMINMAX
 #    define NOMINMAX
 #endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <iphlpapi.h>
 #include <tlhelp32.h>
 
 namespace hlclient::platform::windows {
@@ -557,6 +561,67 @@ std::string_view to_string(
     return "unknown";
 }
 
+WriterTraceHandoffResult signal_writer_trace_prelaunch_and_wait(
+    void* const prelaunch_ready_handle,
+    void* const launch_release_handle,
+    const std::chrono::milliseconds timeout) noexcept
+{
+    const auto prelaunch = static_cast<HANDLE>(prelaunch_ready_handle);
+    const auto release = static_cast<HANDLE>(launch_release_handle);
+    if (prelaunch == nullptr || prelaunch == INVALID_HANDLE_VALUE ||
+        release == nullptr || release == INVALID_HANDLE_VALUE ||
+        prelaunch == release || timeout.count() < 1 ||
+        timeout.count() > static_cast<std::int64_t>(INFINITE - 1U)) {
+        return {WriterTraceHandoffErrorCode::invalid_capability};
+    }
+    if (::SetEvent(prelaunch) == FALSE) {
+        return {WriterTraceHandoffErrorCode::prelaunch_signal_failed,
+                ::GetLastError()};
+    }
+    const auto wait = ::WaitForSingleObject(
+        release, static_cast<DWORD>(timeout.count()));
+    if (wait == WAIT_TIMEOUT) {
+        return {WriterTraceHandoffErrorCode::trace_ready_timeout, 0U, true};
+    }
+    if (wait != WAIT_OBJECT_0) {
+        return {WriterTraceHandoffErrorCode::launch_release_wait_failed,
+                ::GetLastError(), true};
+    }
+    return {WriterTraceHandoffErrorCode::none, 0U, true, true};
+}
+
+WriterTraceHandoffResult signal_writer_trace_stock_processes_stopped(
+    void* const stock_processes_stopped_handle) noexcept
+{
+    const auto stopped = static_cast<HANDLE>(stock_processes_stopped_handle);
+    if (stopped == nullptr || stopped == INVALID_HANDLE_VALUE) {
+        return {WriterTraceHandoffErrorCode::invalid_capability};
+    }
+    if (::SetEvent(stopped) == FALSE) {
+        return {WriterTraceHandoffErrorCode::stock_stopped_signal_failed,
+                ::GetLastError()};
+    }
+    return {WriterTraceHandoffErrorCode::none, 0U, false, false, true};
+}
+
+std::string_view to_string(const WriterTraceHandoffErrorCode error) noexcept
+{
+    switch (error) {
+    case WriterTraceHandoffErrorCode::none: return "none";
+    case WriterTraceHandoffErrorCode::invalid_capability:
+        return "invalid-capability";
+    case WriterTraceHandoffErrorCode::prelaunch_signal_failed:
+        return "prelaunch-signal-failed";
+    case WriterTraceHandoffErrorCode::trace_ready_timeout:
+        return "trace-ready-timeout";
+    case WriterTraceHandoffErrorCode::launch_release_wait_failed:
+        return "launch-release-wait-failed";
+    case WriterTraceHandoffErrorCode::stock_stopped_signal_failed:
+        return "stock-stopped-signal-failed";
+    }
+    return "unknown";
+}
+
 std::wstring quote_windows_command_line_argument(const std::wstring_view argument)
 {
     if (argument.empty()) {
@@ -647,16 +712,34 @@ void OwnedProcess::terminate(const std::uint32_t exit_code) noexcept
 std::optional<std::uint32_t> OwnedProcess::wait(
     const std::chrono::milliseconds timeout) noexcept
 {
-    if (!valid() ||
-        ::WaitForSingleObject(impl_->process.get(), bounded_timeout(timeout)) !=
-            WAIT_OBJECT_0) {
-        return std::nullopt;
+    const auto result = wait_result(timeout);
+    return result ? result.exit_code : std::nullopt;
+}
+
+OwnedProcess::WaitResult OwnedProcess::wait_result(
+    const std::chrono::milliseconds timeout) noexcept
+{
+    if (!valid()) {
+        return WaitResult{WaitStatus::invalid_process, std::nullopt,
+                          ERROR_INVALID_HANDLE};
+    }
+    const DWORD wait = ::WaitForSingleObject(
+        impl_->process.get(), bounded_timeout(timeout));
+    if (wait == WAIT_TIMEOUT) {
+        return WaitResult{WaitStatus::timeout, std::nullopt, std::nullopt};
+    }
+    if (wait != WAIT_OBJECT_0) {
+        const DWORD native_error = wait == WAIT_FAILED
+            ? ::GetLastError() : ERROR_INVALID_FUNCTION;
+        return WaitResult{WaitStatus::wait_failed, std::nullopt, native_error};
     }
     DWORD exit_code = 0U;
     if (!::GetExitCodeProcess(impl_->process.get(), &exit_code)) {
-        return std::nullopt;
+        const DWORD native_error = ::GetLastError();
+        return WaitResult{
+            WaitStatus::exit_query_failed, std::nullopt, native_error};
     }
-    return exit_code;
+    return WaitResult{WaitStatus::exited, exit_code, std::nullopt};
 }
 
 struct KillOnCloseProcessJob::Impl final {
@@ -847,6 +930,7 @@ KillOnCloseProcessJob::launch(const OwnedProcessLaunchSpec& spec) noexcept
         if (!valid() || impl_->failed_child_process || spec.executable.empty() ||
             !spec.executable.is_absolute() || spec.working_directory.empty() ||
             !spec.working_directory.is_absolute() ||
+            (spec.create_no_window && spec.prohibit_child_processes) ||
             !path_equal(spec.executable, spec.expected_identity.canonical_path) ||
             spec.expected_identity.snapshot.size == 0U ||
             spec.arguments.size() > 128U) {
@@ -1045,8 +1129,12 @@ KillOnCloseProcessJob::launch(const OwnedProcessLaunchSpec& spec) noexcept
             process.get(), spec.expected_identity,
             kMaximumObservedExecutableBytes, observation_policy);
         if (!verified) {
-            return fail_child(OwnedProcessErrorCode::process_identity_mismatch,
-                              verified.native_error);
+            return fail_child(
+                verified.code ==
+                        WindowsBinaryIdentityErrorCode::process_image_query_failed
+                    ? OwnedProcessErrorCode::process_query_failed
+                    : OwnedProcessErrorCode::process_identity_mismatch,
+                verified.native_error);
         }
         const DWORD previous_suspend_count = ::ResumeThread(thread.get());
         if (previous_suspend_count != 1U) {
@@ -1643,6 +1731,170 @@ HldsBannerParseResult diagnose_required_hlds_runtime_banner(
     return result;
 }
 
+HldsBannerParseResult parse_observed_hlds_runtime_banner(const std::string_view output) noexcept
+{
+    try {
+        HldsBannerParseResult result;
+        auto& diagnostic = result.diagnostic;
+        diagnostic.observed_byte_count = output.size();
+        if (output.size() > 1U * 1'024U * 1'024U) {
+            result.code = HldsBannerParseErrorCode::too_large;
+            diagnostic.parse_status = HldsRuntimeProfileParseStatus::malformed;
+            diagnostic.mismatch_field = HldsRuntimeProfileField::malformed_field;
+            return result;
+        }
+        HldsRuntimeProfile profile;
+        profile.id = HldsRuntimeProfile::Id::steam_hlds_10210_no_mode_banner_v1;
+        std::size_t protocol_count = 0U;
+        std::size_t engine_count = 0U;
+        std::size_t build_count = 0U;
+        std::size_t machine_count = 0U;
+        const auto set_field = [](HldsRuntimeProfileFieldDiagnostic& field,
+                                  const HldsRuntimeProfileFieldStatus status,
+                                  const bool present = true) {
+            field.present = present;
+            field.syntax_valid = status != HldsRuntimeProfileFieldStatus::malformed;
+            field.matches = status == HldsRuntimeProfileFieldStatus::match;
+            field.status = status;
+        };
+        const auto lines = split_complete_lines(output);
+        diagnostic.observed_line_count = lines.size();
+        for (const auto line : lines) {
+            if (line.size() > 4'096U) {
+                result.code = HldsBannerParseErrorCode::line_too_long;
+                diagnostic.parse_status = HldsRuntimeProfileParseStatus::malformed;
+                diagnostic.mismatch_field = HldsRuntimeProfileField::malformed_field;
+                return result;
+            }
+            if (line.starts_with("Protocol version ")) {
+                ++protocol_count;
+                if (!parse_decimal(line.substr(17U), profile.protocol)) {
+                    set_field(diagnostic.protocol, HldsRuntimeProfileFieldStatus::malformed);
+                } else {
+                    diagnostic.observed_protocol = profile.protocol;
+                    set_field(diagnostic.protocol, profile.protocol == 48U
+                                                       ? HldsRuntimeProfileFieldStatus::match
+                                                       : HldsRuntimeProfileFieldStatus::mismatch);
+                }
+            } else if (line.starts_with("Exe version ")) {
+                ++engine_count;
+                constexpr std::string_view exact{"Exe version 1.1.2.2 (valve)"};
+                if (line == exact) {
+                    profile.engine_version = WindowsFileVersion{1U, 1U, 2U, 2U};
+                    profile.game = "valve";
+                    diagnostic.observed_engine_version = profile.engine_version;
+                    diagnostic.game_matches = true;
+                    set_field(diagnostic.engine_version, HldsRuntimeProfileFieldStatus::match);
+                    set_field(diagnostic.game, HldsRuntimeProfileFieldStatus::match);
+                } else {
+                    set_field(diagnostic.engine_version, HldsRuntimeProfileFieldStatus::mismatch);
+                    set_field(diagnostic.game, HldsRuntimeProfileFieldStatus::mismatch);
+                }
+            } else if (line.starts_with("Exe build:")) {
+                ++build_count;
+                const auto open = line.rfind('(');
+                if (open == std::string_view::npos || line.back() != ')' ||
+                    open <= std::string_view{"Exe build:"}.size() ||
+                    line.find('(', open + 1U) != std::string_view::npos ||
+                    !parse_decimal(line.substr(open + 1U, line.size() - open - 2U),
+                                   profile.build)) {
+                    set_field(diagnostic.build, HldsRuntimeProfileFieldStatus::malformed);
+                } else {
+                    diagnostic.observed_build = profile.build;
+                    set_field(diagnostic.build, profile.build == 10'210U
+                                                    ? HldsRuntimeProfileFieldStatus::match
+                                                    : HldsRuntimeProfileFieldStatus::mismatch);
+                }
+            } else if (line.starts_with("Server IP address ")) {
+                ++machine_count;
+                const auto machine = line.substr(std::string_view{"Server IP address "}.size());
+                if (!safe_profile_token(machine)) {
+                    result.code = HldsBannerParseErrorCode::malformed;
+                    diagnostic.parse_status = HldsRuntimeProfileParseStatus::malformed;
+                    diagnostic.mismatch_field = HldsRuntimeProfileField::malformed_field;
+                    return result;
+                }
+            }
+        }
+        diagnostic.runtime_mode_category = HldsRuntimeModeCategory::not_advertised;
+        set_field(diagnostic.runtime_mode, HldsRuntimeProfileFieldStatus::match, false);
+        if (protocol_count > 1U || engine_count > 1U || build_count > 1U || machine_count > 1U) {
+            diagnostic.duplicate_field_count = (protocol_count > 1U ? protocol_count - 1U : 0U) +
+                                               (engine_count > 1U ? (engine_count - 1U) * 2U : 0U) +
+                                               (build_count > 1U ? build_count - 1U : 0U) +
+                                               (machine_count > 1U ? machine_count - 1U : 0U);
+            result.code = HldsBannerParseErrorCode::duplicate_field;
+            diagnostic.parse_status = HldsRuntimeProfileParseStatus::duplicate_field;
+            diagnostic.mismatch_field = HldsRuntimeProfileField::duplicate_field;
+            return result;
+        }
+        const std::array<std::pair<HldsRuntimeProfileField, HldsRuntimeProfileFieldDiagnostic*>, 4U>
+            fields{{
+                {HldsRuntimeProfileField::engine_version, &diagnostic.engine_version},
+                {HldsRuntimeProfileField::game, &diagnostic.game},
+                {HldsRuntimeProfileField::protocol, &diagnostic.protocol},
+                {HldsRuntimeProfileField::build, &diagnostic.build},
+            }};
+        for (const auto& [field, value] : fields) {
+            if (value->status == HldsRuntimeProfileFieldStatus::malformed) {
+                result.code = HldsBannerParseErrorCode::malformed;
+                diagnostic.parse_status = HldsRuntimeProfileParseStatus::malformed;
+                diagnostic.mismatch_field = field;
+                return result;
+            }
+            if (value->status == HldsRuntimeProfileFieldStatus::mismatch) {
+                result.code = HldsBannerParseErrorCode::profile_mismatch;
+                diagnostic.parse_status = HldsRuntimeProfileParseStatus::profile_mismatch;
+                diagnostic.mismatch_field = field;
+                return result;
+            }
+            if (!value->present) {
+                result.code = HldsBannerParseErrorCode::missing_field;
+                diagnostic.parse_status = HldsRuntimeProfileParseStatus::incomplete;
+                diagnostic.mismatch_field = HldsRuntimeProfileField::missing_field;
+                return result;
+            }
+        }
+        if (machine_count != 1U) {
+            result.code = HldsBannerParseErrorCode::missing_field;
+            diagnostic.parse_status = HldsRuntimeProfileParseStatus::incomplete;
+            diagnostic.mismatch_field = HldsRuntimeProfileField::missing_field;
+            return result;
+        }
+        // Endpoint and map remain deliberately absent until the independent
+        // owned loopback query succeeds.
+        profile.ready = false;
+        result.profile = std::move(profile);
+        result.code = HldsBannerParseErrorCode::none;
+        diagnostic.parse_status = HldsRuntimeProfileParseStatus::valid;
+        diagnostic.mismatch_field = HldsRuntimeProfileField::none;
+        return result;
+    } catch (...) {
+        HldsBannerParseResult result;
+        result.code = HldsBannerParseErrorCode::malformed;
+        result.diagnostic.parse_status = HldsRuntimeProfileParseStatus::malformed;
+        result.diagnostic.mismatch_field = HldsRuntimeProfileField::malformed_field;
+        return result;
+    }
+}
+
+HldsBannerParseResult
+diagnose_observed_hlds_runtime_banner(const BoundedProcessLogSnapshot& snapshot) noexcept
+{
+    auto result = parse_observed_hlds_runtime_banner(snapshot.bytes);
+    result.diagnostic.observed_byte_count = snapshot.observed_bytes;
+    result.diagnostic.observed_line_count = snapshot.observed_line_count;
+    if (snapshot.capture_failed || snapshot.byte_truncated || snapshot.line_count_truncated ||
+        snapshot.line_length_truncated) {
+        result.profile.reset();
+        result.code = HldsBannerParseErrorCode::process_log_truncated;
+        result.diagnostic.parse_status = HldsRuntimeProfileParseStatus::process_log_truncated;
+        result.diagnostic.mismatch_field = HldsRuntimeProfileField::process_log_truncated;
+        result.diagnostic.process_log_truncated = true;
+    }
+    return result;
+}
+
 HldsPrivateBannerShape analyze_hlds_private_banner_streams(
     const std::string_view stdout_bytes,
     const std::string_view stderr_bytes) noexcept
@@ -1750,6 +2002,405 @@ HldsPrivateBannerShape analyze_hlds_private_banner_streams(
         return shape;
     } catch (...) {
         return {};
+    }
+}
+
+HldsLocalReadinessResult
+parse_hlds_local_info_response(const
+
+std::span<const std::byte> response,
+                               const std::string_view requested_map,
+                               const std::string_view requested_game) noexcept
+{
+    HldsLocalReadinessResult result;
+    result.response_byte_count = response.size();
+    try {
+        if (!safe_profile_token(requested_map) || requested_game != "valve" ||
+            response.size() < 6U || response.size() > 8U * 1'024U) {
+            result.status = response.size() > 8U * 1'024U
+                                ? HldsLocalReadinessStatus::query_response_oversized
+                                : HldsLocalReadinessStatus::query_response_malformed;
+            return result;
+        }
+        const auto byte = [&response](const std::size_t index) {
+            return std::to_integer<unsigned char>(response[index]);
+        };
+        if (byte(0U) != 0xFFU || byte(1U) != 0xFFU || byte(2U) != 0xFFU || byte(3U) != 0xFFU) {
+            result.status = HldsLocalReadinessStatus::query_response_malformed;
+            return result;
+        }
+        std::size_t cursor = 5U;
+        const auto read_cstring = [&](std::string_view& value) {
+            if (cursor >= response.size()) return false;
+            const auto begin = cursor;
+            while (cursor < response.size() && byte(cursor) != 0U) {
+                const auto current = byte(cursor);
+                if (current < 0x20U || current > 0x7EU || cursor - begin >= 255U) return false;
+                ++cursor;
+            }
+            if (cursor >= response.size()) return false;
+            value = std::string_view{reinterpret_cast<const char*>(response.data() + begin),
+                                     cursor - begin};
+            ++cursor;
+            return true;
+        };
+        const auto skip = [&](const std::size_t count) {
+            if (count > response.size() - cursor) return false;
+            cursor += count;
+            return true;
+        };
+        const auto read_u16 = [&](std::uint16_t& value) {
+            if (response.size() - cursor < 2U) return false;
+            value = static_cast<std::uint16_t>(byte(cursor)) |
+                    static_cast<std::uint16_t>(byte(cursor + 1U) << 8U);
+            cursor += 2U;
+            return true;
+        };
+        std::string_view ignored;
+        std::string_view map;
+        std::string_view folder;
+        std::uint32_t protocol = 0U;
+        std::uint16_t application_id = 70U;
+        if (byte(4U) == 0x49U) {
+            protocol = byte(cursor++);
+            if (!read_cstring(ignored) || !read_cstring(map) || !read_cstring(folder) ||
+                !read_cstring(ignored) || !read_u16(application_id) || !skip(7U) ||
+                !read_cstring(ignored)) {
+                result.status = HldsLocalReadinessStatus::query_response_malformed;
+                return result;
+            }
+            if (cursor < response.size()) {
+                const auto edf = byte(cursor++);
+                if ((edf & ~0xF1U) != 0U || ((edf & 0x80U) != 0U && !skip(2U)) ||
+                    ((edf & 0x10U) != 0U && !skip(8U)) ||
+                    ((edf & 0x40U) != 0U && (!skip(2U) || !read_cstring(ignored))) ||
+                    ((edf & 0x20U) != 0U && !read_cstring(ignored)) ||
+                    ((edf & 0x01U) != 0U && !skip(8U))) {
+                    result.status = HldsLocalReadinessStatus::query_response_malformed;
+                    return result;
+                }
+            }
+        } else if (byte(4U) == 0x6DU) {
+            if (!read_cstring(ignored) || !read_cstring(ignored) || !read_cstring(map) ||
+                !read_cstring(folder) || !read_cstring(ignored) || !skip(2U)) {
+                result.status = HldsLocalReadinessStatus::query_response_malformed;
+                return result;
+            }
+            protocol = byte(cursor++);
+            if (!skip(3U)) {
+                result.status = HldsLocalReadinessStatus::query_response_malformed;
+                return result;
+            }
+            const auto mod = byte(cursor++);
+            if (mod > 1U ||
+                (mod == 1U && (!read_cstring(ignored) || !read_cstring(ignored) || !skip(10U))) ||
+                !skip(2U)) {
+                result.status = HldsLocalReadinessStatus::query_response_malformed;
+                return result;
+            }
+        } else {
+            result.status = HldsLocalReadinessStatus::query_response_malformed;
+            return result;
+        }
+        if (cursor != response.size()) {
+            result.status = HldsLocalReadinessStatus::query_response_malformed;
+            return result;
+        }
+        if (protocol != 48U) {
+            result.status = HldsLocalReadinessStatus::protocol_mismatch;
+            return result;
+        }
+        if (application_id != 70U) {
+            result.status = HldsLocalReadinessStatus::application_id_mismatch;
+            return result;
+        }
+        result.map_proof_source = HldsMapProofSource::goldsrc_server_info_query;
+        result.map_matches = map == requested_map;
+        result.game_matches = folder == requested_game;
+        if (!result.map_matches) {
+            result.status = HldsLocalReadinessStatus::map_mismatch;
+            return result;
+        }
+        if (!result.game_matches) {
+            result.status = HldsLocalReadinessStatus::game_mismatch;
+            return result;
+        }
+        result.status = HldsLocalReadinessStatus::ready;
+        return result;
+    } catch (...) {
+        result.status = HldsLocalReadinessStatus::query_response_malformed;
+        return result;
+    }
+}
+
+HldsLocalReadinessResult observe_hlds_local_readiness(
+    const OwnedProcess& process, const WindowsBinaryIdentity& expected_identity,
+    const std::uint16_t requested_port, const std::uint16_t excluded_relay_port,
+    const std::string_view requested_map, const std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& continuity_check,
+    const WindowsBinaryObservationPolicy identity_policy) noexcept
+{
+    HldsLocalReadinessResult result;
+    try {
+        if (!process.valid() || process.process_id() == 0U ||
+            process.native_process_handle() == nullptr || requested_port == 0U ||
+            excluded_relay_port == 0U || requested_port == excluded_relay_port ||
+            !safe_profile_token(requested_map) || !continuity_check ||
+            deadline <= std::chrono::steady_clock::now() ||
+            deadline - std::chrono::steady_clock::now() > std::chrono::seconds{10}) {
+            return result;
+        }
+        const auto lifecycle_valid = [&]() {
+            const auto handle = static_cast<HANDLE>(process.native_process_handle());
+            if (::WaitForSingleObject(handle, 0U) != WAIT_TIMEOUT) {
+                result.status = HldsLocalReadinessStatus::process_exited;
+                return false;
+            }
+            result.owned_process_running = true;
+            const auto verified = verify_windows_process_image_identity(
+                process.native_process_handle(), expected_identity, kMaximumObservedExecutableBytes,
+                identity_policy);
+            if (!verified) {
+                result.status = HldsLocalReadinessStatus::process_identity_mismatch;
+                return false;
+            }
+            result.process_identity_matches = true;
+            if (!continuity_check()) {
+                result.status = HldsLocalReadinessStatus::continuity_failed;
+                return false;
+            }
+            return true;
+        };
+        const auto endpoint_valid = [&]() {
+            result.endpoint_owner_matches = false;
+            result.endpoint_address_matches = false;
+            result.endpoint_port_matches = false;
+            result.endpoint_proof_source = HldsEndpointProofSource::absent;
+            for (std::size_t retry = 0U; retry < 3U; ++retry) {
+                ULONG table_size = 0U;
+                const auto sizing = ::GetExtendedUdpTable(nullptr, &table_size, FALSE, AF_INET,
+                                                          UDP_TABLE_OWNER_PID, 0U);
+                if (sizing != ERROR_INSUFFICIENT_BUFFER || table_size == 0U ||
+                    table_size > 16U * 1'024U * 1'024U) {
+                    result.status = HldsLocalReadinessStatus::endpoint_observation_unavailable;
+                    return false;
+                }
+                std::vector<std::byte> storage(table_size);
+                ULONG returned_size = table_size;
+                const auto query = ::GetExtendedUdpTable(storage.data(), &returned_size, FALSE,
+                                                         AF_INET, UDP_TABLE_OWNER_PID, 0U);
+                if (query == ERROR_INSUFFICIENT_BUFFER) continue;
+                if (query != NO_ERROR) {
+                    result.status = HldsLocalReadinessStatus::endpoint_observation_unavailable;
+                    return false;
+                }
+                constexpr auto offset = offsetof(MIB_UDPTABLE_OWNER_PID, table);
+                if (returned_size < offset) {
+                    result.status = HldsLocalReadinessStatus::endpoint_table_malformed;
+                    return false;
+                }
+                const auto* table = reinterpret_cast<const MIB_UDPTABLE_OWNER_PID*>(storage.data());
+                const auto capacity = (returned_size - offset) / sizeof(MIB_UDPROW_OWNER_PID);
+                if (table->dwNumEntries > capacity) {
+                    result.status = HldsLocalReadinessStatus::endpoint_table_malformed;
+                    return false;
+                }
+                std::size_t exact = 0U;
+                bool wrong_owner = false;
+                bool wrong_address = false;
+                bool owner_matches = false;
+                for (DWORD index = 0U; index < table->dwNumEntries; ++index) {
+                    const auto& row = table->table[index];
+                    const auto port = ntohs(static_cast<u_short>(row.dwLocalPort));
+                    if (port != requested_port) continue;
+                    if (row.dwOwningPid != process.process_id()) {
+                        wrong_owner = true;
+                        continue;
+                    }
+                    owner_matches = true;
+                    if (row.dwLocalAddr != htonl(INADDR_LOOPBACK)) {
+                        wrong_address = true;
+                        continue;
+                    }
+                    ++exact;
+                }
+                if (wrong_owner) {
+                    result.status = HldsLocalReadinessStatus::endpoint_not_owned;
+                    return false;
+                }
+                if (!owner_matches) {
+                    if (retry + 1U < 3U && std::chrono::steady_clock::now() < deadline) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+                        continue;
+                    }
+                    result.status = HldsLocalReadinessStatus::endpoint_not_owned;
+                    return false;
+                }
+                result.endpoint_owner_matches = true;
+                if (wrong_address || exact != 1U) {
+                    result.status = HldsLocalReadinessStatus::endpoint_not_loopback_ipv4;
+                    return false;
+                }
+                result.endpoint_address_matches = true;
+                result.endpoint_port_matches = true;
+                result.endpoint_proof_source =
+                    HldsEndpointProofSource::windows_udp_owner_table_and_loopback_query;
+                return true;
+            }
+            result.status = HldsLocalReadinessStatus::endpoint_observation_unavailable;
+            return false;
+        };
+        if (!lifecycle_valid() || !endpoint_valid()) return result;
+
+        WSADATA winsock{};
+        if (::WSAStartup(MAKEWORD(2, 2), &winsock) != 0) {
+            result.status = HldsLocalReadinessStatus::query_socket_failed;
+            return result;
+        }
+        struct WinsockCleanup final {
+            ~WinsockCleanup() { static_cast<void>(::WSACleanup()); }
+        } winsock_cleanup;
+        const SOCKET socket_handle = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (socket_handle == INVALID_SOCKET) {
+            result.status = HldsLocalReadinessStatus::query_socket_failed;
+            return result;
+        }
+        struct SocketCleanup final {
+            SOCKET value{INVALID_SOCKET};
+            ~SocketCleanup()
+            {
+                if (value != INVALID_SOCKET) {
+                    static_cast<void>(::closesocket(value));
+                }
+            }
+        } socket_cleanup{socket_handle};
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_addr.S_un.S_addr = htonl(INADDR_LOOPBACK);
+        local.sin_port = 0U;
+        if (::bind(socket_handle, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) ==
+            SOCKET_ERROR) {
+            result.status = HldsLocalReadinessStatus::query_socket_failed;
+            return result;
+        }
+        sockaddr_in bound{};
+        int bound_size = sizeof(bound);
+        if (::getsockname(socket_handle, reinterpret_cast<sockaddr*>(&bound), &bound_size) ==
+                SOCKET_ERROR ||
+            bound_size != sizeof(bound) || bound.sin_family != AF_INET ||
+            bound.sin_addr.S_un.S_addr != htonl(INADDR_LOOPBACK)) {
+            result.status = HldsLocalReadinessStatus::query_socket_failed;
+            return result;
+        }
+        result.query_socket_loopback_bound = true;
+        const auto bound_port = ntohs(bound.sin_port);
+        if (bound_port == requested_port || bound_port == excluded_relay_port) {
+            result.status = HldsLocalReadinessStatus::query_endpoint_conflict;
+            return result;
+        }
+        result.query_socket_excludes_relay_and_server = true;
+        sockaddr_in destination{};
+        destination.sin_family = AF_INET;
+        destination.sin_addr.S_un.S_addr = htonl(INADDR_LOOPBACK);
+        destination.sin_port = htons(requested_port);
+        constexpr std::array<unsigned char, 25U> base_query{
+            0xFFU, 0xFFU, 0xFFU, 0xFFU, 0x54U, 'S', 'o', 'u', 'r', 'c', 'e', ' ',  'E',
+            'n',   'g',   'i',   'n',   'e',   ' ', 'Q', 'u', 'e', 'r', 'y', 0x00U};
+        std::array<unsigned char, 29U> query{};
+        std::copy(base_query.begin(), base_query.end(), query.begin());
+        std::size_t query_size = base_query.size();
+        std::array<std::byte, 8U * 1'024U> response{};
+        bool challenge_seen = false;
+        for (std::size_t attempt = 0U; attempt < 3U; ++attempt) {
+            if (!lifecycle_valid()) return result;
+            if (::sendto(socket_handle, reinterpret_cast<const char*>(query.data()),
+                         static_cast<int>(query_size), 0,
+                         reinterpret_cast<const sockaddr*>(&destination),
+                         sizeof(destination)) == SOCKET_ERROR) {
+                result.status = HldsLocalReadinessStatus::query_socket_failed;
+                return result;
+            }
+            ++result.request_attempt_count;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (!lifecycle_valid()) return result;
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+                const auto slice = (std::min)(remaining, std::chrono::milliseconds{250});
+                timeval wait_time{};
+                wait_time.tv_sec = static_cast<long>(slice.count() / 1'000);
+                wait_time.tv_usec = static_cast<long>((slice.count() % 1'000) * 1'000);
+                fd_set readable;
+                FD_ZERO(&readable);
+                FD_SET(socket_handle, &readable);
+                const auto selected = ::select(0, &readable, nullptr, nullptr, &wait_time);
+                if (selected == SOCKET_ERROR) {
+                    result.status = HldsLocalReadinessStatus::query_socket_failed;
+                    return result;
+                }
+                if (selected == 0) continue;
+                sockaddr_in source{};
+                int source_size = sizeof(source);
+                const auto received =
+                    ::recvfrom(socket_handle, reinterpret_cast<char*>(response.data()),
+                               static_cast<int>(response.size()), 0,
+                               reinterpret_cast<sockaddr*>(&source), &source_size);
+                if (received == SOCKET_ERROR) {
+                    result.status = ::WSAGetLastError() == WSAEMSGSIZE
+                                        ? HldsLocalReadinessStatus::query_response_oversized
+                                        : HldsLocalReadinessStatus::query_socket_failed;
+                    return result;
+                }
+                if (source_size != sizeof(source) || source.sin_family != AF_INET ||
+                    source.sin_addr.S_un.S_addr != htonl(INADDR_LOOPBACK) ||
+                    ntohs(source.sin_port) != requested_port) {
+                    result.status = HldsLocalReadinessStatus::query_source_mismatch;
+                    return result;
+                }
+                result.response_source_matches = true;
+                const auto bytes =
+                    std::span<const std::byte>{response.data(), static_cast<std::size_t>(received)};
+                if (bytes.size() == 9U && std::to_integer<unsigned char>(bytes[0]) == 0xFFU &&
+                    std::to_integer<unsigned char>(bytes[1]) == 0xFFU &&
+                    std::to_integer<unsigned char>(bytes[2]) == 0xFFU &&
+                    std::to_integer<unsigned char>(bytes[3]) == 0xFFU &&
+                    std::to_integer<unsigned char>(bytes[4]) == 0x41U) {
+                    if (challenge_seen) {
+                        result.status = HldsLocalReadinessStatus::repeated_challenge;
+                        return result;
+                    }
+                    challenge_seen = true;
+                    result.challenge_observed = true;
+                    for (std::size_t index = 0U; index < 4U; ++index) {
+                        query[25U + index] = std::to_integer<unsigned char>(bytes[5U + index]);
+                    }
+                    query_size = query.size();
+                    break;
+                }
+                auto parsed = parse_hlds_local_info_response(bytes, requested_map, "valve");
+                parsed.owned_process_running = result.owned_process_running;
+                parsed.process_identity_matches = result.process_identity_matches;
+                parsed.endpoint_owner_matches = result.endpoint_owner_matches;
+                parsed.endpoint_address_matches = result.endpoint_address_matches;
+                parsed.endpoint_port_matches = result.endpoint_port_matches;
+                parsed.endpoint_proof_source = result.endpoint_proof_source;
+                parsed.query_socket_loopback_bound = result.query_socket_loopback_bound;
+                parsed.query_socket_excludes_relay_and_server =
+                    result.query_socket_excludes_relay_and_server;
+                parsed.response_source_matches = true;
+                parsed.challenge_observed = challenge_seen;
+                parsed.request_attempt_count = result.request_attempt_count;
+                if (!parsed) return parsed;
+                result = parsed;
+                if (!lifecycle_valid() || !endpoint_valid()) return result;
+                result.status = HldsLocalReadinessStatus::ready;
+                return result;
+            }
+        }
+        result.status = HldsLocalReadinessStatus::query_timeout;
+        return result;
+    } catch (...) {
+        result.status = HldsLocalReadinessStatus::query_socket_failed;
+        return result;
     }
 }
 
@@ -1907,9 +2558,92 @@ std::string_view to_string(const HldsRuntimeModeCategory category) noexcept
 {
     switch (category) {
     case HldsRuntimeModeCategory::stdio: return "stdio";
+    case HldsRuntimeModeCategory::not_advertised:
+        return "not-advertised";
     case HldsRuntimeModeCategory::other: return "other";
     case HldsRuntimeModeCategory::malformed: return "malformed";
     case HldsRuntimeModeCategory::absent: return "absent";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(const HldsRuntimeProfile::Id id) noexcept
+{
+    switch (id) {
+    case HldsRuntimeProfile::Id::legacy_stdio_hlds_banner_v1:
+        return "legacy-stdio-hlds-banner-v1";
+    case HldsRuntimeProfile::Id::steam_hlds_10210_no_mode_banner_v1:
+        return "steam-hlds-10210-no-mode-banner-v1";
+
+}
+    return "unknown";
+}
+
+std::string_view to_string(const HldsLocalReadinessStatus status) noexcept
+{
+    switch (status) {
+    case HldsLocalReadinessStatus::ready:
+        return "ready";
+    case HldsLocalReadinessStatus::invalid_argument:
+        return "invalid-argument";
+    case HldsLocalReadinessStatus::process_exited:
+        return "process-exited";
+    case HldsLocalReadinessStatus::process_identity_mismatch:
+        return "process-identity-mismatch";
+    case HldsLocalReadinessStatus::continuity_failed:
+        return "continuity-failed";
+    case HldsLocalReadinessStatus::endpoint_observation_unavailable:
+        return "endpoint-observation-unavailable";
+    case HldsLocalReadinessStatus::endpoint_table_malformed:
+        return "endpoint-table-malformed";
+    case HldsLocalReadinessStatus::endpoint_not_owned:
+        return "endpoint-not-owned";
+    case HldsLocalReadinessStatus::endpoint_not_loopback_ipv4:
+        return "endpoint-not-loopback-ipv4";
+    case HldsLocalReadinessStatus::query_socket_failed:
+        return "query-socket-failed";
+    case HldsLocalReadinessStatus::query_endpoint_conflict:
+        return "query-endpoint-conflict";
+    case HldsLocalReadinessStatus::query_timeout:
+        return "query-timeout";
+    case HldsLocalReadinessStatus::query_source_mismatch:
+        return "query-source-mismatch";
+    case HldsLocalReadinessStatus::query_response_oversized:
+        return "query-response-oversized";
+    case HldsLocalReadinessStatus::query_response_malformed:
+        return "query-response-malformed";
+    case HldsLocalReadinessStatus::repeated_challenge:
+        return "repeated-challenge";
+    case HldsLocalReadinessStatus::protocol_mismatch:
+        return "protocol-mismatch";
+    case HldsLocalReadinessStatus::application_id_mismatch:
+        return "application-id-mismatch";
+    case HldsLocalReadinessStatus::map_mismatch:
+        return "map-mismatch";
+    case HldsLocalReadinessStatus::game_mismatch:
+        return "game-mismatch";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(const HldsEndpointProofSource source) noexcept
+{
+    switch (source) {
+    case HldsEndpointProofSource::absent:
+        return "absent";
+    case HldsEndpointProofSource::windows_udp_owner_table_and_loopback_query:
+        return "windows-udp-owner-table-and-loopback-query";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(const HldsMapProofSource source) noexcept
+{
+    switch (source) {
+    case HldsMapProofSource::absent:
+        return "absent";
+    case HldsMapProofSource::goldsrc_server_info_query:
+        return "goldsrc-server-info-query";
     }
     return "unknown";
 }

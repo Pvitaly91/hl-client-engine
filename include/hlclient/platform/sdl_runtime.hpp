@@ -1,6 +1,13 @@
 #pragma once
+#include <cstdint>
+#include <span>
+#include <string>
 
 namespace hlclient::platform {
+
+// Explicit application diagnostic output; input is bottom-up owning readback.
+void save_rgba_framebuffer_png(const std::string& output, int width, int height,
+    std::span<const std::uint8_t> rgba);
 
 class SdlRuntime final {
 public:

@@ -757,6 +757,77 @@ TEST_CASE("Runtime numeric magnitude rejects values without clamping",
           goldsrc::DeltaValueErrorCode::invalid_base);
 }
 
+TEST_CASE("Public GoldSrc full-width unsigned integer preserves bitmask bits",
+          "[goldsrc][delta-value][numeric][bitmask]")
+{
+    constexpr fixture::Field fields[]{
+        {"weapons", 0x0000'0008U, 0U, 32U},
+    };
+    const auto schema = parse_schema("clientdata_t", fields);
+    fixture::BitWriter writer;
+    writer.write(1U, 3U);
+    writer.write(1U, 8U);
+    writer.write(0xf000'0001U, 32U);
+    writer.align_zero();
+
+    const goldsrc::GoldSrcDeltaValueDecoder decoder{
+        {}, goldsrc::DeltaValueCompatibilityProfile::public_goldsrc48_delta_v1};
+    const auto decoded = decoder.decode_delta(
+        schema, nullptr, context(writer.bytes()));
+
+    REQUIRE(decoded);
+    REQUIRE(decoded.state);
+    CHECK(std::get<std::uint32_t>(
+              decoded.state->fields()[0U].value()) == 0xf000'0001U);
+    CHECK(decoded.bits_consumed == 48U);
+}
+
+TEST_CASE("Public GoldSrc signed scalars use sign-first magnitude literals",
+          "[goldsrc][delta-value][numeric][signed][literal]")
+{
+    constexpr fixture::Field fields[]{
+        {"positive", 0x8000'0008U, 0U, 10U},
+        {"negative", 0x8000'0004U, 4U, 12U, 8'000U, 4'000U},
+    };
+    const auto schema = parse_schema("clientdata_t", fields);
+
+    fixture::BitWriter writer;
+    writer.write(1U, 3U);
+    writer.write(0x03U, 8U);
+    writer.write(200U, 10U); // sign 0, magnitude 100
+    writer.write(17U, 12U);  // sign 1, magnitude 8; scale 1/2 => -4
+    writer.align_zero();
+
+    for (const auto profile : {
+             goldsrc::DeltaValueCompatibilityProfile::public_goldsrc48_delta_v1,
+             goldsrc::DeltaValueCompatibilityProfile::public_goldsrc48_entity_delta_v1,
+             goldsrc::DeltaValueCompatibilityProfile::public_goldsrc48_usercmd_delta_v1}) {
+        const goldsrc::GoldSrcDeltaValueDecoder decoder{{}, profile};
+        const auto decoded = decoder.decode_delta(
+            schema, nullptr, context(writer.bytes()));
+        REQUIRE(decoded);
+        REQUIRE(decoded.state);
+        CHECK(std::get<std::int32_t>(
+                  decoded.state->fields()[0U].value()) == 100);
+        CHECK(std::get<double>(
+                  decoded.state->fields()[1U].value()) == -4.0);
+    }
+}
+
+TEST_CASE("Synthetic signed scalar remains two's-complement",
+          "[goldsrc][delta-value][numeric][signed][synthetic]")
+{
+    const auto schema = parse_schema("signed_short_t", kSignedShortField);
+    constexpr std::array literal{
+        std::byte{0x01U}, std::byte{0x01U},
+        std::byte{0xfeU}, std::byte{0x0fU}};
+    const auto decoded = synthetic_decoder().decode_delta(
+        schema, nullptr, context(literal));
+    REQUIRE(decoded);
+    CHECK(std::get<std::int32_t>(
+              decoded.state->fields()[0U].value()) == -2);
+}
+
 TEST_CASE("Runtime delta base retains the exact source schema descriptor",
           "[goldsrc][delta-value][base][schema-identity]")
 {

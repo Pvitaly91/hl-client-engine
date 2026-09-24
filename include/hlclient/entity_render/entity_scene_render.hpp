@@ -154,7 +154,14 @@ struct EntitySceneRenderError {
 
 class EntitySceneRenderPackage;
 
+enum class EntitySceneRenderAssetSource {
+    imported_asset_library,
+    project_generated_diagnostic,
+};
+
 struct EntitySceneRenderPackageCreateInfo {
+    EntitySceneRenderAssetSource asset_source{
+        EntitySceneRenderAssetSource::imported_asset_library};
     std::shared_ptr<const entity_visual::EntityVisualAssetLibraryState>
         asset_library;
     EntityRenderResourceIdentity asset_library_identity{};
@@ -177,6 +184,7 @@ public:
         const noexcept;
     [[nodiscard]] EntityRenderResourceIdentity asset_library_identity()
         const noexcept;
+    [[nodiscard]] EntitySceneRenderAssetSource asset_source() const noexcept;
     [[nodiscard]] std::span<
         const std::shared_ptr<const StudioModelRenderAsset>> studio_assets()
         const noexcept;
@@ -193,6 +201,7 @@ private:
     friend class EntitySceneRenderPackageBuilder;
 
     EntitySceneRenderPackage(
+        EntitySceneRenderAssetSource asset_source,
         std::shared_ptr<const entity_visual::EntityVisualAssetLibraryState>
             asset_library,
         EntityRenderResourceIdentity asset_library_identity,
@@ -203,6 +212,8 @@ private:
         std::vector<std::shared_ptr<const SpriteRenderAsset>> sprite_assets,
         EntitySceneRenderStatistics statistics) noexcept;
 
+    EntitySceneRenderAssetSource asset_source_{
+        EntitySceneRenderAssetSource::imported_asset_library};
     std::shared_ptr<const entity_visual::EntityVisualAssetLibraryState>
         asset_library_;
     EntityRenderResourceIdentity asset_library_identity_{};
@@ -233,6 +244,7 @@ public:
 
 enum class EntityRenderInterpolationProfile {
     synthetic_seconds_v1,
+    decoded_discrete_runtime_replay_v1,
     stock_server_time_evidence_pending,
 };
 

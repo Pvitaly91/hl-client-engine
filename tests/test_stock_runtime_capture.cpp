@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
+#include <chrono>
 #include <limits>
 #include <string>
 
@@ -40,6 +42,8 @@ TEST_CASE("Stock runtime output roles bind only their exact ignored roots",
         goldsrc::parse_stock_runtime_capture_output_role("normal-campaign-run");
     const auto canary =
         goldsrc::parse_stock_runtime_capture_output_role("pre-campaign-canary");
+    const auto functional = goldsrc::parse_stock_runtime_capture_output_role(
+        "functional-runtime-capture");
     const auto diagnostic = goldsrc::parse_stock_runtime_capture_output_role(
         "server-profile-diagnostic");
     const auto private_diagnostic =
@@ -47,12 +51,15 @@ TEST_CASE("Stock runtime output roles bind only their exact ignored roots",
             "server-profile-private-diagnostic");
     REQUIRE(normal);
     REQUIRE(canary);
+    REQUIRE(functional);
     REQUIRE(diagnostic);
     REQUIRE(private_diagnostic);
     CHECK(*normal ==
           goldsrc::StockRuntimeCaptureOutputRole::normal_campaign_run);
     CHECK(*canary ==
           goldsrc::StockRuntimeCaptureOutputRole::pre_campaign_canary);
+    CHECK(*functional ==
+          goldsrc::StockRuntimeCaptureOutputRole::functional_runtime_capture);
     CHECK(goldsrc::to_string(*normal) == "normal-campaign-run");
     CHECK(goldsrc::to_string(*canary) == "pre-campaign-canary");
     CHECK(goldsrc::to_string(*diagnostic) == "server-profile-diagnostic");
@@ -60,6 +67,10 @@ TEST_CASE("Stock runtime output roles bind only their exact ignored roots",
           "stock-runtime");
     CHECK(goldsrc::stock_runtime_capture_output_parent_directory(*canary) ==
           "stock-runtime-canary");
+    CHECK(goldsrc::to_string(*functional) ==
+          "functional-runtime-capture");
+    CHECK(goldsrc::stock_runtime_capture_output_parent_directory(*functional) ==
+          "research-runtime-capture");
     CHECK(goldsrc::stock_runtime_capture_output_parent_directory(*diagnostic) ==
           "stock-runtime-server-profile-diagnostic");
     CHECK(goldsrc::to_string(*private_diagnostic) ==
@@ -67,11 +78,86 @@ TEST_CASE("Stock runtime output roles bind only their exact ignored roots",
     CHECK(goldsrc::stock_runtime_capture_output_parent_directory(
               *private_diagnostic) ==
           "stock-runtime-server-profile-private");
+    CHECK(goldsrc::stock_runtime_capture_waits_until_requested_deadline(*normal));
+    CHECK(goldsrc::stock_runtime_capture_waits_until_requested_deadline(*canary));
+    CHECK_FALSE(
+        goldsrc::stock_runtime_capture_waits_until_requested_deadline(*functional));
+    CHECK(goldsrc::stock_runtime_capture_waits_until_requested_deadline(
+        *diagnostic));
+    CHECK(goldsrc::stock_runtime_capture_waits_until_requested_deadline(
+        *private_diagnostic));
     CHECK_FALSE(
         goldsrc::parse_stock_runtime_capture_output_role("stock-runtime"));
     CHECK_FALSE(goldsrc::parse_stock_runtime_capture_output_role(
         "manual-artifacts/stock-runtime-canary"));
     CHECK_FALSE(goldsrc::parse_stock_runtime_capture_output_role("canary"));
+}
+
+TEST_CASE("Functional lifecycle completes from map entry before its maximum",
+          "[goldsrc][stock-runtime][capture][functional][lifecycle]")
+{
+    using Decision = goldsrc::StockRuntimeCaptureLifecycleDecision;
+    using Role = goldsrc::StockRuntimeCaptureOutputRole;
+    using namespace std::chrono_literals;
+
+    CHECK(goldsrc::stock_runtime_capture_lifecycle_decision(
+              Role::functional_runtime_capture, 40s, 14'999ms, 90s) ==
+          Decision::continue_capture);
+    CHECK(goldsrc::stock_runtime_capture_lifecycle_decision(
+              Role::functional_runtime_capture, 40s, 15s, 90s) ==
+          Decision::functional_interval_complete);
+    CHECK(goldsrc::stock_runtime_capture_lifecycle_decision(
+              Role::functional_runtime_capture, 90s, 14'999ms, 90s) ==
+          Decision::incomplete);
+    CHECK(goldsrc::stock_runtime_capture_lifecycle_decision(
+              Role::functional_runtime_capture, 20s, std::nullopt, 90s) ==
+          Decision::continue_capture);
+    CHECK(goldsrc::stock_runtime_capture_lifecycle_decision(
+              Role::functional_runtime_capture, 20s, 15s, 90s, 15s,
+              false) == Decision::incomplete);
+
+    CHECK(goldsrc::stock_runtime_capture_lifecycle_decision(
+              Role::normal_campaign_run, 89'999ms, std::nullopt, 90s) ==
+          Decision::continue_capture);
+    CHECK(goldsrc::stock_runtime_capture_lifecycle_decision(
+              Role::normal_campaign_run, 90s, std::nullopt, 90s) ==
+          Decision::requested_duration_complete);
+    CHECK(goldsrc::stock_runtime_capture_lifecycle_decision(
+              Role::pre_campaign_canary, 90s, std::nullopt, 90s) ==
+          Decision::requested_duration_complete);
+}
+
+TEST_CASE("Functional auxiliary query recognition is exact and bounded by bytes",
+          "[goldsrc][stock-runtime][capture][functional]")
+{
+    std::array query{
+        std::byte{0xffU}, std::byte{0xffU}, std::byte{0xffU},
+        std::byte{0xffU}, std::byte{0x54U}, std::byte{'S'},
+        std::byte{'o'}, std::byte{'u'}, std::byte{'r'}, std::byte{'c'},
+        std::byte{'e'}, std::byte{' '}, std::byte{'E'}, std::byte{'n'},
+        std::byte{'g'}, std::byte{'i'}, std::byte{'n'}, std::byte{'e'},
+        std::byte{' '}, std::byte{'Q'}, std::byte{'u'}, std::byte{'e'},
+        std::byte{'r'}, std::byte{'y'}, std::byte{0x00U}};
+    CHECK(goldsrc::is_functional_runtime_auxiliary_query(query));
+    query.back() = std::byte{0x01U};
+    CHECK_FALSE(goldsrc::is_functional_runtime_auxiliary_query(query));
+    CHECK_FALSE(goldsrc::is_functional_runtime_auxiliary_query(
+        std::span{query}.first(query.size() - 1U)));
+
+    query.back() = std::byte{0x00U};
+    CHECK(goldsrc::is_functional_runtime_auxiliary_observation(
+        query, true, true, true, false, 0U));
+    CHECK_FALSE(goldsrc::is_functional_runtime_auxiliary_observation(
+        query, false, true, true, false, 0U));
+    CHECK_FALSE(goldsrc::is_functional_runtime_auxiliary_observation(
+        query, true, false, true, false, 0U));
+    CHECK_FALSE(goldsrc::is_functional_runtime_auxiliary_observation(
+        query, true, true, false, false, 0U));
+    CHECK_FALSE(goldsrc::is_functional_runtime_auxiliary_observation(
+        query, true, true, true, true, 0U));
+    CHECK_FALSE(goldsrc::is_functional_runtime_auxiliary_observation(
+        query, true, true, true, false,
+        goldsrc::kMaximumFunctionalRuntimeAuxiliaryQueries));
 }
 
 TEST_CASE("Stock runtime capture counter failures are transactional",

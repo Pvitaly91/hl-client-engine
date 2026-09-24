@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <bit>
 
 namespace hlclient::goldsrc {
 
@@ -36,14 +37,15 @@ namespace {
 bool valid_goldsrc_usercmd_packet_planner_config(
     const GoldSrcUserCmdPacketPlannerConfig& config) noexcept
 {
-    return config.profile ==
-               GoldSrcUserCmdPacketPlannerProfile::synthetic_backup_v1 &&
+    const bool reference = config.profile == GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1;
+    return (reference || config.profile ==
+               GoldSrcUserCmdPacketPlannerProfile::synthetic_backup_v1) &&
            config.desired_backup_commands <= config.maximum_backup_commands &&
-           config.maximum_backup_commands <= 15U &&
+           config.maximum_backup_commands <= (reference ? 61U : 15U) &&
            config.maximum_new_commands > 0U &&
-           config.maximum_new_commands <= 15U &&
+           config.maximum_new_commands <= (reference ? 62U : 15U) &&
            config.maximum_commands_per_packet > 0U &&
-           config.maximum_commands_per_packet <= 32U &&
+           config.maximum_commands_per_packet <= (reference ? 62U : 32U) &&
            config.maximum_backup_commands + config.maximum_new_commands <=
                config.maximum_commands_per_packet &&
            config.maximum_packet_bytes >= 4U &&
@@ -115,12 +117,31 @@ std::uint32_t GoldSrcUserCmdPacketPlan::outgoing_netchan_sequence() const noexce
 }
 std::size_t GoldSrcUserCmdPacketPlan::expected_encoded_bits() const noexcept
 {
-    return encoded_message_ ? encoded_message_->bit_length() : 0U;
+    return reference_message_ ? reference_message_->bytes.size() * 8 : encoded_message_ ? encoded_message_->bit_length() : 0U;
 }
 std::size_t GoldSrcUserCmdPacketPlan::expected_encoded_bytes() const noexcept
 {
-    return encoded_message_ ? encoded_message_->bytes().size() : 0U;
+    return encoded_bytes().size();
 }
+std::span<const std::byte> GoldSrcUserCmdPacketPlan::encoded_bytes() const noexcept {
+    return reference_message_ ? std::span<const std::byte>{reference_message_->bytes}
+        : encoded_message_ ? encoded_message_->bytes() : std::span<const std::byte>{};
+}
+std::size_t GoldSrcUserCmdPacketPlan::changed_field_count() const noexcept {
+    if (!reference_message_) return encoded_message_ ? encoded_message_->changed_field_count() : 0;
+    std::size_t count = 0;
+    for (const auto& c : reference_message_->commands) count += std::popcount(c.field_mask);
+    return count;
+}
+GoldSrcUserCmdPacketPlan::GoldSrcUserCmdPacketPlan(
+    std::vector<GoldSrcUserCmdSequence> sequences, std::uint64_t history_revision,
+    std::uint64_t planner_revision, std::uint64_t identity, ReferenceClientMoveMessage message,
+    std::shared_ptr<const GoldSrcUserCmdPacketPlannerIdentity> owner) noexcept
+    : ordered_sequences_{std::move(sequences)}, backup_command_count_{message.backup_count},
+      new_command_count_{message.new_count}, history_revision_{history_revision},
+      planner_revision_{planner_revision}, plan_identity_{identity},
+      outgoing_netchan_sequence_{message.source.sequence}, owner_{std::move(owner)},
+      reference_message_{std::move(message)} {}
 const GoldSrcClientMoveMessage&
 GoldSrcUserCmdPacketPlan::encoded_message() const noexcept
 {
@@ -145,6 +166,24 @@ GoldSrcUserCmdPacketPlanResult GoldSrcUserCmdPacketPlanner::prepare(
     const GoldSrcUserCmdSchemaBinding& binding,
     const std::uint32_t outgoing_netchan_sequence)
 {
+    if (config_.profile == GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1)
+        return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::invalid_configuration,
+            "Reference planning requires a retained driver context");
+    return prepare_bounded(history, binding, outgoing_netchan_sequence, config_.maximum_packet_bytes);
+}
+
+GoldSrcUserCmdPacketPlanResult GoldSrcUserCmdPacketPlanner::prepare(
+    const GoldSrcUserCmdHistoryState& history, const GoldSrcUserCmdSchemaBinding& binding,
+    const NetchanOutgoingContextPlan& context)
+{
+    return prepare_bounded(history, binding, context.next_outgoing_sequence().value(),
+        context.maximum_unreliable_payload_size());
+}
+
+GoldSrcUserCmdPacketPlanResult GoldSrcUserCmdPacketPlanner::prepare_bounded(
+    const GoldSrcUserCmdHistoryState& history, const GoldSrcUserCmdSchemaBinding& binding,
+    std::uint32_t outgoing_netchan_sequence, std::size_t capacity)
+{
     if (!valid_configuration_) {
         return prepare_failure(
             config_.profile ==
@@ -166,8 +205,12 @@ GoldSrcUserCmdPacketPlanResult GoldSrcUserCmdPacketPlanner::prepare(
             "Usercmd packet plan identity domain is exhausted");
     }
     const auto& entries = history.entries();
+    const bool reference = config_.profile == GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1;
+    if (reference != (history.profile() == GoldSrcUserCmdHistoryProfile::reference_wire_v1))
+        return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::invalid_configuration,
+            "History and planner profiles differ");
     const auto first_unsent = std::ranges::find_if(entries, [](const auto& entry) {
-        return entry.command && entry.new_transmission_count == 0U;
+        return entry.has_command() && entry.new_transmission_count == 0U;
     });
     if (first_unsent == entries.end()) {
         return prepare_failure(
@@ -186,7 +229,7 @@ GoldSrcUserCmdPacketPlanResult GoldSrcUserCmdPacketPlanner::prepare(
     while (candidate > 0U &&
            backup_indexes.size() < config_.desired_backup_commands) {
         --candidate;
-        if (entries[candidate].command &&
+        if (entries[candidate].has_command() &&
             entries[candidate].new_transmission_count != 0U) {
             backup_indexes.push_back(candidate);
         }
@@ -197,6 +240,46 @@ GoldSrcUserCmdPacketPlanResult GoldSrcUserCmdPacketPlanner::prepare(
         return prepare_failure(
             GoldSrcUserCmdPacketPlannerErrorCode::command_limit_exceeded,
             "Selected backup/new split exceeds the packet command bound");
+    }
+
+    if (reference) {
+        ReferenceMoveLimits limits;
+        limits.maximum_commands = config_.maximum_commands_per_packet;
+        limits.maximum_message_bytes = std::min({capacity, config_.maximum_packet_bytes, config_.maximum_packet_bits / 8});
+        if (limits.maximum_message_bytes < 7)
+            return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::packet_budget_exceeded, "No minimum move fits suffix capacity");
+        const GoldSrcReferenceClientMoveCodec codec{binding, history.generation(), limits};
+        if (!codec.valid_configuration())
+            return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::invalid_configuration, "Reference codec binding or limits invalid");
+        auto backups = backup_count;
+        auto news = new_count;
+        while (news != 0) {
+            std::vector<GoldSrcWireUserCmd> values;
+            std::vector<GoldSrcUserCmdSequence> ids;
+            values.reserve(backups + news); ids.reserve(backups + news);
+            const auto append = [&](std::size_t index) {
+                const auto& e = entries[index];
+                if (!e.reference_command || e.command) return false;
+                values.push_back(*e.reference_command); ids.push_back(e.sequence()); return true;
+            };
+            for (std::size_t b = backup_count - backups; b < backup_count; ++b)
+                if (!append(backup_indexes[b])) return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::invalid_configuration, "Non-reference history entry");
+            for (std::size_t n = 0; n < news; ++n)
+                if (!append(first_unsent_index + n)) return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::invalid_configuration, "Non-reference history entry");
+            ReferenceMoveSource source; source.generation = history.generation(); source.sequence = outgoing_netchan_sequence;
+            auto encoded = codec.encode(values, backups, 0, source);
+            if (encoded) {
+                const auto checked = history.preflight_submission(history.revision(), ids, backups);
+                if (!checked) return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::history_commit_failed, "Reference history preflight failed", {}, checked.error->code);
+                GoldSrcUserCmdPacketPlan plan{std::move(ids), history.revision(), revision_, next_plan_identity_++, std::move(*encoded.message), identity_};
+                plan.history_owner_ = history.owner_;
+                return {std::move(plan), {}};
+            }
+            if (encoded.error->code != ReferenceMoveErrorCode::byte_limit)
+                return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::encode_failed, "Reference encode failed");
+            if (backups != 0) --backups; else --news;
+        }
+        return prepare_failure(GoldSrcUserCmdPacketPlannerErrorCode::packet_budget_exceeded, "Oldest unsent command cannot fit suffix capacity");
     }
 
     std::vector<std::shared_ptr<const GoldSrcUserCmdState>> commands;
@@ -294,6 +377,12 @@ GoldSrcUserCmdPacketPlannerOperationResult GoldSrcUserCmdPacketPlanner::commit(
     GoldSrcUserCmdHistoryBuilder& history,
     GoldSrcUserCmdPacketPlan&& plan) noexcept
 {
+    const auto checked = preflight(history, plan);
+    if (!checked) {
+        if (plan.owner_ == identity_ && checked.error->code != GoldSrcUserCmdPacketPlannerErrorCode::foreign_plan)
+            plan.consumable_ = false;
+        return checked;
+    }
     const auto validated = validate(plan);
     if (!validated) {
         return validated;
@@ -320,6 +409,19 @@ GoldSrcUserCmdPacketPlannerOperationResult GoldSrcUserCmdPacketPlanner::commit(
                             : std::nullopt);
     }
     ++revision_;
+    return {};
+}
+
+GoldSrcUserCmdPacketPlannerOperationResult GoldSrcUserCmdPacketPlanner::preflight(
+    const GoldSrcUserCmdHistoryBuilder& history, const GoldSrcUserCmdPacketPlan& plan) const noexcept
+{
+    if (!plan.consumable_) return operation_failure(GoldSrcUserCmdPacketPlannerErrorCode::consumed_plan, "Plan consumed");
+    if (plan.owner_ != identity_ || (plan.history_owner_ && plan.history_owner_ != history.owner_))
+        return operation_failure(GoldSrcUserCmdPacketPlannerErrorCode::foreign_plan, "Foreign planner/history owner");
+    if (plan.planner_revision_ != revision_) return operation_failure(GoldSrcUserCmdPacketPlannerErrorCode::stale_plan, "Planner revision changed");
+    if (revision_ == UINT64_MAX) return operation_failure(GoldSrcUserCmdPacketPlannerErrorCode::revision_overflow, "Planner revision exhausted");
+    const auto checked = history.preflight_submission(plan.history_revision_, plan.ordered_sequences_, plan.backup_command_count_);
+    if (!checked) return operation_failure(checked.error->code == GoldSrcUserCmdHistoryErrorCode::stale_submission ? GoldSrcUserCmdPacketPlannerErrorCode::stale_plan : GoldSrcUserCmdPacketPlannerErrorCode::history_commit_failed, "History preflight failed", checked.error->code);
     return {};
 }
 

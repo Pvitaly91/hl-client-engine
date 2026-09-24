@@ -4,11 +4,18 @@
 
 `GoldSrcClientMoveMessageCodec` executes only
 `synthetic_client_move_v1`. The
-`stock_protocol_48_build_10210_evidence_pending` profile fails before encoding
-or decoding because the clean-room corpus currently has zero accepted runs and
-zero verified move packets. The synthetic opcode `0xE1` is deliberately outside
+`stock_protocol_48_build_10210_evidence_pending` profile still fails before encoding
+or decoding. Separately, M4.7.2A's `GoldSrcReferenceClientMoveCodec` executes
+`public_goldsrc48_client_move_v1` on owning wire commands, with 768 captured
+messages verified offline. See the [reference contract](GOLDSRC_REFERENCE_CLIENT_MOVE.md).
+No strict evidence gate or transmission route is opened. The synthetic opcode `0xE1` is deliberately outside
 the stock claim; it must not be called `clc_move` or submitted to an arbitrary
 production server.
+
+M4.7.2B subsequently adds an explicit reference-backed **local test-peer**
+transmission route, not an arbitrary live connection. See
+[reference move transmission](GOLDSRC_REFERENCE_MOVE_TRANSMISSION.md); the
+synthetic envelope and strict evidence gate described here remain separate.
 
 The codec owns a complete byte-aligned synthetic envelope. It does not own a
 socket, a `NetchanDriver`, scheduling, history mutation, or a native

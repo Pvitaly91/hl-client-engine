@@ -643,6 +643,48 @@ TEST_CASE("Initial sign-on reaches the owning boundary only after the matching A
     CHECK(transport.sent.size() == sends_at_boundary);
 }
 
+TEST_CASE("Live initial sign-on accepts a bounded uncompressed service payload",
+          "[goldsrc][signon][stage][uncompressed][live]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'128U);
+    const auto epoch = goldsrc::InitialSignonTimePoint{} + 1s;
+    auto config = test_config();
+    config.service_payload_envelope.compression_policy =
+        goldsrc::ServicePayloadCompressionPolicy::
+            accept_bzip2_or_uncompressed;
+    goldsrc::InitialSignonStage stage{transport, remote, config};
+    require_started(stage, transport, epoch);
+    static_cast<void>(stage.poll_event());
+    const auto first =
+        require_initial_request_sent(stage, transport, epoch + 1ms);
+    static_cast<void>(stage.poll_event());
+
+    const auto semantic = synthetic_boundary_payload();
+    transport.queue(
+        remote,
+        server_packet(
+            1U,
+            false,
+            first.header.sequence.sequence.value(),
+            true,
+            semantic));
+    stage.update(epoch + 2ms);
+
+    CAPTURE(static_cast<int>(stage.state()));
+    const auto error_context =
+        stage.error() ? stage.error()->context : std::string{};
+    CAPTURE(error_context);
+    REQUIRE(stage.result());
+    CHECK(stage.state() ==
+          goldsrc::InitialSignonState::signon_boundary_reached);
+    CHECK(stage.result()->boundary_payload.bytes == semantic);
+    CHECK_FALSE(stage.result()->boundary_payload.decompressed);
+    CHECK(stage.result()->boundary_payload.wire_uncompressed);
+    CHECK(stage.result()->service_payload_count == 1U);
+    CHECK(stage.cleanup_count() == 1U);
+}
+
 TEST_CASE("Initial sign-on keeps one pre-ACK payload owning then decodes it after ACK",
           "[goldsrc][signon][stage][payload][pre-ack][ack]")
 {

@@ -16,6 +16,11 @@ struct AuthenticationRequestContext {
     goldsrc::ProtocolVersion protocol{goldsrc::ProtocolVersion::goldsrc_48};
     goldsrc::ConnectCompatibilityProfile compatibility_profile;
     std::optional<goldsrc::ChallengeToken> challenge;
+    // Present only for the fresh Steam challenge route. These values are
+    // supplied by the owning server challenge, never synthesized by a
+    // provider.
+    std::optional<std::uint64_t> game_server_steam_id;
+    std::optional<bool> game_server_secure;
 };
 
 enum class AuthenticationErrorCode {
@@ -24,6 +29,7 @@ enum class AuthenticationErrorCode {
     provider_error,
     invalid_material,
     material_too_large,
+    timed_out,
     cancelled,
 };
 
@@ -154,6 +160,8 @@ protected:
         return "invalid_material";
     case AuthenticationErrorCode::material_too_large:
         return "material_too_large";
+    case AuthenticationErrorCode::timed_out:
+        return "timed_out";
     case AuthenticationErrorCode::cancelled:
         return "cancelled";
     }

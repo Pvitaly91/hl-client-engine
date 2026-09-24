@@ -59,6 +59,71 @@ function Test-ExternalTargetMetadata {
             $Profile -ceq 'reviewed-non-executable-v1'))
 }
 
+function Test-ResearchRunSteamPolicy {
+    param([object]$Manifest, [bool]$RequireAccepted)
+    $schema = [string]$Manifest.schema
+    if ($schema -ceq 'hlclient.stock-runtime-research-run.v1') {
+        return (-not $RequireAccepted) -or
+            [string]$Manifest.external_drift_status -ceq 'none'
+    }
+    if ($schema -cne 'hlclient.stock-runtime-research-run.v2') { return $false }
+    foreach ($name in @('raw_external_state', 'protected_projection',
+            'steam_rewrite_policy_id', 'policy_decision')) {
+        if ($null -eq $Manifest.PSObject.Properties[$name]) { return $false }
+    }
+    if (@('unchanged', 'changed', 'incomplete') -cnotcontains
+            [string]$Manifest.raw_external_state -or
+        @('none', 'match', 'mismatch', 'incomplete') -cnotcontains
+            [string]$Manifest.protected_projection -or
+        @('legacy-strict-v1', 'steam-appinfo-change-number-v1') -cnotcontains
+            [string]$Manifest.steam_rewrite_policy_id -or
+        @('strict_pass', 'explicit_advisory', 'reject') -cnotcontains
+            [string]$Manifest.policy_decision) { return $false }
+    if (-not $RequireAccepted) { return $true }
+    return (
+        ([string]$Manifest.raw_external_state -ceq 'unchanged' -and
+         [string]$Manifest.external_drift_status -ceq 'none' -and
+         [string]$Manifest.protected_projection -ceq 'none' -and
+         [string]$Manifest.policy_decision -ceq 'strict_pass') -or
+        ([string]$Manifest.raw_external_state -ceq 'changed' -and
+         [string]$Manifest.external_drift_status -ceq 'changed' -and
+         [string]$Manifest.protected_projection -ceq 'match' -and
+         [string]$Manifest.steam_rewrite_policy_id -ceq
+            'steam-appinfo-change-number-v1' -and
+         [string]$Manifest.policy_decision -ceq 'explicit_advisory'))
+}
+
+function Test-RestorationSteamPolicy {
+    param([object]$Restoration)
+    if ([string]$Restoration.schema -ceq 'hlclient.stock-runtime-restoration.v1') {
+        return [string]$Restoration.external_file_drift -ceq 'none' -and
+            [string]$Restoration.external_pre_manifest_sha256 -ceq
+                [string]$Restoration.external_post_manifest_sha256
+    }
+    if ([string]$Restoration.schema -cne
+            'hlclient.stock-runtime-restoration.v2') { return $false }
+    $rawUnchanged = [string]$Restoration.raw_external_state -ceq 'unchanged'
+    $rawChanged = [string]$Restoration.raw_external_state -ceq 'changed'
+    if (($rawUnchanged -and [string]$Restoration.external_pre_manifest_sha256 -cne
+            [string]$Restoration.external_post_manifest_sha256) -or
+        ($rawChanged -and [string]$Restoration.external_pre_manifest_sha256 -ceq
+            [string]$Restoration.external_post_manifest_sha256) -or
+        [Int64]$Restoration.external_unreadable_count -ne 0) { return $false }
+    return (
+        ($rawUnchanged -and
+         [string]$Restoration.external_file_drift -ceq 'none' -and
+         [string]$Restoration.protected_projection -ceq 'none' -and
+         @('legacy-strict-v1', 'steam-appinfo-change-number-v1') -ccontains
+            [string]$Restoration.steam_rewrite_policy_id -and
+         [string]$Restoration.policy_decision -ceq 'strict_pass') -or
+        ($rawChanged -and
+         [string]$Restoration.external_file_drift -ceq 'changed' -and
+         [string]$Restoration.protected_projection -ceq 'match' -and
+         [string]$Restoration.steam_rewrite_policy_id -ceq
+            'steam-appinfo-change-number-v1' -and
+         [string]$Restoration.policy_decision -ceq 'explicit_advisory'))
+}
+
 function Assert-NoReparsePointInExistingPath {
     param([string]$Path, [string]$Label)
     $full = [IO.Path]::GetFullPath($Path)
@@ -2057,7 +2122,7 @@ function Get-VerifiedPreCampaignCanary {
     $run = Read-BoundedJson `
         (Join-Path $runRoot 'research-run-metadata.json') 262144 `
         'pre-campaign canary run manifest'
-    if ([string]$run.schema -cne 'hlclient.stock-runtime-research-run.v1' -or
+    if (-not (Test-ResearchRunSteamPolicy $run $true) -or
         [string]$run.run_id -cne $runs[0].Name -or
         [string]$run.map_category -cne 'boot_camp' -or
         [string]$run.scenario -cne 'baseline' -or
@@ -2240,9 +2305,12 @@ foreach ($directory in $entries) {
                 'runtime_candidate_count', 'generation_distinct',
                 'candidate_conflict')
         }
+        if ([string]$run.schema -ceq 'hlclient.stock-runtime-research-run.v2') {
+            $runKeys += @('raw_external_state', 'protected_projection',
+                'steam_rewrite_policy_id', 'policy_decision')
+        }
         Assert-ExactProperties $run $runKeys 'research run manifest'
-        if ([string]$run.schema -cne
-                'hlclient.stock-runtime-research-run.v1' -or
+        if (-not (Test-ResearchRunSteamPolicy $run $false) -or
             [string]$run.run_id -cne $directory.Name -or
             $run.accepted_evidence_run -isnot [bool] -or
             $run.accepted_transport_run -isnot [bool]) {
@@ -2342,6 +2410,16 @@ foreach ($directory in $entries) {
             'protected_paths_included', 'owned_processes_stopped',
             'input_automation_used', 'input_events_injected',
             'orchestrator_exit_code', 'restoration_status')
+        if ([string]$restoration.schema -ceq
+                'hlclient.stock-runtime-restoration.v2') {
+            $restorationKeys += @(
+                'raw_external_state', 'protected_projection',
+                'steam_rewrite_policy_id', 'policy_decision',
+                'external_drift_phase', 'external_changed_scope_count',
+                'external_content_change_count', 'external_metadata_only_count',
+                'external_identity_replacement_count', 'external_created_count',
+                'external_removed_count', 'external_unreadable_count')
+        }
         Assert-ExactProperties $restoration $restorationKeys `
             'restoration attestation'
         Assert-ExactProperties $stagedRestoration $restorationKeys `
@@ -2370,7 +2448,7 @@ foreach ($directory in $entries) {
         }
         if (-not $run.accepted_transport_run -or
             [string]$run.restoration_status -cne 'exact' -or
-            [string]$run.external_drift_status -cne 'none' -or
+            -not (Test-ResearchRunSteamPolicy $run $true) -or
             [string]$run.offline_replay_status -cne 'success' -or
             [string]$run.post_resource_boundary_status -cne 'observed' -or
             [string]$run.first_observation_status -cne 'observed') {
@@ -2418,9 +2496,8 @@ foreach ($directory in $entries) {
             ($currentIsolationEvidence | ConvertTo-Json -Compress)) {
             throw 'Isolation profile conflicts cross-run.'
         }
-        if ([string]$restoration.schema -cne 'hlclient.stock-runtime-restoration.v1' -or
+        if (-not (Test-RestorationSteamPolicy $restoration) -or
             [string]$restoration.restoration_status -cne 'exact' -or
-            [string]$restoration.external_file_drift -cne 'none' -or
             [string]$restoration.pre_manifest_sha256 -cne
                 [string]$restoration.post_manifest_sha256 -or
             $restoration.created_files_removed -cne $true -or

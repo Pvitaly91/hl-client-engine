@@ -1,5 +1,11 @@
 # GoldSrc usercmd delta codec
 
+M4.7.2A adds a separate offline wire-command path in
+`GoldSrcReferenceClientMoveCodec`, reusing `GoldSrcDeltaValueDecoder` with
+`public_goldsrc48_usercmd_delta_v1`. Its sign-first magnitude, captured schema
+binding and owning quantized values do not change the synthetic grammar below.
+See the [reference wire contract and capture results](GOLDSRC_REFERENCE_CLIENT_MOVE.md).
+
 ## Compatibility gate
 
 `GoldSrcUserCmdDeltaCodec` implements exactly one executable grammar:

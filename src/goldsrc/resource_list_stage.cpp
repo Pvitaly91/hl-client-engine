@@ -825,7 +825,9 @@ void ResourceListStage::fail_from_transition(
             : std::nullopt,
         std::nullopt,
         std::nullopt,
-        nested_error ? nested_error->driver_code : std::nullopt);
+        nested_error ? nested_error->driver_code : std::nullopt,
+        nested_error ? nested_error->control_code : std::nullopt,
+        nested_error ? nested_error->failure_metadata : std::nullopt);
     if (can_push_events()) {
         push_event(ResourceListStageEvent{
             .type = terminal_event(mapped_state),
@@ -874,7 +876,11 @@ void ResourceListStage::set_error(
     const std::optional<ResourceTransitionStageErrorCode> transition_code,
     const std::optional<ResourceListErrorCode> resource_list_code,
     const std::optional<PostResourceListStreamErrorCode> post_stream_code,
-    const std::optional<NetchanDriverErrorCode> driver_code) noexcept
+    const std::optional<NetchanDriverErrorCode> driver_code,
+    const std::optional<ResourceTransitionControlErrorCode>
+        transition_control_code,
+    std::optional<ResourceTransitionFailureMetadata>
+        transition_failure_metadata) noexcept
 {
     state_ = state;
     result_.reset();
@@ -883,6 +889,9 @@ void ResourceListStage::set_error(
         error_.emplace();
         error_->code = code;
         error_->transition_code = transition_code;
+        error_->transition_control_code = transition_control_code;
+        error_->transition_failure_metadata =
+            std::move(transition_failure_metadata);
         error_->resource_list_code = resource_list_code;
         error_->post_stream_code = post_stream_code;
         error_->driver_code = driver_code;

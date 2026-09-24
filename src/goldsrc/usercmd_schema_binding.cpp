@@ -248,6 +248,17 @@ GoldSrcUserCmdSchemaBinding::profile() const noexcept
 std::span<const GoldSrcUserCmdSchemaBindingEntry>
 GoldSrcUserCmdSchemaBinding::entries() const noexcept
 {
+    static constexpr auto public_entries = [] {
+        auto entries = kBindingEntries;
+        for (auto& entry : entries) {
+            entry.encode_support = GoldSrcUserCmdFieldCodecSupport::public_reference;
+            entry.decode_support = GoldSrcUserCmdFieldCodecSupport::public_reference;
+        }
+        return entries;
+    }();
+    if (profile_ == GoldSrcUserCmdSchemaBindingProfile::public_goldsrc48_usercmd_schema_v1) {
+        return public_entries;
+    }
     return kBindingEntries;
 }
 
@@ -265,7 +276,9 @@ GoldSrcUserCmdSchemaBindingResult bind_goldsrc_usercmd_schema(
             std::nullopt,
             "Stock usercmd runtime binding remains evidence-pending");
     }
-    if (profile != GoldSrcUserCmdSchemaBindingProfile::
+    const bool reference = profile == GoldSrcUserCmdSchemaBindingProfile::
+        public_goldsrc48_usercmd_schema_v1;
+    if (!reference && profile != GoldSrcUserCmdSchemaBindingProfile::
                        synthetic_usercmd_schema_v1) {
         return binding_failure(
             GoldSrcUserCmdSchemaBindingErrorCode::invalid_profile,
@@ -294,21 +307,21 @@ GoldSrcUserCmdSchemaBindingResult bind_goldsrc_usercmd_schema(
             actual.name() != expected.exact_name ||
             actual.type_flags().base_type() != expected.base_type ||
             actual.type_flags().signed_value() != expected.signed_value ||
-            actual.offset() != expected.description_offset ||
-            actual.storage_size() != kStorageSize ||
+            (!reference && actual.offset() != expected.description_offset) ||
+            (!reference && actual.storage_size() != kStorageSize) ||
             actual.significant_bits() != expected.significant_bits ||
             actual.premultiply_wire_value() !=
                 expected.premultiply_wire_value ||
             actual.postmultiply_wire_value() !=
                 expected.postmultiply_wire_value ||
-            actual.presence_mask() != expected.description_presence_mask ||
+            (!reference && actual.presence_mask() != expected.description_presence_mask) ||
             expected.encode_support != kSyntheticCodecSupport ||
             expected.decode_support != kSyntheticCodecSupport) {
             return binding_failure(
                 GoldSrcUserCmdSchemaBindingErrorCode::
                     field_definition_mismatch,
                 index,
-                "A usercmd_t field differs from the explicit synthetic binding");
+                "A usercmd_t field differs from the explicit descriptor contract");
         }
     }
 

@@ -22,6 +22,7 @@ enum class GoldSrcMovementEvidenceProfile : std::uint8_t {
 
 enum class GoldSrcMovementCommandProfile : std::uint8_t {
     synthetic_usercmd_semantics_v1,
+    reference_wire_dry_walk_v1,
     stock_usercmd_semantics_evidence_pending,
 };
 

@@ -642,6 +642,124 @@ TEST_CASE("Resource-transition stage preserves one driver and stops before opcod
     run_baseline(0U);
 }
 
+TEST_CASE("Resource-transition dispatcher decodes svc_nop before exact opcode 45",
+          "[goldsrc][resource-transition][stage][dispatch][nop][cursor][regression]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'420U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(
+        stage, transport, remote, epoch);
+
+    auto semantic = second_semantic_payload();
+    semantic.insert(semantic.begin(), std::byte{1U});
+    transport.queue(
+        remote,
+        server_packet(
+            2U,
+            false,
+            driven.transition_request.header.sequence.sequence.value(),
+            false,
+            service_envelope(semantic)));
+    stage.update(epoch + 4ms);
+
+    REQUIRE(stage.state() ==
+            goldsrc::ResourceTransitionStageState::
+                neutral_opcode43_boundary_reached);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->control().source_message_offset() == 1U);
+    CHECK(stage.result()->boundary().byte_offset() == 10U);
+    CHECK(stage.result()->boundary().source_payload_size() == semantic.size());
+    bool observed_nop = false;
+    while (const auto event = stage.poll_event()) {
+        if (event->type ==
+            goldsrc::ResourceTransitionStageEventType::
+                intermediate_message_decoded) {
+            observed_nop = true;
+            CHECK(event->opcode == 1U);
+            CHECK(event->byte_offset == 0U);
+            CHECK(event->byte_count == 1U);
+        }
+    }
+    CHECK(observed_nop);
+}
+
+TEST_CASE("Resource-transition dispatcher consumes a pre-ACK NOP-only payload once",
+          "[goldsrc][resource-transition][stage][dispatch][nop][pre-ack][ordering][regression]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'421U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(
+        stage, transport, remote, epoch);
+
+    const auto nops = std::vector<std::byte>(8U, std::byte{1U});
+    transport.queue(
+        remote,
+        normal_fragment_packet(
+            2U,
+            true,
+            driven.transition_request.header.sequence.sequence.value(),
+            true,
+            1U,
+            1U,
+            service_envelope(nops)));
+    stage.update(epoch + 4ms);
+    REQUIRE(stage.state() ==
+            goldsrc::ResourceTransitionStageState::waiting_for_request_ack);
+    CHECK_FALSE(stage.transition_request_acknowledged());
+    const auto retry = decode_sent(transport.sent.back());
+
+    transport.queue(
+        remote,
+        server_packet(
+            3U,
+            false,
+            retry.header.sequence.sequence.value(),
+            false,
+            {}));
+    stage.update(epoch + 5ms);
+    CHECK(stage.state() ==
+          goldsrc::ResourceTransitionStageState::waiting_for_server_transfer);
+    CHECK(stage.transition_request_acknowledged());
+    CHECK_FALSE(stage.result());
+
+    transport.queue(
+        remote,
+        server_packet(
+            4U,
+            false,
+            retry.header.sequence.sequence.value(),
+            false,
+            service_envelope(second_semantic_payload())));
+    stage.update(epoch + 6ms);
+    REQUIRE(stage.state() ==
+            goldsrc::ResourceTransitionStageState::
+                neutral_opcode43_boundary_reached);
+    REQUIRE(stage.result());
+    CHECK(stage.result()->source_payload().source_sequence() == 4U);
+
+    std::size_t nop_events = 0U;
+    std::size_t consumed_payload_events = 0U;
+    while (const auto event = stage.poll_event()) {
+        if (event->type ==
+            goldsrc::ResourceTransitionStageEventType::
+                intermediate_message_decoded) {
+            ++nop_events;
+        }
+        if (event->type ==
+            goldsrc::ResourceTransitionStageEventType::
+                intermediate_payload_consumed) {
+            ++consumed_payload_events;
+            CHECK(event->byte_count == nops.size());
+        }
+    }
+    CHECK(nop_events == nops.size());
+    CHECK(consumed_payload_events == 1U);
+}
+
 TEST_CASE("User-info and resource-transition stage limits are positive and hard capped",
           "[goldsrc][userinfo][resource-transition][stage][limits][negative]")
 {
@@ -792,17 +910,35 @@ TEST_CASE("Resource-transition stage ignores a wrong endpoint before the valid t
               neutral_opcode43_boundary_reached);
 }
 
-TEST_CASE("Resource-transition stage rejects an unknown opcode before the boundary",
-          "[goldsrc][resource-transition][stage][unknown-opcode][negative][transaction]")
+TEST_CASE("Resource-transition dispatcher rejects unknown message without byte resync",
+          "[goldsrc][resource-transition][stage][dispatch][unknown-opcode][negative][transaction][regression]")
 {
     FakeTransport transport;
     const auto remote = network::NetworkAddress::loopback(28'403U);
     const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
-    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    std::optional<goldsrc::ResourceTransitionTraceEvent> failure_trace;
+    goldsrc::ResourceTransitionStage stage{
+        transport,
+        remote,
+        test_config(),
+        {},
+        {},
+        {},
+        {},
+        {},
+        [&failure_trace](const auto& event) {
+            if (event.classification ==
+                goldsrc::ResourceTransitionTraceClassification::
+                    unsupported_message) {
+                failure_trace = event;
+            }
+        }};
     const auto driven = drive_to_transition_request(
         stage, transport, remote, epoch);
     auto malformed = second_semantic_payload();
     malformed[0U] = std::byte{44U};
+    malformed[4U] = std::byte{45U};
+    const auto wire_payload = service_envelope(malformed);
     transport.queue(
         remote,
         server_packet(
@@ -810,7 +946,7 @@ TEST_CASE("Resource-transition stage rejects an unknown opcode before the bounda
             false,
             driven.transition_request.header.sequence.sequence.value(),
             false,
-            service_envelope(malformed)));
+            wire_payload));
     stage.update(epoch + 4ms);
     CHECK(stage.state() ==
           goldsrc::ResourceTransitionStageState::unsupported_message);
@@ -818,9 +954,98 @@ TEST_CASE("Resource-transition stage rejects an unknown opcode before the bounda
     REQUIRE(stage.error());
     CHECK(stage.error()->code ==
           goldsrc::ResourceTransitionStageErrorCode::
-              transition_control_decode_failed);
-    CHECK(stage.error()->control_code ==
-          goldsrc::ResourceTransitionControlErrorCode::wrong_opcode);
+              intermediate_message_decode_failed);
+    CHECK(stage.error()->intermediate_control_code ==
+          goldsrc::RuntimeControlDecodeErrorCode::unsupported_opcode);
+    CHECK_FALSE(stage.error()->control_code);
+    REQUIRE(stage.error()->failure_metadata);
+    const auto& metadata = *stage.error()->failure_metadata;
+    CHECK(metadata.expected_opcode == 45U);
+    CHECK(metadata.actual_opcode == 44U);
+    CHECK(metadata.cursor_byte_value == 44U);
+    CHECK(metadata.cursor_byte_offset == 0U);
+    CHECK(metadata.cursor_bit_offset == 0U);
+    CHECK(metadata.cursor_boundary_kind ==
+          goldsrc::ResourceTransitionCursorBoundaryKind::
+              validated_message_boundary);
+    CHECK(metadata.payload_ordinal == 1U);
+    CHECK(metadata.payload_ordinal_scope ==
+          goldsrc::ResourceTransitionPayloadOrdinalScope::
+              resource_transition_nonempty_service_payload);
+    CHECK(metadata.direction ==
+          goldsrc::NetchanDirection::server_to_client);
+    CHECK(metadata.source_sequence == 2U);
+    CHECK(metadata.source_acknowledgement ==
+          driven.transition_request.header.sequence.sequence.value());
+    CHECK(metadata.source_reliable == false);
+    CHECK(metadata.reassembled == false);
+    CHECK(metadata.wire_encoding ==
+          goldsrc::ResourceTransitionWireEncodingKind::bzip2);
+    CHECK(metadata.wire_byte_count == wire_payload.size());
+    CHECK(metadata.decoded_byte_count == malformed.size());
+    CHECK(metadata.pending_suffix_byte_offset == 0U);
+    CHECK(metadata.pending_suffix_bit_offset == 0U);
+    CHECK(metadata.request_queued);
+    CHECK(metadata.request_transmitted);
+    CHECK(metadata.request_acknowledged);
+    CHECK(metadata.request_transmit_sequence ==
+          driven.transition_request.header.sequence.sequence.value());
+    CHECK(metadata.request_acknowledgement_sequence ==
+          driven.transition_request.header.sequence.sequence.value());
+    CHECK(metadata.last_successful_message_category ==
+          goldsrc::ResourceTransitionLastMessageCategory::
+              user_info_first_batch);
+    CHECK(metadata.last_successful_message_byte_offset);
+    CHECK(metadata.last_successful_message_end_byte_offset);
+    CHECK(metadata.intermediate_parser_error ==
+          goldsrc::RuntimeControlDecodeErrorCode::unsupported_opcode);
+    CHECK_FALSE(metadata.parser_error);
+    REQUIRE(failure_trace);
+    REQUIRE(failure_trace->failure_metadata);
+    CHECK(failure_trace->failure_metadata->cursor_byte_value == 44U);
+    CHECK(failure_trace->failure_metadata->actual_opcode == 44U);
+    CHECK(stage.cleanup_count() == 1U);
+}
+
+TEST_CASE("Resource-transition dispatcher rejects a truncated known intermediate message",
+          "[goldsrc][resource-transition][stage][dispatch][truncated][negative][regression]")
+{
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'422U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    goldsrc::ResourceTransitionStage stage{transport, remote, test_config()};
+    const auto driven = drive_to_transition_request(
+        stage, transport, remote, epoch);
+
+    transport.queue(
+        remote,
+        server_packet(
+            2U,
+            false,
+            driven.transition_request.header.sequence.sequence.value(),
+            false,
+            service_envelope(std::vector<std::byte>{
+                std::byte{7U}, std::byte{0U}, std::byte{0U}})));
+    stage.update(epoch + 4ms);
+
+    CHECK(stage.state() == goldsrc::ResourceTransitionStageState::protocol_error);
+    CHECK_FALSE(stage.result());
+    REQUIRE(stage.error());
+    CHECK(stage.error()->code ==
+          goldsrc::ResourceTransitionStageErrorCode::
+              intermediate_message_decode_failed);
+    CHECK(stage.error()->intermediate_control_code ==
+          goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+    REQUIRE(stage.error()->failure_metadata);
+    CHECK(stage.error()->failure_metadata->actual_opcode == 7U);
+    CHECK(stage.error()->failure_metadata->cursor_byte_offset == 0U);
+    CHECK(stage.error()->failure_metadata->intermediate_parser_error ==
+          goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+    while (const auto event = stage.poll_event()) {
+        CHECK(event->type !=
+              goldsrc::ResourceTransitionStageEventType::
+                  transition_control_decoded);
+    }
 }
 
 TEST_CASE("Resource-transition stage rejects malformed opcode-45 framing transactionally",

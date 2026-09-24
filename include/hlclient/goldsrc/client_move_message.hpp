@@ -18,6 +18,7 @@ inline constexpr std::uint8_t kSyntheticClientMoveOpcode = 0xE1U;
 enum class GoldSrcClientMoveCompatibilityProfile : std::uint8_t {
     synthetic_client_move_v1,
     stock_protocol_48_build_10210_evidence_pending,
+    public_goldsrc48_client_move_v1,
 };
 
 enum class GoldSrcClientMoveEndPolicy : std::uint8_t {

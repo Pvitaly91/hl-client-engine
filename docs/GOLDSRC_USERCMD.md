@@ -4,12 +4,13 @@
 
 M4.6.2 provides a bounded typed usercmd model and a deterministic synthetic
 tool/test path. It does **not** claim that the project can submit a move command
-accepted by stock Protocol 48. The clean-room stock corpus currently contains
-zero accepted runs and zero verified move packets. In particular, the stock
-move opcode, envelope, checksum, input mapping, command cadence, backup policy,
-and server acceptance remain evidence-pending.
+accepted by stock Protocol 48. Its strict evidence gates remain pending.
+M4.7.2A separately implements an offline reference codec, validated against 768
+original-client move messages in an existing functional capture; this does not
+establish our encoder's live server acceptance, input mapping, command cadence
+or backup policy. See the [reference wire contract](GOLDSRC_REFERENCE_CLIENT_MOVE.md).
 
-The profiles keep those facts separate:
+The earlier simulation/transmission profiles keep those facts separate:
 
 | Boundary | Executable profile | Reserved stock/pending profiles |
 | --- | --- | --- |

@@ -396,8 +396,9 @@ struct AssetByteCounts {
                 EntityVisualModelResolutionEvidenceProfile::
                     stock_modelindex_mapping_pending
             ? EntityVisualBindingEvidenceProfile::stock_visual_mapping_pending
-            : EntityVisualBindingEvidenceProfile::
-                  exact_synthetic_model_slot_and_approved_source,
+            : resolution.evidence_profile == EntityVisualModelResolutionEvidenceProfile::public_goldsrc48_type_local_model_slot
+                ? EntityVisualBindingEvidenceProfile::public_goldsrc48_model_slot_and_local_source
+                : EntityVisualBindingEvidenceProfile::exact_synthetic_model_slot_and_approved_source,
         resource_id,
         revision};
 }
@@ -420,8 +421,9 @@ struct AssetByteCounts {
         studio ? EntityVisualBindingStatus::resolved_studio_model
                : EntityVisualBindingStatus::resolved_sprite,
         record.source_fingerprint(),
-        EntityVisualBindingEvidenceProfile::
-            exact_synthetic_model_slot_and_approved_source,
+        entry.resolution.evidence_profile == EntityVisualModelResolutionEvidenceProfile::public_goldsrc48_type_local_model_slot
+            ? EntityVisualBindingEvidenceProfile::public_goldsrc48_model_slot_and_local_source
+            : EntityVisualBindingEvidenceProfile::exact_synthetic_model_slot_and_approved_source,
         resource_id,
         revision};
 }
@@ -964,6 +966,36 @@ EntityVisualAssetLibraryPlanResult EntityVisualAssetLibraryBuilder::plan(
     const std::span<const EntityVisualAssetReuseEvidence> reuse_evidence)
     const noexcept
 {
+    try {
+        if (!valid_entity_visual_asset_library_limits(limits)) {
+            return plan_failure(make_error(EntityVisualAssetLibraryErrorCode::invalid_configuration,
+                "Invalid entity visual asset library limits"));
+        }
+        if (previous_projections.size() > limits.maximum_library_events ||
+            current_projections.size() > limits.maximum_library_events - previous_projections.size()) {
+            return plan_failure(make_error(EntityVisualAssetLibraryErrorCode::projection_reference_limit_exceeded,
+                "Projection reference count exceeds the bounded event limit"));
+        }
+        std::vector<EntityVisualModelReference> references;
+        for (const auto& p : previous_projections) { references.push_back(p.model_reference()); }
+        for (const auto& p : current_projections) { references.push_back(p.model_reference()); }
+        return plan_references(resource_id, references, manifest, resolver,
+            std::move(previous_library), limits, reuse_evidence);
+    } catch (const std::bad_alloc&) {
+        return plan_failure(make_error(EntityVisualAssetLibraryErrorCode::projection_reference_limit_exceeded,
+            "Unable to retain projection references"));
+    }
+}
+
+EntityVisualAssetLibraryPlanResult EntityVisualAssetLibraryBuilder::plan_references(
+    const std::uint64_t resource_id,
+    const std::span<const EntityVisualModelReference> input_references,
+    const goldsrc::PrecacheManifestState& manifest,
+    const IEntityVisualModelReferenceResolver& resolver,
+    std::shared_ptr<const EntityVisualAssetLibraryState> previous_library,
+    const EntityVisualAssetLibraryLimits limits,
+    const std::span<const EntityVisualAssetReuseEvidence> reuse_evidence) const noexcept
+{
     if (!valid_entity_visual_asset_library_limits(limits)) {
         return plan_failure(make_error(
             EntityVisualAssetLibraryErrorCode::invalid_configuration,
@@ -1029,15 +1061,7 @@ EntityVisualAssetLibraryPlanResult EntityVisualAssetLibraryBuilder::plan(
 
     try {
         std::vector<EntityVisualModelReference> references;
-        if (previous_projections.size() >
-            std::numeric_limits<std::size_t>::max() -
-                current_projections.size()) {
-            return plan_failure(make_error(
-                EntityVisualAssetLibraryErrorCode::size_overflow,
-                "Projection reference count overflow"));
-        }
-        const auto input_count =
-            previous_projections.size() + current_projections.size();
+        const auto input_count = input_references.size();
         if (input_count > limits.maximum_library_events) {
             return plan_failure(make_error(
                 EntityVisualAssetLibraryErrorCode::
@@ -1045,12 +1069,7 @@ EntityVisualAssetLibraryPlanResult EntityVisualAssetLibraryBuilder::plan(
                 "Projection reference count exceeds the bounded event limit"));
         }
         references.reserve(input_count);
-        for (const auto& projection : previous_projections) {
-            references.push_back(projection.model_reference());
-        }
-        for (const auto& projection : current_projections) {
-            references.push_back(projection.model_reference());
-        }
+        references.assign(input_references.begin(), input_references.end());
         std::ranges::sort(references, reference_less);
         const auto unique_end = std::unique(references.begin(), references.end());
         const auto duplicate_count = static_cast<std::size_t>(

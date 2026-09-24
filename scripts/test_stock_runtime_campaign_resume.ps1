@@ -710,6 +710,12 @@ if ($policyLines -cnotcontains
         '[stock-runtime-campaign-policy] canary-mutation-rejections=4' -or
     $policyLines -cnotcontains
         '[stock-runtime-campaign-policy] unbound-canary-rebind-rejections=1' -or
+    $policyLines -cnotcontains
+        '[stock-runtime-campaign-policy] canary-only-matrix-runs=0' -or
+    $policyLines -cnotcontains
+        '[stock-runtime-campaign-policy] canary-only-resume-binding=verified' -or
+    $policyLines -cnotcontains
+        '[stock-runtime-campaign-policy] versioned-steam-policy=verified' -or
     $policyLines -cnotcontains '[stock-runtime-campaign-policy] files-written=0' -or
     $policyLines -cnotcontains '[stock-runtime-campaign-policy] result=success') {
     throw 'Campaign aggregation policy self-test failed.'

@@ -285,6 +285,22 @@ struct NetchanDriverTraceEvent {
 using NetchanDriverTraceCallback =
     std::function<void(const NetchanDriverTraceEvent&)>;
 
+// Session totals from the owning transport. No packet or authentication bytes.
+struct NetchanDriverReceiveStatistics final {
+    std::size_t updates{0U};
+    std::size_t receive_polls{0U};
+    std::size_t would_block{0U};
+    std::size_t wrong_endpoint{0U};
+    std::size_t owning_datagrams{0U};
+    std::size_t accepted_sequences{0U};
+    std::size_t rejected_sequences{0U};
+    std::size_t payloads_created{0U};
+    std::optional<std::uint32_t> first_accepted_sequence;
+    std::optional<std::uint32_t> last_accepted_sequence;
+    std::optional<std::uint32_t> first_payload_sequence;
+    std::optional<std::uint32_t> last_payload_sequence;
+};
+
 // A driver can own an authentication/provider lifetime without depending on
 // authentication types or exposing authentication bytes to the netchan layer.
 class INetchanDriverLifetime {
@@ -349,6 +365,7 @@ public:
     last_valid_packet_time() const noexcept;
     [[nodiscard]] std::size_t pending_event_count() const noexcept;
     [[nodiscard]] std::size_t transmitted_packet_count() const noexcept;
+    [[nodiscard]] NetchanDriverReceiveStatistics receive_statistics() const noexcept;
     // Identity of the most recent sequence-bound unreliable context whose
     // datagram reached IDatagramTransport::send_to successfully. This narrow
     // receipt lets the owner commit semantic history without inferring success

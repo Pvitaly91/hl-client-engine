@@ -16,6 +16,13 @@ not include entity-visual projection, the GoldSrc snapshot codec, or sign-on
 parsing. Composition roots that call `EntitySceneRenderPackageBuilder::build`
 must link `hlclient::entity_scene_package_build` explicitly.
 
+The builder has two explicit sources. `imported_asset_library` retains the
+existing exact library identity and record-coverage checks.
+`project_generated_diagnostic` accepts validated owning Studio assets without
+inventing an imported library or game manifest; it rejects Sprite input and is
+used only by the offline runtime-replay diagnostic. Both paths use the same
+asset and package validators and publish the same renderer-neutral contract.
+
 `hlclient::entity_interpolation_stage` remains a client-side orchestration
 target. After pose and Sprite composition, its terminal result retains the
 exact `InterpolatedEntityFrame` and resulting `EntityRenderFrame` together and
@@ -29,6 +36,12 @@ those references into `RenderDynamicEntities`; it performs no decoding, import,
 pose evaluation, or I/O. World resources and entity resources therefore have
 separate cache identities, and a new entity frame cannot trigger static geometry
 or texture upload.
+
+The decoded-discrete replay profile is another valid interpolation metadata
+profile with equal previous/current sample time and alpha zero. It requests no
+interpolation and does not introduce a second transform convention. Studio
+model matrices are derived by the shared `entity_render_model_matrix()` used by
+the existing OpenGL Studio path and CPU expectations.
 
 Entity bounds are culled conservatively. With a spatial package, an entity is
 PVS-visible when any touched non-solid leaf is visible; otherwise the route uses

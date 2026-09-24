@@ -266,8 +266,9 @@ project-client-to-stock-server claim.
 - stock runtime use of the registry for entity/clientdata/usercmd/snapshot
   decoding; M4.5.1's generic and M4.6.2's usercmd-specific synthetic profiles
   do not close that evidence gap;
-- live project-client-to-stock-HLDS sign-on, pending a production Steam
-  authentication provider;
+- live project-client-to-stock-HLDS sign-on, pending live execution of the
+  implemented optional Steam provider after the two M4.7.2C attempt budget was
+  exhausted at pre-authentication orchestration boundaries;
 - independent stock duplicate-batch and truncated-fragment delta projections;
   their transport behavior is covered by earlier accepted evidence and current
   deterministic integration, but no new raw delta projection is claimed.
@@ -283,3 +284,8 @@ context. Public schema names and fields do not establish stock runtime message
 opcodes, masks, bases or value encoding. The stock catalog therefore validates
 that a registry is present but does not read a runtime body until separate
 capture evidence promotes the runtime delta profile.
+
+
+## Reference-based baseline decoder
+
+The `public_goldsrc48_entity_delta_v1` baseline path consumes this validated registry and fails on unsupported field types; it does not claim stock-build interoperability without an accepted corpus.

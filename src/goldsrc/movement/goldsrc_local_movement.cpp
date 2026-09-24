@@ -1732,11 +1732,15 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
             LocalMovementSimulationErrorCode::invalid_configuration,
             statistics, "movement configuration is invalid");
     }
+    const bool reference_dry_walk = previous_state.command_profile() ==
+        hlclient::movement::GoldSrcMovementCommandProfile::
+            reference_wire_dry_walk_v1;
     if (previous_state.compatibility_profile() != hlclient::movement::
             GoldSrcMovementCompatibilityProfile::
                 public_valve_pm_shared_dry_walk_subset_v1 ||
-        previous_state.command_profile() != hlclient::movement::
-            GoldSrcMovementCommandProfile::synthetic_usercmd_semantics_v1 ||
+        (!reference_dry_walk &&
+         previous_state.command_profile() != hlclient::movement::
+             GoldSrcMovementCommandProfile::synthetic_usercmd_semantics_v1) ||
         previous_state.mode() == PlayerMovementMode::invalid_or_stuck) {
         return fail(LocalMovementSimulationErrorCode::invalid_state,
             statistics, "previous movement state is not executable");
@@ -1756,8 +1760,11 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
         return fail(LocalMovementSimulationErrorCode::invalid_environment,
             statistics, "movement environment is not executable");
     }
-    if (command.compatibility_profile() !=
-        GoldSrcUserCmdCompatibilityProfile::synthetic_usercmd_v1) {
+    const auto expected_command_profile = reference_dry_walk
+        ? GoldSrcUserCmdCompatibilityProfile::
+              public_goldsrc48_dry_walk_prediction_v1
+        : GoldSrcUserCmdCompatibilityProfile::synthetic_usercmd_v1;
+    if (command.compatibility_profile() != expected_command_profile) {
         return fail(
             command.compatibility_profile() ==
                     GoldSrcUserCmdCompatibilityProfile::
@@ -1768,7 +1775,7 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
                 ? LocalMovementSimulationErrorCode::stock_semantics_pending
                 : LocalMovementSimulationErrorCode::unsupported_command_profile,
             statistics,
-            "only synthetic usercmd semantics are executable locally");
+            "usercmd profile does not match the movement-state scope");
     }
     if (previous_state.source_command_sequence() == UINT32_MAX ||
         sequence != previous_state.source_command_sequence() + 1U) {
@@ -1785,8 +1792,19 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
             statistics,
             "usercmd msec is outside the movement duration profile");
     }
-    const auto substep_count_wide = static_cast<std::size_t>(
-        std::ceil(duration / config.maximum_substep_duration_seconds));
+    // Pinned Xash3D CL_RunUsercmd only splits a command above 50 ms. The
+    // reference dry-walk slice accepts at most that duration and executes
+    // one kernel step; the older synthetic profile keeps its own 10 ms cap.
+    if (reference_dry_walk &&
+        (command.msec() > 50U || command.buttons() != 0U ||
+         command.up_move() != 0.0F || command.impulse() != 0U)) {
+        return fail(LocalMovementSimulationErrorCode::stock_semantics_pending,
+            statistics,
+            "reference dry-walk kernel excludes long commands and action buttons");
+    }
+    const auto substep_count_wide = reference_dry_walk ? 1U :
+        static_cast<std::size_t>(
+            std::ceil(duration / config.maximum_substep_duration_seconds));
     if (substep_count_wide == 0U ||
         substep_count_wide > config.maximum_substeps_per_command) {
         return fail(

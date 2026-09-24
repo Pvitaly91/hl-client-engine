@@ -1,4 +1,5 @@
 #include "local_movement_test_fixture.hpp"
+#include <hlclient/goldsrc/reference_prediction_command.hpp>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -12,6 +13,35 @@ namespace fixture = hlclient::tests::local_movement;
 namespace assets = hlclient::assets;
 namespace local = hlclient::goldsrc::movement;
 namespace player = hlclient::movement;
+
+TEST_CASE("Reference dry-walk command uses one 20ms collision step",
+          "[movement][prediction-command]")
+{
+    fixture::DeterministicLocalMovementCollision collision;
+    collision.add_positive_x_wall(32.0F);
+    auto state_info = player::local_player_movement_state_create_info(
+        fixture::make_state());
+    state_info.command_profile =
+        player::GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1;
+    const auto state = player::LocalPlayerMovementState::create(state_info);
+    REQUIRE(state);
+    hlclient::goldsrc::GoldSrcWireUserCmd wire;
+    wire.msec = 20U;
+    wire.forward = 400;
+    const auto command = hlclient::goldsrc::reference_dry_walk_movement_command(
+        *hlclient::goldsrc::GoldSrcUserCmdSequence::create(1U), wire);
+    REQUIRE(command);
+    local::GoldSrcLocalMovementScratch scratch;
+    const auto moved = local::GoldSrcLocalMovementKernel::simulate(
+        *state.state, *command.state, fixture::make_environment(), collision,
+        scratch);
+    REQUIRE(moved);
+    CHECK(moved.statistics.command_count == 1U);
+    CHECK(moved.statistics.substep_count == 1U);
+    CHECK(moved.state->simulation_time_nanoseconds() == 20'000'000ULL);
+    CHECK(moved.state->origin().x > state.state->origin().x);
+    CHECK(moved.state->origin().x <= 16.0F);
+}
 
 enum class MalformedCollisionOutput {
     invalid_position_status,

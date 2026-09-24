@@ -1,6 +1,7 @@
 #include <hlclient/goldsrc/move_checksum.hpp>
 
 #include <limits>
+#include <algorithm>
 
 namespace hlclient::goldsrc {
 namespace {
@@ -9,6 +10,7 @@ namespace {
     const GoldSrcMoveChecksumProfile profile) noexcept
 {
     return profile == GoldSrcMoveChecksumProfile::synthetic_crc8_v1 ||
+        profile == GoldSrcMoveChecksumProfile::public_goldsrc48_crc32_low8_v1 ||
         profile == GoldSrcMoveChecksumProfile::
                        stock_protocol_48_build_10210_evidence_pending;
 }
@@ -68,7 +70,7 @@ GoldSrcMoveChecksumResult GoldSrcMoveChecksum::compute(
             GoldSrcMoveChecksumErrorCode::invalid_configuration,
             "Move checksum profile or coverage bound is invalid");
     }
-    if (profile_ != GoldSrcMoveChecksumProfile::synthetic_crc8_v1) {
+    if (profile_ == GoldSrcMoveChecksumProfile::stock_protocol_48_build_10210_evidence_pending) {
         return failure(
             GoldSrcMoveChecksumErrorCode::stock_evidence_pending,
             "Stock move checksum constants and coverage remain evidence-pending");
@@ -86,6 +88,36 @@ GoldSrcMoveChecksumResult GoldSrcMoveChecksum::compute(
             "Move checksum body bit length does not match its owning bytes");
     }
 
+    if (profile_ == GoldSrcMoveChecksumProfile::public_goldsrc48_crc32_low8_v1) {
+        if (context.outgoing_netchan_sequence > 0x3fffffffU ||
+            context.body_bit_length != body.size() * 8U) {
+            return failure(GoldSrcMoveChecksumErrorCode::invalid_geometry,
+                "Reference checksum requires byte geometry and a netchan sequence");
+        }
+        // Standard reflected CRC32; generate table entries as protocol data,
+        // never copy a foreign implementation/table. See pinned crc.cpp/crclib.c.
+        const auto table_entry = [](std::uint32_t value) noexcept {
+            for (unsigned bit = 0; bit < 8; ++bit) {
+                value = (value >> 1U) ^ ((value & 1U) ? 0xedb88320U : 0U);
+            }
+            return value;
+        };
+        std::uint32_t crc32 = 0xffffffffU;
+        const auto feed = [&](std::uint8_t byte) {
+            crc32 = (crc32 >> 8U) ^ table_entry((crc32 ^ byte) & 255U);
+        };
+        const auto covered = std::min<std::size_t>(body.size(), 60U);
+        for (std::size_t i = 0; i < covered; ++i) {
+            feed(std::to_integer<std::uint8_t>(body[i]));
+        }
+        const auto offset = context.outgoing_netchan_sequence % 1020U;
+        for (std::uint32_t i = 0; i < 4U; ++i) {
+            const auto address = offset + i;
+            feed(static_cast<std::uint8_t>(table_entry(address / 4U) >>
+                (8U * (address % 4U))));
+        }
+        return {static_cast<std::uint8_t>(crc32 ^ 0xffffffffU), {}, covered, true};
+    }
     std::uint8_t crc = 0xA7U;
     for (std::size_t byte_index = 0U; byte_index < 4U; ++byte_index) {
         crc = crc8_update(

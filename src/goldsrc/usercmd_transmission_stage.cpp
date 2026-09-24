@@ -108,6 +108,8 @@ inline constexpr std::size_t kMaximumMovePacketEventCount = 6U;
 {
     return profile == GoldSrcUserCmdSessionPrerequisiteProfile::
                           synthetic_runtime_ready_v1 ||
+        profile == GoldSrcUserCmdSessionPrerequisiteProfile::reference_loopback_test_ready_v1 ||
+        profile == GoldSrcUserCmdSessionPrerequisiteProfile::production_live_runtime_ready_v1 ||
         profile == GoldSrcUserCmdSessionPrerequisiteProfile::
                        stock_runtime_ready_evidence_pending;
 }
@@ -149,6 +151,23 @@ GoldSrcUserCmdTransmissionStage::GoldSrcUserCmdTransmissionStage(
           config_.maximum_transmission_phases_per_update > 0U &&
           config_.maximum_transmission_phases_per_update <= 2U}
 {
+    const bool reference = config_.planner.profile == GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1;
+    if (reference) {
+        valid_configuration_ = planner_.valid_configuration() && history_.valid_configuration() &&
+            config_.history.profile == GoldSrcUserCmdHistoryProfile::reference_wire_v1 &&
+            config_.history.protected_backup_window >= config_.planner.desired_backup_commands &&
+            binding_.profile() == GoldSrcUserCmdSchemaBindingProfile::public_goldsrc48_usercmd_schema_v1 &&
+            (prerequisite_.profile == GoldSrcUserCmdSessionPrerequisiteProfile::reference_loopback_test_ready_v1 ||
+             (prerequisite_.profile == GoldSrcUserCmdSessionPrerequisiteProfile::production_live_runtime_ready_v1 &&
+              prerequisite_.runtime_ready && prerequisite_.session_generation != 0U &&
+              prerequisite_.session_generation == config_.history.generation)) &&
+            config_.timeout.count() > 0 && config_.timeout <= std::chrono::milliseconds{300'000} &&
+            config_.maximum_events >= kMaximumMovePacketEventCount && config_.maximum_events <= 1024 &&
+            config_.maximum_transmission_phases_per_update > 0 && config_.maximum_transmission_phases_per_update <= 2;
+    } else if (config_.history.profile != GoldSrcUserCmdHistoryProfile::synthetic_v1 ||
+               prerequisite_.profile == GoldSrcUserCmdSessionPrerequisiteProfile::reference_loopback_test_ready_v1) {
+        valid_configuration_ = false;
+    }
     if (valid_configuration_) {
         events_.reserve(config_.maximum_events);
     }
@@ -179,6 +198,18 @@ std::size_t
 GoldSrcUserCmdTransmissionStage::transmitted_packet_count() const noexcept
 {
     return transmitted_packet_count_;
+}
+
+std::size_t GoldSrcUserCmdTransmissionStage::new_command_submission_count()
+    const noexcept
+{
+    return new_command_submission_count_;
+}
+
+std::size_t GoldSrcUserCmdTransmissionStage::backup_command_submission_count()
+    const noexcept
+{
+    return backup_command_submission_count_;
 }
 
 GoldSrcUserCmdHistoryState GoldSrcUserCmdTransmissionStage::history() const
@@ -261,9 +292,21 @@ GoldSrcUserCmdTransmissionStage::commit_prepared_move(
     const auto outgoing_sequence = prepared_move_->outgoing_sequence;
     const auto new_count = prepared_move_->packet.new_command_count();
     const auto backup_count = prepared_move_->packet.backup_command_count();
+    const auto first_new_command_sequence =
+        prepared_move_->first_new_command_sequence;
+    const auto last_new_command_sequence =
+        prepared_move_->last_new_command_sequence;
+    const auto preflight = planner_.preflight(history_, prepared_move_->packet);
+    if (!preflight || transmitted_packet_count_ == std::numeric_limits<std::size_t>::max()) {
+        return fail(GoldSrcUserCmdTransmissionState::protocol_error,
+            {GoldSrcUserCmdTransmissionErrorCode::history_failed, {}, {}, {}, {}, {}, "Pre-send accounting preflight failed"},
+            GoldSrcUserCmdTransmissionEventType::protocol_error, now, true);
+    }
+    bool bound_now = false;
+    if (!prepared_move_->driver_owned) {
     const auto submitted = driver_.commit_unreliable(
         std::move(prepared_move_->context),
-        prepared_move_->packet.encoded_message().bytes());
+        prepared_move_->packet.encoded_bytes());
     if (!submitted) {
         static_cast<void>(
             planner_.abandon(std::move(prepared_move_->packet)));
@@ -301,9 +344,21 @@ GoldSrcUserCmdTransmissionStage::commit_prepared_move(
             now,
             true);
     }
+    prepared_move_->driver_owned = true;
+    bound_now = true;
+    }
 
-    driver_.update(now);
+    if (!config_.externally_owned_driver_update) {
+        driver_.update(now);
+    } else if (bound_now) {
+        state_ = GoldSrcUserCmdTransmissionState::waiting_for_unreliable_submission;
+        return {};
+    }
     if (driver_.last_sent_unreliable_context_identity() != context_identity) {
+        if (driver_.state() == NetchanDriverState::active) {
+            state_ = GoldSrcUserCmdTransmissionState::unreliable_backpressure;
+            return {}; // Driver retains the bound context; never bind/queue twice.
+        }
         static_cast<void>(
             planner_.abandon(std::move(prepared_move_->packet)));
         prepared_move_.reset();
@@ -345,9 +400,21 @@ GoldSrcUserCmdTransmissionStage::commit_prepared_move(
             true);
     }
     last_progress_at_ = now;
+    if (new_count > (std::numeric_limits<std::size_t>::max)() -
+            new_command_submission_count_ ||
+        backup_count > (std::numeric_limits<std::size_t>::max)() -
+            backup_command_submission_count_) {
+        return fail(
+            GoldSrcUserCmdTransmissionState::protocol_error,
+            {GoldSrcUserCmdTransmissionErrorCode::counter_exhausted, {}, {},
+             {}, {}, {}, "Usercmd submission counters are exhausted"},
+            GoldSrcUserCmdTransmissionEventType::protocol_error, now, true);
+    }
     ++transmitted_packet_count_;
+    new_command_submission_count_ += new_count;
+    backup_command_submission_count_ += backup_count;
     state_ = GoldSrcUserCmdTransmissionState::move_packet_submitted;
-    static_cast<void>(push_event(GoldSrcUserCmdTransmissionEvent{
+    auto submitted_event = GoldSrcUserCmdTransmissionEvent{
         GoldSrcUserCmdTransmissionEventType::move_packet_submitted,
         std::nullopt,
         std::nullopt,
@@ -358,7 +425,10 @@ GoldSrcUserCmdTransmissionStage::commit_prepared_move(
         changed_field_count,
         outgoing_sequence,
         history_.size(),
-    }));
+    };
+    submitted_event.first_new_command_sequence = first_new_command_sequence;
+    submitted_event.last_new_command_sequence = last_new_command_sequence;
+    static_cast<void>(push_event(std::move(submitted_event)));
     if (backup_count != 0U) {
         static_cast<void>(push_event(GoldSrcUserCmdTransmissionEvent{
             GoldSrcUserCmdTransmissionEventType::backup_commands_included,
@@ -409,7 +479,7 @@ GoldSrcUserCmdTransmissionStage::commit_prepared_move(
 GoldSrcUserCmdTransmissionOperationResult
 GoldSrcUserCmdTransmissionStage::queue_impulse(const std::uint8_t impulse) noexcept
 {
-    if (terminal() || !valid_configuration_) {
+    if (terminal() || !valid_configuration_ || config_.planner.profile == GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1) {
         return operation_error(GoldSrcUserCmdTransmissionError{
             GoldSrcUserCmdTransmissionErrorCode::not_active,
             std::nullopt,
@@ -472,6 +542,8 @@ GoldSrcUserCmdTransmissionStage::update(
     const gameplay_input::GameplayInputIntent& intent,
     const gameplay_camera::GameplayCameraState& camera)
 {
+    if (config_.planner.profile == GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1)
+        return operation_error({GoldSrcUserCmdTransmissionErrorCode::invalid_configuration, {}, {}, {}, {}, {}, "Reference profile requires typed command entry point"});
     if (!valid_configuration_) {
         return fail(
             GoldSrcUserCmdTransmissionState::protocol_error,
@@ -782,6 +854,58 @@ GoldSrcUserCmdTransmissionStage::update(
         static_cast<void>(push_event(std::move(event)));
     }
 
+    return transmit_pending(now);
+}
+
+bool GoldSrcUserCmdTransmissionStage::reference_ready() const noexcept {
+    if (!valid_configuration_ || terminal() || !prerequisite_.runtime_ready ||
+        driver_.state() != NetchanDriverState::active ||
+        !driver_.local_endpoint()) {
+        return false;
+    }
+    if (prerequisite_.profile == GoldSrcUserCmdSessionPrerequisiteProfile::
+            production_live_runtime_ready_v1) {
+        return prerequisite_.session_generation != 0U &&
+            prerequisite_.session_generation == config_.history.generation;
+    }
+    return prerequisite_.profile == GoldSrcUserCmdSessionPrerequisiteProfile::
+               reference_loopback_test_ready_v1 &&
+        driver_.remote_endpoint().ipv4_host_order() == 0x7f000001U &&
+        driver_.local_endpoint()->ipv4_host_order() == 0x7f000001U;
+}
+
+GoldSrcUserCmdHistoryOperationResult GoldSrcUserCmdTransmissionStage::queue_reference_command(
+    GoldSrcUserCmdSequence identity, const GoldSrcWireUserCmd& command, std::uint64_t generation)
+{
+    if (!reference_ready()) return {{GoldSrcUserCmdHistoryError{GoldSrcUserCmdHistoryErrorCode::invalid_configuration, {}, "Reference insertion requires an active bound session prerequisite"}}, 0};
+    if (prepared_move_) return {{GoldSrcUserCmdHistoryError{GoldSrcUserCmdHistoryErrorCode::pending_submission, identity, "Pending plan owns history revision"}}, 0};
+    return history_.insert(identity, command, generation);
+}
+
+GoldSrcUserCmdTransmissionOperationResult GoldSrcUserCmdTransmissionStage::update_reference(NetchanDriverTimePoint now)
+{
+    // Account an already-sent receipt even after a separate driver pump sees
+    // terminal RX. Sending is not reversible.
+    if (!terminal() && prepared_move_ && prepared_move_->driver_owned &&
+        driver_.last_sent_unreliable_context_identity() == prepared_move_->context_identity)
+        return commit_prepared_move(now);
+    if (!reference_ready()) return operation_error({GoldSrcUserCmdTransmissionErrorCode::runtime_signon_evidence_pending, {}, {}, {}, {}, {}, "Explicit active loopback or production-live prerequisite required"});
+    if (last_update_ && now < *last_update_) return fail(GoldSrcUserCmdTransmissionState::protocol_error,
+        {GoldSrcUserCmdTransmissionErrorCode::packet_context_failed, {}, {}, {}, {}, {}, "Reference update time regressed"}, GoldSrcUserCmdTransmissionEventType::protocol_error, now, true);
+    last_update_ = now;
+    if (!last_progress_at_) last_progress_at_ = now;
+    if (timeout_elapsed(*last_progress_at_, now, config_.timeout)) return fail(GoldSrcUserCmdTransmissionState::timed_out,
+        {GoldSrcUserCmdTransmissionErrorCode::timed_out, {}, {}, {}, {}, {}, "Reference sender stalled"}, GoldSrcUserCmdTransmissionEventType::timed_out, now, true);
+    if (prepared_move_) return commit_prepared_move(now);
+    if (config_.maximum_events - (events_.size() - next_event_index_) < kMaximumMovePacketEventCount) {
+        state_ = GoldSrcUserCmdTransmissionState::event_backpressure;
+        return operation_error({GoldSrcUserCmdTransmissionErrorCode::event_backpressure, {}, {}, {}, {}, {}, "Drain metadata before preparing another move"});
+    }
+    return transmit_pending(now);
+}
+
+GoldSrcUserCmdTransmissionOperationResult GoldSrcUserCmdTransmissionStage::transmit_pending(NetchanDriverTimePoint now)
+{
     if (history_.unsent_count() == 0U) {
         state_ = GoldSrcUserCmdTransmissionState::waiting_for_next_sample;
         return {};
@@ -811,7 +935,7 @@ GoldSrcUserCmdTransmissionStage::update(
             // reliable fragment progress. Let one bounded driver update drain
             // that work; otherwise this stage would re-observe the same
             // backpressure forever and could never reach a fresh context.
-            driver_.update(now);
+            if (!config_.externally_owned_driver_update) driver_.update(now);
             if (driver_.state() != NetchanDriverState::active) {
                 return fail(
                     GoldSrcUserCmdTransmissionState::network_error,
@@ -848,10 +972,17 @@ GoldSrcUserCmdTransmissionStage::update(
 
     const auto outgoing_sequence = context.plan->next_outgoing_sequence().value();
     state_ = GoldSrcUserCmdTransmissionState::planning_move_packet;
-    auto packet_plan = planner_.prepare(
-        history_.publish(), binding_, outgoing_sequence);
+    auto packet_plan = config_.planner.profile == GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1
+        ? planner_.prepare(history_.publish(), binding_, *context.plan)
+        : planner_.prepare(history_.publish(), binding_, outgoing_sequence);
     if (!packet_plan || !packet_plan.plan) {
         static_cast<void>(driver_.abandon_unreliable(std::move(*context.plan)));
+        if (config_.planner.profile == GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1 &&
+            packet_plan.error->code == GoldSrcUserCmdPacketPlannerErrorCode::packet_budget_exceeded) {
+            state_ = GoldSrcUserCmdTransmissionState::unreliable_backpressure;
+            if (!config_.externally_owned_driver_update) driver_.update(now);
+            if (driver_.state() == NetchanDriverState::active) return {};
+        }
         return fail(
             GoldSrcUserCmdTransmissionState::protocol_error,
             GoldSrcUserCmdTransmissionError{
@@ -868,10 +999,9 @@ GoldSrcUserCmdTransmissionStage::update(
             now,
             true);
     }
-    const auto& message = packet_plan.plan->encoded_message();
-    const auto encoded_bytes = message.bytes().size();
-    const auto encoded_bits = message.bit_length();
-    const auto changed_field_count = message.changed_field_count();
+    const auto encoded_bytes = packet_plan.plan->expected_encoded_bytes();
+    const auto encoded_bits = packet_plan.plan->expected_encoded_bits();
+    const auto changed_field_count = packet_plan.plan->changed_field_count();
     if (encoded_bytes >
         context.plan->maximum_unreliable_payload_size()) {
         static_cast<void>(planner_.abandon(std::move(*packet_plan.plan)));
@@ -906,7 +1036,7 @@ GoldSrcUserCmdTransmissionStage::update(
         // The encoded packet is valid under the static packet budget. Only
         // this reliable composition is too narrow, so retain unsent history
         // and let the exact driver make one bounded progress step.
-        driver_.update(now);
+        if (!config_.externally_owned_driver_update) driver_.update(now);
         if (driver_.state() != NetchanDriverState::active) {
             return fail(
                 GoldSrcUserCmdTransmissionState::network_error,
@@ -1003,6 +1133,14 @@ GoldSrcUserCmdTransmissionStage::update(
         changed_field_count,
         outgoing_sequence,
     });
+    const auto& selected = prepared_move_->packet.ordered_sequences();
+    const auto backup_count = prepared_move_->packet.backup_command_count();
+    if (prepared_move_->packet.new_command_count() != 0U &&
+        backup_count < selected.size()) {
+        prepared_move_->first_new_command_sequence =
+            selected[backup_count].value();
+        prepared_move_->last_new_command_sequence = selected.back().value();
+    }
     if (config_.maximum_transmission_phases_per_update == 1U) {
         return {};
     }

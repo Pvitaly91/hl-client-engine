@@ -1,95 +1,46 @@
-# GoldSrc runtime delta values
+# GoldSrc protocol 48 runtime delta values
 
-## Confirmed inputs and evidence boundary
+Profiles `public_goldsrc48_delta_v1` and the retained entity-specific
+`public_goldsrc48_entity_delta_v1` decode the GoldSrc delta mask as a 3-bit
+mask-byte count followed by the raw mask bytes, then selected fields in schema
+order. The generic profile is used for `clientdata_t` and `weapon_data_t`; the
+entity profile remains distinct for A/B/C compatibility. Both use the
+validated `DeltaSchemaRegistryState`; offsets are schema metadata, never
+native-struct addresses. Public GoldSrc signed scalar fields put the sign in
+the first transmitted bit and the magnitude in the remaining bits; they are
+not two's-complement values to sign-extend. Synthetic fixtures retain their
+separate two's-complement contract. Floats use declared multipliers, angles map
+unsigned wire values to degrees, strings are NUL-terminated bytes, and
+`DT_TIMEWINDOW_8`/`DT_TIMEWINDOW_BIG` require a finite explicit server-time
+context. The decoder accepts unaligned bit cursors and reports the exact next
+bit; no opcode scanning or guessed resynchronisation is performed.
 
-The existing immutable `DeltaSchemaRegistryState` is the sole schema source.
-Accepted opcode-14 captures confirm seven ordered schema descriptions, field
-names/order, base-type flags, significant-bit metadata and two fixed-point
-multiplier metadata values. They do **not** confirm the runtime changed-mask,
-scalar representation or enclosing entity-message grammar.
+The field rules are cross-checked against
+[Xash3D FWGS `net_encode.c`](https://github.com/FWGS/xash3d-fwgs/blob/e9b63241616c390d4d1720ced80e88de2acf83a6/engine/common/net_encode.c),
+and the alternate GoldSrc signed representation against
+[`MSG_ReadSBitLong` in `net_buffer.c`](https://github.com/FWGS/xash3d-fwgs/blob/e9b63241616c390d4d1720ced80e88de2acf83a6/engine/common/net_buffer.c).
+The implementation is original and uses this repository's `BitReader`, schema
+registry, value types, limits, and typed errors. The existing synthetic and
+strict evidence-pending profiles are unchanged.
 
-`GoldSrcDeltaValueDecoder` therefore has two sealed profiles:
+This signed-wire correction changes decoded semantics without changing the
+canonical observation field set. For functional capture
+`ededd068a0444ff497d98204eacec8a4`, the corrected null-renderer replay remains
+323/323 applied with zero failures, but its canonical hash is
+`7014210005320501317`. The former value `14031366596970435596` is retained only
+as historical pre-correction evidence; it represented public signed fields as
+two's-complement values and must not be used as the current replay oracle.
 
-- `stock_protocol_48_build_10210_evidence_pending` rejects before reading a bit
-  and leaves the cursor and base object unchanged;
-- `synthetic_neutral_v1` is an independently authored test/fake grammar and is
-  never presented as stock GoldSrc behavior.
+`DeltaObjectBuilder::build_default` creates schema-typed zero or empty values
+only when an enclosing reference grammar explicitly selects a null/default
+base (currently ordinary `svc_clientdata`'s no-base branch). It is not a
+fallback for a missing referenced frame.
 
-No field offset is used and decoded values are never written into an HLSDK or
-other native C struct.
-
-M4.6.2 has a separate usercmd-specific binding for the exact 15-field
-`usercmd_t` descriptor. It validates every descriptor property and feeds only
-the sealed synthetic usercmd delta codec; it neither changes this generic
-decoder nor promotes its grammar to stock. The clean-room stock usercmd corpus
-still contains zero accepted runs and zero verified move packets. See
-[GoldSrc usercmd](GOLDSRC_USERCMD.md) and
-[GoldSrc usercmd delta](GOLDSRC_USERCMD_DELTA.md).
-
-## Generic owning state
-
-`DeltaObjectState` owns the exact per-field schema descriptor used to construct
-it (type flags, signedness, offsets, storage sizes, significant bits,
-multipliers, wire indices and presence masks), plus an ordered value vector
-aligned to that wire order. It has no pointer into the payload. Unchanged fields
-are copied only from a base whose retained descriptor exactly matches the
-selected schema. A missing required base, descriptor/profile mismatch or
-value-count mismatch is a typed error. Publication is transactional.
-
-The generic state remains the source of truth. Entity semantic projections stay
-disabled until accepted stock captures correlate exact schema field names with
-coherent runtime values.
-
-## Synthetic-neutral grammar
-
-This grammar exists only to exercise bounded mechanics:
-
-1. A byte-aligned `u8` mask-byte count.
-2. Exactly that many raw mask bytes.
-3. Mask bit `i` (least-significant bit first) selects schema wire field `i`.
-4. Selected scalar payloads are contiguous.
-5. A zero count preserves an exact base object.
-
-The decoder rejects excessive mask length, a bit beyond the schema, truncation,
-non-exact bounded ranges and forbidden non-zero enclosing padding. This mask is
-not reused from the opcode-14 field-description presence mask.
-
-Synthetic scalar rules are explicit test policy:
-
-- byte: fixed-width unsigned value; the reused published schema grammar rejects
-  the signed modifier for byte fields, so signed-byte runtime support remains
-  unavailable;
-- short/integer: fixed-width unsigned or two's-complement signed value;
-- float: quantized value multiplied by `postmultiply / premultiply`, with
-  checked finite arithmetic and a configured magnitude bound;
-- angle: unsigned quantized value multiplied by `360 / 2^bits`;
-- string: little-endian 16-bit byte length followed by bounded owning bytes;
-- time-window-8/time-window-big: typed evidence-pending, even in the synthetic
-  decoder, until a captured server-time reference and wrap formula exist.
-
-There is no wall-clock input, silent clamp, Unicode conversion, path
-interpretation or command execution.
-
-## Limits
-
-`GoldSrcDeltaValueLimits` names default and hard project caps for fields per
-object, mask bytes, string bytes, total value bytes, objects per message, delta
-bits and numeric magnitude. Every configured value is validated; exact-limit
-and cap-plus-one behavior is covered by tests.
-
-The current decoder is deliberately a single-object API. The validated
-`maximum_object_count_per_message` value is reserved for the future
-evidence-backed enclosing message walker and is not claimed as an exercised
-loop bound in M4.5.1.
-
-The decoder reports the exact bit cursor and consumed bit count. Failed reads do
-not publish a candidate object or mutate its base.
-
-M4.7.1 retains the same fail-before-read stock behavior. A reserved stock
-runtime delta profile is not enabled by its enum value: exact changed-mask,
-field bit order, scalar/time-window grammar and end padding require accepted
-runtime captures and a future independently authored runtime-message walker;
-neither currently exists. At zero accepted runs the
-runtime delta result remains `evidence_pending`, consumed bits remain zero and
-no clientdata/entity object is published. See
-[stock runtime transcript](GOLDSRC_STOCK_RUNTIME_TRANSCRIPT.md).
+For time-window fields, the GoldSrc wire value is an unsigned integer even
+though the reconstructed result can be earlier than the time base. The public
+profile applies `time_base - raw / scale` (equivalently
+`(time_base * scale - raw) / scale`) after validating a finite staged time.
+This is distinct from ordinary signed integer/float decoding. The rule is
+checked against pinned revision
+`e9b63241616c390d4d1720ced80e88de2acf83a6`; the source link intentionally
+does not track `master`.

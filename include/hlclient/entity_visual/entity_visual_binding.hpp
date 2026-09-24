@@ -26,6 +26,7 @@ enum class EntityVisualModelResolutionStatus {
 enum class EntityVisualModelResolutionEvidenceProfile {
     exact_synthetic_type_local_model_slot,
     stock_modelindex_mapping_pending,
+    public_goldsrc48_type_local_model_slot,
 };
 
 struct EntityVisualManifestResourceMetadata {
@@ -93,6 +94,15 @@ public:
         const goldsrc::PrecacheManifestState& manifest) const override;
 };
 
+// Public-reference offline resolver. Does not activate the strict stock
+// evidence provider and never treats a wire ordinal as a model slot.
+class PublicGoldSrc48ModelResolver final : public IEntityVisualModelReferenceResolver {
+public:
+    [[nodiscard]] EntityVisualModelSlotResolution resolve(
+        const EntityVisualModelReference& reference,
+        const goldsrc::PrecacheManifestState& manifest) const override;
+};
+
 enum class EntityVisualAssetKind {
     studio_model,
     sprite,
@@ -124,6 +134,7 @@ enum class EntityVisualBindingStatus {
 enum class EntityVisualBindingEvidenceProfile {
     exact_synthetic_model_slot_and_approved_source,
     stock_visual_mapping_pending,
+    public_goldsrc48_model_slot_and_local_source,
 };
 
 class EntityVisualBindingState final {

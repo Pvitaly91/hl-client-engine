@@ -710,6 +710,180 @@ template<typename Integer>
             found->second.kind == ManifestScalar::Kind::null_value);
 }
 
+[[nodiscard]] bool valid_functional_runtime_capture_manifest(
+    const ManifestProperties& properties,
+    const std::string_view run_id) noexcept
+{
+    constexpr std::array names{
+        std::string_view{"schema"},
+        std::string_view{"purpose"},
+        std::string_view{"campaign_evidence_eligible"},
+        std::string_view{"run_id"},
+        std::string_view{"recorded_by_stock_pair"},
+        std::string_view{"validated_by_our_decoder"},
+        std::string_view{"route"},
+        std::string_view{"relay_policy"},
+        std::string_view{"game"},
+        std::string_view{"map"},
+        std::string_view{"maximum_duration_seconds"},
+        std::string_view{"output_role"},
+        std::string_view{"server_profile_id"},
+        std::string_view{"client_steam_argument"},
+        std::string_view{"external_steam_state"},
+        std::string_view{"lifecycle_clock"},
+        std::string_view{"lifecycle_unit"},
+        std::string_view{"requested_maximum_duration_ms"},
+        std::string_view{"required_runtime_interval_ms"},
+        std::string_view{"client_map_entry_observed_ms"},
+        std::string_view{"functional_interval_completed_ms"},
+        std::string_view{"shutdown_requested_ms"},
+        std::string_view{"relay_stop_requested_ms"},
+        std::string_view{"relay_finalization_completed_ms"},
+        std::string_view{"stop_reason"},
+        std::string_view{"stock_shutdown_method"},
+        std::string_view{"capture_status"},
+        std::string_view{"owned_process_cleanup"},
+        std::string_view{"research_restoration"},
+        std::string_view{"capture_metadata_byte_length"},
+        std::string_view{"capture_metadata_sha256"},
+        std::string_view{"transport_journal_byte_length"},
+        std::string_view{"transport_journal_sha256"},
+        std::string_view{"version_observation_byte_length"},
+        std::string_view{"version_observation_sha256"},
+        std::string_view{"isolation_attestation_byte_length"},
+        std::string_view{"isolation_attestation_sha256"},
+        std::string_view{"result"},
+    };
+    std::uint64_t maximum_duration = 0U;
+    std::uint64_t capture_metadata_bytes = 0U;
+    std::uint64_t journal_bytes = 0U;
+    std::uint64_t version_bytes = 0U;
+    std::uint64_t isolation_bytes = 0U;
+    std::uint64_t requested_maximum_ms = 0U;
+    std::uint64_t required_interval_ms = 0U;
+    std::uint64_t map_entry_ms = 0U;
+    std::uint64_t interval_complete_ms = 0U;
+    std::uint64_t shutdown_requested_ms = 0U;
+    std::uint64_t relay_stop_ms = 0U;
+    std::uint64_t relay_finalized_ms = 0U;
+    return exact_properties(properties, names) &&
+        property_equals(properties, "schema", ManifestScalar::Kind::string,
+                        kFunctionalRuntimeCaptureSchema) &&
+        property_equals(properties, "purpose", ManifestScalar::Kind::string,
+                        "functional_runtime_capture") &&
+        property_equals(properties, "campaign_evidence_eligible",
+                        ManifestScalar::Kind::boolean, "false") &&
+        property_equals(properties, "run_id", ManifestScalar::Kind::string,
+                        run_id) &&
+        property_equals(properties, "recorded_by_stock_pair",
+                        ManifestScalar::Kind::boolean, "true") &&
+        property_equals(properties, "validated_by_our_decoder",
+                        ManifestScalar::Kind::boolean, "false") &&
+        property_equals(properties, "route", ManifestScalar::Kind::string,
+                        "stock_client_loopback_relay_stock_hlds") &&
+        property_equals(properties, "relay_policy", ManifestScalar::Kind::string,
+                        "byte_preserving_owning_session_no_perturbation") &&
+        property_equals(properties, "game", ManifestScalar::Kind::string,
+                        "valve") &&
+        property(properties, "map", ManifestScalar::Kind::string) != nullptr &&
+        manifest_integer(properties, "maximum_duration_seconds",
+                         maximum_duration) &&
+        maximum_duration >= 5U && maximum_duration <= 300U &&
+        property_equals(properties, "output_role", ManifestScalar::Kind::string,
+                        "functional-runtime-capture") &&
+        property(properties, "server_profile_id", ManifestScalar::Kind::string) !=
+            nullptr &&
+        property_equals(properties, "client_steam_argument",
+                        ManifestScalar::Kind::string, "present") &&
+        property_equals(properties, "external_steam_state",
+                        ManifestScalar::Kind::string, "not_assessed") &&
+        (property_equals(properties, "lifecycle_clock",
+                         ManifestScalar::Kind::string, "steady-clock") ||
+         property_equals(properties, "lifecycle_clock",
+                         ManifestScalar::Kind::string,
+                         "scaled-steady-clock")) &&
+        property_equals(properties, "lifecycle_unit",
+                        ManifestScalar::Kind::string, "milliseconds") &&
+        manifest_integer(properties, "requested_maximum_duration_ms",
+                         requested_maximum_ms) &&
+        requested_maximum_ms == maximum_duration * 1'000U &&
+        manifest_integer(properties, "required_runtime_interval_ms",
+                         required_interval_ms) &&
+        required_interval_ms == 15'000U &&
+        manifest_integer(properties, "client_map_entry_observed_ms",
+                         map_entry_ms) &&
+        manifest_integer(properties, "functional_interval_completed_ms",
+                         interval_complete_ms) &&
+        interval_complete_ms >= map_entry_ms + required_interval_ms &&
+        manifest_integer(properties, "shutdown_requested_ms",
+                         shutdown_requested_ms) &&
+        shutdown_requested_ms >= interval_complete_ms &&
+        manifest_integer(properties, "relay_stop_requested_ms",
+                         relay_stop_ms) &&
+        relay_stop_ms >= shutdown_requested_ms &&
+        manifest_integer(properties, "relay_finalization_completed_ms",
+                         relay_finalized_ms) &&
+        relay_finalized_ms >= relay_stop_ms &&
+        relay_finalized_ms < requested_maximum_ms &&
+        property_equals(properties, "stop_reason", ManifestScalar::Kind::string,
+                        "functional-interval-complete") &&
+        property_equals(properties, "stock_shutdown_method",
+                        ManifestScalar::Kind::string,
+                        "owned-process-terminate") &&
+        property_equals(properties, "capture_status", ManifestScalar::Kind::string,
+                        "complete") &&
+        property_equals(properties, "owned_process_cleanup",
+                        ManifestScalar::Kind::string, "exact") &&
+        property_equals(properties, "research_restoration",
+                        ManifestScalar::Kind::string, "exact") &&
+        property_equals(properties, "result", ManifestScalar::Kind::string,
+                        "functional_runtime_capture_complete") &&
+        manifest_integer(properties, "capture_metadata_byte_length",
+                         capture_metadata_bytes) &&
+        manifest_integer(properties, "transport_journal_byte_length",
+                         journal_bytes) &&
+        manifest_integer(properties, "version_observation_byte_length",
+                         version_bytes) &&
+        manifest_integer(properties, "isolation_attestation_byte_length",
+                         isolation_bytes) &&
+        capture_metadata_bytes != 0U && journal_bytes != 0U &&
+        version_bytes != 0U && isolation_bytes != 0U &&
+        hexadecimal_sha256(properties, "capture_metadata_sha256", false) &&
+        hexadecimal_sha256(properties, "transport_journal_sha256", false) &&
+        hexadecimal_sha256(properties, "version_observation_sha256", false) &&
+        hexadecimal_sha256(properties, "isolation_attestation_sha256", false);
+}
+
+[[nodiscard]] bool valid_functional_runtime_restoration(
+    const ManifestProperties& properties,
+    const std::string_view run_id) noexcept
+{
+    constexpr std::array names{
+        std::string_view{"schema"},
+        std::string_view{"run_id"},
+        std::string_view{"owned_process_cleanup"},
+        std::string_view{"research_restoration"},
+        std::string_view{"before_manifest_sha256"},
+        std::string_view{"after_manifest_sha256"},
+    };
+    const auto* before = property(
+        properties, "before_manifest_sha256", ManifestScalar::Kind::string);
+    const auto* after = property(
+        properties, "after_manifest_sha256", ManifestScalar::Kind::string);
+    return exact_properties(properties, names) &&
+        property_equals(properties, "schema", ManifestScalar::Kind::string,
+                        kFunctionalRuntimeRestorationSchema) &&
+        property_equals(properties, "run_id", ManifestScalar::Kind::string,
+                        run_id) &&
+        property_equals(properties, "owned_process_cleanup",
+                        ManifestScalar::Kind::string, "exact") &&
+        property_equals(properties, "research_restoration",
+                        ManifestScalar::Kind::string, "exact") &&
+        before != nullptr && after != nullptr && before->value == after->value &&
+        hexadecimal_sha256(properties, "before_manifest_sha256", false) &&
+        hexadecimal_sha256(properties, "after_manifest_sha256", false);
+}
+
 [[nodiscard]] bool valid_version_document(
     const ManifestProperties& properties,
     const bool require_accepted_profile)
@@ -857,6 +1031,170 @@ template<typename Integer>
     const ManifestProperties& properties,
     const bool require_accepted_profile)
 {
+    const auto* schema = property(properties, "schema", ManifestScalar::Kind::string);
+    if (schema != nullptr && schema->value == "hlclient.stock-runtime-restoration.v2") {
+    constexpr std::array v2_names{
+            std::string_view{"schema"},
+            std::string_view{"external_file_drift"},
+            std::string_view{"raw_external_state"},
+            std::string_view{"protected_projection"},
+            std::string_view{"steam_rewrite_policy_id"},
+            std::string_view{"policy_decision"},
+            std::string_view{"snapshot_entry_count"},
+            std::string_view{"pre_manifest_sha256"},
+            std::string_view{"post_manifest_sha256"},
+            std::string_view{"external_snapshot_entry_count"},
+            std::string_view{"external_pre_manifest_sha256"},
+            std::string_view{"external_post_manifest_sha256"},
+            std::string_view{"external_drift_phase"},
+            std::string_view{"external_changed_scope_count"},
+            std::string_view{"external_content_change_count"},
+            std::string_view{"external_metadata_only_count"},
+            std::string_view{"external_identity_replacement_count"},
+            std::string_view{"external_created_count"},
+            std::string_view{"external_removed_count"},
+            std::string_view{"external_unreadable_count"},
+            std::string_view{"created_files_removed"},
+            std::string_view{"protected_paths_included"},
+            std::string_view{"owned_processes_stopped"},
+            std::string_view{"input_automation_used"},
+            std::string_view{"input_events_injected"},
+            std::string_view{"orchestrator_exit_code"},
+            std::string_view{"restoration_status"},
+        };
+        if (!exact_properties(properties, v2_names) ||
+            std::ranges::any_of(
+                std::array{
+                    std::string_view{"external_file_drift"},
+                    std::string_view{"raw_external_state"},
+                    std::string_view{"protected_projection"},
+                    std::string_view{"steam_rewrite_policy_id"},
+                    std::string_view{"policy_decision"},
+                    std::string_view{"external_drift_phase"},
+                    std::string_view{"restoration_status"},
+                },
+                [&properties](const auto name) {
+                    return property(properties, name, ManifestScalar::Kind::string) == nullptr;
+                }) ||
+            std::ranges::any_of(
+                std::array{
+                    std::string_view{"snapshot_entry_count"},
+                    std::string_view{"external_snapshot_entry_count"},
+                    std::string_view{"external_changed_scope_count"},
+                    std::string_view{"external_content_change_count"},
+                    std::string_view{"external_metadata_only_count"},
+                    std::string_view{"external_identity_replacement_count"},
+                    std::string_view{"external_created_count"},
+                    std::string_view{"external_removed_count"},
+                    std::string_view{"external_unreadable_count"},
+                    std::string_view{"input_events_injected"},
+                    std::string_view{"orchestrator_exit_code"},
+                },
+                [&properties](const auto name) {
+                    return property(properties, name, ManifestScalar::Kind::integer) == nullptr;
+                }) ||
+            std::ranges::any_of(
+                std::array{
+                    std::string_view{"created_files_removed"},
+                    std::string_view{"protected_paths_included"},
+                    std::string_view{"owned_processes_stopped"},
+                    std::string_view{"input_automation_used"},
+                },
+                [&properties](const auto name) {
+                    return property(properties, name, ManifestScalar::Kind::boolean) == nullptr;
+                })) {
+            return false;
+        }
+        std::string before;
+        std::string after;
+        std::string external_before;
+        std::string external_after;
+        if (!hexadecimal_sha256(properties, "pre_manifest_sha256", false, &before) ||
+            !hexadecimal_sha256(properties, "post_manifest_sha256", false, &after) ||
+            !hexadecimal_sha256(properties, "external_pre_manifest_sha256", false,
+                                &external_before) ||
+            !hexadecimal_sha256(properties, "external_post_manifest_sha256", false,
+                                &external_after)) {
+            return false;
+        }
+        const bool policy_shape_valid =
+            (property_equals(properties, "external_file_drift", ManifestScalar::Kind::string,
+                             "none") ||
+             property_equals(properties, "external_file_drift", ManifestScalar::Kind::string,
+                             "changed")) &&
+            (property_equals(properties, "raw_external_state", ManifestScalar::Kind::string,
+                             "unchanged") ||
+             property_equals(properties, "raw_external_state", ManifestScalar::Kind::string,
+                             "changed") ||
+             property_equals(properties, "raw_external_state", ManifestScalar::Kind::string,
+                             "incomplete")) &&
+            (property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                             "none") ||
+             property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                             "match") ||
+             property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                             "mismatch") ||
+             property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                             "incomplete")) &&
+            (property_equals(properties, "steam_rewrite_policy_id", ManifestScalar::Kind::string,
+                             "legacy-strict-v1") ||
+             property_equals(properties, "steam_rewrite_policy_id", ManifestScalar::Kind::string,
+                             "steam-appinfo-change-number-v1")) &&
+            (property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                             "strict_pass") ||
+             property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                             "explicit_advisory") ||
+             property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                             "reject"));
+        if (!policy_shape_valid) return false;
+        if (!require_accepted_profile) return true;
+        const bool raw_unchanged = property_equals(properties, "raw_external_state",
+                                                   ManifestScalar::Kind::string, "unchanged");
+        const bool raw_changed = property_equals(properties, "raw_external_state",
+                                                 ManifestScalar::Kind::string, "changed");
+        const bool strict =
+            raw_unchanged &&
+            property_equals(properties, "external_file_drift", ManifestScalar::Kind::string,
+                            "none") &&
+            property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                            "none") &&
+            property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                            "strict_pass") &&
+            (property_equals(properties, "steam_rewrite_policy_id", ManifestScalar::Kind::string,
+                             "legacy-strict-v1") ||
+             property_equals(properties, "steam_rewrite_policy_id", ManifestScalar::Kind::string,
+                             "steam-appinfo-change-number-v1"));
+        const bool advisory =
+            raw_changed &&
+            property_equals(properties, "external_file_drift", ManifestScalar::Kind::string,
+                            "changed") &&
+            property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                            "match") &&
+            property_equals(properties, "steam_rewrite_policy_id", ManifestScalar::Kind::string,
+                            "steam-appinfo-change-number-v1") &&
+            property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                            "explicit_advisory");
+        return before == after &&
+               ((raw_unchanged && external_before == external_after) ||
+                (raw_changed && external_before != external_after)) &&
+               (strict || advisory) &&
+               property_equals(properties, "external_unreadable_count",
+                               ManifestScalar::Kind::integer, "0") &&
+               property_equals(properties, "created_files_removed", ManifestScalar::Kind::boolean,
+                               "true") &&
+               property_equals(properties, "protected_paths_included",
+                               ManifestScalar::Kind::boolean, "true") &&
+               property_equals(properties, "owned_processes_stopped", ManifestScalar::Kind::boolean,
+                               "true") &&
+               property_equals(properties, "input_automation_used", ManifestScalar::Kind::boolean,
+                               "false") &&
+               property_equals(properties, "input_events_injected", ManifestScalar::Kind::integer,
+                               "0") &&
+               property_equals(properties, "orchestrator_exit_code", ManifestScalar::Kind::integer,
+                               "0") &&
+               property_equals(properties, "restoration_status", ManifestScalar::Kind::string,
+                               "exact");
+    }
     constexpr std::array names{
         std::string_view{"schema"},
         std::string_view{"external_file_drift"},
@@ -1008,6 +1346,18 @@ template<typename Integer>
         std::string_view{"generation_distinct"},
         std::string_view{"candidate_conflict"},
     };
+    constexpr std::array policy_names{
+        std::string_view{"raw_external_state"},
+        std::string_view{"protected_projection"},
+        std::string_view{"steam_rewrite_policy_id"},
+        std::string_view{"policy_decision"},
+    };
+    const auto* schema = property(properties, "schema", ManifestScalar::Kind::string);
+    if (schema == nullptr || (schema->value != "hlclient.stock-runtime-research-run.v1" &&
+                              schema->value != "hlclient.stock-runtime-research-run.v2")) {
+        return false;
+    }
+    const bool version_two = schema->value == "hlclient.stock-runtime-research-run.v2";
     const auto* scenario = property(
         properties, "scenario", ManifestScalar::Kind::string);
     const auto* accepted = property(
@@ -1016,10 +1366,14 @@ template<typename Integer>
     const bool accepted_reconnect = scenario->value == "reconnect" &&
                                     accepted->value == "true";
     if (properties.size() != base_names.size() +
-            (accepted_reconnect ? reconnect_names.size() : 0U) ||
+            (accepted_reconnect ? reconnect_names.size() : 0U) +
+                                 (version_two ? policy_names.size() : 0U) ||
         !std::ranges::all_of(base_names, [&properties](const auto name) {
             return properties.contains(name);
         }) ||
+        (version_two &&
+         !std::ranges::all_of(
+             policy_names, [&properties](const auto name) { return properties.contains(name); })) ||
         (accepted_reconnect &&
          !std::ranges::all_of(reconnect_names, [&properties](const auto name) {
              return properties.contains(name);
@@ -1077,7 +1431,33 @@ template<typename Integer>
         std::string_view{"last_observed_transport_timestamp_us"},
         std::string_view{"last_delivered_sequenced_s2c_timestamp_us"},
     };
-    const bool base_valid = std::ranges::all_of(
+    const bool policy_shape_valid =
+        !version_two ||
+        ((property_equals(properties, "raw_external_state", ManifestScalar::Kind::string,
+                          "unchanged") ||
+          property_equals(properties, "raw_external_state", ManifestScalar::Kind::string,
+                          "changed") ||
+          property_equals(properties, "raw_external_state", ManifestScalar::Kind::string,
+                          "incomplete")) &&
+         (property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                          "none") ||
+          property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                          "match") ||
+          property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                          "mismatch") ||
+          property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                          "incomplete")) &&
+         (property_equals(properties, "steam_rewrite_policy_id", ManifestScalar::Kind::string,
+                          "legacy-strict-v1") ||
+          property_equals(properties, "steam_rewrite_policy_id", ManifestScalar::Kind::string,
+                          "steam-appinfo-change-number-v1")) &&
+         (property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                          "strict_pass") ||
+          property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                          "explicit_advisory") ||
+          property_equals(properties, "policy_decision", ManifestScalar::Kind::string, "reject")));
+    const bool base_valid =
+        policy_shape_valid && std::ranges::all_of(
                nullable_integers, [&properties](const auto name) {
                    return nullable_kind(
                        properties, name, ManifestScalar::Kind::integer);
@@ -1320,21 +1700,49 @@ template<typename Integer>
          candidate_value >= (std::uint32_t{1U} << candidate_bit_width))) {
         return false;
     }
-    return property_equals(properties, "isolation_status",
-                           ManifestScalar::Kind::string, "verified") &&
+    const auto* schema = property(properties, "schema", ManifestScalar::Kind::string);
+    const bool policy_accepted =
+        schema != nullptr &&
+        ((schema->value == "hlclient.stock-runtime-research-run.v1" && property_equals(properties, "external_drift_status",
+                           ManifestScalar::Kind::string,
+                          "none")) ||
+         (schema->value == "hlclient.stock-runtime-research-run.v2" &&
+          ((
+           property_equals(properties, "raw_external_state",
+                           ManifestScalar::Kind::string,
+                            "unchanged") &&
+           property_equals(properties, "external_drift_status",
+                           ManifestScalar::Kind::string,
+                            "none") &&
+            property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                            "none") &&
+            property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                            "strict_pass")) ||
+           (property_equals(properties, "raw_external_state", ManifestScalar::Kind::string,
+                            "changed") &&
+            property_equals(properties, "external_drift_status", ManifestScalar::Kind::string,
+                            "changed") &&
+            property_equals(properties, "protected_projection", ManifestScalar::Kind::string,
+                            "match") &&
+            property_equals(properties, "steam_rewrite_policy_id", ManifestScalar::Kind::string,
+                            "steam-appinfo-change-number-v1") &&
+            property_equals(properties, "policy_decision", ManifestScalar::Kind::string,
+                            "explicit_advisory")))));
+    return policy_accepted &&
+           property_equals(properties, "isolation_status", ManifestScalar::Kind::string, "verified") &&
            property_equals(properties, "process_ownership_status",
                            ManifestScalar::Kind::string,
                            "verified-cleanup") &&
            property_equals(properties, "version_profile_status",
-                           ManifestScalar::Kind::string, "verified") &&
-           property_equals(properties, "relay_status",
-                           ManifestScalar::Kind::string, "true") &&
+                           ManifestScalar::Kind::string,
+                           "verified") &&
+           property_equals(properties, "relay_status", ManifestScalar::Kind::string, "true") &&
            property_equals(properties, "client_ready_status",
-                           ManifestScalar::Kind::string, "true") &&
+                           ManifestScalar::Kind::string,
+                           "true") &&
            property_equals(properties, "restoration_status",
-                           ManifestScalar::Kind::string, "exact") &&
-           property_equals(properties, "external_drift_status",
-                           ManifestScalar::Kind::string, "none") &&
+                           ManifestScalar::Kind::string,
+                           "exact") &&
            property_equals(properties, "offline_replay_status",
                            ManifestScalar::Kind::string, "success") &&
            property_equals(properties, "post_resource_boundary_status",
@@ -1937,7 +2345,7 @@ read_strict_reconnect_document(
     const std::string_view expected_schema,
     const std::size_t maximum_bytes,
     StockRuntimeCaptureCorpusError& error,
-    ManifestProperties* properties = nullptr)
+    ManifestProperties* properties = nullptr, const std::string_view legacy_schema = {})
 {
     auto read = read_bounded_regular_file(path, maximum_bytes);
     if (!read.bytes) {
@@ -1953,12 +2361,13 @@ read_strict_reconnect_document(
     }
     const auto* schema = property(
         *parsed.properties, "schema", ManifestScalar::Kind::string);
-    if (schema == nullptr || schema->value != expected_schema) {
+    if (schema == nullptr || ( schema->value != expected_schema && schema->value != legacy_schema)) {
         error = StockRuntimeCaptureCorpusError{
             StockRuntimeCaptureCorpusErrorCode::wrong_schema, 0U,
             "manifest schema does not match its file role", std::nullopt};
         return std::nullopt;
     }
+    const auto actual_schema = schema->value;
     const auto digest = hash::sha256(*read.bytes);
     if (!digest) {
         error = StockRuntimeCaptureCorpusError{
@@ -1969,8 +2378,7 @@ read_strict_reconnect_document(
     if (properties != nullptr) {
         *properties = std::move(*parsed.properties);
     }
-    return StockRuntimeCorpusDocument{
-        std::string{expected_schema}, hash::sha256_hex(*digest)};
+    return StockRuntimeCorpusDocument{actual_schema, hash::sha256_hex(*digest)};
 }
 
 [[nodiscard]] bool valid_corpus_limits(
@@ -2214,7 +2622,8 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     if (component_state != ExistingPathComponentsState::safe) {
         return failure(
             StockRuntimeCaptureCorpusErrorCode::missing_directory,
-            "run directory path has a missing, unreadable, or non-directory component");
+                       "run directory path has a missing, unreadable, or "
+                       "non-directory component");
     }
     const auto root_status = fs::symlink_status(absolute, path_error);
     if (path_error || !fs::is_directory(root_status)) {
@@ -2228,23 +2637,31 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
 
     const bool prepublication =
         policy == StockRuntimeCaptureCorpusLoadPolicy::prepublication;
-    const std::string version_filename = prepublication
+    const bool functional_capture =
+        policy == StockRuntimeCaptureCorpusLoadPolicy::functional_capture;
+    const bool staged_inputs = prepublication || functional_capture;
+    const std::string version_filename = staged_inputs
         ? "version-observation.staged.json"
         : "version-observation.json";
-    const std::string isolation_filename = prepublication
+    const std::string isolation_filename = staged_inputs
         ? "isolation-attestation.staged.json"
         : "isolation-attestation.json";
-    const std::string restoration_filename = prepublication
-        ? "restoration-attestation.staged.json"
-        : "restoration-attestation.json";
+    const std::string restoration_filename = functional_capture
+        ? "restoration-attestation.functional.json"
+        : prepublication
+            ? "restoration-attestation.staged.json"
+            : "restoration-attestation.json";
     std::set<std::string, std::less<>> required_root_entries{
         "capture-metadata.json", version_filename, isolation_filename,
         restoration_filename, "transport-journal.jsonl", "raw", "logs",
     };
-    if (!prepublication) {
+    if (!staged_inputs) {
         required_root_entries.insert("version-observation.staged.json");
         required_root_entries.insert("isolation-attestation.staged.json");
         required_root_entries.insert("restoration-attestation.staged.json");
+    }
+    if (functional_capture) {
+        required_root_entries.insert("functional-runtime-capture.json");
     }
     std::set<std::string, std::less<>> seen_root_entries;
     for (const auto& item : fs::directory_iterator(absolute, path_error)) {
@@ -2257,7 +2674,13 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
             name == "reconnect-transport-observation.staged.json" ||
             name == "reconnect-orchestration.staged.json" ||
             name == "reconnect-observation.json";
-        if (name == "research-run-metadata.json") {
+        if (name == "functional-runtime-capture.json") {
+            if (!functional_capture) {
+                return failure(
+                    StockRuntimeCaptureCorpusErrorCode::unexpected_manifest,
+                    "strict corpus contains a functional capture manifest");
+            }
+        } else if (name == "research-run-metadata.json") {
             if (policy == StockRuntimeCaptureCorpusLoadPolicy::prepublication) {
                 return failure(StockRuntimeCaptureCorpusErrorCode::unexpected_manifest,
                                "prepublication corpus already has a final run manifest");
@@ -2290,6 +2713,12 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
         !seen_root_entries.contains("research-run-metadata.json")) {
         return failure(StockRuntimeCaptureCorpusErrorCode::missing_manifest,
                        "published corpus lacks its final run manifest");
+    }
+    if (functional_capture &&
+        seen_root_entries.contains("research-run-metadata.json")) {
+        return failure(
+            StockRuntimeCaptureCorpusErrorCode::unexpected_manifest,
+            "functional capture must not contain a strict campaign manifest");
     }
 
     const auto raw_root = absolute / "raw";
@@ -2358,7 +2787,7 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
             StockRuntimeCaptureCorpusErrorCode::missing_manifest,
             "reconnect staged transport and orchestration documents are atomic");
     }
-    if (prepublication && has_reconnect_final) {
+    if (staged_inputs && has_reconnect_final) {
         return failure(
             StockRuntimeCaptureCorpusErrorCode::unexpected_manifest,
             "prepublication reconnect corpus already has a final observation");
@@ -2368,6 +2797,7 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     ManifestProperties version_properties;
     ManifestProperties isolation_properties;
     ManifestProperties restoration_properties;
+    ManifestProperties functional_properties;
     ManifestProperties staged_version_properties;
     ManifestProperties staged_isolation_properties;
     ManifestProperties staged_restoration_properties;
@@ -2383,13 +2813,19 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     if (!isolation) return {std::nullopt, std::move(document_error)};
     auto restoration = read_document(
         absolute / restoration_filename,
-        kStockRuntimeRestorationAttestationSchema, limits_.maximum_manifest_bytes,
-        document_error, &restoration_properties);
+        functional_capture
+            ? kFunctionalRuntimeRestorationSchema
+            : kStockRuntimeRestorationAttestationSchema,
+        limits_.maximum_manifest_bytes, document_error,
+        &restoration_properties,
+        functional_capture
+            ? std::string_view{}
+            : kStockRuntimeLegacyRestorationAttestationSchema);
     if (!restoration) return {std::nullopt, std::move(document_error)};
     std::optional<StockRuntimeCorpusDocument> staged_version;
     std::optional<StockRuntimeCorpusDocument> staged_isolation;
     std::optional<StockRuntimeCorpusDocument> staged_restoration;
-    if (!prepublication) {
+    if (!staged_inputs) {
         staged_version = read_document(
             absolute / "version-observation.staged.json",
             kStockRuntimeVersionObservationSchema,
@@ -2406,25 +2842,43 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
             absolute / "restoration-attestation.staged.json",
             kStockRuntimeRestorationAttestationSchema,
             limits_.maximum_manifest_bytes, document_error,
-            &staged_restoration_properties);
+            &staged_restoration_properties,
+                          kStockRuntimeLegacyRestorationAttestationSchema);
         if (!staged_restoration) {
             return {std::nullopt, std::move(document_error)};
         }
     }
 
     std::optional<StockRuntimeCorpusDocument> research_run;
+    std::optional<StockRuntimeCorpusDocument> functional_manifest;
     std::optional<StockRuntimeAcceptedManifestClaims> accepted_manifest_claims;
     ManifestProperties research_properties;
     bool manifest_accepted = false;
     if (policy == StockRuntimeCaptureCorpusLoadPolicy::published) {
         research_run = read_document(
             absolute / "research-run-metadata.json", kStockRuntimeResearchRunSchema,
-            limits_.maximum_manifest_bytes, document_error, &research_properties);
+            limits_.maximum_manifest_bytes, document_error, &research_properties,
+                          kStockRuntimeLegacyResearchRunSchema);
         if (!research_run) return {std::nullopt, std::move(document_error)};
+        const auto* research_schema =
+            property(research_properties, "schema", ManifestScalar::Kind::string);
+        const auto* restoration_schema =
+            property(restoration_properties, "schema", ManifestScalar::Kind::string);
+        const auto* staged_restoration_schema =
+            property(staged_restoration_properties, "schema", ManifestScalar::Kind::string);
+        if (research_schema == nullptr || restoration_schema == nullptr ||
+            staged_restoration_schema == nullptr ||
+            ((research_schema->value == kStockRuntimeResearchRunSchema) !=
+             (restoration_schema->value == kStockRuntimeRestorationAttestationSchema)) ||
+            restoration_schema->value != staged_restoration_schema->value) {
+            return failure(StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
+                           "research and restoration policy contract versions differ");
+        }
         if (!valid_research_manifest_shape(research_properties)) {
             return failure(
                 StockRuntimeCaptureCorpusErrorCode::invalid_json,
-                "final manifest fields do not match the exact flat v1 contract");
+                           "final manifest fields do not match an exact supported "
+                           "flat contract");
         }
         const auto* manifest_run_id = property(
             research_properties, "run_id", ManifestScalar::Kind::string);
@@ -2454,6 +2908,24 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
                     StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
                     "accepted final manifest claims could not be typed");
             }
+        }
+    }
+    if (functional_capture) {
+        functional_manifest = read_document(
+            absolute / "functional-runtime-capture.json",
+            kFunctionalRuntimeCaptureSchema,
+            limits_.maximum_manifest_bytes, document_error,
+            &functional_properties);
+        if (!functional_manifest) {
+            return {std::nullopt, std::move(document_error)};
+        }
+        if (!valid_functional_runtime_capture_manifest(
+                functional_properties, run_id) ||
+            !valid_functional_runtime_restoration(
+                restoration_properties, run_id)) {
+            return failure(
+                StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
+                "functional capture manifest or restoration contract is invalid");
         }
     }
 
@@ -2506,12 +2978,12 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
 
     const bool acceptance_required =
         policy == StockRuntimeCaptureCorpusLoadPolicy::prepublication ||
-        manifest_accepted;
+        functional_capture || manifest_accepted;
     if (!valid_version_document(version_properties, acceptance_required) ||
         !valid_isolation_document(isolation_properties, acceptance_required) ||
-        !valid_restoration_document(
-            restoration_properties, acceptance_required) ||
-        (!prepublication &&
+        (!functional_capture && !valid_restoration_document(
+            restoration_properties, acceptance_required)) ||
+        (!staged_inputs &&
          (!valid_version_document(staged_version_properties, true) ||
           !valid_isolation_document(staged_isolation_properties, true) ||
           !valid_restoration_document(staged_restoration_properties, true) ||
@@ -2528,6 +3000,65 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     auto journal_file = read_bounded_regular_file(
         absolute / "transport-journal.jsonl", limits_.maximum_journal_bytes);
     if (!journal_file.bytes) return {std::nullopt, std::move(journal_file.error)};
+    if (functional_capture) {
+        std::uint64_t capture_bytes = 0U;
+        std::uint64_t journal_bytes = 0U;
+        std::uint64_t version_bytes = 0U;
+        std::uint64_t isolation_bytes = 0U;
+        std::string capture_hash;
+        std::string journal_hash;
+        std::string version_hash;
+        std::string isolation_hash;
+        const auto version_size = fs::file_size(
+            absolute / version_filename, path_error);
+        if (path_error) {
+            return failure(
+                StockRuntimeCaptureCorpusErrorCode::read_failed,
+                "functional version observation size is unavailable");
+        }
+        const auto isolation_size = fs::file_size(
+            absolute / isolation_filename, path_error);
+        if (path_error ||
+            !manifest_integer(functional_properties,
+                              "capture_metadata_byte_length", capture_bytes) ||
+            !manifest_integer(functional_properties,
+                              "transport_journal_byte_length", journal_bytes) ||
+            !manifest_integer(functional_properties,
+                              "version_observation_byte_length", version_bytes) ||
+            !manifest_integer(functional_properties,
+                              "isolation_attestation_byte_length",
+                              isolation_bytes) ||
+            !hexadecimal_sha256(functional_properties,
+                                "capture_metadata_sha256", false,
+                                &capture_hash) ||
+            !hexadecimal_sha256(functional_properties,
+                                "transport_journal_sha256", false,
+                                &journal_hash) ||
+            !hexadecimal_sha256(functional_properties,
+                                "version_observation_sha256", false,
+                                &version_hash) ||
+            !hexadecimal_sha256(functional_properties,
+                                "isolation_attestation_sha256", false,
+                                &isolation_hash)) {
+            return failure(
+                StockRuntimeCaptureCorpusErrorCode::invalid_json,
+                "functional file bindings are invalid");
+        }
+        const auto capture_digest = hash::sha256(*capture_file.bytes);
+        const auto journal_digest = hash::sha256(*journal_file.bytes);
+        if (!capture_digest || !journal_digest ||
+            capture_bytes != capture_file.bytes->size() ||
+            journal_bytes != journal_file.bytes->size() ||
+            version_bytes != version_size || isolation_bytes != isolation_size ||
+            capture_hash != hash::sha256_hex(*capture_digest) ||
+            journal_hash != hash::sha256_hex(*journal_digest) ||
+            version_hash != version->structural_sha256 ||
+            isolation_hash != isolation->structural_sha256) {
+            return failure(
+                StockRuntimeCaptureCorpusErrorCode::raw_hash_mismatch,
+                "functional manifest file bindings disagree with captured files");
+        }
+    }
     const auto journal_text = bytes_as_string(*journal_file.bytes);
     std::vector<StockRuntimeTransportJournalEntry> journal;
     std::size_t line_begin = 0U;
@@ -2560,8 +3091,10 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     // retain unresolved holds or unexpected-source observations.  A
     // prepublication transaction must be complete before the final manifest
     // can be written, and an accepted manifest is always fail-closed.
-    const auto journal_policy =
-        policy == StockRuntimeCaptureCorpusLoadPolicy::published &&
+    const auto journal_policy = functional_capture
+        ? StockRuntimeTransportJournalValidationPolicy::
+              functional_complete_capture
+        : policy == StockRuntimeCaptureCorpusLoadPolicy::published &&
                 !manifest_accepted
             ? StockRuntimeTransportJournalValidationPolicy::incomplete_capture
             : StockRuntimeTransportJournalValidationPolicy::complete_capture;
@@ -2582,6 +3115,7 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     std::size_t duplicated_count = 0U;
     std::size_t delayed_count = 0U;
     std::size_t wrong_source_count = 0U;
+    std::size_t auxiliary_observation_count = 0U;
     for (const auto& entry : journal) {
         const auto emission_multiplier = entry.emitted_ordinals.size();
         if (emission_multiplier != 0U &&
@@ -2604,6 +3138,10 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
                 ? 1U
                 : 0U;
         wrong_source_count += entry.wrong_source ? 1U : 0U;
+        auxiliary_observation_count +=
+            entry.action == StockRuntimeCaptureAction::auxiliary_observation
+                ? 1U
+                : 0U;
     }
     if (metadata.counters.observed_datagrams != journal.size() ||
         metadata.counters.emitted_datagrams !=
@@ -2624,6 +3162,8 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
         metadata.counters.delayed_datagrams != delayed_count ||
         metadata.counters.ignored_wrong_source_datagrams !=
             wrong_source_count ||
+        metadata.counters.auxiliary_observed_datagrams !=
+            auxiliary_observation_count ||
         metadata.perturbation_count !=
             dropped_count + duplicated_count + delayed_count) {
         return failure(
@@ -2631,22 +3171,18 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
             "capture metadata perturbation counters disagree with the journal");
     }
     if (metadata.bounded_transport_complete !=
-        journal_validation.transport_complete) {
+            journal_validation.transport_complete) {
         return failure(
             StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
             "capture metadata and journal disagree about transport completeness");
     }
     const bool has_wrong_source = std::ranges::any_of(
         journal, [](const auto& entry) { return entry.wrong_source; });
-    if (has_wrong_source &&
-        (policy == StockRuntimeCaptureCorpusLoadPolicy::prepublication ||
-         manifest_accepted)) {
+    if (has_wrong_source && acceptance_required && !functional_capture) {
         return failure(StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
                        "unexpected-source datagram prevents publication readiness");
     }
-    if ((policy == StockRuntimeCaptureCorpusLoadPolicy::prepublication ||
-         manifest_accepted) &&
-        !metadata.bounded_transport_complete) {
+    if (acceptance_required && !metadata.bounded_transport_complete) {
         return failure(StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
                        "publication-ready corpus lacks complete bounded transport");
     }
@@ -2669,7 +3205,8 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
             manifest_map_property->value != observed_map_property->value) {
             return failure(
                 StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
-                "final manifest scenario/map disagree with immutable capture observations");
+                           "final manifest scenario/map disagree with immutable capture "
+                           "observations");
         }
         std::size_t manifest_raw_count = 0U;
         std::size_t manifest_journal_count = 0U;
@@ -2719,6 +3256,7 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
         delivered_slots;
     std::vector<StockRuntimeCorpusDeliveredDatagram> delivered_c2s;
     std::vector<StockRuntimeCorpusDeliveredDatagram> delivered_s2c;
+    std::size_t functional_auxiliary_query_count = 0U;
     try {
         observed.reserve(journal.size());
         delivered.reserve(journal_validation.emitted_datagram_count);
@@ -2751,6 +3289,31 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
                            "raw file SHA-256 differs from its journal entry",
                            entry.observed_ordinal);
         }
+        if (functional_capture && entry.wrong_source) {
+            if (entry.direction !=
+                    StockRuntimeCaptureDirection::client_to_server ||
+                entry.action !=
+                    StockRuntimeCaptureAction::auxiliary_observation ||
+                entry.delivered || !entry.emitted_ordinals.empty() ||
+                !is_functional_runtime_auxiliary_query(*raw.bytes) ||
+                functional_auxiliary_query_count >=
+                    kMaximumFunctionalRuntimeAuxiliaryQueries) {
+                return failure(
+                    StockRuntimeCaptureCorpusErrorCode::
+                        publication_state_mismatch,
+                    "functional auxiliary observation is not the exact bounded "
+                    "non-session query",
+                    entry.observed_ordinal);
+            }
+            ++functional_auxiliary_query_count;
+        } else if (functional_capture &&
+                   entry.action != StockRuntimeCaptureAction::forward) {
+            return failure(
+                StockRuntimeCaptureCorpusErrorCode::
+                    publication_state_mismatch,
+                "functional owning session contains a delivery perturbation",
+                entry.observed_ordinal);
+        }
         auto bytes = std::make_shared<const std::vector<std::byte>>(
             std::move(*raw.bytes));
         for (const auto emission : entry.emitted_ordinals) {
@@ -2759,6 +3322,18 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
         }
         observed.push_back(StockRuntimeCorpusObservedDatagram{
             std::move(entry), std::move(bytes)});
+    }
+
+    if (functional_capture &&
+        (functional_auxiliary_query_count != wrong_source_count ||
+         functional_auxiliary_query_count != auxiliary_observation_count ||
+         functional_auxiliary_query_count !=
+             metadata.counters.auxiliary_observed_datagrams ||
+         dropped_count != 0U || duplicated_count != 0U || delayed_count != 0U ||
+         metadata.perturbation_count != 0U)) {
+        return failure(
+            StockRuntimeCaptureCorpusErrorCode::publication_state_mismatch,
+            "functional auxiliary accounting or owning-session delivery is invalid");
     }
     for (auto& slot : delivered_slots) {
         if (!slot) {
@@ -2914,7 +3489,9 @@ StockRuntimeCaptureCorpusLoadResult StockRuntimeCaptureCorpusLoader::load(
     }
 
     const auto publication_state =
-        policy == StockRuntimeCaptureCorpusLoadPolicy::prepublication
+        functional_capture
+            ? StockRuntimeCaptureCorpusPublicationState::functional_complete
+        : policy == StockRuntimeCaptureCorpusLoadPolicy::prepublication
             ? StockRuntimeCaptureCorpusPublicationState::ready_for_manifest_publication
             : manifest_accepted
                 ? StockRuntimeCaptureCorpusPublicationState::published_accepted

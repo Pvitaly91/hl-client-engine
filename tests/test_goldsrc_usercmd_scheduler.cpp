@@ -127,6 +127,40 @@ TEST_CASE("GoldSrc usercmd scheduler exposes fixed cadence independent of render
     CHECK_FALSE(sparse_requests[1U].one_shot_eligible);
 }
 
+TEST_CASE("GoldSrc usercmd scheduler publishes retained timing diagnostics",
+          "[goldsrc][usercmd][scheduler][diagnostics]")
+{
+    goldsrc::GoldSrcUserCmdSchedulerConfig config;
+    config.command_interval_nanoseconds = 20'000'000U;
+    config.maximum_commands_per_update = 8U;
+    goldsrc::GoldSrcUserCmdScheduler scheduler{config};
+    const auto input_state = sample_intent();
+    const auto camera_state = sample_camera();
+
+    CHECK_FALSE(scheduler.state().initialized);
+    const auto initialized = scheduler.update(
+        5'000'000'000LL, input_state, camera_state);
+    REQUIRE(initialized);
+    CHECK(initialized.requests.empty());
+    const auto ready = scheduler.state();
+    CHECK(ready.initialized);
+    CHECK(ready.last_update_time_nanoseconds == 5'000'000'000LL);
+    CHECK(ready.next_sample_time_nanoseconds == 5'020'000'000LL);
+    CHECK(ready.next_command_sequence == 1U);
+
+    const auto first = scheduler.update(
+        5'020'000'000LL, input_state, camera_state);
+    REQUIRE(first);
+    REQUIRE(first.requests.size() == 1U);
+    CHECK(scheduler.state().last_update_time_nanoseconds == 5'020'000'000LL);
+    CHECK(scheduler.state().next_sample_time_nanoseconds == 5'040'000'000LL);
+    CHECK(scheduler.state().next_command_sequence == 2U);
+
+    CHECK(goldsrc::to_string(
+              goldsrc::GoldSrcUserCmdSchedulerErrorCode::lag_limit_exceeded) ==
+          "lag_limit_exceeded");
+}
+
 TEST_CASE("GoldSrc usercmd scheduler carries duration remainder across catch-up commands",
           "[goldsrc][usercmd][scheduler][duration][catchup]")
 {
@@ -277,6 +311,22 @@ TEST_CASE("GoldSrc scheduler profile and time bounds fail without publication",
     require_error(
         stock.update(0, intent, camera_state),
         goldsrc::GoldSrcUserCmdSchedulerErrorCode::stock_evidence_pending);
+
+    auto live_config = goldsrc::GoldSrcUserCmdSchedulerConfig{};
+    live_config.profile = goldsrc::GoldSrcUserCmdSamplingProfile::
+        stock_protocol_48_live_usercmd_check_v1;
+    live_config.command_interval_nanoseconds = 20'000'000U;
+    goldsrc::GoldSrcUserCmdScheduler live{live_config};
+    const auto activated = live.update(9'000'000'000LL, intent, camera_state);
+    REQUIRE(activated);
+    CHECK(activated.requests.empty());
+    CHECK(activated.next_sample_time_nanoseconds == 9'020'000'000LL);
+    const auto first_live_command = live.update(
+        9'020'000'000LL, intent, camera_state);
+    REQUIRE(first_live_command);
+    REQUIRE(first_live_command.requests.size() == 1U);
+    CHECK(first_live_command.requests.front().command_sequence.value() == 1U);
+    CHECK(first_live_command.requests.front().command_msec == 20U);
 
     goldsrc::GoldSrcUserCmdScheduler backwards;
     REQUIRE(backwards.update(10'000'000, intent, camera_state));

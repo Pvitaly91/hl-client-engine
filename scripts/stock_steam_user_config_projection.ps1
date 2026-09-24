@@ -11,6 +11,9 @@ $script:StockSteamConfigMaximumTokenLength = 65536
 # exact changed semantic path set.  It is a path-set fingerprint, never a
 # value hash and never public output.
 $script:StockSteamAcceptedVolatilePathSetSha256 = ''
+$script:StockSteamKnownPolicyIds = @(
+    'legacy-strict-v1',
+    'steam-appinfo-change-number-v1')
 $script:StockSteamVolatileClasses = @(
     'playtime_counter', 'last_launch_timestamp', 'last_exit_timestamp',
     'volatile_launch_accounting', 'unrelated_steam_metadata')
@@ -37,6 +40,19 @@ function Get-StockSteamCanonicalPath {
         [void]$parts.Add(([string]$segment.Length) + ':' + $segment)
     }
     return $parts -join '|'
+}
+
+function Assert-StockSteamPolicyId {
+    param([string]$PolicyId)
+    if ($script:StockSteamKnownPolicyIds -cnotcontains $PolicyId) {
+        throw 'Unknown stock Steam external-state policy ID.'
+    }
+}
+
+function Get-StockSteamAppInfoChangeNumberPathSetSha256 {
+    $pathId = Get-StockSteamSha256Text (Get-StockSteamCanonicalPath @(
+            'UserLocalConfigStore', 'AppInfoChangeNumber'))
+    return Get-StockSteamSha256Text ($pathId + '#0')
 }
 
 function Get-StockSteamSemanticClass {
@@ -278,6 +294,9 @@ function ConvertFrom-StockValveKeyValuesBytes {
     }
     return [pscustomobject]@{
         status = 'valid'
+        analysis_profile_id = 'stock-steam-keyvalues-projection-v2'
+        bounded_parse_complete = $true
+        source_byte_count = $Bytes.Length
         entry_class = $(if ([bool]$state.IsGlobalUserConfig) {
                 'global_steam_user_config'
             } else { 'other_keyvalues' })
@@ -316,7 +335,11 @@ function Get-StockSteamUserConfigProjection {
 }
 
 function Compare-StockSteamUserConfigProjection {
-    param([object]$Before, [object]$After)
+    param(
+        [object]$Before,
+        [object]$After,
+        [string]$PolicyId = 'legacy-strict-v1')
+    Assert-StockSteamPolicyId $PolicyId
     if ($null -eq $Before -or $null -eq $After -or
         [string]$Before.status -cne 'valid' -or
         [string]$After.status -cne 'valid' -or
@@ -325,6 +348,8 @@ function Compare-StockSteamUserConfigProjection {
         [bool]$Before.duplicate_path_ambiguity -or
         [bool]$After.duplicate_path_ambiguity) {
         return [pscustomobject]@{
+            policy_id = $PolicyId
+            policy_decision = 'reject'
             status = 'incomplete'; eligible = $false
             candidate_eligible = $false; changed_leaf_count = 0
             volatile_classes = @(); unknown_changes = 0; fatal_changes = 1
@@ -358,6 +383,7 @@ function Compare-StockSteamUserConfigProjection {
     $unknown = 0
     $fatal = 0
     $nonMonotonic = 0
+    $narrowNumericShapeValid = $true
     foreach ($key in $unique) {
         if (-not $beforeMap.ContainsKey($key) -or
             -not $afterMap.ContainsKey($key)) {
@@ -411,6 +437,12 @@ function Compare-StockSteamUserConfigProjection {
                     ++$nonMonotonic
                     ++$fatal
                 } else { [void]$classSet.Add($semantic) }
+                if ($PolicyId -ceq 'steam-appinfo-change-number-v1' -and
+                    ($beforeValue -cnotmatch '^(?:0|[1-9][0-9]{0,19})$' -or
+                     $afterValue -cnotmatch '^(?:0|[1-9][0-9]{0,19})$' -or
+                     $afterNumber -le $beforeNumber)) {
+                    $narrowNumericShapeValid = $false
+                }
             }
         } else { ++$fatal }
     }
@@ -423,11 +455,32 @@ function Compare-StockSteamUserConfigProjection {
     $candidateEligible = $changedPaths.Count -gt 0 -and $fatal -eq 0 -and
         $unknown -eq 0 -and $projectionMatch
     $pathSetSha256 = Get-StockSteamSha256Text ($pathArray -join "`n")
-    $eligible = $candidateEligible -and
-        -not [string]::IsNullOrEmpty(
-            $script:StockSteamAcceptedVolatilePathSetSha256) -and
-        $pathSetSha256 -ceq $script:StockSteamAcceptedVolatilePathSetSha256
+    $completeBoundedSource = $true
+    foreach ($projection in @($Before, $After)) {
+        if ($null -eq $projection.PSObject.Properties['analysis_profile_id'] -or
+            $null -eq $projection.PSObject.Properties['bounded_parse_complete'] -or
+            $null -eq $projection.PSObject.Properties['source_byte_count'] -or
+            $projection.analysis_profile_id -cne
+                'stock-steam-keyvalues-projection-v2' -or
+            $projection.bounded_parse_complete -isnot [bool] -or
+            -not $projection.bounded_parse_complete -or
+            $projection.source_byte_count -lt 1 -or
+            $projection.source_byte_count -gt $script:StockSteamConfigMaximumBytes -or
+            $projection.node_count -lt 1 -or
+            $projection.node_count -gt $script:StockSteamConfigMaximumNodes) {
+            $completeBoundedSource = $false
+        }
+    }
+    $eligible = $PolicyId -ceq 'steam-appinfo-change-number-v1' -and
+        $candidateEligible -and $completeBoundedSource -and
+        $narrowNumericShapeValid -and $changedPaths.Count -eq 1 -and
+        $pathSetSha256 -ceq
+            (Get-StockSteamAppInfoChangeNumberPathSetSha256)
     return [pscustomobject]@{
+        policy_id = $PolicyId
+        policy_decision = $(if ($eligible) { 'explicit_advisory' } else { 'reject' })
+        narrow_numeric_shape_valid = $narrowNumericShapeValid
+        bounded_source_complete = $completeBoundedSource
         status = $(if ($projectionMatch) { 'match' } else { 'mismatch' })
         eligible = $eligible
         candidate_eligible = $candidateEligible

@@ -12,6 +12,8 @@
 #include <thread>
 #include <utility>
 
+#include <vector>
+
 #ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
 #endif
@@ -120,6 +122,17 @@ private:
     return *result.identity;
 }
 
+[[nodiscard]] windows::WindowsBinaryIdentity observe_project_client()
+{
+    const auto result = windows::observe_windows_binary_identity(
+        sibling(L"hlclient.exe"),
+        windows::kMaximumObservedExecutableBytes,
+        {windows::AuthenticodePolicy::not_required_for_project_owned_binary,
+         false});
+    REQUIRE(result);
+    return *result.identity;
+}
+
 [[nodiscard]] windows::WindowsBinaryIdentity observe_capture_relay()
 {
     const auto result = windows::observe_windows_binary_identity(
@@ -188,7 +201,8 @@ private:
     const bool suppress_ready = false,
     const std::uint32_t ready_delay_ms = 0U,
     const std::string_view profile_variant = {},
-    const std::uint32_t profile_chunk_delay_ms = 25U)
+    const std::uint32_t profile_chunk_delay_ms = 25U,
+    const std::uint32_t exit_code = 0U)
 {
     windows::OwnedProcessLaunchSpec spec;
     spec.executable = identity.canonical_path;
@@ -198,7 +212,8 @@ private:
         L"--port", std::to_wstring(port),
         L"--duration-ms", std::to_wstring(duration_ms),
         L"--emit-bytes", std::to_wstring(emit_bytes),
-        L"--ready-delay-ms", std::to_wstring(ready_delay_ms)};
+        L"--ready-delay-ms", std::to_wstring(ready_delay_ms),
+        L"--exit-code", std::to_wstring(exit_code)};
     if (suppress_ready) spec.arguments.push_back(L"--suppress-ready");
     if (!profile_variant.empty()) {
         spec.arguments.push_back(L"--hlds-profile-variant");
@@ -1007,6 +1022,161 @@ TEST_CASE("Fake HLDS profile variants stay server-only and bounded",
     }
 }
 
+TEST_CASE("Observed Steam HLDS profile keeps endpoint and map independent",
+          "[platform][windows][stock-runtime][orchestrator][banner]"
+          "[observed-hlds-profile]")
+{
+    constexpr std::string_view observed = "Protocol version 48\r\n"
+                                          "Exe version 1.1.2.2 (valve)\r\n"
+                                          "Exe build: 00:00:00 Jan 1 2026 (10210)\r\n"
+                                          "Server IP address fake-machine\r\n";
+    const auto parsed = windows::parse_observed_hlds_runtime_banner(observed);
+    REQUIRE(parsed);
+    CHECK(parsed.profile->id ==
+          windows::HldsRuntimeProfile::Id::steam_hlds_10210_no_mode_banner_v1);
+    CHECK_FALSE(parsed.profile->ready);
+    CHECK(parsed.profile->protocol == 48U);
+    CHECK(parsed.profile->build == 10'210U);
+    CHECK(parsed.profile->game == "valve");
+    CHECK_FALSE(parsed.diagnostic.runtime_mode.present);
+    CHECK(parsed.diagnostic.runtime_mode.status == windows::HldsRuntimeProfileFieldStatus::match);
+    CHECK(parsed.diagnostic.runtime_mode_category ==
+          windows::HldsRuntimeModeCategory::not_advertised);
+    CHECK(parsed.diagnostic.endpoint_address.status ==
+          windows::HldsRuntimeProfileFieldStatus::absent);
+    CHECK(parsed.diagnostic.map.status == windows::HldsRuntimeProfileFieldStatus::absent);
+
+    CHECK_FALSE(windows::parse_required_hlds_runtime_banner(observed, "boot_camp", 27'141U));
+    CHECK(
+        windows::parse_observed_hlds_runtime_banner(std::string{observed} + "Protocol version 48\n")
+            .code == windows::HldsBannerParseErrorCode::duplicate_field);
+    CHECK(windows::parse_observed_hlds_runtime_banner("Protocol version 47\n"
+                                                      "Exe version 1.1.2.2 (valve)\n"
+                                                      "Exe build: 00:00:00 Jan 1 2026 (10210)\n"
+                                                      "Server IP address fake-machine\n")
+              .code == windows::HldsBannerParseErrorCode::profile_mismatch);
+    CHECK(windows::parse_observed_hlds_runtime_banner("Protocol version 48\n"
+                                                      "Exe version 1.1.2.2/Stdio (valve)\n"
+                                                      "Exe build: 00:00:00 Jan 1 2026 (10210)\n"
+                                                      "Server IP address fake-machine\n")
+              .code == windows::HldsBannerParseErrorCode::profile_mismatch);
+}
+
+TEST_CASE("Bounded A2S info parser proves exact map and game",
+          "[platform][windows][stock-runtime][orchestrator][readiness]")
+{
+    const auto response = [](const std::uint8_t protocol, const std::string_view map,
+                             const std::string_view folder, const std::uint16_t app_id) {
+        std::vector<std::byte> bytes;
+        const auto push = [&bytes](const std::uint8_t value) {
+            bytes.push_back(static_cast<std::byte>(value));
+        };
+        const auto string = [&bytes](const std::string_view value) {
+            for (const char character : value) {
+                bytes.push_back(static_cast<std::byte>(character));
+            }
+            bytes.push_back(std::byte{});
+        };
+        for (std::size_t count = 0U; count < 4U; ++count)
+            push(0xFFU);
+        push(0x49U);
+        push(protocol);
+        string("hlclient-fake");
+        string(map);
+        string(folder);
+        string("Half-Life");
+        push(static_cast<std::uint8_t>(app_id & 0xFFU));
+        push(static_cast<std::uint8_t>(app_id >> 8U));
+        push(0U);
+        push(8U);
+        push(0U);
+        push('d');
+        push('w');
+        push(0U);
+        push(0U);
+        string("1.1.2.2");
+        return bytes;
+    };
+    const auto valid = response(48U, "boot_camp", "valve", 70U);
+    const auto parsed = windows::parse_hlds_local_info_response(valid, "boot_camp");
+    REQUIRE(parsed);
+    CHECK(parsed.map_matches);
+    CHECK(parsed.game_matches);
+    CHECK(parsed.map_proof_source == windows::HldsMapProofSource::goldsrc_server_info_query);
+    CHECK(windows::parse_hlds_local_info_response(response(47U, "boot_camp", "valve", 70U),
+                                                  "boot_camp")
+              .status == windows::HldsLocalReadinessStatus::protocol_mismatch);
+    CHECK(windows::parse_hlds_local_info_response(response(48U, "boot_camp", "valve", 71U),
+                                                  "boot_camp")
+              .status == windows::HldsLocalReadinessStatus::application_id_mismatch);
+    CHECK(windows::parse_hlds_local_info_response(response(48U, "crossfire", "valve", 70U),
+                                                  "boot_camp")
+              .status == windows::HldsLocalReadinessStatus::map_mismatch);
+    CHECK(windows::parse_hlds_local_info_response(response(48U, "boot_camp", "gearbox", 70U),
+                                                  "boot_camp")
+              .status == windows::HldsLocalReadinessStatus::game_mismatch);
+    auto truncated = valid;
+    truncated.pop_back();
+    CHECK(windows::parse_hlds_local_info_response(truncated, "boot_camp").status ==
+          windows::HldsLocalReadinessStatus::query_response_malformed);
+    auto trailing = valid;
+    trailing.push_back(std::byte{});
+    trailing.push_back(std::byte{});
+    CHECK(windows::parse_hlds_local_info_response(trailing, "boot_camp").status ==
+          windows::HldsLocalReadinessStatus::query_response_malformed);
+}
+
+TEST_CASE("Owned loopback readiness rejects wrong process port map and source",
+          "[platform][windows][stock-runtime][orchestrator][readiness]"
+          "[fake-integration]")
+{
+    const auto identity = observe_fake_server();
+    const auto run = [&](const std::string_view variant, const std::string_view requested_map,
+                         const bool continuity = true, const bool wrong_identity = false,
+                         const bool wrong_port = false) {
+        auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+        REQUIRE(created);
+        const auto port = reserve_then_release_loopback_port();
+        auto [server, launched] =
+            job.launch(fake_server_spec(identity, port, 5'000U, nullptr, 0U, false, 0U, variant));
+        REQUIRE(launched);
+        auto expected = identity;
+        if (wrong_identity) expected.sha256[0] ^= std::byte{1U};
+        const auto result = windows::observe_hlds_local_readiness(
+            server, expected, wrong_port ? reserve_then_release_loopback_port() : port,
+            reserve_then_release_loopback_port(), requested_map,
+            std::chrono::steady_clock::now() + std::chrono::seconds{3},
+            [continuity]() { return continuity; },
+            {windows::AuthenticodePolicy::not_required_for_project_owned_binary, false});
+        REQUIRE(job.terminate_and_wait(120U, std::chrono::seconds{5}));
+        return result;
+    };
+
+    const auto ready = run("observed-no-mode", "boot_camp");
+    INFO("readiness-status=" << windows::to_string(ready.status));
+    REQUIRE(ready);
+    CHECK(ready.endpoint_owner_matches);
+    CHECK(ready.endpoint_address_matches);
+    CHECK(ready.endpoint_port_matches);
+    CHECK(ready.response_source_matches);
+    CHECK(ready.map_matches);
+    CHECK(ready.game_matches);
+    CHECK(ready.endpoint_proof_source ==
+          windows::HldsEndpointProofSource::windows_udp_owner_table_and_loopback_query);
+    CHECK(run("observed-no-mode", "boot_camp", false).status ==
+          windows::HldsLocalReadinessStatus::continuity_failed);
+    CHECK(run("observed-no-mode", "boot_camp", true, true).status ==
+          windows::HldsLocalReadinessStatus::process_identity_mismatch);
+    CHECK(run("observed-no-mode", "boot_camp", true, false, true).status ==
+          windows::HldsLocalReadinessStatus::endpoint_not_owned);
+    CHECK(run("observed-no-mode-map-mismatch", "boot_camp").status ==
+          windows::HldsLocalReadinessStatus::map_mismatch);
+    CHECK(run("observed-no-mode-wrong-source", "boot_camp").status ==
+          windows::HldsLocalReadinessStatus::query_source_mismatch);
+    CHECK(run("observed-no-mode-malformed-response", "boot_camp").status ==
+          windows::HldsLocalReadinessStatus::query_response_malformed);
+}
+
 TEST_CASE("Private HLDS witness attributes exact stream and byte shape",
           "[platform][windows][stock-runtime][orchestrator]"
           "[server-profile-diagnostic][private-witness]")
@@ -1090,6 +1260,63 @@ TEST_CASE("Stock runtime startup state accepts only the exact process order",
         out_of_order, Event::relay_started));
     CHECK(out_of_order.failure ==
           windows::StockRuntimeStartupFailure::out_of_order);
+}
+
+TEST_CASE("Writer trace handoff blocks launch until the exact release event",
+          "[platform][windows][stock-runtime][writer-trace-handoff]")
+{
+    TestHandle prelaunch{::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    TestHandle release{::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    REQUIRE(prelaunch);
+    REQUIRE(release);
+    bool observed_prelaunch = false;
+    std::thread coordinator{[&]() {
+        observed_prelaunch =
+            ::WaitForSingleObject(prelaunch.get(), 1'000U) == WAIT_OBJECT_0;
+        if (observed_prelaunch) {
+            static_cast<void>(::SetEvent(release.get()));
+        }
+    }};
+    const auto result = windows::signal_writer_trace_prelaunch_and_wait(
+        prelaunch.get(), release.get(), std::chrono::seconds{1});
+    coordinator.join();
+    CHECK(result);
+    CHECK(observed_prelaunch);
+    CHECK(result.prelaunch_ready);
+    CHECK(result.launch_released);
+}
+
+TEST_CASE("Missing writer trace readiness keeps fake stock launch blocked",
+          "[platform][windows][stock-runtime][writer-trace-handoff]")
+{
+    TestHandle prelaunch{::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    TestHandle release{::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    REQUIRE(prelaunch);
+    REQUIRE(release);
+    const auto result = windows::signal_writer_trace_prelaunch_and_wait(
+        prelaunch.get(), release.get(), std::chrono::milliseconds{20});
+    CHECK_FALSE(result);
+    CHECK(result.code == windows::WriterTraceHandoffErrorCode::trace_ready_timeout);
+    CHECK(result.prelaunch_ready);
+    CHECK_FALSE(result.launch_released);
+    CHECK(windows::to_string(result.code) == "trace-ready-timeout");
+}
+
+TEST_CASE("Writer trace stock-stopped receipt is a distinct capability",
+          "[platform][windows][stock-runtime][writer-trace-handoff]")
+{
+    TestHandle stopped{::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    REQUIRE(stopped);
+    const auto result = windows::signal_writer_trace_stock_processes_stopped(
+        stopped.get());
+    CHECK(result);
+    CHECK(result.stock_processes_stopped);
+    CHECK(::WaitForSingleObject(stopped.get(), 0U) == WAIT_OBJECT_0);
+    const auto invalid = windows::signal_writer_trace_prelaunch_and_wait(
+        stopped.get(), stopped.get(), std::chrono::milliseconds{1});
+    CHECK_FALSE(invalid);
+    CHECK(invalid.code ==
+          windows::WriterTraceHandoffErrorCode::invalid_capability);
 }
 
 TEST_CASE("Stock runtime startup state types relay not-ready",
@@ -1529,6 +1756,168 @@ TEST_CASE("Process logs are drained concurrently and remain bounded",
     CHECK_FALSE(windows::bounded_process_log_snapshot_complete(captured));
 }
 
+TEST_CASE("Owned process waits retain early nonzero output and type timeout",
+          "[platform][windows][stock-runtime][orchestrator][wait-result]"
+          "[logs]")
+{
+    using WaitStatus = windows::OwnedProcess::WaitStatus;
+    const auto identity = observe_fake_server();
+
+    SECTION("early nonzero exit") {
+        auto log = windows::BoundedProcessLogCapture::create({});
+        REQUIRE(log);
+        auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+        REQUIRE(created);
+        const auto port = reserve_then_release_loopback_port();
+        auto [child, launched] = job.launch(fake_server_spec(
+            identity, port, 25U, &*log, 0U, false, 0U, {}, 25U, 37U));
+        REQUIRE(launched);
+        log->close_parent_write_handle();
+
+        const auto waited = child.wait_result(std::chrono::seconds{3});
+        REQUIRE(waited.status == WaitStatus::exited);
+        REQUIRE(waited.exit_code);
+        CHECK(*waited.exit_code == 37U);
+        CHECK_FALSE(waited.native_error);
+        const auto retained = log->finish();
+        CHECK(windows::bounded_process_log_snapshot_complete(retained));
+        CHECK(retained.bytes.find("[hlclient-fake-server] ready=true") !=
+              std::string::npos);
+        REQUIRE(job.terminate_and_wait(120U, std::chrono::seconds{3}));
+    }
+
+    SECTION("finalization timeout") {
+        auto log = windows::BoundedProcessLogCapture::create({});
+        REQUIRE(log);
+        auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+        REQUIRE(created);
+        const auto port = reserve_then_release_loopback_port();
+        auto [child, launched] = job.launch(
+            fake_server_spec(identity, port, 5'000U, &*log));
+        REQUIRE(launched);
+        log->close_parent_write_handle();
+        REQUIRE(wait_for_log_marker(
+            *log, child, "[hlclient-fake-server] ready=true",
+            std::chrono::seconds{2}));
+
+        const auto waited = child.wait_result(std::chrono::milliseconds{10});
+        CHECK(waited.status == WaitStatus::timeout);
+        CHECK_FALSE(waited.exit_code);
+        CHECK_FALSE(waited.native_error);
+        const auto before_cleanup = log->snapshot();
+        CHECK(before_cleanup.bytes.find(
+                  "[hlclient-fake-server] ready=true") != std::string::npos);
+        REQUIRE(job.terminate_and_wait(120U, std::chrono::seconds{3}));
+        const auto retained = log->finish();
+        CHECK(windows::bounded_process_log_snapshot_complete(retained));
+        CHECK(retained.bytes.find("[hlclient-fake-server] ready=true") !=
+              std::string::npos);
+    }
+
+    windows::OwnedProcess invalid;
+    const auto invalid_wait = invalid.wait_result(std::chrono::milliseconds{0});
+    CHECK(invalid_wait.status == WaitStatus::invalid_process);
+    CHECK_FALSE(invalid_wait.exit_code);
+    REQUIRE(invalid_wait.native_error);
+    CHECK(*invalid_wait.native_error == ERROR_INVALID_HANDLE);
+}
+
+TEST_CASE("Suspended launch keeps identity mismatch and query failure distinct",
+          "[platform][windows][stock-runtime][orchestrator][launch-identity]")
+{
+    const auto identity = observe_fake_server();
+    auto mismatched = identity;
+    mismatched.sha256[0] ^= std::byte{1U};
+    auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+    REQUIRE(created);
+    const auto port = reserve_then_release_loopback_port();
+    auto spec = fake_server_spec(mismatched, port, 1'000U);
+    spec.executable = identity.canonical_path;
+
+    auto [child, launched] = job.launch(spec);
+    CHECK_FALSE(child.valid());
+    CHECK_FALSE(launched);
+    CHECK(launched.code ==
+          windows::OwnedProcessErrorCode::process_identity_mismatch);
+    CHECK(launched.process_id != 0U);
+    REQUIRE(job.active_process_count());
+    CHECK(*job.active_process_count() == 0U);
+
+    const auto query_failed = windows::verify_windows_process_image_identity(
+        nullptr, identity,
+        windows::kMaximumObservedExecutableBytes,
+        {windows::AuthenticodePolicy::not_required_for_project_owned_binary,
+         false});
+    CHECK_FALSE(query_failed);
+    CHECK(query_failed.code ==
+          windows::WindowsBinaryIdentityErrorCode::process_image_query_failed);
+    CHECK(query_failed.native_error == ERROR_INVALID_HANDLE);
+    REQUIRE(job.terminate_and_wait(120U, std::chrono::seconds{3}));
+}
+
+TEST_CASE("Restricted child launch rejects incompatible no-window creation",
+          "[platform][windows][stock-runtime][orchestrator][launch-policy]")
+{
+    const auto identity = observe_fake_server();
+    auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+    REQUIRE(created);
+    auto spec = fake_server_spec(
+        identity, reserve_then_release_loopback_port(), 1'000U);
+    spec.prohibit_child_processes = true;
+    spec.create_no_window = true;
+
+    auto [child, launched] = job.launch(spec);
+    CHECK_FALSE(child.valid());
+    CHECK_FALSE(launched);
+    CHECK(launched.code ==
+          windows::OwnedProcessErrorCode::invalid_specification);
+    CHECK(launched.native_error == ERROR_INVALID_PARAMETER);
+    CHECK(launched.process_id == 0U);
+    REQUIRE(job.active_process_count());
+    CHECK(*job.active_process_count() == 0U);
+    REQUIRE(job.terminate_and_wait(120U, std::chrono::seconds{3}));
+}
+
+TEST_CASE("Restricted production launch seam starts project client help safely",
+          "[platform][windows][stock-runtime][orchestrator]"
+          "[launch-policy][project-client]")
+{
+    const auto identity = observe_project_client();
+    auto log = windows::BoundedProcessLogCapture::create({});
+    REQUIRE(log);
+    auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+    REQUIRE(created);
+
+    windows::OwnedProcessLaunchSpec spec;
+    spec.executable = identity.canonical_path;
+    spec.working_directory = identity.canonical_path.parent_path();
+    spec.expected_identity = identity;
+    spec.stdout_handle = log->inherited_write_handle();
+    spec.stderr_handle = log->inherited_write_handle();
+    spec.arguments = {L"--help"};
+    spec.prohibit_child_processes = true;
+    spec.create_no_window = false;
+
+    auto [child, launched] = job.launch(spec);
+    REQUIRE(launched);
+    CHECK(child.valid());
+    CHECK(launched.process_id != 0U);
+    log->close_parent_write_handle();
+    const auto waited = child.wait_result(std::chrono::seconds{5});
+    REQUIRE(waited.status == windows::OwnedProcess::WaitStatus::exited);
+    REQUIRE(waited.exit_code);
+    CHECK(*waited.exit_code == 0U);
+    const auto captured = log->finish();
+    REQUIRE(windows::bounded_process_log_snapshot_complete(captured));
+    CHECK(captured.bytes.find("Usage: hlclient") != std::string::npos);
+    CHECK(captured.bytes.find("steam_api_initialized=true") ==
+          std::string::npos);
+    CHECK(captured.bytes.find("connect_sent=true") == std::string::npos);
+    REQUIRE(job.active_process_count());
+    CHECK(*job.active_process_count() == 0U);
+    REQUIRE(job.terminate_and_wait(120U, std::chrono::seconds{3}));
+}
+
 TEST_CASE("Fake orchestration starts server before client and reaches capture",
           "[platform][windows][stock-runtime][orchestrator][fake-integration]"
           "[startup-order]")
@@ -1677,7 +2066,6 @@ TEST_CASE("Fake guard early exit is typed before relay startup",
     CHECK(job.active_process_count() == 0U);
     static_cast<void>(log->finish());
 }
-
 TEST_CASE("Client early exit cleanup leaves unrelated owned process alive",
           "[platform][windows][stock-runtime][orchestrator][fake-integration]"
           "[client-early-exit][unrelated-process]")

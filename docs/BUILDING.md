@@ -1,5 +1,77 @@
 # Building and debugging
 
+## Recover the current H2 source checkpoint (not historical main)
+
+The accumulated A-I, live sign-on/usercmd, OpenGL/input, jump/duck, normal/Shift,
+reference dry-walk prediction/reconciliation and RX fix are published on
+`codex/stock-runtime-campaign-5e48b7c1`. Do not substitute an old `main` checkout.
+In PowerShell 7, after installing the tools below:
+
+```powershell
+git clone --branch codex/stock-runtime-campaign-5e48b7c1 --recurse-submodules https://github.com/Pvitaly91/hl-client-engine.git
+Set-Location hl-client-engine
+git rev-parse HEAD # record the exact published SHA; checkout that SHA for future recovery
+pwsh -NoProfile -File .\scripts\build_source.ps1
+```
+
+`build_source.ps1` discovers CMake on PATH or through VS Installer's vswhere,
+uses the existing Win32 preset, restores recursive pinned submodules and
+FetchContent dependencies, builds ALL default client/tools/tests targets in
+Release, and runs the audited offline CTest registration plus B loopback,
+NullRenderer, native producer/consumer and PowerShell launcher/summary checks.
+It works when invoked by absolute path from another current directory. Use
+`-Configuration Debug` or `RelWithDebInfo` to retain the original configurations;
+the opt-in ASan workflow below remains separate. No local user preset or old
+build/cache is needed. CMake's downloaded sources live only in that build tree.
+
+The script disables the explicit WFP-test opt-in in its own process environment.
+WFP, unavailable directory-symlink and hidden-window input capabilities report
+SKIPPED with reasons; ordinary own-fixture tests are not suppressed. Local UDP
+peers and synthetic process fixtures are allowed. It never starts stock HLDS,
+Steam, a live capture, or an ETW campaign. A private capture is not a build/test
+prerequisite. The CI Debug/Release test steps use this same script.
+
+The 2026-09-24 recovery host uses CMake 3.29.5-msvc4, Visual Studio 2022
+MSVC v143 14.34.31933 (compiler 19.34.31948.0), Windows SDK 10.0.26100.0,
+PowerShell 7.6.6 and Git 2.49.0.windows.1. These are measured versions, not
+claims that every component must match byte-for-byte on another host.
+
+Functional recovery is not a promise of bit-identical EXE/PDB across toolchain
+versions, build paths or timestamps. Credentials, historical private captures,
+DPAPI snapshots and game binaries are deliberately NOT recoverable from Git.
+Dependency commits/digests and licenses are in [DEPENDENCIES.md](DEPENDENCIES.md);
+GLAD generated source is committed, not recovered from an old build directory.
+
+### Optional manual game prerequisites
+
+Offline build and source-only launcher validation need no game installation:
+
+```powershell
+pwsh -NoProfile -File .\Start-HLClient-H2-Manual.ps1 -CheckOnly -SourceOnly
+```
+
+This explicitly does NOT validate external game files or live readiness.
+For an actual manual session supply your own legal Half-Life/HLDS installation,
+Steam session/runtime and matching appmanifest. Never add those assets to Git.
+Prepare a separate research tree using the existing reviewed tool:
+
+```powershell
+.\scripts\prepare_stock_runtime_research_copy.ps1 -SourceHalfLifeRoot 'C:\Games\Steam\steamapps\common\Half-Life' -DestinationHalfLifeRoot 'C:\Research\Half-Life' -InspectSourceTopology
+.\scripts\prepare_stock_runtime_research_copy.ps1 -SourceHalfLifeRoot 'C:\Games\Steam\steamapps\common\Half-Life' -DestinationHalfLifeRoot 'C:\Research\Half-Life'
+.\Start-HLClient-H2-Manual.ps1 -CheckOnly -ResearchHalfLifeRoot 'C:\Research\Half-Life' -SteamAppsRoot 'C:\Games\Steam\steamapps'
+```
+
+Reparse/external targets, if found, require the existing explicit review and
+approval procedure; see [STOCK_CAPTURE_LOCAL_ASSET_REPLAY.md](STOCK_CAPTURE_LOCAL_ASSET_REPLAY.md)
+and the preparation script. Do not copy through them blindly. The managed
+runner still enforces binary profiles, isolation, ownership and restoration.
+Once prepared, run the same launcher WITHOUT CheckOnly in administrative
+PowerShell 7. Defaults remain reference/keyboard-mouse/90 seconds; `-Prediction
+off` is a separate optional invocation. The original machine's convenience
+defaults remain, but both external roots are configurable: no D:\DEV path is
+required on another PC. Supported prediction is narrow dry-walk; manual feel,
+jump/duck prediction and general stock gameplay are not certified by recovery.
+
 ## Supported reference environment
 
 The acceptance platform for this milestone is Visual Studio 2022, MSVC v143,
@@ -42,7 +114,7 @@ reliable tool discovery.
 ## Clone and initialize the SDK reference
 
 ```powershell
-git clone --recurse-submodules https://github.com/Pvitaly91/hl-client-engine.git
+git clone --branch codex/stock-runtime-campaign-5e48b7c1 --recurse-submodules https://github.com/Pvitaly91/hl-client-engine.git
 Set-Location hl-client-engine
 ```
 

@@ -190,7 +190,7 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_goldsrc_brush_models` | inert bounded entity metadata, qcsg/AngleMatrix initial transforms, brush instances, shared texture/lightmap render library, spawn descriptor, and scene composition | runtime entity behavior, commands/touch/use/think, snapshots, translucent rendering, GPU calls |
 | `hlclient_world_preview` | deterministic historical static/orbit/inert-spawn cameras plus externally supplied interactive cameras, per-frame visibility/draw-list composition, and neutral scene-source state | input polling, gameplay intent, usercmds, runtime entity updates, network mutation, GPU calls |
 | `hlclient_auth` | asynchronous provider/operation contract and move-only authentication session lifetime | file policy, Steam implementation, sockets, renderer, world state |
-| `hlclient_app_support` | explicit user-file auth adapter, bounded local-file loading, and metadata-manifest CLI exit policy | discovery, caching, Steam integration, fallback search, protocol parsing |
+| `hlclient_app_support` | explicit user-file auth adapter, optional dynamically loaded legacy Steam auth adapter, bounded local-file loading, and metadata-manifest CLI exit policy | implicit discovery, caching, provider fallback search, protocol parsing |
 | `hlclient_goldsrc_client` | challenge/connect coordination, same-socket bootstrap/sign-on/resource composition, selected manifest/asset/world-texture/render-package/spatial-scene continuations, and driver/auth/provider lifetime ownership through the selected terminal stop | auth or consistency-material generation, wire codec duplication, arbitrary reliable payload production, native path/handle policy, runtime application, OpenGL, SDL, render state |
 | `hlclient_client` | connection-independent client world and presentation state | raw socket ownership, GL resources |
 | `hlclient_gameplay_camera` | immutable Z-up local free-flight/entity-attached camera state and bounded renderer-independent controller updates | SDL, renderer types, collision/physics/prediction, stock view-angle claims, network |
@@ -501,8 +501,10 @@ provider-gated post-resource response boundary:
                                                               complex body unconsumed
 ```
 
-The application has only an explicit user-file authentication provider; it
-does not generate tickets or integrate with Steam. The local consistency
+The application has an explicit user-file authentication provider and an
+optional Steam legacy game-connection provider selected by
+`--auth-provider steam --steam-api-runtime <absolute-path>`. Default/offline
+modes do not load Steam, and failure never falls back to a file. The local consistency
 provider is likewise explicit and is fully prepared before network creation.
 Each later terminal stage composes the driver on the already-bound transport
 and validates unchanged
@@ -742,6 +744,64 @@ reverse-engineered/proprietary GoldSrc source dumps, or original Valve binaries
 such as `hl.exe`, `hw.dll`, or `sw.dll`. External implementations may be treated
 only as separately recorded behavioral/reference material where legally and
 technically permissible. Repository code must remain independently authored.
+
+M4.7.1.2A applies that reference-material rule to a narrow runtime-control
+profile. Public ReHLDS revision-pinned opcode/field facts are recorded before
+the project-owned implementation in
+[GOLDSRC_RUNTIME_CONTROL.md](GOLDSRC_RUNTIME_CONTROL.md). The decoder consumes
+the existing owning service payload and byte reader, publishes typed owning
+events/control state, and never crosses into OpenGL. Its reference-driven
+profile is a separate type and status domain from the strict accepted-stock
+catalog, so running literal fixtures cannot satisfy stock evidence gates.
+
+M4.7.1.2B/C extend the same boundary with separately named public-reference
+profiles for sign-on baselines, runtime delta values, and packet-entity
+snapshots. The packet path shares the owning service payload/cursor, runtime
+control dispatcher, schema registry, bit reader, and delta-value decoder. It
+stages a complete immutable full or reconstructed delta snapshot and an exact
+30-bit, generation-bound history update before one commit. Its eight-bit base
+tag is resolved against the current transport sequence; it is never a history
+slot, command acknowledgement, or permission to choose a nearest frame. See
+[GoldSrc entity baselines](GOLDSRC_ENTITY_BASELINES.md) and
+[packet-entity snapshots](GOLDSRC_ENTITY_SNAPSHOTS.md).
+
+M4.7.1.2D adds a separate `public_goldsrc48_clientdata_v1` profile for the
+ordinary game-client `svc_clientdata` body and its embedded `weapon_data_t`
+records. It reuses the same owning payload/cursor, validated schema registry,
+bit reader, delta-value decoder, staged `svc_time`, and service dispatcher.
+Client frames and their 64 wire-indexed weapon substates have an independent
+exact-reference, generation-bound bounded history; entity-only frames do not
+fabricate clientdata bases. A source frame may atomically publish both client
+and entity substates without conflating either reference with a ring index,
+transport ACK, usercmd ACK, inventory identity, or prediction authority. See
+[GoldSrc clientdata and weapondata](GOLDSRC_CLIENTDATA.md).
+
+M4.7.1.2E composes these exact A/B/C/D decoders in an in-memory runtime replay
+session over owning, already extracted service payloads. It stages protocol
+state and a narrow immutable `ClientWorldState` runtime observation before one
+commit, preserving distinct freshness/source identity for control time,
+clientdata and packet entities. The client attachment is renderer-neutral and
+contains no packet/schema/socket/resource ownership. See
+[GoldSrc runtime replay and client-state bridge](GOLDSRC_RUNTIME_REPLAY.md).
+
+M4.7.1.2F composes that E session directly into the existing `hlclient.exe`
+NullRenderer update loop through an `IClientSceneSource`. The source owns the
+one application `ClientWorldState`, preserves ordered backlog under bounded
+record/byte budgets, and terminates the ordinary loop on typed EOF, failure or
+incomplete stop. CLI selection enters this offline path before socket,
+authentication, filesystem or asset-provider construction. See
+[application-owned runtime replay](APPLICATION_RUNTIME_REPLAY.md).
+
+M4.7.1.2G extends that same source with an explicit diagnostic visual mode.
+After each successful entity-bearing E commit, the application maps complete
+neutral origin/angles into an immutable `EntityRenderFrame`, validates it, and
+publishes it beside a once-built project-generated Studio package in the same
+`ClientWorldState`. `build_render_scene()` and the existing Null/OpenGL dynamic
+entity paths remain unchanged consumers. Renderer targets still cannot see the
+replay session, codecs, schemas, packet bytes or diagnostic binding policy.
+Presentation offsets and a fixed camera belong to the application demo; they
+do not alter canonical wire state or static resource identity. See
+[application-owned runtime replay](APPLICATION_RUNTIME_REPLAY.md).
 
 M1's wire profile was established by black-box observation of stock signed
 Valve programs: the exact request transmission was captured from original
@@ -1055,3 +1115,22 @@ canary/run/campaign/verifier metadata retains only the sanitized
 external-target profile and count. The boundary provides no runtime semantics
 and no evidence. No real review, canary or campaign success is claimed by this
 architecture entry.
+
+### M4.7.1.2H/I functional capture and explicit local-asset scene
+
+H completed offline replay of the specific functional capture
+`ededd068a0444ff497d98204eacec8a4`; old acquisition failures are historical.
+Its campaign-evidence eligibility remains false. I retains owning resource
+context from the same sign-on parser and resolves committed ordinary entity
+model indices only in the captured sparse model namespace. Approved rooted
+readers/importers prepare the BSP/WAD/lightmap world and Studio/Sprite assets
+once from an explicit read-only local game root. The existing session, scene
+source, frame composers, `ClientWorldState` and renderer paths remain shared.
+The renderer owns neutral packages/frames, not packets, schemas or paths.
+
+The executable local-asset profile is separate from both G's project-generated
+diagnostic binding and the strict evidence-pending authority adapters. The
+verified scene slice has 16 supported Studio instances; eight inline-brush and
+five material variants remain unsupported. Details, exact provenance and
+commands: [captured local-asset replay](STOCK_CAPTURE_LOCAL_ASSET_REPLAY.md).
+This is neither a new active capture nor live/universal stock compatibility.

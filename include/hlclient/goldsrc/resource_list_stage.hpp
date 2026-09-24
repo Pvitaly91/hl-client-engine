@@ -62,6 +62,9 @@ struct ResourceListStageError {
     ResourceListStageErrorCode code{
         ResourceListStageErrorCode::invalid_configuration};
     std::optional<ResourceTransitionStageErrorCode> transition_code;
+    std::optional<ResourceTransitionControlErrorCode> transition_control_code;
+    std::optional<ResourceTransitionFailureMetadata>
+        transition_failure_metadata;
     std::optional<ResourceListErrorCode> resource_list_code;
     std::optional<PostResourceListStreamErrorCode> post_stream_code;
     std::optional<NetchanDriverErrorCode> driver_code;
@@ -277,7 +280,11 @@ private:
         std::optional<ResourceListErrorCode> resource_list_code = std::nullopt,
         std::optional<PostResourceListStreamErrorCode> post_stream_code =
             std::nullopt,
-        std::optional<NetchanDriverErrorCode> driver_code = std::nullopt) noexcept;
+        std::optional<NetchanDriverErrorCode> driver_code = std::nullopt,
+        std::optional<ResourceTransitionControlErrorCode>
+            transition_control_code = std::nullopt,
+        std::optional<ResourceTransitionFailureMetadata>
+            transition_failure_metadata = std::nullopt) noexcept;
     void emit_trace(
         ResourceListTraceClassification classification,
         std::size_t resource_count = 0U,

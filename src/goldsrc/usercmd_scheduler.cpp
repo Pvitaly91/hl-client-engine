@@ -22,11 +22,35 @@ namespace {
 
 } // namespace
 
+std::string_view to_string(
+    const GoldSrcUserCmdSchedulerErrorCode code) noexcept
+{
+    switch (code) {
+    case GoldSrcUserCmdSchedulerErrorCode::invalid_configuration:
+        return "invalid_configuration";
+    case GoldSrcUserCmdSchedulerErrorCode::stock_evidence_pending:
+        return "stock_evidence_pending";
+    case GoldSrcUserCmdSchedulerErrorCode::time_moved_backwards:
+        return "time_moved_backwards";
+    case GoldSrcUserCmdSchedulerErrorCode::time_overflow:
+        return "time_overflow";
+    case GoldSrcUserCmdSchedulerErrorCode::lag_limit_exceeded:
+        return "lag_limit_exceeded";
+    case GoldSrcUserCmdSchedulerErrorCode::sequence_exhausted:
+        return "sequence_exhausted";
+    case GoldSrcUserCmdSchedulerErrorCode::allocation_failed:
+        return "allocation_failed";
+    }
+    return "unknown";
+}
+
 bool valid_goldsrc_usercmd_scheduler_config(
     const GoldSrcUserCmdSchedulerConfig& config) noexcept
 {
-    return config.profile ==
-               GoldSrcUserCmdSamplingProfile::synthetic_fixed_step_v1 &&
+    return (config.profile ==
+                GoldSrcUserCmdSamplingProfile::synthetic_fixed_step_v1 ||
+            config.profile == GoldSrcUserCmdSamplingProfile::
+                stock_protocol_48_live_usercmd_check_v1) &&
            config.command_interval_nanoseconds > 0U &&
            config.command_interval_nanoseconds <= 255'000'000U &&
            config.maximum_commands_per_update > 0U &&
@@ -52,6 +76,14 @@ const GoldSrcUserCmdSchedulerConfig& GoldSrcUserCmdScheduler::config() const noe
     return config_;
 }
 
+GoldSrcUserCmdSchedulerState GoldSrcUserCmdScheduler::state() const noexcept
+{
+    return GoldSrcUserCmdSchedulerState{
+        initialized_, last_update_time_nanoseconds_,
+        next_sample_time_nanoseconds_, duration_remainder_nanoseconds_,
+        next_command_sequence_};
+}
+
 GoldSrcUserCmdSchedulerUpdateResult GoldSrcUserCmdScheduler::update(
     const std::int64_t monotonic_time_nanoseconds,
     const gameplay_input::GameplayInputIntent& intent,
@@ -60,12 +92,11 @@ GoldSrcUserCmdSchedulerUpdateResult GoldSrcUserCmdScheduler::update(
     if (!valid_configuration_) {
         return failure(
             config_.profile == GoldSrcUserCmdSamplingProfile::stock_evidence_pending ||
-                    config_.profile ==
-                        GoldSrcUserCmdSamplingProfile::
-                            stock_protocol_48_controlled_profile_v1
+                    config_.profile == GoldSrcUserCmdSamplingProfile::
+                        stock_protocol_48_controlled_profile_v1
                 ? GoldSrcUserCmdSchedulerErrorCode::stock_evidence_pending
                 : GoldSrcUserCmdSchedulerErrorCode::invalid_configuration,
-            "Only the bounded synthetic fixed-step scheduler is executable",
+            "Only bounded synthetic or explicit live-usercmd-check fixed-step scheduling is executable",
             next_sample_time_nanoseconds_,
             duration_remainder_nanoseconds_);
     }

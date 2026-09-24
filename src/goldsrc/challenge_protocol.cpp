@@ -12,8 +12,6 @@ namespace {
 inline constexpr std::string_view kGetChallengePayload = "getchallenge steam\n";
 inline constexpr std::string_view kChallengeResponsePrefix = "A00000000 ";
 inline constexpr std::uint32_t kObservedProfileParameter1 = 3U;
-inline constexpr std::uint64_t kObservedProfileParameter2 = 72'057'594'037'927'936ULL;
-inline constexpr std::uint32_t kObservedProfileParameter3 = 0U;
 
 [[nodiscard]] ChallengeResponseParseResult failure(
     const ChallengeProtocolErrorCode code,
@@ -212,11 +210,11 @@ ChallengeResponseParseResult parse_challenge_response(
             kConnectionlessPacketHeaderSize + offset,
             "Profile parameter 2 is invalid or out of range");
     }
-    if (profile_parameter_2.value != kObservedProfileParameter2) {
+    if (profile_parameter_2.value == 0U) {
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Profile parameter 2 does not match the captured Steam Half-Life value");
+            "Steam game-server identity must be nonzero");
     }
     offset = profile_parameter_2.next;
     if (offset >= payload.size() || payload[offset] != ' ') {
@@ -235,11 +233,11 @@ ChallengeResponseParseResult parse_challenge_response(
             kConnectionlessPacketHeaderSize + offset,
             "Profile parameter 3 is invalid or out of range");
     }
-    if (profile_parameter_3.value != kObservedProfileParameter3) {
+    if (profile_parameter_3.value > 1U) {
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Profile parameter 3 does not match the captured Steam Half-Life value");
+            "Steam game-server secure flag must be 0 or 1");
     }
     offset = profile_parameter_3.next;
 

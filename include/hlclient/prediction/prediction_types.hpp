@@ -23,6 +23,7 @@ inline constexpr std::size_t kHardMaximumPredictionReplayCommands = 256U;
 enum class PredictionCompatibilityProfile : std::uint8_t {
     synthetic_authoritative_reconciliation_v1,
     stock_protocol_48_authoritative_reconciliation_evidence_pending,
+    reference_carrier_dry_walk_v1,
 };
 
 enum class PredictionEvidenceProfile : std::uint8_t {
@@ -33,6 +34,7 @@ enum class PredictionEvidenceProfile : std::uint8_t {
 enum class PredictionAcknowledgementProfile : std::uint8_t {
     synthetic_uint32_non_wrapping_v1,
     stock_usercmd_acknowledgement_evidence_pending,
+    reference_sent_carrier_boundary_v1,
 };
 
 enum class AuthoritativePlayerDiscontinuity : std::uint8_t {

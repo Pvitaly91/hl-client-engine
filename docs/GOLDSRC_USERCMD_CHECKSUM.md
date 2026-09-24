@@ -2,15 +2,18 @@
 
 ## Evidence gate
 
-`GoldSrcMoveChecksum` implements only `synthetic_crc8_v1`. The reserved
+`GoldSrcMoveChecksum` implements `synthetic_crc8_v1` and the separate offline
+`public_goldsrc48_crc32_low8_v1`. The latter has 768/768 actual capture matches;
+its CRC32, sequence salt, 60-byte cap, padding and unmunged coverage contract
+are documented in [M4.7.2A](GOLDSRC_REFERENCE_CLIENT_MOVE.md). The reserved
 `stock_protocol_48_build_10210_evidence_pending` profile returns
-`stock_evidence_pending`. Public Valve CRC declarations are function-name and
-semantic references only; without controlled captures they do not establish a
-Protocol 48 move checksum algorithm, table, seed, coverage, padding policy, or
-sequence relationship.
+`stock_evidence_pending`. Valve CRC declarations alone are insufficient; the
+new reference profile additionally uses pinned protocol facts and checks them
+against an existing functional capture, without promoting that capture into
+strict campaign evidence.
 
-The stock checksum status is therefore pending: zero accepted stock usercmd
-runs and zero verified move packets.
+Strict stock usercmd acceptance remains pending; offline checksum agreement
+does not establish that our encoder has been accepted by a server.
 
 ## Exact synthetic algorithm
 

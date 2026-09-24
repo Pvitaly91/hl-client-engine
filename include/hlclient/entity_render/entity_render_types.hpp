@@ -2,6 +2,7 @@
 
 #include <hlclient/assets/asset_types.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -63,5 +64,11 @@ inline constexpr RuntimeEntityVisualLimits kRuntimeEntityVisualHardLimits{
 
 [[nodiscard]] bool finite_entity_render_bounds(
     const assets::WorldBounds& bounds) noexcept;
+
+// Column-major model matrix used by the established OpenGL Studio path.
+// Keeping this derivation beside the neutral transform makes CPU projection
+// expectations and renderer presentation use one coordinate convention.
+[[nodiscard]] std::array<float, 16U> entity_render_model_matrix(
+    const EntityRenderTransform& transform) noexcept;
 
 } // namespace hlclient::entity_render

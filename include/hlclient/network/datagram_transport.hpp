@@ -12,6 +12,7 @@ namespace hlclient::network {
 enum class DatagramSendStatus {
     sent,
     error,
+    would_block,
 };
 
 struct DatagramSendResult {

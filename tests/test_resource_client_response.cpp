@@ -327,6 +327,37 @@ TEST_CASE("Resource response safety limits validate exact caps and cap plus one"
     });
 }
 
+TEST_CASE("Typed empty client-resource advertisement has exact stock framing",
+          "[goldsrc][resource-response][codec][empty]")
+{
+    const auto built = goldsrc::Opcode5EmptyResourceResponseBuilder{}.build();
+    REQUIRE(built);
+    REQUIRE(built.encoding);
+
+    const auto bytes = built.encoding->semantic_bytes();
+    REQUIRE(bytes.size() ==
+            goldsrc::kOpcode5EmptyResourceResponseSemanticSize);
+    CHECK(bytes[0] == std::byte{goldsrc::kOpcode5ResourceResponseOpcode});
+    CHECK(bytes[1] == std::byte{0U});
+    CHECK(bytes[2] == std::byte{0U});
+
+    const auto& response = built.encoding->response();
+    CHECK(response.entry_count() == 0U);
+    CHECK(response.wire_name().empty());
+    CHECK(response.byte_count() == 0U);
+    CHECK(response.opaque_byte_count() == 0U);
+    CHECK(response.bytes_consumed() == bytes.size());
+    CHECK(response.compatibility_profile() ==
+          goldsrc::ResourceClientResponseCompatibilityProfile::
+              stock_protocol_48_build_10210_opcode5_empty_list);
+    CHECK(response.evidence_profile() ==
+          goldsrc::ResourceClientResponseEvidenceProfile::
+              source_backed_stock_empty_custom_resource_list);
+    CHECK(response.source_profile() ==
+          goldsrc::Opcode5ResourceResponseSourceProfile::
+              canonical_empty_list_builder_output);
+}
+
 static_assert(std::is_copy_constructible_v<goldsrc::Opcode5ResourceResponse>);
 static_assert(!std::is_copy_assignable_v<goldsrc::Opcode5ResourceResponse>);
 

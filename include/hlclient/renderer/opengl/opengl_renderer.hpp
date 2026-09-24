@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hlclient::renderer::opengl {
 
@@ -90,6 +91,35 @@ struct OpenGlEntityRendererStatistics {
     bool active_entity_resources{false};
 };
 
+enum class OpenGlFramebufferObservationStatus : std::uint8_t {
+    valid,
+    default_back_buffer_unavailable,
+};
+
+[[nodiscard]] std::string_view to_string(
+    OpenGlFramebufferObservationStatus status) noexcept;
+
+struct OpenGlFramebufferObservation {
+    OpenGlFramebufferObservationStatus status{
+        OpenGlFramebufferObservationStatus::default_back_buffer_unavailable};
+    std::uint32_t read_framebuffer{0U};
+    std::uint32_t read_buffer{0U};
+    std::uint64_t sampled_pixel_count{0U};
+    std::uint64_t non_clear_pixel_count{0U};
+    std::uint64_t color_signature{0U};
+    int minimum_x{0};
+    int minimum_y{0};
+    int maximum_x{0};
+    int maximum_y{0};
+    bool has_non_clear_bounds{false};
+    // Opt-in bounded readback, bottom row first. No paths or filesystem I/O.
+    std::vector<std::uint8_t> rgba8;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return status == OpenGlFramebufferObservationStatus::valid;
+    }
+};
+
 class OpenGlRenderer final : public IRenderer {
 public:
     // An OpenGL 3.3 Core context must be current on the calling thread.
@@ -106,6 +136,12 @@ public:
     [[nodiscard]] const OpenGlWorldRendererStatistics& statistics() const noexcept;
     [[nodiscard]] const OpenGlEntityRendererStatistics&
     entity_statistics() const noexcept;
+    // Reads the renderer-owned default back framebuffer after render(). The
+    // observer selects GL_BACK explicitly and restores the caller's read-FBO,
+    // read-buffer, pixel-pack-buffer and pack-layout state before returning.
+    [[nodiscard]] OpenGlFramebufferObservation observe_framebuffer(
+        RenderExtent extent,
+        ClearColor expected_clear_color, bool retain_pixels = false) const;
 
 private:
     class Implementation;

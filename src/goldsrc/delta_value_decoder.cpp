@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <utility>
 
 namespace hlclient::goldsrc {
@@ -29,9 +30,21 @@ namespace {
     case DeltaValueCompatibilityProfile::
         stock_protocol_48_build_10210_evidence_pending:
     case DeltaValueCompatibilityProfile::synthetic_neutral_v1:
+    case DeltaValueCompatibilityProfile::public_goldsrc48_entity_delta_v1:
+    case DeltaValueCompatibilityProfile::public_goldsrc48_delta_v1:
+    case DeltaValueCompatibilityProfile::public_goldsrc48_usercmd_delta_v1:
         return true;
     }
     return false;
+}
+
+[[nodiscard]] bool is_public_goldsrc_profile(
+    const DeltaValueCompatibilityProfile profile) noexcept
+{
+    return profile ==
+               DeltaValueCompatibilityProfile::public_goldsrc48_entity_delta_v1 ||
+           profile == DeltaValueCompatibilityProfile::public_goldsrc48_delta_v1 ||
+           profile == DeltaValueCompatibilityProfile::public_goldsrc48_usercmd_delta_v1;
 }
 
 [[nodiscard]] DeltaValueDecodeResult decode_failure(
@@ -166,6 +179,27 @@ namespace {
     return true;
 }
 
+[[nodiscard]] bool magnitude_within_limit(
+    const DeltaFieldDefinition& field,
+    const DeltaScalarValue& value,
+    const double maximum,
+    const DeltaValueCompatibilityProfile profile) noexcept
+{
+    // Public GoldSrc uses unsigned, full-width DT_INTEGER fields for bitsets
+    // such as clientdata_t::weapons.  Their 32-bit wire width is the exact
+    // bound; treating the bit pattern as a scalar magnitude rejects valid
+    // high-bit masks.  Other integer widths and every scaled numeric type
+    // retain the configured magnitude guard.
+    if (is_public_goldsrc_profile(profile) &&
+        field.type_flags().base_type() == DeltaFieldBaseType::integer_value &&
+        !field.type_flags().signed_value() &&
+        field.significant_bits() == 32U &&
+        std::holds_alternative<std::uint32_t>(value)) {
+        return true;
+    }
+    return magnitude_within_limit(value, maximum);
+}
+
 [[nodiscard]] bool value_type_matches(
     const DeltaFieldDefinition& field,
     const DeltaScalarValue& value) noexcept
@@ -184,7 +218,7 @@ namespace {
         return std::holds_alternative<std::string>(value);
     case DeltaFieldBaseType::time_window_8:
     case DeltaFieldBaseType::time_window_big:
-        return false;
+        return std::holds_alternative<double>(value);
     }
     return false;
 }
@@ -217,11 +251,25 @@ namespace {
     const DeltaFieldDefinition& field,
     const DeltaScalarValue& value,
     const GoldSrcDeltaValueLimits& limits,
-    const std::size_t field_index)
+    const std::size_t field_index,
+    const DeltaValueCompatibilityProfile profile)
 {
     const auto base_type = field.type_flags().base_type();
     if (base_type == DeltaFieldBaseType::time_window_8 ||
         base_type == DeltaFieldBaseType::time_window_big) {
+        if (is_public_goldsrc_profile(profile)) {
+            if (!std::holds_alternative<double>(value) ||
+                !magnitude_within_limit(
+                    value, limits.maximum_numeric_magnitude)) {
+                return DeltaValueError{
+                    DeltaValueErrorCode::value_type_mismatch,
+                    0U,
+                    field_index,
+                    "Public GoldSrc time-window object value must be a finite bounded double",
+                };
+            }
+            return std::nullopt;
+        }
         return DeltaValueError{
             DeltaValueErrorCode::evidence_pending,
             0U,
@@ -267,7 +315,8 @@ namespace {
             "Explicit floating value must be finite",
         };
     }
-    if (!magnitude_within_limit(value, limits.maximum_numeric_magnitude)) {
+    if (!magnitude_within_limit(
+            field, value, limits.maximum_numeric_magnitude, profile)) {
         return DeltaValueError{
             DeltaValueErrorCode::numeric_magnitude_exceeded,
             0U,
@@ -289,6 +338,13 @@ namespace {
     const auto modulus = std::int64_t{1} << width;
     return static_cast<std::int32_t>(
         static_cast<std::int64_t>(raw) - modulus);
+}
+
+[[nodiscard]] std::int32_t decode_goldsrc_signed_magnitude(
+    const std::uint32_t raw) noexcept
+{
+    const auto magnitude = static_cast<std::int32_t>(raw >> 1U);
+    return (raw & 1U) != 0U ? -magnitude : magnitude;
 }
 
 [[nodiscard]] bool same_field_definition(
@@ -346,7 +402,8 @@ namespace {
             return false;
         }
         if (!magnitude_within_limit(
-                base_field.value(), limits.maximum_numeric_magnitude)) {
+                field, base_field.value(), limits.maximum_numeric_magnitude,
+                profile)) {
             return false;
         }
     }
@@ -470,6 +527,20 @@ bool DeltaObjectState::has_same_schema_as(
     return true;
 }
 
+bool DeltaObjectState::has_equal_values_as(
+    const DeltaObjectState& other) const noexcept
+{
+    if (!has_same_schema_as(other) || fields_.size() != other.fields_.size()) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < fields_.size(); ++index) {
+        if (fields_[index].value() != other.fields_[index].value()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 DeltaObjectBuilder::DeltaObjectBuilder(
     GoldSrcDeltaValueLimits limits,
     const DeltaValueCompatibilityProfile profile) noexcept
@@ -525,7 +596,8 @@ DeltaObjectBuildResult DeltaObjectBuilder::build(
     for (std::size_t index = 0U; index < schema.field_count(); ++index) {
         const auto& definition = schema.fields()[index];
         if (const auto value_error =
-                validate_explicit_value(definition, values[index], limits_, index)) {
+                validate_explicit_value(
+                    definition, values[index], limits_, index, profile_)) {
             return {std::nullopt, value_error};
         }
         if (!checked_add(
@@ -551,6 +623,43 @@ DeltaObjectBuildResult DeltaObjectBuilder::build(
         },
         std::nullopt,
     };
+}
+
+DeltaObjectBuildResult DeltaObjectBuilder::build_default(
+    const DeltaSchema& schema) const
+{
+    try {
+        std::vector<DeltaScalarValue> values;
+        values.reserve(schema.field_count());
+        for (const auto& field : schema.fields()) {
+            switch (field.type_flags().base_type()) {
+            case DeltaFieldBaseType::byte_value:
+            case DeltaFieldBaseType::short_value:
+            case DeltaFieldBaseType::integer_value:
+                if (field.type_flags().signed_value()) {
+                    values.emplace_back(std::int32_t{0});
+                } else {
+                    values.emplace_back(std::uint32_t{0U});
+                }
+                break;
+            case DeltaFieldBaseType::float_value:
+            case DeltaFieldBaseType::angle:
+            case DeltaFieldBaseType::time_window_8:
+            case DeltaFieldBaseType::time_window_big:
+                values.emplace_back(0.0);
+                break;
+            case DeltaFieldBaseType::string:
+                values.emplace_back(std::string{});
+                break;
+            }
+        }
+        return build(schema, values);
+    } catch (const std::bad_alloc&) {
+        return build_failure(
+            DeltaValueErrorCode::total_value_bytes_exceeded,
+            std::nullopt,
+            "Unable to allocate schema-defined default delta object");
+    }
 }
 
 GoldSrcDeltaValueDecoder::GoldSrcDeltaValueDecoder(
@@ -659,16 +768,21 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
         context.bit_length == static_cast<std::size_t>(-1)
             ? remaining_bits
             : context.bit_length;
+    const bool public_profile = is_public_goldsrc_profile(profile_);
     if (selected_bits > remaining_bits ||
         selected_bits > limits_.maximum_delta_bits ||
-        (initial_bit_offset & 7U) != 0U ||
-        ((initial_bit_offset + selected_bits) & 7U) != 0U) {
+        (!public_profile && ((initial_bit_offset & 7U) != 0U ||
+                             ((initial_bit_offset + selected_bits) & 7U) != 0U)) ||
+        (public_profile && context.server_time_seconds.has_value() &&
+         !std::isfinite(*context.server_time_seconds))) {
         return decode_failure(
             DeltaValueErrorCode::invalid_input_geometry,
             initial_bit_offset,
             initial_bit_offset,
             std::nullopt,
-            "Synthetic runtime delta input must be bounded and byte-aligned");
+            public_profile
+                ? "GoldSrc runtime delta input is outside its bounded geometry or time context"
+                : "Synthetic runtime delta input must be bounded and byte-aligned");
     }
     if (const auto schema_error = validate_schema(schema, limits_)) {
         return decode_failure(
@@ -697,7 +811,7 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
             std::nullopt,
             "Runtime delta bit-reader geometry is invalid");
     }
-    const auto mask_count_read = reader.read_bits(8U);
+    const auto mask_count_read = reader.read_bits(public_profile ? 3U : 8U);
     if (!mask_count_read) {
         return decode_failure(
             DeltaValueErrorCode::truncated_mask,
@@ -790,8 +904,8 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
                 "Runtime delta field significant-bit width is invalid");
         }
         const auto base_type = field.type_flags().base_type();
-        if (base_type == DeltaFieldBaseType::time_window_8 ||
-            base_type == DeltaFieldBaseType::time_window_big) {
+        if (!public_profile && (base_type == DeltaFieldBaseType::time_window_8 ||
+                                base_type == DeltaFieldBaseType::time_window_big)) {
             return decode_failure(
                 DeltaValueErrorCode::evidence_pending,
                 initial_bit_offset,
@@ -801,38 +915,67 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
         }
 
         if (base_type == DeltaFieldBaseType::string) {
-            const auto length_read = reader.read_bits(16U);
-            if (!length_read) {
-                return decode_failure(
-                    DeltaValueErrorCode::truncated_value,
-                    initial_bit_offset,
-                    reader.bit_offset(),
-                    index,
-                    "Synthetic runtime string length is truncated");
-            }
-            const auto length = static_cast<std::size_t>(length_read.value);
-            if (length > limits_.maximum_string_bytes) {
-                return decode_failure(
-                    DeltaValueErrorCode::string_limit_exceeded,
-                    initial_bit_offset,
-                    reader.bit_offset(),
-                    index,
-                    "Synthetic runtime string exceeds the configured byte bound");
-            }
             std::string value;
-            value.reserve(length);
-            for (std::size_t byte_index = 0U; byte_index < length; ++byte_index) {
-                const auto byte_read = reader.read_bits(8U);
-                if (!byte_read) {
+            if (public_profile) {
+                bool terminated = false;
+                for (std::size_t byte_index = 0U;
+                     byte_index <= limits_.maximum_string_bytes;
+                     ++byte_index) {
+                    const auto byte_read = reader.read_bits(8U);
+                    if (!byte_read) {
+                        return decode_failure(
+                            DeltaValueErrorCode::truncated_value,
+                            initial_bit_offset,
+                            reader.bit_offset(),
+                            index,
+                            "GoldSrc runtime string is unterminated or truncated");
+                    }
+                    if (byte_read.value == 0U) {
+                        terminated = true;
+                        break;
+                    }
+                    value.push_back(static_cast<char>(byte_read.value));
+                }
+                if (!terminated) {
+                    return decode_failure(
+                        DeltaValueErrorCode::string_limit_exceeded,
+                        initial_bit_offset,
+                        reader.bit_offset(),
+                        index,
+                        "GoldSrc runtime string exceeds the configured byte bound");
+                }
+            } else {
+                const auto length_read = reader.read_bits(16U);
+                if (!length_read) {
                     return decode_failure(
                         DeltaValueErrorCode::truncated_value,
                         initial_bit_offset,
                         reader.bit_offset(),
                         index,
-                        "Synthetic runtime string bytes are truncated");
+                        "Synthetic runtime string length is truncated");
                 }
-                value.push_back(static_cast<char>(
-                    static_cast<std::uint8_t>(byte_read.value)));
+                const auto length = static_cast<std::size_t>(length_read.value);
+                if (length > limits_.maximum_string_bytes) {
+                    return decode_failure(
+                        DeltaValueErrorCode::string_limit_exceeded,
+                        initial_bit_offset,
+                        reader.bit_offset(),
+                        index,
+                        "Synthetic runtime string exceeds the configured byte bound");
+                }
+                value.reserve(length);
+                for (std::size_t byte_index = 0U; byte_index < length; ++byte_index) {
+                    const auto byte_read = reader.read_bits(8U);
+                    if (!byte_read) {
+                        return decode_failure(
+                            DeltaValueErrorCode::truncated_value,
+                            initial_bit_offset,
+                            reader.bit_offset(),
+                            index,
+                            "Synthetic runtime string bytes are truncated");
+                    }
+                    value.push_back(static_cast<char>(byte_read.value));
+                }
             }
             staged[index] = std::move(value);
             continue;
@@ -847,7 +990,10 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
                 index,
                 "Synthetic runtime scalar bits are truncated");
         }
-        const auto signed_quantized = field.type_flags().signed_value()
+        const auto signed_quantized = field.type_flags().signed_value() &&
+                is_public_goldsrc_profile(profile_)
+            ? decode_goldsrc_signed_magnitude(raw_read.value)
+            : field.type_flags().signed_value()
                                           ? sign_extend(
                                                 raw_read.value,
                                                 field.significant_bits())
@@ -904,6 +1050,46 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
             staged[index] = value;
             break;
         }
+        case DeltaFieldBaseType::time_window_8:
+        case DeltaFieldBaseType::time_window_big: {
+            if (!public_profile || !context.server_time_seconds.has_value() ||
+                !std::isfinite(*context.server_time_seconds)) {
+                return decode_failure(
+                    DeltaValueErrorCode::missing_required_base,
+                    initial_bit_offset,
+                    reader.bit_offset(),
+                    index,
+                    "GoldSrc time-window field requires finite server-time context");
+            }
+            long double scale = 100.0L;
+            if (base_type == DeltaFieldBaseType::time_window_big) {
+                scale = static_cast<long double>(field.premultiply_wire_value()) /
+                        static_cast<long double>(kDeltaMultiplierScale);
+            }
+            if (!(scale > 0.0L) || !std::isfinite(scale)) {
+                return decode_failure(
+                    DeltaValueErrorCode::invalid_multiplier,
+                    initial_bit_offset,
+                    reader.bit_offset(),
+                    index,
+                    "GoldSrc time-window multiplier is invalid");
+            }
+            const auto result =
+                (static_cast<long double>(*context.server_time_seconds) * scale -
+                 static_cast<long double>(raw_read.value)) /
+                scale;
+            const auto value = static_cast<double>(result);
+            if (!std::isfinite(value)) {
+                return decode_failure(
+                    DeltaValueErrorCode::non_finite_result,
+                    initial_bit_offset,
+                    reader.bit_offset(),
+                    index,
+                    "GoldSrc time-window result is non-finite");
+            }
+            staged[index] = value;
+            break;
+        }
         case DeltaFieldBaseType::angle: {
             const auto denominator =
                 std::ldexp(1.0L, field.significant_bits());
@@ -922,8 +1108,6 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
             break;
         }
         case DeltaFieldBaseType::string:
-        case DeltaFieldBaseType::time_window_8:
-        case DeltaFieldBaseType::time_window_big:
             return decode_failure(
                 DeltaValueErrorCode::invalid_schema,
                 initial_bit_offset,
@@ -933,7 +1117,8 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
         }
 
         if (!magnitude_within_limit(
-                *staged[index], limits_.maximum_numeric_magnitude)) {
+                field, *staged[index], limits_.maximum_numeric_magnitude,
+                profile_)) {
             return decode_failure(
                 DeltaValueErrorCode::numeric_magnitude_exceeded,
                 initial_bit_offset,
@@ -943,8 +1128,10 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
         }
     }
 
-    const auto padding_error = reader.align_to_byte_zero_padding();
-    if (padding_error != BitReaderError::none) {
+    const auto padding_error = context.require_exact_end
+                                   ? reader.align_to_byte_zero_padding()
+                                   : BitReaderError::none;
+    if (context.require_exact_end && padding_error != BitReaderError::none) {
         return decode_failure(
             padding_error == BitReaderError::nonzero_padding
                 ? DeltaValueErrorCode::nonzero_padding
@@ -954,7 +1141,7 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
             std::nullopt,
             "Runtime delta has truncated or non-zero byte padding");
     }
-    if (reader.remaining_bits() != 0U) {
+    if (context.require_exact_end && reader.remaining_bits() != 0U) {
         return decode_failure(
             DeltaValueErrorCode::unexpected_trailing_bits,
             initial_bit_offset,

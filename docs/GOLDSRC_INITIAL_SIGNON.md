@@ -129,6 +129,17 @@ stdio API and publishes nothing on failure.
 Envelope framing is separate from the service opcode stream: byte `0x42` in
 `BZ2\0` is not a service-message opcode.
 
+The strict rule above remains the default for the captured profile and all
+offline replay. A live normal-fragment transfer has a second source-backed
+case: the stock-compatible server may retain and fragment the original service
+message when bzip2 does not fit its bounded output buffer. The explicit
+`live-runtime-state` composition therefore selects a bounded
+`accept_bzip2_or_uncompressed` policy. Raw publication records
+`wire_uncompressed=true`; an exact but malformed `BZ2\0` prefix still fails
+closed and never falls back to raw. This live-only policy reuses the same
+owning service payload and downstream codecs and does not weaken the historical
+`delta-schemas` or capture/replay profiles.
+
 ## Confirmed service stream and boundary
 
 The decompressed stream is byte-aligned and has no observed separate

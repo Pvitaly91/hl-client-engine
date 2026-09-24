@@ -1,13 +1,20 @@
 #pragma once
+#include <hlclient/goldsrc/resource_list.hpp>
 
+#include <hlclient/goldsrc/delta_description.hpp>
+#include <hlclient/goldsrc/move_vars.hpp>
 #include <hlclient/goldsrc/resource_client_response.hpp>
+#include <hlclient/goldsrc/server_info.hpp>
 #include <hlclient/goldsrc/stock_runtime_transport_replay.hpp>
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hlclient::goldsrc {
 
@@ -51,6 +58,13 @@ public:
     [[nodiscard]] bool observed_initial_new() const noexcept;
     [[nodiscard]] bool observed_sendres() const noexcept;
     [[nodiscard]] bool observed_opcode5_resource_response() const noexcept;
+    [[nodiscard]] const std::optional<ServerInfoState>& server_info()
+        const noexcept;
+    [[nodiscard]] const std::shared_ptr<const DeltaSchemaRegistryState>&
+    delta_registry() const noexcept;
+    [[nodiscard]] std::span<const PostMoveVarsUserMessageDefinition>
+    user_message_definitions() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const ResourceListState>& resources() const noexcept { return resources_; }
     [[nodiscard]] constexpr bool generated_ack() const noexcept { return false; }
     [[nodiscard]] constexpr bool generated_client_request() const noexcept { return false; }
 
@@ -62,13 +76,23 @@ private:
         StockPostResourceResponseCursor cursor,
         std::size_t observed_client_request_count,
         std::size_t decoded_server_signon_payload_count,
-        bool known_signon_validated) noexcept;
+        bool known_signon_validated,
+        std::optional<ServerInfoState> server_info = std::nullopt,
+        std::shared_ptr<const DeltaSchemaRegistryState> delta_registry = {},
+        std::vector<PostMoveVarsUserMessageDefinition>
+            user_message_definitions = {},
+        std::shared_ptr<const ResourceListState> resources = {})
+        noexcept;
 
     PostResourceResponseBoundary boundary_;
     StockPostResourceResponseCursor cursor_;
     std::size_t observed_client_request_count_{0U};
     std::size_t decoded_server_signon_payload_count_{0U};
     bool known_signon_validated_{false};
+    std::optional<ServerInfoState> server_info_;
+    std::shared_ptr<const DeltaSchemaRegistryState> delta_registry_;
+    std::vector<PostMoveVarsUserMessageDefinition> user_message_definitions_;
+    std::shared_ptr<const ResourceListState> resources_;
 };
 
 enum class StockCapturedSignonReplayErrorCode {
@@ -142,7 +166,12 @@ private:
         std::size_t first_post_response_server_payload_ordinal,
         std::size_t observed_client_request_count,
         std::size_t decoded_server_signon_payload_count,
-        bool known_signon_validated) const;
+        bool known_signon_validated,
+        std::optional<ServerInfoState> server_info = std::nullopt,
+        std::shared_ptr<const DeltaSchemaRegistryState> delta_registry = {},
+        std::vector<PostMoveVarsUserMessageDefinition>
+            user_message_definitions = {},
+        std::shared_ptr<const ResourceListState> resources = {}) const;
 
     StockCapturedSignonReplayLimits limits_;
 };

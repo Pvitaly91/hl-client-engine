@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/goldsrc/delta_value_decoder.hpp>
+#include <hlclient/goldsrc/netchan_sequence.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -13,8 +14,8 @@
 
 namespace hlclient::goldsrc {
 
-// Project safety limits for the caller-supplied neutral profile. None of
-// these constants claims a stock GoldSrc wire maximum.
+// Project safety limits shared by synthetic and public-reference state paths.
+// None of these constants claims a stock GoldSrc wire maximum.
 inline constexpr std::size_t kDefaultMaximumEntityBaselines = 4'096U;
 inline constexpr std::size_t kMaximumEntityBaselines = 16'384U;
 inline constexpr std::size_t kDefaultMaximumEntitiesPerSnapshot = 4'096U;
@@ -59,16 +60,20 @@ struct EntitySnapshotLimits {
 enum class EntitySnapshotCompatibilityProfile {
     stock_protocol_48_build_10210_evidence_pending,
     synthetic_neutral_v1,
+    public_goldsrc48_entity_delta_v1,
+    public_goldsrc48_packet_entities_v1,
 };
 
 enum class EntitySnapshotEvidenceProfile {
     stock_runtime_grammar_evidence_pending,
     caller_supplied_typed_records,
+    public_protocol_reference,
 };
 
 enum class EntitySnapshotReferencePolicy {
     stock_width_and_wrap_policy_evidence_pending,
     synthetic_uint32_non_wrapping,
+    goldsrc_transport_sequence_30bit,
 };
 
 enum class EntityBaselineKeyKind {
@@ -89,6 +94,7 @@ struct EntitySourceGeometry {
     std::size_t payload_byte_count{0U};
     std::size_t start_bit_offset{0U};
     std::size_t bits_consumed{0U};
+    std::uint64_t source_generation{0U};
 };
 
 [[nodiscard]] bool valid_entity_source_geometry(
@@ -138,6 +144,8 @@ public:
 
     [[nodiscard]] static EntitySnapshotReference synthetic(
         std::uint32_t value) noexcept;
+    [[nodiscard]] static std::optional<EntitySnapshotReference>
+    goldsrc_transport_sequence(std::uint32_t value) noexcept;
 
     [[nodiscard]] std::uint32_t value() const noexcept;
     [[nodiscard]] EntitySnapshotReferencePolicy policy() const noexcept;
@@ -171,15 +179,20 @@ public:
 
     [[nodiscard]] static EntityServerTime synthetic_raw(
         std::int64_t value) noexcept;
+    [[nodiscard]] static std::optional<EntityServerTime>
+    public_goldsrc_seconds(double value) noexcept;
 
     [[nodiscard]] std::int64_t raw_value() const noexcept;
+    [[nodiscard]] std::optional<double> goldsrc_seconds() const noexcept;
     [[nodiscard]] EntitySnapshotEvidenceProfile evidence_profile()
         const noexcept;
 
 private:
     explicit EntityServerTime(std::int64_t value) noexcept;
+    explicit EntityServerTime(double value) noexcept;
 
     std::int64_t raw_value_{0};
+    std::optional<double> goldsrc_seconds_;
 };
 
 enum class GoldSrcEntityProjectionStatus {
@@ -392,6 +405,41 @@ private:
     std::optional<DeltaObjectState> object_;
 };
 
+enum class EntityStateBaseReferenceKind {
+    entity_baseline,
+    instanced_baseline,
+    intra_message_entity,
+    previous_snapshot_entity,
+};
+
+class EntityStateBaseReference final {
+public:
+    [[nodiscard]] static EntityStateBaseReference entity_baseline(
+        std::uint32_t entity_number) noexcept;
+    [[nodiscard]] static EntityStateBaseReference instanced_baseline(
+        std::uint32_t slot) noexcept;
+    [[nodiscard]] static EntityStateBaseReference intra_message_entity(
+        std::uint32_t entity_number) noexcept;
+    [[nodiscard]] static EntityStateBaseReference previous_snapshot_entity(
+        std::uint32_t entity_number) noexcept;
+
+    [[nodiscard]] EntityStateBaseReferenceKind kind() const noexcept;
+    [[nodiscard]] std::uint32_t value() const noexcept;
+
+    [[nodiscard]] friend bool operator==(
+        const EntityStateBaseReference&,
+        const EntityStateBaseReference&) noexcept = default;
+
+private:
+    EntityStateBaseReference(
+        EntityStateBaseReferenceKind kind,
+        std::uint32_t value) noexcept;
+
+    EntityStateBaseReferenceKind kind_{
+        EntityStateBaseReferenceKind::entity_baseline};
+    std::uint32_t value_{0U};
+};
+
 class EntitySnapshotEntityState final {
 public:
     EntitySnapshotEntityState(const EntitySnapshotEntityState&) = default;
@@ -405,6 +453,8 @@ public:
     [[nodiscard]] std::uint32_t entity_number() const noexcept;
     [[nodiscard]] const EntityBaselineKey& baseline_key() const noexcept;
     [[nodiscard]] EntitySchemaCategory schema_category() const noexcept;
+    [[nodiscard]] const EntityStateBaseReference& state_base_reference()
+        const noexcept;
     [[nodiscard]] const DeltaObjectState& object() const noexcept;
     [[nodiscard]] const std::optional<GoldSrcEntityStateProjection>&
     semantic_projection() const noexcept;
@@ -414,6 +464,7 @@ public:
 private:
     friend class EntityFullSnapshotBuilder;
     friend class EntityDeltaSnapshotBuilder;
+    friend class GoldSrcPacketEntityDecoder;
 
     EntitySnapshotEntityState(
         std::uint32_t entity_number,
@@ -422,11 +473,19 @@ private:
         std::shared_ptr<const DeltaObjectState> object,
         std::optional<GoldSrcEntityStateProjection> semantic_projection)
         noexcept;
+    EntitySnapshotEntityState(
+        std::uint32_t entity_number,
+        EntityBaselineKey baseline_key,
+        EntitySchemaCategory schema_category,
+        EntityStateBaseReference state_base_reference,
+        std::shared_ptr<const DeltaObjectState> object) noexcept;
 
     std::uint32_t entity_number_{0U};
     EntityBaselineKey baseline_key_;
     EntitySchemaCategory schema_category_{
         EntitySchemaCategory::ordinary_entity};
+    EntityStateBaseReference state_base_reference_{
+        EntityStateBaseReference::entity_baseline(0U)};
     std::shared_ptr<const DeltaObjectState> object_;
     std::optional<GoldSrcEntityStateProjection> semantic_projection_;
 };
@@ -475,6 +534,7 @@ public:
 private:
     friend class EntityFullSnapshotBuilder;
     friend class EntityDeltaSnapshotBuilder;
+    friend class GoldSrcPacketEntityDecoder;
 
     EntitySnapshotState(
         EntitySnapshotReference reference,
@@ -581,6 +641,8 @@ public:
     [[nodiscard]] std::size_t accounted_value_bytes() const noexcept;
     [[nodiscard]] EntitySnapshotCompatibilityProfile compatibility_profile()
         const noexcept;
+    [[nodiscard]] std::optional<std::uint64_t> source_generation()
+        const noexcept;
 
 private:
     friend class EntitySnapshotHistoryBuilder;
@@ -590,7 +652,8 @@ private:
         std::vector<EntitySnapshotReference> required_base_references,
         std::optional<EntitySnapshotReference> evicted_through,
         std::size_t accounted_value_bytes,
-        EntitySnapshotCompatibilityProfile compatibility_profile) noexcept;
+        EntitySnapshotCompatibilityProfile compatibility_profile,
+        std::optional<std::uint64_t> source_generation) noexcept;
 
     std::vector<EntitySnapshotState> snapshots_;
     std::vector<EntitySnapshotReference> required_base_references_;
@@ -598,6 +661,7 @@ private:
     std::size_t accounted_value_bytes_{0U};
     EntitySnapshotCompatibilityProfile compatibility_profile_{
         EntitySnapshotCompatibilityProfile::synthetic_neutral_v1};
+    std::optional<std::uint64_t> source_generation_;
 };
 
 enum class EntitySnapshotHistoryErrorCode {
@@ -651,6 +715,9 @@ public:
         EntitySnapshotCompatibilityProfile profile =
             EntitySnapshotCompatibilityProfile::
                 stock_protocol_48_build_10210_evidence_pending) noexcept;
+    EntitySnapshotHistoryBuilder(
+        const EntitySnapshotHistoryState& state,
+        EntitySnapshotLimits limits = {});
 
     [[nodiscard]] bool valid_configuration() const noexcept;
     [[nodiscard]] const EntitySnapshotLimits& limits() const noexcept;
@@ -677,6 +744,7 @@ private:
     std::vector<EntitySnapshotReference> required_base_references_;
     std::optional<EntitySnapshotReference> evicted_through_;
     std::size_t accounted_value_bytes_{0U};
+    std::optional<std::uint64_t> source_generation_;
 };
 
 class EntityFullSnapshotBuilder final {
@@ -746,6 +814,10 @@ private:
         return "stock_protocol_48_build_10210_evidence_pending";
     case EntitySnapshotCompatibilityProfile::synthetic_neutral_v1:
         return "synthetic_neutral_v1";
+    case EntitySnapshotCompatibilityProfile::public_goldsrc48_entity_delta_v1:
+        return "public_goldsrc48_entity_delta_v1";
+    case EntitySnapshotCompatibilityProfile::public_goldsrc48_packet_entities_v1:
+        return "public_goldsrc48_packet_entities_v1";
     }
     return "unknown";
 }

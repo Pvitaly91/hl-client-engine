@@ -29,12 +29,19 @@ bool PredictionSessionIdentity::valid() const noexcept
             stock_usercmd_semantics_evidence_pending) {
         return false;
     }
-    return prediction_profile == PredictionCompatibilityProfile::
-               synthetic_authoritative_reconciliation_v1 &&
+    const bool synthetic = prediction_profile == PredictionCompatibilityProfile::
+            synthetic_authoritative_reconciliation_v1 &&
         acknowledgement_profile == PredictionAcknowledgementProfile::
             synthetic_uint32_non_wrapping_v1 &&
         command_profile == movement::GoldSrcMovementCommandProfile::
             synthetic_usercmd_semantics_v1;
+    const bool reference = prediction_profile == PredictionCompatibilityProfile::
+            reference_carrier_dry_walk_v1 &&
+        acknowledgement_profile == PredictionAcknowledgementProfile::
+            reference_sent_carrier_boundary_v1 &&
+        command_profile == movement::GoldSrcMovementCommandProfile::
+            reference_wire_dry_walk_v1;
+    return synthetic || reference;
 }
 
 bool valid_local_prediction_history_limits(
@@ -77,6 +84,8 @@ std::string_view to_string(const PredictionCompatibilityProfile profile) noexcep
     case PredictionCompatibilityProfile::
             stock_protocol_48_authoritative_reconciliation_evidence_pending:
         return "stock_protocol_48_authoritative_reconciliation_evidence_pending";
+    case PredictionCompatibilityProfile::reference_carrier_dry_walk_v1:
+        return "reference_carrier_dry_walk_v1";
     }
     return "unknown";
 }
@@ -101,6 +110,8 @@ std::string_view to_string(const PredictionAcknowledgementProfile profile) noexc
     case PredictionAcknowledgementProfile::
             stock_usercmd_acknowledgement_evidence_pending:
         return "stock_usercmd_acknowledgement_evidence_pending";
+    case PredictionAcknowledgementProfile::reference_sent_carrier_boundary_v1:
+        return "reference_sent_carrier_boundary_v1";
     }
     return "unknown";
 }
