@@ -3086,6 +3086,16 @@ if(BUILD_TESTING)
         hlclient_stock_runtime_evidence_pending
         PROPERTIES TIMEOUT 30)
 
+    # These zero-side-effect gates snapshot process names (and restoration
+    # directories) across the whole host. Concurrent own-fixture executables
+    # legitimately change those sets; isolate the observers without weakening
+    # their assertions or disabling parallel execution for other tests.
+    set_tests_properties(
+        hlclient_stock_runtime_active_disabled
+        hlclient_research_copy_smoke_policy
+        hlclient_stock_runtime_evidence_pending
+        PROPERTIES RUN_SERIAL TRUE)
+
     add_test(
         NAME hlclient_stock_runtime_evidence_policy
         COMMAND
