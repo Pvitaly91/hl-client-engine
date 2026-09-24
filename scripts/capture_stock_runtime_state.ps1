@@ -5149,10 +5149,12 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalResearchProjectionSelfTest') {
             'platform/config/InGameDialogConfig.vdf',
             'platform/config/ServerBrowser.vdf')
         foreach ($relative in $projectionFiles) {
+            $content = if ($relative -ceq 'steam_appid.txt') { "70`r`n" }
+                else { 'same:' + $relative }
             Write-FunctionalProjectionFixtureFile `
-                $sourceRoot $relative ('same:' + $relative)
+                $sourceRoot $relative $content
             Write-FunctionalProjectionFixtureFile `
-                $researchRoot $relative ('same:' + $relative)
+                $researchRoot $relative $content
         }
 
         # This represents a file installed after the v3 research copy was
@@ -5164,6 +5166,22 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalResearchProjectionSelfTest') {
         if ($accepted.Status -cne 'prepared_projection_content_verified') {
             throw 'Later source-only file did not preserve the prepared projection.'
         }
+
+        # Exercise the real App ID contract; generic fixture text is not a
+        # valid marker, even when its bytes match the source installation.
+        Write-FunctionalProjectionFixtureFile $researchRoot 'steam_appid.txt' '480'
+        $wrongAppIdRejected = $false
+        try {
+            [void](Assert-FunctionalResearchProjection `
+                $researchRoot @(Get-BoundedItems $researchRoot))
+        } catch {
+            if ($_.Exception.Message -ceq
+                    'Functional research projection has an invalid local App ID marker.') {
+                $wrongAppIdRejected = $true
+            } else { throw }
+        }
+        if (-not $wrongAppIdRejected) { throw 'Wrong local App ID was not rejected.' }
+        Write-FunctionalProjectionFixtureFile $researchRoot 'steam_appid.txt' "70`r`n"
 
         Write-FunctionalProjectionFixtureFile $researchRoot `
             'valve/unapproved-research-only.cfg' 'research-only-file'
@@ -5233,6 +5251,7 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalResearchProjectionSelfTest') {
         }
 
         Write-Output '[stock-runtime-projection-test] later-source-addition=accepted'
+        Write-Output '[stock-runtime-projection-test] wrong-local-app-id=rejected'
         Write-Output '[stock-runtime-projection-test] research-only-addition=rejected'
         Write-Output '[stock-runtime-projection-test] changed-critical-binary=rejected'
         Write-Output '[stock-runtime-projection-test] missing-required-map=rejected'

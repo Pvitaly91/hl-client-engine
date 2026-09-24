@@ -269,7 +269,10 @@ if (-not (Test-Path -LiteralPath $gitIgnorePath -PathType Leaf) -or
     throw 'Repository-wide manual-artifacts ignore rule is absent.'
 }
 $git = Get-Command git.exe -ErrorAction Stop
-$trackedRaw = @(& $git.Source -C $repositoryRoot ls-files -- `
+# Trust only the repository containing this already-executing script for this
+# read-only index query (e.g. an administrator-created linked worktree). Do not
+# mutate global Git config or grant a wildcard safe.directory exception.
+$trackedRaw = @(& $git.Source -c "safe.directory=$repositoryRoot" -C $repositoryRoot ls-files -- `
     'manual-artifacts/stock-runtime' 2>$null)
 if ($LASTEXITCODE -ne 0) { throw 'Git raw-artifact index check failed.' }
 if ($trackedRaw.Count -ne 0) {
