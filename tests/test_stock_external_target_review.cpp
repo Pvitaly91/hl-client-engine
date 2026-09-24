@@ -49,8 +49,12 @@ struct MountPointBuffer final {
     REQUIRE(size < module.size());
     const auto nonce =
         std::chrono::steady_clock::now().time_since_epoch().count();
+    // Keep room for the review nonce and secure-output capability lock leaf
+    // under Win32 MAX_PATH, independent of ordinary clone-name differences.
+    // Stay beside the test executable: Temp/user-state roots are intentionally
+    // ineligible inputs to the production review policy exercised below.
     return fs::path{std::wstring_view{module.data(), size}}.parent_path() /
-           (L"hlclient-external-target-review-test-" +
+           (L"hlexrev-" +
             std::to_wstring(::GetCurrentProcessId()) + L"-" +
             std::to_wstring(nonce));
 }

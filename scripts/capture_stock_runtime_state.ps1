@@ -5447,6 +5447,12 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalPublicationRoundtripSelfTest') {
     $stockBefore = @(Get-Process -Name $stockNames -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Id | Sort-Object)
     try {
+        # The first lifecycle fixture runs before New-FunctionalProducerFixture.
+        # A clean clone has no ignored output parents yet; prepare our bounded
+        # fixture parent just as the later producer fixtures do.
+        if (-not (Test-Path -LiteralPath $requiredFunctionalRuntimeCaptureRoot -PathType Container)) {
+            [IO.Directory]::CreateDirectory($requiredFunctionalRuntimeCaptureRoot) | Out-Null
+        }
         $lifecycleRunId = [Guid]::NewGuid().ToString('N')
         $lifecycleRunRoot = Join-Path $requiredFunctionalRuntimeCaptureRoot `
             $lifecycleRunId
@@ -5490,7 +5496,8 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalPublicationRoundtripSelfTest') {
                 '[functional-lifecycle-test] peer-shutdown-after-relay-finalization=true',
                 '[functional-lifecycle-test] result=success')) {
             if ($lifecycle.Lines -cnotcontains $requiredLine) {
-                throw "Functional lifecycle output is missing: $requiredLine"
+                throw ("Functional lifecycle output is missing: $requiredLine; exit=" +
+                    $lifecycle.ExitCode + '; output=' + ($lifecycle.Lines -join '|'))
             }
         }
         if ($lifecycle.ExitCode -ne 0 -or
