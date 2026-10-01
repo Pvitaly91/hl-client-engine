@@ -50,6 +50,8 @@ struct OpenGlWorldRendererStatistics {
     std::uint64_t rendered_frame_count{0U};
     std::uint64_t draw_call_count{0U};
     std::uint64_t brush_draw_call_count{0U};
+    std::uint64_t runtime_brush_submitted_count{0U};
+    std::uint64_t runtime_brush_culled_count{0U};
     std::uint64_t rendered_command_count{0U};
     std::uint64_t triangle_count{0U};
     std::uint64_t base_texture_bind_count{0U};

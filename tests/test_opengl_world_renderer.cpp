@@ -1,4 +1,5 @@
 #include "world_render_test_fixture.hpp"
+#include "missing_texture_test_fixture.hpp"
 #include "synthetic_goldsrc_bsp_fixture.hpp"
 #include "synthetic_goldsrc_wad3_fixture.hpp"
 
@@ -1278,6 +1279,75 @@ TEST_CASE("OpenGL renderer uploads, caches and draws a synthetic static world",
     // Its transactional RAII teardown must leave no GL error behind.
     context->release_renderer();
     CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("Production OpenGL draws a typed missing-texture image without hiding later world passes",
+    "[renderer][opengl][world-textures][external-map-compat]")
+{
+    auto context = try_create_context();
+    if (!context) SKIP("OpenGL 3.3 Core context unavailable on this host");
+    const auto version = current_actual_open_gl_version();
+    const auto profile = current_actual_open_gl_profile_mask();
+    REQUIRE(version);
+    REQUIRE(profile);
+    if (!supports_required_open_gl_version(*version) || !supports_required_open_gl_profile(*profile))
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    auto world = make_vertical_world();
+    world.materials[0U].texture_storage = assets::WorldTextureStorage::external_reference;
+    world.materials[0U].texture_name = "ABSENT";
+    auto built = world_render::WorldRenderPackageBuilder{}.build(
+        {std::move(world), goldsrc_fixture::make_missing_texture_set()},
+        fixture::make_lightmap_set(fixture::FixtureOptions{false, true, 0U, 0U}));
+    REQUIRE(built);
+    auto package = std::make_shared<const world_render::WorldRenderPackage>(std::move(*built.package));
+    auto scene = make_scene(package);
+    auto& gl_renderer = context->renderer();
+    constexpr renderer::RenderExtent extent{96, 96};
+    gl_renderer.render(scene, extent);
+    const auto left = read_pixel(24, 36);
+    const auto right = read_pixel(72, 36);
+    CHECK_FALSE(approximately_clear(left, scene.clear_color));
+    CHECK_FALSE(approximately_clear(right, scene.clear_color));
+    CHECK(left != right);
+    CHECK(left[1U] == 0U);
+    CHECK(right[1U] == 0U);
+    CHECK(static_cast<unsigned>(left[0U]) + right[0U] > 200U);
+    CHECK(gl_renderer.statistics().uploaded_base_texture_count == 1U);
+    CHECK(gl_renderer.statistics().uploaded_base_mip_level_count == 4U);
+    CHECK(glGetError() == GL_NO_ERROR);
+    auto normal = make_scene(make_frame_package(false, false, 1U, 0U, 0xC0U));
+    gl_renderer.render(normal, extent);
+    CHECK_FALSE(approximately_clear(read_pixel(24, 36), normal.clear_color));
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("E4.1 transient light changes nearby wall pixels without changing a distant patch",
+          "[weapon-visuals][opengl][actual-context]")
+{
+    auto context = try_create_context();
+    if (!context) SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    constexpr renderer::RenderExtent extent{96,96};
+    auto scene = make_scene(make_frame_package(false,false,1U,0U,0x50U));
+    context->renderer().render(scene,extent);
+    const auto baseline_near=read_pixel(48,48);
+    const auto baseline_far=read_pixel(78,48);
+    REQUIRE_FALSE(approximately_clear(baseline_near,scene.clear_color));
+    REQUIRE_FALSE(approximately_clear(baseline_far,scene.clear_color));
+    scene.transient_world_light=renderer::RenderPointLight{{0.0F,-0.05F,0.0F},
+        0.45F,1.0F,{1.0F,0.62F,0.28F}};
+    context->renderer().render(scene,extent);
+    const auto lit_near=read_pixel(48,48);
+    const auto lit_far=read_pixel(78,48);
+    CHECK(lit_near[0]>baseline_near[0]);
+    CHECK(lit_near[1]>baseline_near[1]);
+    CHECK(lit_far==baseline_far);
+    CHECK(glGetError()==GL_NO_ERROR);
+    scene.transient_world_light.reset();
+    context->renderer().render(scene,extent);
+    CHECK(read_pixel(48,48)==baseline_near);
+    context->release_renderer();
 }
 
 TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",

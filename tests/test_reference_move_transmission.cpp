@@ -5,8 +5,13 @@
 #include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <hlclient/app/live_visual_control.hpp>
+#include <hlclient/games/halflife/movement_policy.hpp>
+#include <hlclient/games/halflife/client_module.hpp>
+#include <hlclient/game_api/game_client_host.hpp>
+#include <SDL3/SDL_keycode.h>
 #include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
 #include <hlclient/goldsrc/live_runtime_stage.hpp>
 #include <hlclient/goldsrc/reference_prediction_anchor.hpp>
@@ -201,6 +206,208 @@ TEST_CASE("Reference prediction carrier ledger binds only actual move sends to f
     CHECK(anchor.last_new_command->value() == 4U); // backup IDs do not advance
 }
 
+TEST_CASE("D2 physical E through G1 policy immutable history and Netchan preserves tap hold release and backups",
+          "[use][game-module][input][reference-transmission]") {
+    namespace api = hlclient::game_api;
+    namespace input = hlclient::input;
+    namespace gi = hlclient::gameplay_input;
+    api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+    host.reset({17U, 1U, 1U});
+    const auto& policy = host.movement_policy();
+    REQUIRE(api::valid_game_movement_policy(policy));
+    CHECK(policy.bindings->actions_for_key(input::PhysicalKey::e) == gi::gameplay_input_action_mask(gi::GameplayInputAction::use));
+    Transport transport;
+    g::NetchanDriver driver{transport, transport.remote};
+    activate(driver, transport);
+    g::GoldSrcUserCmdTransmissionStage stage{driver, binding(), ready, config()};
+    input::InputStateTracker tracker;
+    hlclient::platform::detail::SdlPlatformEventTranslator translator;
+    g::LiveVisualButtonLatch latch;
+    auto key = [](SDL_Scancode code, bool down, bool repeat = false) {
+        SDL_Event native{};
+        native.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        native.key.scancode = code;
+        native.key.key = SDLK_Z; // layout must not change physical E
+        native.key.repeat = repeat;
+        return native;
+    };
+    tracker.begin_frame();
+    tracker.apply_event(input::InputEvent::focus_gained());
+    tracker.apply_event(input::InputEvent::capture_acquired());
+    static_cast<void>(tracker.publish_snapshot());
+    tracker.end_frame();
+    auto frame = [&](std::initializer_list<SDL_Event> events) {
+        tracker.begin_frame();
+        for (const auto& native : events) {
+            auto translated = translator.translate(native);
+            REQUIRE(translated);
+            const auto* event = std::get_if<input::InputEvent>(&*translated);
+            REQUIRE(event);
+            tracker.apply_event(*event);
+        }
+        auto intent = gi::GameplayInputIntentBuilder{}.build(tracker.publish_snapshot(), *policy.bindings, policy.mouse_look, 0.02);
+        REQUIRE(intent);
+        latch.observe(intent.intent->pressed_buttons() & policy.live_buttons, intent.intent->focused());
+        tracker.end_frame();
+        return std::move(*intent.intent);
+    };
+    auto sample = [&](const gi::GameplayInputIntent& intent, unsigned id, std::uint16_t buttons, int forward = 0) {
+        g::GoldSrcUserCmdBuildContext context;
+        context.command_sequence = f::sequence(id);
+        context.command_msec = 20U;
+        context.command_sample_duration_nanoseconds = 20'000'000U;
+        context.movement_speeds = policy.movement_speeds;
+        context.reference_movement.speed_key_multiplier = policy.speed_key_multiplier;
+        context.reference_button_policy = policy.button_policy;
+        context.one_shot_buttons = latch.pending();
+        const auto camera = hlclient::gameplay_camera::GameplayCameraState::create({});
+        REQUIRE(camera);
+        auto wire = g::GoldSrcUserCmdInputAdapter{}.build_reference_wire(intent, *camera.state, context);
+        REQUIRE(wire);
+        CHECK(wire.command->buttons == buttons);
+        CHECK(wire.command->forward == forward);
+        REQUIRE(stage.queue_reference_command(f::sequence(id), *wire.command, 17U));
+        if (wire.one_shot_plan) {
+            REQUIRE(wire.one_shot_plan->commit_after_history_insert(f::sequence(id)));
+            latch.consume_after_history_insert(wire.one_shot_plan->consumes_buttons());
+        }
+        CHECK(*stage.history().find(f::sequence(id))->reference_command == *wire.command);
+        return *wire.command;
+    };
+    auto tap = frame({key(SDL_SCANCODE_E, true), key(SDL_SCANCODE_E, false)});
+    CHECK(tap.held_buttons() == 0U);
+    CHECK(latch.pending() == gi::gameplay_button_mask(gi::GameplayButton::use));
+    const auto first = sample(frame({}), 1U, 32U);
+    CHECK(latch.pending() == 0U);
+    transport.block = true;
+    REQUIRE(stage.update_reference(g::NetchanDriverTimePoint{} + 2ms));
+    REQUIRE(stage.update_reference(g::NetchanDriverTimePoint{} + 3ms));
+    CHECK(transport.sent.empty());
+    CHECK(*stage.history().find(f::sequence(1U))->reference_command == first);
+    transport.block = false;
+    REQUIRE(stage.update_reference(g::NetchanDriverTimePoint{} + 4ms));
+    REQUIRE(transport.sent.size() == 1U);
+    auto packet = g::decode_client_to_server_netchan_packet(transport.sent.back());
+    REQUIRE(packet);
+    auto plaintext = packet.packet->payload;
+    REQUIRE(g::transform_reference_move_body(std::span<std::byte>{plaintext}.subspan(3U), std::to_integer<unsigned char>(plaintext[1U]), packet.packet->header.sequence.sequence.value(), true));
+    // Independent LSB packing: 24-bit counts; 3-bit mask length 1,
+    // mask 0x12 (msec/buttons), msec 20, uint16 buttons 32, zero padding.
+    const std::vector<std::byte> expected{std::byte{0},std::byte{0},std::byte{1},std::byte{0x91},std::byte{0xa0},std::byte{0},std::byte{1},std::byte{0}};
+    CHECK(std::vector<std::byte>(plaintext.begin()+3, plaintext.end()) == expected);
+    CHECK(decode(transport.sent.back()).commands.back().value.buttons == 32U);
+    sample(frame({}), 2U, 0U);
+    REQUIRE(stage.update_reference(g::NetchanDriverTimePoint{} + 5ms));
+    const auto released = decode(transport.sent.back());
+    CHECK(released.commands.back().value.buttons == 0U);
+    REQUIRE(released.backup_count > 0U);
+    CHECK(released.commands.front().value.buttons == 32U);
+    sample(frame({key(SDL_SCANCODE_E,true),key(SDL_SCANCODE_W,true)}),3U,32U|8U,400);
+    sample(frame({key(SDL_SCANCODE_E,true,true)}),4U,32U|8U,400);
+    CHECK(latch.pending() == 0U);
+    sample(frame({key(SDL_SCANCODE_LSHIFT,true)}),5U,32U|8U,120);
+    sample(frame({key(SDL_SCANCODE_SPACE,true),key(SDL_SCANCODE_LCTRL,true),key(SDL_SCANCODE_R,true)}),6U,32U|8U|2U|4U|8192U,120);
+    sample(frame({key(SDL_SCANCODE_E,false)}),7U,8U|2U|4U|8192U,120);
+    SDL_Event attack{}; attack.type=SDL_EVENT_MOUSE_BUTTON_DOWN; attack.button.button=SDL_BUTTON_LEFT;
+    sample(frame({key(SDL_SCANCODE_E,true),attack}),8U,32U|8U|2U|4U|8192U|1U,120);
+    CHECK(*stage.history().find(f::sequence(1U))->reference_command == first);
+    host.teardown();
+    CHECK_FALSE(host.active());
+}
+
+TEST_CASE("G1 aimed Use retains the server-facing pitch through Netchan and backups",
+          "[pitch-boundary][use][game-module][reference-transmission]") {
+    namespace gi = hlclient::gameplay_input;
+    namespace input = hlclient::input;
+    hlclient::game_api::GameClientHost host{
+        hlclient::games::halflife::make_half_life_client_module()};
+    host.reset({17U, 1U, 1U});
+    const auto& policy = host.movement_policy();
+    Transport transport;
+    g::NetchanDriver driver{transport, transport.remote};
+    activate(driver, transport);
+    g::GoldSrcUserCmdTransmissionStage stage{driver, binding(), ready, config()};
+    input::InputStateTracker tracker;
+    for (unsigned id = 1; id <= 2; ++id) {
+        tracker.begin_frame();
+        if (id == 1) {
+            tracker.apply_event(input::InputEvent::focus_gained());
+            tracker.apply_event(input::InputEvent::capture_acquired());
+            tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::e));
+        } else {
+            tracker.apply_event(input::InputEvent::key_released(input::PhysicalKey::e));
+        }
+        const auto intent = gi::GameplayInputIntentBuilder{}.build(
+            tracker.publish_snapshot(), *policy.bindings, policy.mouse_look, 0.02);
+        REQUIRE(intent);
+        hlclient::gameplay_camera::GameplayCameraStateCreateInfo camera_info;
+        camera_info.yaw_degrees = 90.0;
+        camera_info.pitch_degrees = id == 1 ? -45.0 : 45.0;
+        const auto camera = hlclient::gameplay_camera::GameplayCameraState::create(camera_info);
+        REQUIRE(camera);
+        g::GoldSrcUserCmdBuildContext context;
+        context.command_sequence = f::sequence(id);
+        context.command_msec = 20U;
+        context.command_sample_duration_nanoseconds = 20'000'000U;
+        context.reference_button_policy = policy.button_policy;
+        context.movement_speeds = policy.movement_speeds;
+        const auto command = g::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+            *intent.intent, *camera.state, context);
+        REQUIRE(command);
+        REQUIRE(stage.queue_reference_command(f::sequence(id), *command.command, 17U));
+        REQUIRE(stage.update_reference(g::NetchanDriverTimePoint{} + std::chrono::milliseconds{2 * id}));
+        const auto sent = decode(transport.sent.back());
+        const auto& current = sent.commands.back().value;
+        CHECK(current.angle_turns[0] == (id == 1 ? 8192U : 57344U));
+        CHECK(current.angle_turns[1] == 16384U);
+        CHECK(current.buttons == (id == 1 ? 32U : 0U));
+        CHECK(current == *stage.history().find(f::sequence(id))->reference_command);
+        if (id == 1) {
+            // Project-owned button below the eye, nearest point (0,16,-8).
+            // Independent SDK-facing cone predicate; no proprietary BSP needed.
+            constexpr double radians = 3.14159265358979323846 / 180.0;
+            const double pitch = current.angle_turns[0] * 360.0 / 65536.0 * radians;
+            const double dot = (16.0 * std::cos(pitch) + 8.0 * std::sin(pitch)) / std::sqrt(320.0);
+            CHECK(dot > 0.7);
+            const auto replay = g::reference_jump_duck_weapon_use_movement_command(f::sequence(id), current);
+            REQUIRE(replay);
+            CHECK(replay.state->view_angles()[0] == 45.0F); // already wire-native: no second inversion
+            CHECK(transport.sent.size() == 1U);
+        } else {
+            REQUIRE(sent.backup_count > 0U);
+            CHECK(sent.commands.front().value.angle_turns[0] == 8192U);
+            CHECK(sent.commands.front().value.buttons == 32U);
+        }
+        tracker.end_frame();
+    }
+    host.teardown();
+}
+
+TEST_CASE("D2 capture and life scoped input gate never resumes stale Use",
+          "[use][game-module][input]") {
+    namespace gi = hlclient::gameplay_input;
+    hlclient::game_api::ScopedGameplayButtonGate gate;
+    const auto use = gi::gameplay_button_mask(gi::GameplayButton::use);
+    const auto jump = gi::gameplay_button_mask(gi::GameplayButton::jump);
+    auto held = use | jump, pressed = use;
+    gate.filter(use, false, held, pressed, 0U);
+    CHECK(held == jump); CHECK(pressed == 0U);
+    held = use | jump;
+    gate.filter(use, true, held, pressed, 0U);
+    CHECK(held == jump);
+    gate.filter(use, true, held, pressed, use); // physical release
+    held = use; pressed = use;
+    gate.filter(use, true, held, pressed, 0U);
+    CHECK(held == use); CHECK(pressed == use);
+    gate.invalidate(use); // death or new life: same production gate
+    held = use; pressed = 0U;
+    gate.filter(use, true, held, pressed, 0U);
+    CHECK(held == 0U);
+    held = use; pressed = use; // a genuinely new physical press
+    gate.filter(use, true, held, pressed, 0U);
+    CHECK(held == use);
+}
+
 TEST_CASE("Reference seed requires coherent player data and exact button provenance",
           "[prediction-seed]") {
     namespace c = hlclient::client;
@@ -281,6 +488,28 @@ TEST_CASE("Reference seed requires coherent player data and exact button provena
     CHECK(liquid.status == g::ReferencePredictionSeedStatus::unsupported_context);
     CHECK(liquid.field == g::ReferencePredictionSeedField::water_level);
     observed.receiving_client->water_level = 0U;
+    // Completed FL_DUCKING/usehull=1 is not Valve's transient bInDuck.
+    observed.receiving_client->flags = (1U << 9U) | (1U << 14U);
+    observed.receiving_client->in_duck = false;
+    observed.receiving_client->duck_time = 580U;
+    observed.packet_entities[0].use_hull = 1U;
+    const auto crouched = g::inspect_reference_prediction_seed(
+        observed, 1U, anchor);
+    REQUIRE(crouched.seed);
+    CHECK(crouched.seed->use_hull == 1U);
+    CHECK_FALSE(crouched.seed->in_duck);
+    CHECK(crouched.seed->duck_time_milliseconds == 580U);
+    observed.receiving_client->flags = 1U << 9U;
+    observed.receiving_client->duck_time.reset();
+    observed.packet_entities[0].use_hull = 0U;
+    anchor.last_new_value->buttons =
+        g::kReferenceGoldSrcButtonAttack | g::kReferenceGoldSrcButtonReload;
+    const auto weapon_only = g::inspect_reference_prediction_seed(
+        observed, 1U, anchor);
+    REQUIRE(weapon_only.seed);
+    CHECK(weapon_only.seed->old_buttons == 0U);
+    CHECK(weapon_only.seed->old_buttons_origin ==
+          g::ReferencePredictionFieldOrigin::reference_anchored_weapon_only_policy);
     anchor.last_new_value->buttons = g::kReferenceGoldSrcButtonJump;
     CHECK(g::inspect_reference_prediction_seed(observed, 1U, anchor).status ==
           g::ReferencePredictionSeedStatus::matching_prediction_slot_required);
@@ -316,6 +545,35 @@ TEST_CASE("Immutable reference wire command maps to dry-walk movement state",
               public_goldsrc48_dry_walk_prediction_v1);
     wire.buttons = g::kReferenceGoldSrcButtonJump;
     CHECK_FALSE(g::reference_dry_walk_movement_command(
+        f::sequence(7U), wire));
+    // H4: action-capable reference adaptation must accept only the two
+    // supported immutable wire action bits, without changing the v1 gate.
+    CHECK(g::reference_jump_duck_movement_command(
+        f::sequence(7U), wire));
+    wire.buttons = g::kReferenceGoldSrcButtonDuck;
+    CHECK(g::reference_jump_duck_movement_command(
+        f::sequence(7U), wire));
+    wire.buttons = g::kReferenceGoldSrcButtonJump |
+                   g::kReferenceGoldSrcButtonDuck;
+    CHECK(g::reference_jump_duck_movement_command(
+        f::sequence(7U), wire));
+    wire.buttons = g::kSyntheticGoldSrcButtonUse;
+    CHECK_FALSE(g::reference_jump_duck_movement_command(
+        f::sequence(7U), wire));
+    wire.buttons = g::kReferenceGoldSrcButtonAttack |
+                   g::kReferenceGoldSrcButtonReload |
+                   g::kReferenceGoldSrcButtonJump;
+    CHECK_FALSE(g::reference_jump_duck_movement_command(
+        f::sequence(7U), wire));
+    const auto weapon_inert = g::reference_jump_duck_weapon_movement_command(
+        f::sequence(7U), wire);
+    REQUIRE(weapon_inert);
+    CHECK(weapon_inert.state->buttons() == wire.buttons);
+    CHECK(weapon_inert.state->compatibility_profile() ==
+          g::GoldSrcUserCmdCompatibilityProfile::
+              public_goldsrc48_jump_duck_weapon_prediction_v3);
+    wire.buttons = g::kSyntheticGoldSrcButtonAttack2;
+    CHECK_FALSE(g::reference_jump_duck_weapon_movement_command(
         f::sequence(7U), wire));
     wire.buttons = 0U;
     wire.msec = 51U;
@@ -399,7 +657,11 @@ TEST_CASE("SDL A/D reaches reference history and actual encoded send",
         CHECK(command.command->forward == wire_forward);
         CHECK(command.command->side == wire_side);
         CHECK(command.command->up == 0);
-        CHECK(command.command->buttons == 0U);
+        const std::uint16_t expected_direction_buttons =
+            (snapshot.key_held(hlclient::input::PhysicalKey::a) ? 512U : 0U) |
+            (snapshot.key_held(hlclient::input::PhysicalKey::d) ? 1024U : 0U) |
+            (snapshot.key_held(hlclient::input::PhysicalKey::w) ? 8U : 0U);
+        CHECK(command.command->buttons == expected_direction_buttons);
         CHECK(command.command->impulse == 0U);
         REQUIRE(stage.queue_reference_command(f::sequence(sequence),
                                               *command.command, 17U));
@@ -489,7 +751,8 @@ TEST_CASE("SDL Left Shift changes actual reference command without a speed wire 
         context.command_msec = 20U;
         context.command_sample_duration_nanoseconds = 20'000'000U;
         context.command_sample_time_nanoseconds = sequence * 20'000'000LL;
-        context.movement_speeds = g::kLiveReferenceManualSpeeds;
+        context.movement_speeds =
+            hlclient::games::halflife::make_movement_policy().movement_speeds;
         context.reference_movement.speed_key_multiplier = 0.3F;
         context.reference_button_policy = g::GoldSrcReferenceButtonPolicy::jump_duck;
         auto camera = hlclient::gameplay_camera::GameplayCameraState::create({});
@@ -512,16 +775,16 @@ TEST_CASE("SDL Left Shift changes actual reference command without a speed wire 
         CHECK(sent.commands.back().value.buttons == buttons);
         tracker.end_frame();
     };
-    frame({focus(true), key(SDL_SCANCODE_W, true)}, 400, 0, 0U);
+    frame({focus(true), key(SDL_SCANCODE_W, true)}, 400, 0, 8U);
     frame({key(SDL_SCANCODE_LSHIFT, true), key(SDL_SCANCODE_A, true),
            key(SDL_SCANCODE_SPACE, true), key(SDL_SCANCODE_LCTRL, true)},
-          120, -120, 6U);
-    frame({key(SDL_SCANCODE_LSHIFT, true)}, 120, -120, 6U);
+          120, -120, 8U|512U|6U);
+    frame({key(SDL_SCANCODE_LSHIFT, true)}, 120, -120, 8U|512U|6U);
     frame({key(SDL_SCANCODE_LSHIFT, false), key(SDL_SCANCODE_A, false),
            key(SDL_SCANCODE_SPACE, false), key(SDL_SCANCODE_LCTRL, false)},
-          400, 0, 0U);
+          400, 0, 8U);
     frame({focus(false)}, 0, 0, 0U);
-    frame({focus(true), key(SDL_SCANCODE_W, true)}, 400, 0, 0U);
+    frame({focus(true), key(SDL_SCANCODE_W, true)}, 400, 0, 8U);
 }
 
 TEST_CASE("SDL jump tap survives render frames and wire backpressure",
@@ -624,10 +887,10 @@ TEST_CASE("SDL jump tap survives render frames and wire backpressure",
                        native_key(SDL_SCANCODE_LCTRL, true),
                        native_key(SDL_SCANCODE_W, true),
                        native_key(SDL_SCANCODE_A, true)});
-    sample(held, 3U, 6U);
-    sample(frame({native_key(SDL_SCANCODE_SPACE, true)}), 4U, 6U);
+    sample(held, 3U, 8U|512U|6U);
+    sample(frame({native_key(SDL_SCANCODE_SPACE, true)}), 4U, 8U|512U|6U);
     sample(frame({native_key(SDL_SCANCODE_SPACE, false),
-                  native_key(SDL_SCANCODE_LCTRL, false)}), 5U, 0U);
+                  native_key(SDL_SCANCODE_LCTRL, false)}), 5U, 8U|512U);
     auto interrupted = frame({native_key(SDL_SCANCODE_SPACE, true)});
     CHECK(interrupted.pressed_buttons() == 1U);
     CHECK(latch.pending() == 1U);

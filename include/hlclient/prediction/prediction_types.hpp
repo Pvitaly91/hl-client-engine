@@ -24,6 +24,9 @@ enum class PredictionCompatibilityProfile : std::uint8_t {
     synthetic_authoritative_reconciliation_v1,
     stock_protocol_48_authoritative_reconciliation_evidence_pending,
     reference_carrier_dry_walk_v1,
+    reference_carrier_jump_duck_v2,
+    reference_carrier_jump_duck_weapon_v3,
+    reference_carrier_jump_duck_weapon_use_v4,
 };
 
 enum class PredictionEvidenceProfile : std::uint8_t {

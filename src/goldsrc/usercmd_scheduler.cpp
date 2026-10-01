@@ -56,6 +56,9 @@ bool valid_goldsrc_usercmd_scheduler_config(
            config.maximum_commands_per_update > 0U &&
            config.maximum_commands_per_update <=
                kMaximumUserCmdsPerSchedulerUpdate &&
+           (config.lag_policy == GoldSrcUserCmdLagPolicy::fail_closed ||
+            (config.lag_policy == GoldSrcUserCmdLagPolicy::discard_unsampled_wall_time &&
+             config.profile == GoldSrcUserCmdSamplingProfile::stock_protocol_48_live_usercmd_check_v1)) &&
            config.maximum_command_sequence > 0U;
 }
 
@@ -143,14 +146,16 @@ GoldSrcUserCmdSchedulerUpdateResult GoldSrcUserCmdScheduler::update(
         static_cast<std::uint64_t>(next_sample_time_nanoseconds_);
     const auto elapsed_intervals =
         elapsed_due / config_.command_interval_nanoseconds;
-    if (elapsed_intervals >= config_.maximum_commands_per_update) {
+    const bool recovering = elapsed_intervals >= config_.maximum_commands_per_update &&
+        config_.lag_policy == GoldSrcUserCmdLagPolicy::discard_unsampled_wall_time;
+    if (elapsed_intervals >= config_.maximum_commands_per_update && !recovering) {
         return failure(
             GoldSrcUserCmdSchedulerErrorCode::lag_limit_exceeded,
             "Scheduler catch-up demand exceeds the configured bounded update",
             next_sample_time_nanoseconds_,
             duration_remainder_nanoseconds_);
     }
-    const auto due_count_wide = elapsed_intervals + 1U;
+    const auto due_count_wide = recovering ? 1U : elapsed_intervals + 1U;
     const auto due_count = static_cast<std::size_t>(due_count_wide);
     if (next_command_sequence_ > config_.maximum_command_sequence ||
         due_count_wide - 1U >
@@ -164,7 +169,11 @@ GoldSrcUserCmdSchedulerUpdateResult GoldSrcUserCmdScheduler::update(
     }
     const auto deadline_advance = due_count_wide *
         config_.command_interval_nanoseconds;
-    if (next_sample_time_nanoseconds_ >
+    const auto first_sample = recovering
+        ? monotonic_time_nanoseconds - static_cast<std::int64_t>(
+            elapsed_due % config_.command_interval_nanoseconds)
+        : next_sample_time_nanoseconds_;
+    if (first_sample >
         std::numeric_limits<std::int64_t>::max() -
             static_cast<std::int64_t>(deadline_advance)) {
         return failure(
@@ -175,9 +184,10 @@ GoldSrcUserCmdSchedulerUpdateResult GoldSrcUserCmdScheduler::update(
     }
 
     GoldSrcUserCmdSchedulerUpdateResult result;
+    result.discarded_wall_time_samples = recovering ? elapsed_intervals : 0U;
     auto staged_remainder = duration_remainder_nanoseconds_;
     auto staged_sequence = next_command_sequence_;
-    auto staged_sample_time = next_sample_time_nanoseconds_;
+    auto staged_sample_time = first_sample;
     try {
         result.requests.reserve(due_count);
         for (std::size_t index = 0U; index < due_count; ++index) {
@@ -203,8 +213,8 @@ GoldSrcUserCmdSchedulerUpdateResult GoldSrcUserCmdScheduler::update(
                 config_.command_interval_nanoseconds,
                 command_msec,
                 intent.input_sequence(),
-                intent.focused(),
-                index == 0U && intent.pressed_buttons() != 0U,
+                !recovering && intent.focused(),
+                !recovering && index == 0U && intent.pressed_buttons() != 0U,
                 camera.yaw_degrees(),
                 camera.pitch_degrees(),
             });

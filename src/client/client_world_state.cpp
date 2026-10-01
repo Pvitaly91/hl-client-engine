@@ -80,6 +80,7 @@ void ClientWorldState::set_static_world(
         clear_dynamic_entities();
     }
     world_scene_.reset();
+    runtime_brushes_.reset();
     scene_revision_ = 0U;
     clear_world_visibility();
     static_world_ = std::move(package);
@@ -92,6 +93,7 @@ void ClientWorldState::set_world_scene(
 {
     clear_world_visibility();
     world_scene_ = std::move(package);
+    runtime_brushes_.reset();
     if (world_scene_) {
         static_world_ = world_scene_->world_package();
         world_revision_ = static_world_ ? static_world_->resource_revision() : 0U;
@@ -119,6 +121,7 @@ void ClientWorldState::clear_static_world() noexcept
     }
     static_world_.reset();
     world_scene_.reset();
+    runtime_brushes_.reset();
     world_revision_ = 0U;
     scene_revision_ = 0U;
     clear_world_visibility();
@@ -195,6 +198,15 @@ void ClientWorldState::clear_dynamic_entities() noexcept
     entity_frame_.reset();
     entity_scene_revision_ = 0U;
     entity_frame_revision_ = 0U;
+}
+
+bool ClientWorldState::set_runtime_brushes(
+    std::shared_ptr<const world_scene_render::RuntimeBrushRenderFrame> frame) noexcept
+{
+    if (frame && (!world_scene_ ||
+        !world_scene_render::valid_runtime_brush_frame(*frame, *world_scene_))) return false;
+    runtime_brushes_ = std::move(frame);
+    return true;
 }
 
 void ClientWorldState::set_camera(const RenderCameraState& camera) noexcept

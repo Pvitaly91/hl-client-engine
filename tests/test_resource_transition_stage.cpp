@@ -7,6 +7,7 @@
 #include <hlclient/network/datagram_transport.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <bzlib.h>
 
@@ -683,6 +684,55 @@ TEST_CASE("Resource-transition dispatcher decodes svc_nop before exact opcode 45
         }
     }
     CHECK(observed_nop);
+}
+
+TEST_CASE("Resource transfer waiting for a new client packet progresses after non-reliable sendres ACK",
+          "[goldsrc][resource-transition][stage][idle-poll][regression]") {
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(28'421U);
+    const auto epoch = goldsrc::ResourceTransitionStageTimePoint{} + 1s;
+    auto config = test_config();
+    auto& driver_config = config.user_info.movement_environment.delta.pre_resource.initial_signon.driver;
+    driver_config.channel_inactivity_timeout = 2s;
+    const auto poll_enabled = GENERATE(false,true);
+    if (poll_enabled) driver_config.idle_poll_interval = 200ms;
+    goldsrc::ResourceTransitionStage stage{transport,remote,config};
+    const auto driven = drive_to_transition_request(stage,transport,remote,epoch);
+    const auto before_ack = transport.sent.size();
+    transport.queue(remote,server_packet(2U,false,
+        driven.transition_request.header.sequence.sequence.value(),
+        false,{})); // second client reliable unit has toggle zero
+    stage.update(epoch + 4ms);
+    REQUIRE(stage.transition_request_acknowledged());
+    REQUIRE(stage.state() == goldsrc::ResourceTransitionStageState::waiting_for_server_transfer);
+    while (stage.poll_event()) {}
+    REQUIRE(transport.sent.size() == before_ack);
+    stage.update(epoch + 204ms);
+    CHECK(stage.initial_request_queue_count() == 1U);
+    CHECK(stage.transition_request_queue_count() == 1U);
+    if (!poll_enabled) {
+        // Reproduces the previous silence with the strict historical profile.
+        CHECK(transport.sent.size() == before_ack);
+        CHECK_FALSE(stage.result());
+        CHECK(stage.state() == goldsrc::ResourceTransitionStageState::waiting_for_server_transfer);
+    } else {
+        REQUIRE(transport.sent.size() == before_ack + 1U);
+        const auto poll = decode_sent(transport.sent.back());
+        CHECK_FALSE(poll.header.sequence.flags.reliable);
+        CHECK_FALSE(poll.header.sequence.flags.fragmented);
+        CHECK(std::ranges::all_of(poll.payload,[](const auto value) { return value == std::byte{1U}; }));
+        // Fake unspawned server releases queued resource data only after this
+        // fresh client sequence, as the server's send-message gate permits.
+        transport.queue(remote,server_packet(3U,false,
+            poll.header.sequence.sequence.value(),
+            poll.header.sequence.flags.reliable,
+            service_envelope(second_semantic_payload())));
+        stage.update(epoch + 205ms);
+        REQUIRE(stage.result());
+        CHECK(stage.state() == goldsrc::ResourceTransitionStageState::neutral_opcode43_boundary_reached);
+        CHECK(stage.result()->source_payload().source_sequence() == 3U);
+        CHECK(stage.transition_request_acknowledged());
+    }
 }
 
 TEST_CASE("Resource-transition dispatcher consumes a pre-ACK NOP-only payload once",

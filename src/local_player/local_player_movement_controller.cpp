@@ -10,6 +10,15 @@
 namespace hlclient::local_player {
 namespace {
 
+// Movement directions are continuous physical state, not synthetic one-shot
+// actions. A pressed edge must not mutate the pending-command revision or be
+// replayed after the direction key has already been released.
+constexpr auto kContinuousDirectionButtons =
+    gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::move_forward) |
+    gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::move_backward) |
+    gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::move_left) |
+    gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::move_right);
+
 [[nodiscard]] bool finite_speed_config(
     const goldsrc::GoldSrcUserCmdMovementSpeedConfig& config) noexcept
 {
@@ -378,7 +387,7 @@ void LocalPlayerMovementController::capture_pending_input(
 {
     const auto previous = pending_one_shots_;
     if (intent.focused()) {
-        pending_one_shots_ |= intent.pressed_buttons();
+        pending_one_shots_ |= intent.pressed_buttons() & ~kContinuousDirectionButtons;
     } else {
         pending_one_shots_ = 0U;
     }
@@ -476,7 +485,7 @@ LocalPlayerMovementPrepareResult LocalPlayerMovementController::prepare_update(
     }
     auto staged_pending_one_shots = pending_one_shots_;
     if (intent.focused()) {
-        staged_pending_one_shots |= intent.pressed_buttons();
+        staged_pending_one_shots |= intent.pressed_buttons() & ~kContinuousDirectionButtons;
     } else {
         staged_pending_one_shots = 0U;
     }

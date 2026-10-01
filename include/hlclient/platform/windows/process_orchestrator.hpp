@@ -20,6 +20,9 @@ struct BoundedProcessLogLimits final {
     std::size_t maximum_bytes{1U * 1'024U * 1'024U};
     std::size_t maximum_line_length{4'096U};
     std::size_t maximum_line_count{8'192U};
+    // Explicit diagnostic-only prefix + rolling tail; zero retains the
+    // existing capture-evidence prefix policy. Eviction remains attested.
+    std::size_t retained_prefix_bytes{0U};
 };
 
 struct BoundedProcessLogSnapshot final {
@@ -32,11 +35,14 @@ struct BoundedProcessLogSnapshot final {
     bool line_length_truncated{false};
     bool capture_failed{false};
     std::uint32_t native_error{0U};
+    bool retained_window{false};
 };
 
 [[nodiscard]] bool validate_bounded_process_log_limits(
     const BoundedProcessLogLimits& limits) noexcept;
 [[nodiscard]] bool bounded_process_log_snapshot_complete(
+    const BoundedProcessLogSnapshot& snapshot) noexcept;
+[[nodiscard]] bool bounded_process_log_diagnostic_window_usable(
     const BoundedProcessLogSnapshot& snapshot) noexcept;
 
 enum class BoundedProcessLogReadDisposition {

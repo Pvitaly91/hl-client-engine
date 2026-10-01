@@ -4535,7 +4535,8 @@ void run_precache_manifest_integration(
         CHECK(registries.models.size() == 1U);
         CHECK(registries.sprites.size() == 1U);
         CHECK(registries.images.size() == 0U);
-        CHECK(registries.audio.size() == 0U);
+        // E1 production registration now includes the actual PCM WAV importer.
+        CHECK(registries.audio.size() == 1U);
     }
     goldsrc::PrecacheAssetDispatchStageConfig asset_dispatch_config;
     asset_dispatch_config.source_open.read_chunk_bytes =

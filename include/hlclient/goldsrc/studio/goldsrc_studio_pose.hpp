@@ -63,6 +63,18 @@ struct StudioPoseInput {
         StudioPoseCompatibilityProfile::synthetic_explicit_v1};
 };
 
+// Caller-selected presentation only. All samples address this exact immutable
+// model; no game names, time policy, events, or world state enter the evaluator.
+// The previous sample contributes previous_weight, then the layer replaces
+// exactly the listed local bones. The owned numeric mask is bounded by bones.
+struct StudioPoseCompositionInput {
+    StudioPoseInput main;
+    std::optional<StudioPoseInput> previous;
+    float previous_weight{0.0F};
+    std::optional<StudioPoseInput> layer;
+    std::vector<std::uint32_t> lower_bone_indices;
+};
+
 struct StudioPoseEvaluationLimits {
     std::size_t maximum_bones{kDefaultMaximumStudioPoseBones};
     std::size_t maximum_instances{kDefaultMaximumStudioPoseInstances};
@@ -75,6 +87,8 @@ struct StudioPoseEvaluationLimits {
     std::size_t maximum_pose_cache_entries{
         kDefaultMaximumStudioPoseCacheEntries};
     float maximum_entity_scale{1'024.0F};
+    std::size_t maximum_composition_samples{3U};
+    std::size_t maximum_composition_blend_evaluations{12U};
 };
 
 [[nodiscard]] bool valid_studio_pose_evaluation_limits(
@@ -105,6 +119,8 @@ enum class StudioPoseErrorCode {
     pose_cache_entry_limit_exceeded,
     non_finite_pose,
     unable_to_retain_pose,
+    invalid_composition,
+    composition_limit_exceeded,
 };
 
 struct StudioPoseError {
@@ -270,6 +286,7 @@ struct StudioPoseStatistics {
     std::size_t skin_reference_count{0U};
     std::size_t suppressed_motion_axis_count{0U};
     std::size_t accounted_pose_bytes{0U};
+    std::size_t composition_sample_count{1U};
 };
 
 class StudioPoseState final {
@@ -330,6 +347,12 @@ struct StudioPoseEvaluationResult {
     }
 };
 
+struct StudioPosedBoundsResult {
+    std::optional<assets::ModelBounds> bounds;
+    std::optional<StudioPoseError> error;
+    [[nodiscard]] explicit operator bool() const noexcept { return bounds.has_value(); }
+};
+
 class StudioPoseEvaluator final {
   public:
     [[nodiscard]] StudioPoseEvaluationResult
@@ -337,6 +360,18 @@ class StudioPoseEvaluator final {
              const assets::SkeletalModelAssetData& model,
              const StudioPoseInput& input,
              const StudioPoseEvaluationLimits& limits = {}) const;
+    [[nodiscard]] StudioPoseEvaluationResult compose(
+        const StudioPoseModelIdentity& model_identity,
+        const assets::SkeletalModelAssetData& model,
+        const StudioPoseCompositionInput& input,
+        const StudioPoseEvaluationLimits& limits = {}) const;
+    // Model-space bounds of actual selected skinned vertices, not sequence
+    // endpoint boxes. Pure CPU operation; caller applies its entity transform.
+    [[nodiscard]] StudioPosedBoundsResult posed_bounds(
+        const StudioPoseModelIdentity& model_identity,
+        const assets::SkeletalModelAssetData& model,
+        const StudioPoseState& pose,
+        std::size_t maximum_vertices = 1'048'576U) const;
 };
 
 enum class StudioPoseCacheLookupStatus {
@@ -442,6 +477,10 @@ to_string(StudioPoseErrorCode code) noexcept
         return "non_finite_pose";
     case StudioPoseErrorCode::unable_to_retain_pose:
         return "unable_to_retain_pose";
+    case StudioPoseErrorCode::invalid_composition:
+        return "invalid_composition";
+    case StudioPoseErrorCode::composition_limit_exceeded:
+        return "composition_limit_exceeded";
     }
     return "unknown";
 }

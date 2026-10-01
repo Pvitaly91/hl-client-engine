@@ -45,6 +45,15 @@ namespace {
 [[nodiscard]] bool valid_texture_profile(
     const WorldTextureAsset& texture) noexcept
 {
+    if (texture.source_kind == WorldTextureSourceKind::generated_missing_texture) {
+        return texture.width == 16U && texture.height == 16U &&
+            texture.alpha_mode == WorldTextureAlphaMode::opaque &&
+            !texture.source_bsp_texture_index && !texture.source_archive_ordinal &&
+            texture.compatibility_profile ==
+                WorldTextureCompatibilityProfile::missing_texture_checker_v1 &&
+            texture.evidence_profile ==
+                WorldTextureEvidenceProfile::project_generated_placeholder;
+    }
     const bool source_kind_valid =
         texture.source_kind == WorldTextureSourceKind::embedded_bsp ||
         texture.source_kind == WorldTextureSourceKind::external_wad3;
@@ -131,7 +140,6 @@ WorldTextureSetCreateResult WorldTextureSet::create(
 
     WorldTextureSetStatistics statistics;
     statistics.material_binding_count = bindings.size();
-    statistics.decoded_texture_count = textures.size();
     statistics.wad_declaration_count = archive_metadata.size();
     std::size_t total_rgba_bytes = 0U;
 
@@ -168,9 +176,13 @@ WorldTextureSetCreateResult WorldTextureSet::create(
         }
         ++statistics.total_mip_level_count;
         statistics.total_mip_level_count += texture.mip_levels.size() - 1U;
-        if (texture.source_kind == WorldTextureSourceKind::embedded_bsp) {
+        if (texture.source_kind == WorldTextureSourceKind::generated_missing_texture) {
+            ++statistics.generated_placeholder_texture_count;
+        } else if (texture.source_kind == WorldTextureSourceKind::embedded_bsp) {
+            ++statistics.decoded_texture_count;
             ++statistics.embedded_texture_count;
         } else {
+            ++statistics.decoded_texture_count;
             ++statistics.wad3_texture_count;
         }
         if (texture.alpha_mode == WorldTextureAlphaMode::masked_index_255) {
@@ -193,24 +205,32 @@ WorldTextureSetCreateResult WorldTextureSet::create(
                     binding_index,
                     "Material bindings must retain exact world material order");
             }
-            if (binding.compatibility_profile !=
-                    WorldTextureCompatibilityProfile::
-                        goldsrc_indexed_miptex_v1 ||
-                binding.evidence_profile != WorldTextureEvidenceProfile::
-                                                valve_public_tools_and_synthetic_fixtures) {
+            const bool placeholder = binding.status ==
+                WorldMaterialTextureBindingStatus::substituted_missing_texture;
+            const bool placeholder_profile =
+                binding.compatibility_profile ==
+                    WorldTextureCompatibilityProfile::missing_texture_checker_v1 &&
+                binding.evidence_profile ==
+                    WorldTextureEvidenceProfile::project_generated_placeholder;
+            const bool source_profile = binding.compatibility_profile ==
+                    WorldTextureCompatibilityProfile::goldsrc_indexed_miptex_v1 &&
+                binding.evidence_profile == WorldTextureEvidenceProfile::
+                    valve_public_tools_and_synthetic_fixtures;
+            if ((placeholder && !placeholder_profile) ||
+                (!placeholder && !source_profile)) {
                 return fail(WorldTextureSetErrorCode::invalid_material_binding,
                     binding_index,
                     "Material binding compatibility or evidence profile is invalid");
             }
-            const bool resolved = is_resolved(binding.status);
-            if (resolved != binding.texture_asset_index.has_value() ||
+            const bool renderable = is_renderable(binding.status);
+            if (renderable != binding.texture_asset_index.has_value() ||
                 (binding.texture_asset_index &&
                     *binding.texture_asset_index >= textures.size())) {
                 return fail(WorldTextureSetErrorCode::invalid_material_binding,
                     binding_index,
-                    "Resolved binding status and texture asset index disagree");
+                    "Renderable binding status and texture asset index disagree");
             }
-            if (resolved) {
+            if (renderable) {
                 const auto texture_index = *binding.texture_asset_index;
                 const auto& texture = textures[texture_index];
                 if ((binding.status ==
@@ -220,13 +240,28 @@ WorldTextureSetCreateResult WorldTextureSet::create(
                     (binding.status ==
                             WorldMaterialTextureBindingStatus::resolved_wad3 &&
                         texture.source_kind !=
-                            WorldTextureSourceKind::external_wad3)) {
+                            WorldTextureSourceKind::external_wad3) ||
+                    (placeholder &&
+                        (texture.source_kind != WorldTextureSourceKind::generated_missing_texture ||
+                         !binding.source_bsp_texture_index || binding.source_archive_ordinal ||
+                         archive_metadata.empty()))) {
                     return fail(WorldTextureSetErrorCode::invalid_material_binding,
                         binding_index,
-                        "Resolved binding source status disagrees with its texture asset");
+                        "Renderable binding source status disagrees with its texture asset");
+                }
+                if (placeholder) {
+                    for (const auto& archive : archive_metadata) {
+                        if (archive.status != WorldTextureArchiveStatus::resolved) {
+                            return fail(WorldTextureSetErrorCode::invalid_material_binding,
+                                binding_index,
+                                "Missing-texture placeholder requires resolved source archives");
+                        }
+                    }
+                    ++statistics.placeholder_material_count;
                 }
                 referenced_textures[texture_index] = 1U;
-            } else {
+            }
+            if (!is_resolved(binding.status)) {
                 complete = false;
                 ++statistics.unresolved_material_count;
                 if (binding.status ==
@@ -315,6 +350,11 @@ const WorldMaterialTextureBinding* WorldTextureSet::binding_for_material(
 bool WorldTextureSet::complete_for_world_materials() const noexcept
 {
     return complete_;
+}
+
+bool WorldTextureSet::renderable_for_world_materials() const noexcept
+{
+    return statistics_.unresolved_material_count == statistics_.placeholder_material_count;
 }
 
 const WorldTextureSetStatistics& WorldTextureSet::statistics() const noexcept

@@ -17,6 +17,13 @@ inline constexpr std::size_t kMaximumGoldSrcUserCmdHistoryEntries = 256U;
 inline constexpr std::uint16_t kSyntheticGoldSrcButtonAttack = 1U << 0U;
 inline constexpr std::uint16_t kSyntheticGoldSrcButtonJump = 1U << 1U;
 inline constexpr std::uint16_t kSyntheticGoldSrcButtonDuck = 1U << 2U;
+inline constexpr std::uint16_t kGoldSrcButtonForward = 1U << 3U;
+inline constexpr std::uint16_t kGoldSrcButtonBack = 1U << 4U;
+inline constexpr std::uint16_t kGoldSrcButtonMoveLeft = 1U << 9U;
+inline constexpr std::uint16_t kGoldSrcButtonMoveRight = 1U << 10U;
+inline constexpr std::uint16_t kGoldSrcButtonDirections =
+    kGoldSrcButtonForward | kGoldSrcButtonBack |
+    kGoldSrcButtonMoveLeft | kGoldSrcButtonMoveRight;
 inline constexpr std::uint16_t kSyntheticGoldSrcButtonUse = 1U << 5U;
 inline constexpr std::uint16_t kSyntheticGoldSrcButtonAttack2 = 1U << 11U;
 inline constexpr std::uint16_t kSyntheticGoldSrcButtonRun = 1U << 12U;
@@ -25,8 +32,11 @@ inline constexpr std::uint16_t kSyntheticGoldSrcButtonReload = 1U << 13U;
 enum class GoldSrcUserCmdCompatibilityProfile : std::uint8_t {
     synthetic_usercmd_v1,
     public_goldsrc48_dry_walk_prediction_v1,
+    public_goldsrc48_jump_duck_prediction_v2,
+    public_goldsrc48_jump_duck_weapon_prediction_v3,
     stock_protocol_48_build_10210,
     stock_protocol_48_evidence_pending,
+    public_goldsrc48_jump_duck_weapon_use_prediction_v4,
 };
 
 enum class GoldSrcUserCmdInputMappingProfile : std::uint8_t {
@@ -227,6 +237,12 @@ struct GoldSrcUserCmdState::CreationResult {
         return "synthetic_usercmd_v1";
     case GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_dry_walk_prediction_v1:
         return "public_goldsrc48_dry_walk_prediction_v1";
+    case GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_jump_duck_prediction_v2:
+        return "public_goldsrc48_jump_duck_prediction_v2";
+    case GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_jump_duck_weapon_prediction_v3:
+        return "public_goldsrc48_jump_duck_weapon_prediction_v3";
+    case GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_jump_duck_weapon_use_prediction_v4:
+        return "public_goldsrc48_jump_duck_weapon_use_prediction_v4";
     case GoldSrcUserCmdCompatibilityProfile::stock_protocol_48_build_10210:
         return "stock_protocol_48_build_10210";
     case GoldSrcUserCmdCompatibilityProfile::stock_protocol_48_evidence_pending:

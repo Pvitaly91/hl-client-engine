@@ -1244,4 +1244,124 @@ InterpolatedEntityFrameResult EntitySnapshotInterpolator::interpolate(
     }
 }
 
+RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime(
+    const client::RuntimeClientObservationState& previous,
+    const client::RuntimeClientObservationState& current, const double target,
+    const RuntimeEntityInterpolationOptions& options) const
+{
+    const auto fail = [](const EntityInterpolationErrorCode code) {
+        RuntimeEntityInterpolationResult result;
+        result.error = EntityInterpolationError{code, {}, {}, "Runtime presentation sample rejected"};
+        return result;
+    };
+    const auto& limits = options.limits;
+    if (!valid_entity_interpolation_limits(limits) || !std::isfinite(target) ||
+        (options.teleport_distance && (!std::isfinite(*options.teleport_distance) ||
+                                      *options.teleport_distance <= 0.0))) {
+        return fail(EntityInterpolationErrorCode::invalid_configuration);
+    }
+    if (!client::valid_runtime_observation(previous) ||
+        !client::valid_runtime_observation(current) || !current.server_time_seconds) {
+        return fail(EntityInterpolationErrorCode::invalid_projection);
+    }
+    if (current.packet_entities.size() > limits.maximum_entities ||
+        previous.packet_entities.size() > limits.maximum_entities) {
+        return fail(EntityInterpolationErrorCode::entity_limit_exceeded);
+    }
+    std::size_t bytes = sizeof(current), count_bytes{};
+    const auto account = [&](const std::size_t count, const std::size_t size) {
+        return checked_multiply(count, size, count_bytes) &&
+               checked_add(bytes, count_bytes, bytes) && bytes <= limits.maximum_result_bytes;
+    };
+    if (!account(current.packet_entities.size(), sizeof(client::RuntimePacketEntityObservation)) ||
+        !account(current.weapon_slots.size(), sizeof(client::RuntimeWeaponSlotObservation)) ||
+        !account(current.life_events.size(), sizeof(client::RuntimeLifeEvent)) ||
+        !account(current.weapon_hud.catalogue.size(), sizeof(client::RuntimeWeaponTypeObservation))) {
+        return fail(EntityInterpolationErrorCode::result_byte_limit_exceeded);
+    }
+    for (const auto& entry : current.weapon_hud.catalogue) {
+        if (!account(entry.command_name.size(), 1U)) return fail(EntityInterpolationErrorCode::result_byte_limit_exceeded);
+    }
+    for (const auto& event : current.life_events) {
+        if (!account(event.weapon_text.size(), 1U)) return fail(EntityInterpolationErrorCode::result_byte_limit_exceeded);
+    }
+    const auto bounded = [&](const client::RuntimeVector3Observation& value) {
+        const auto component = [&](const std::optional<double>& v) {
+            return !v || (std::isfinite(*v) && std::abs(*v) <= limits.maximum_position_magnitude);
+        };
+        return component(value.x) && component(value.y) && component(value.z);
+    };
+    for (const auto& entity : current.packet_entities) {
+        if (!bounded(entity.origin)) return fail(EntityInterpolationErrorCode::position_limit_exceeded);
+    }
+    const double latest = *current.server_time_seconds;
+    const bool new_generation = previous.generation != current.generation || !previous.server_time_seconds;
+    const double oldest = new_generation ? latest : *previous.server_time_seconds;
+    if (oldest > latest) return fail(EntityInterpolationErrorCode::invalid_snapshot_time_order);
+    const bool held = new_generation || latest == oldest ||
+                      latest - oldest > limits.maximum_snapshot_gap_seconds;
+    try {
+        RuntimeEntityInterpolationResult result;
+        result.sample_seconds = held ? latest : std::clamp(target, oldest, latest);
+        result.alpha = held ? 1.0 : (result.sample_seconds - oldest) / (latest - oldest);
+        result.selection_status = held ? EntitySnapshotPairSelectionStatus::held_only :
+            target < oldest ? EntitySnapshotPairSelectionStatus::held_oldest :
+            target > latest ? EntitySnapshotPairSelectionStatus::held_newest :
+            result.alpha == 0.0 ? EntitySnapshotPairSelectionStatus::exact_previous :
+            result.alpha == 1.0 ? EntitySnapshotPairSelectionStatus::exact_current :
+            EntitySnapshotPairSelectionStatus::bracketed;
+        auto sampled = std::make_shared<client::RuntimeClientObservationState>(current);
+        std::size_t old_index{};
+        for (auto& entity : sampled->packet_entities) {
+            // E10 changes players only. Brush/non-player presentation keeps its existing owner.
+            if (!entity.player_movement_schema) continue;
+            while (old_index < previous.packet_entities.size() &&
+                   previous.packet_entities[old_index].entity_number < entity.entity_number) ++old_index;
+            const auto* old = old_index < previous.packet_entities.size() &&
+                              previous.packet_entities[old_index].entity_number == entity.entity_number
+                                  ? &previous.packet_entities[old_index] : nullptr;
+            bool reset = held || options.no_interpolation || !old ||
+                         std::ranges::find(options.discontinuous_entities,entity.entity_number)!=options.discontinuous_entities.end() ||
+                         (entity.effects.value_or(0U) & options.no_interpolation_effect_mask) != 0U;
+            if (old) {
+                if (!bounded(old->origin)) return fail(EntityInterpolationErrorCode::position_limit_exceeded);
+                reset = reset || old->model_index != entity.model_index ||
+                        old->player_movement_schema != entity.player_movement_schema ||
+                        old->ordinary_visual_schema != entity.ordinary_visual_schema;
+                if (options.teleport_distance && old->origin.complete() && entity.origin.complete()) {
+                    reset = reset || std::hypot(*entity.origin.x - *old->origin.x,
+                        *entity.origin.y - *old->origin.y, *entity.origin.z - *old->origin.z) > *options.teleport_distance;
+                }
+            }
+            if (reset) { ++result.reset_count; continue; }
+            if (result.alpha >= 1.0) continue;
+            const auto linear = [&](std::optional<double>& now, const std::optional<double>& before) {
+                if (now && before) now = *before + (*now - *before) * result.alpha;
+            };
+            linear(entity.origin.x, old->origin.x); linear(entity.origin.y, old->origin.y); linear(entity.origin.z, old->origin.z);
+            const auto angle = [&](std::optional<double>& now, const std::optional<double>& before) {
+                if (now && before) now = *before + shortest_degree_delta(*before, *now) * result.alpha;
+            };
+            angle(entity.angles.x, old->angles.x); angle(entity.angles.y, old->angles.y); angle(entity.angles.z, old->angles.z);
+            const auto bytes_lerp = [&](auto& now, const auto& before) {
+                for (std::size_t i = 0; i < now.size(); ++i) if (now[i] && before[i])
+                    now[i] = static_cast<std::uint32_t>(std::lround(
+                        static_cast<double>(*before[i]) + (static_cast<double>(*now[i]) - *before[i]) * result.alpha));
+            };
+            bytes_lerp(entity.controllers, old->controllers); bytes_lerp(entity.blending, old->blending);
+            const auto step = [](auto& now, const auto& before) { if (now && before) now = before; };
+            step(entity.sequence, old->sequence); step(entity.body, old->body); step(entity.skin, old->skin);
+            step(entity.frame, old->frame); step(entity.animation_time_seconds, old->animation_time_seconds);
+            step(entity.frame_rate, old->frame_rate); step(entity.gait_sequence, old->gait_sequence);
+            step(entity.weapon_model_index, old->weapon_model_index);
+            ++result.interpolated_count;
+        }
+        sampled->canonical_state_hash = client::runtime_observation_canonical_hash(*sampled);
+        if(!client::valid_runtime_observation(*sampled)) return fail(EntityInterpolationErrorCode::non_finite_result);
+        result.state = std::move(sampled);
+        return result;
+    } catch (const std::bad_alloc&) { return fail(EntityInterpolationErrorCode::unable_to_retain_result); }
+      catch (const std::length_error&) { return fail(EntityInterpolationErrorCode::unable_to_retain_result); }
+}
+
 } // namespace hlclient::goldsrc

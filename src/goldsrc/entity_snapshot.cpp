@@ -711,6 +711,12 @@ EntityStateBaseReference EntityStateBaseReference::entity_baseline(
     return {EntityStateBaseReferenceKind::entity_baseline, entity_number};
 }
 
+EntityStateBaseReference EntityStateBaseReference::null_baseline(
+    const std::uint32_t entity_number) noexcept
+{
+    return {EntityStateBaseReferenceKind::null_baseline, entity_number};
+}
+
 EntityStateBaseReference EntityStateBaseReference::instanced_baseline(
     const std::uint32_t slot) noexcept
 {

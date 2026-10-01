@@ -254,7 +254,8 @@ RuntimeReplayCaptureLoadResult RuntimeReplayCaptureLoader::load(
 
                     const auto control = RuntimeControlDecoder{}.decode_one(
                         RuntimeControlDecodeInput{
-                            payload, *cursor, generation, payload_ordinal},
+                            payload, *cursor, generation, payload_ordinal, {},
+                            &*signon.state->delta_registry()},
                         control_ordinal++);
                     if (!control || !control.event) {
                         RuntimeReplayCaptureError error;

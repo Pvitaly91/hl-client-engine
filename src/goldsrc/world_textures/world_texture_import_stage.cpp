@@ -644,7 +644,7 @@ private:
                 "Texture operation did not retain its terminal texture set", now);
             return;
         }
-        const bool complete = texture_set->complete_for_world_materials();
+        const bool complete = texture_set->renderable_for_world_materials();
         const auto statistics = texture_set->statistics();
         try {
             auto owned = std::make_unique<TexturedWorldAssetState::Implementation>(

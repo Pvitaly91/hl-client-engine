@@ -18,6 +18,18 @@ Initial baselines are delta-decoded from the protocol-defined null
 of `CL_ParseBaseline`. They do not inherit a preceding runtime `svc_time`;
 packet-entity values use staged runtime time separately.
 
+An entity created after signon may have no explicit `svc_spawnbaseline`
+record. For an ordinary new packet-entity update without an instanced or
+intra-message base, the client uses the schema-defined zero `entity_state_t`
+for that entity slot, matching the stock-compatible client path. Snapshot
+provenance records `null_baseline` separately from an explicit entity
+baseline; the signon registry is not modified. Invalid explicit baseline
+references remain errors.
+This fallback follows the new-entity base selection in
+[Xash3D FWGS `CL_DeltaEntity`](https://github.com/FWGS/xash3d-fwgs/blob/master/engine/client/cl_frame.c),
+which uses the entity slot's baseline for a new entity; the null object is
+our explicit representation when signon supplied no slot record.
+
 This contract is based on the public [Half-Life 1 engine message reference](https://wiki.alliedmods.net/Half-Life_1_Engine_Messages)
 and the GoldSrc path in [Xash3D FWGS `cl_parse.c`](https://github.com/FWGS/xash3d-fwgs/blob/e9b63241616c390d4d1720ced80e88de2acf83a6/engine/client/parse/cl_parse.c)
 (pinned source revision `e9b63241616c390d4d1720ced80e88de2acf83a6`, GoldSrc

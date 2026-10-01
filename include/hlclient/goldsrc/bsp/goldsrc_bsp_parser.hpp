@@ -175,6 +175,8 @@ struct GoldSrcBspParsedDocument {
     // counts, while the texture lump reports its directory entry count.
     std::array<std::size_t, kGoldSrcBspLumpCount> lump_element_counts{};
     GoldSrcBspGeometryStatistics geometry_statistics{};
+    // Canonical directory metadata, including alternate textures without faces.
+    std::vector<assets::WorldMaterialReference> texture_directory;
 };
 
 struct GoldSrcBspParseResult {

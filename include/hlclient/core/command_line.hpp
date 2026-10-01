@@ -71,6 +71,10 @@ enum class LiveInputMode {
     scripted_side_check,
     scripted_jump_duck_check,
     scripted_speed_check,
+    scripted_weapon_check,
+    scripted_fire_reload_check,
+    scripted_fire_reload_presentation_check,
+    scripted_damage_respawn_check,
 };
 
 enum class ResourceConsistencyProviderKind {
@@ -92,6 +96,9 @@ struct CommandLineOptions {
     bool show_help{false};
     bool show_version{false};
     bool net_trace{false};
+    unsigned audio_volume{35}; // application percent; zero is mute
+    bool audio_on_focus_loss{false}; // explicit manual listener, default unchanged
+    bool mute_glock_fire_sound{false}; // manual audio-isolation diagnostic, not gameplay
     bool view_world{false};
     bool view_entity_snapshot{false};
     std::optional<RuntimeReplayFixtureOption> runtime_replay_fixture;
@@ -106,7 +113,9 @@ struct CommandLineOptions {
     ConnectionStopPoint stop_after{ConnectionStopPoint::challenge};
     std::optional<LiveInputMode> live_input;
     bool reference_prediction{false};
+    bool test_start_health{false}; // owned-server manual harness; never a health override
     std::optional<std::size_t> live_session_seconds;
+    bool live_session_unlimited{false}; // explicit user-ended keyboard session
     std::optional<AuthenticationProviderKind> authentication_provider;
     std::optional<std::string> authentication_material_file;
     std::optional<std::string> steam_api_runtime;

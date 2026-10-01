@@ -1782,11 +1782,27 @@ bool GoldSrcHandshakeCoordinator::activate_live_visual_control(
     return live_runtime_stage_ &&
         live_runtime_stage_->activate_live_visual_control(now);
 }
+
+bool GoldSrcHandshakeCoordinator::request_weapon_selection(
+    const std::uint8_t weapon_id) {
+    return live_runtime_stage_ &&
+        live_runtime_stage_->request_weapon_selection(weapon_id);
+}
 std::optional<LiveUserCmdCheckState>
 GoldSrcHandshakeCoordinator::live_usercmd_snapshot() const
 {
     return live_runtime_stage_ ? live_runtime_stage_->live_usercmd_snapshot()
                                : std::nullopt;
+}
+std::size_t GoldSrcHandshakeCoordinator::live_use_new_submission_count() const noexcept {
+    return live_runtime_stage_ ? live_runtime_stage_->live_use_new_submission_count() : 0U;
+}
+std::optional<LiveWeaponCommandSubmission>
+GoldSrcHandshakeCoordinator::poll_weapon_command_submission()
+{
+    return live_runtime_stage_
+        ? live_runtime_stage_->poll_weapon_command_submission()
+        : std::nullopt;
 }
 bool GoldSrcHandshakeCoordinator::attach_reference_prediction_collision(
     std::shared_ptr<const hlclient::collision::CollisionWorldPackage> package)
@@ -1794,6 +1810,12 @@ bool GoldSrcHandshakeCoordinator::attach_reference_prediction_collision(
     return live_runtime_stage_ &&
         live_runtime_stage_->attach_reference_prediction_collision(
             std::move(package));
+}
+bool GoldSrcHandshakeCoordinator::attach_reference_prediction_surfaces(
+    std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> package)
+{
+    return live_runtime_stage_ &&
+        live_runtime_stage_->attach_reference_prediction_surfaces(std::move(package));
 }
 LiveReferencePredictionSnapshot
 GoldSrcHandshakeCoordinator::live_reference_prediction_snapshot(

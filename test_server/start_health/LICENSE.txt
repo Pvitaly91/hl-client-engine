@@ -1,0 +1,11 @@
+The project-owned files in this directory are licensed under the GNU General
+Public License, version 2 or (at your option) any later version. The complete
+license is provided by the pinned Metamod source dependency (GPL.txt)
+and is available at https://www.gnu.org/licenses/old-licenses/gpl-2.0.html.
+
+As an additional permission, these files may be linked with the Half-Life Game
+Engine and Modified Game Libraries developed by Valve, LLC. All other code
+remains subject to the GPL. This is the HL Engine/MOD exception used by Metamod.
+Fetched Metamod and HLSDK headers retain their upstream notices and licenses.
+This test addon is separate from the engine and client libraries and does not
+change their license or their dependency graph.

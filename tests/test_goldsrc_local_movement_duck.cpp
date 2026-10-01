@@ -1,4 +1,5 @@
 #include "local_movement_test_fixture.hpp"
+#include <hlclient/goldsrc/reference_prediction_command.hpp>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -58,6 +59,49 @@ TEST_CASE("A low ceiling keeps a grounded player ducked without failing",
     CHECK(result.state->view_offset().z == movement::kValveDuckViewOffsetZ);
     CHECK(result.statistics.stand_blocked_count == 1U);
     CHECK(result.statistics.duck_exit_count == 0U);
+}
+
+TEST_CASE("Reference crouch walking survives a blocked stand attempt",
+    "[goldsrc][movement][kernel][duck][reference-actions][clearance]")
+{
+    fixture::DeterministicLocalMovementCollision low_ceiling;
+    low_ceiling.add_ceiling(50.0F);
+    auto info = player::local_player_movement_state_create_info(
+        fixture::make_state({0.0F, 0.0F, 18.0F}, {},
+            player::PlayerMovementMode::walking,
+            player::PlayerMovementHull::ducked, 1U,
+            goldsrc::kSyntheticGoldSrcButtonDuck));
+    info.command_profile = player::GoldSrcMovementCommandProfile::
+        reference_wire_jump_duck_v2;
+    info.compatibility_profile = player::GoldSrcMovementCompatibilityProfile::
+        public_valve_pm_shared_dry_actions_subset_v2;
+    info.duck_time_milliseconds = 560U;
+    const auto initial = player::LocalPlayerMovementState::create(info);
+    REQUIRE(initial);
+    goldsrc::GoldSrcWireUserCmd wire;
+    wire.msec = 20U;
+    wire.forward = 400;
+    const auto release = goldsrc::reference_jump_duck_movement_command(
+        *goldsrc::GoldSrcUserCmdSequence::create(2U), wire);
+    REQUIRE(release);
+    movement::GoldSrcLocalMovementScratch scratch;
+    const auto blocked = movement::GoldSrcLocalMovementKernel::simulate(
+        *initial.state, *release.state, fixture::make_environment(),
+        low_ceiling, scratch);
+    REQUIRE(blocked);
+    CHECK(blocked.state->hull() == player::PlayerMovementHull::ducked);
+    CHECK(blocked.statistics.stand_blocked_count == 1U);
+    CHECK(blocked.state->origin().x > initial.state->origin().x);
+    fixture::DeterministicLocalMovementCollision open_space;
+    const auto next = goldsrc::reference_jump_duck_movement_command(
+        *goldsrc::GoldSrcUserCmdSequence::create(3U), wire);
+    REQUIRE(next);
+    const auto stood = movement::GoldSrcLocalMovementKernel::simulate(
+        *blocked.state, *next.state, fixture::make_environment(),
+        open_space, scratch);
+    REQUIRE(stood);
+    CHECK(stood.state->hull() == player::PlayerMovementHull::standing);
+    CHECK(stood.state->duck_time_milliseconds() == 0U);
 }
 
 TEST_CASE("Airborne duck changes hull around the same center",

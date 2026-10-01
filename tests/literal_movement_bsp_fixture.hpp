@@ -293,10 +293,13 @@ struct ConvexVolume {
     return fallback;
 }
 
-[[nodiscard]] inline std::vector<std::byte> make_bsp_v30()
+[[nodiscard]] inline std::vector<std::byte> make_bsp_v30(const float step_height = kValidStepHeight)
 {
     auto point_volumes = authored_volumes(true);
     auto clip_volumes = authored_volumes(false);
+    point_volumes[6] = box({kValidStepMinimumX,kValidStepMinimumY,kFloorZ},
+        {kValidStepMaximumX,kValidStepMaximumY,step_height});
+    clip_volumes[6] = point_volumes[6];
     // Plane zero belongs to SyntheticBspBuilder's retained Z=0 render quad.
     std::vector<SyntheticBspPlane> planes{
         SyntheticBspPlane{{0.0F, 0.0F, 1.0F}, 0.0F, 2}};
@@ -332,6 +335,77 @@ struct ConvexVolume {
         .set_clipnodes(clipnodes)
         .set_models(std::span{&model, 1U})
         .build();
+}
+
+// Independent infinite slope and three compiled hulls for D4 analytic rules.
+[[nodiscard]] inline std::vector<std::byte> make_slope_bsp_v30(float slope)
+{
+    const std::vector<ConvexVolume> volumes{{{normalized_halfspace({-slope,0,1},0,false)},-2}};
+    std::vector<SyntheticBspPlane> planes{{{0,0,1},0,2}};
+    std::vector<SyntheticBspNode> nodes;
+    std::vector<SyntheticBspClipnode> clips;
+    SyntheticBspModel model;
+    model.minimum={-192,-192,-128}; model.maximum={192,192,128};
+    model.headnodes={compile_point_tree(volumes,planes,nodes),
+        compile_clip_tree(volumes,{16,16,36},planes,clips),-1,
+        compile_clip_tree(volumes,{16,16,18},planes,clips)};
+    model.face_count=1; model.visibility_leaf_count=1;
+    const std::array leaves{
+        SyntheticBspLeaf{-1,-1,{-192,-192,-128},{192,192,128},0,0,{}},
+        SyntheticBspLeaf{-2,-1,{-192,-192,-128},{192,192,128},0,0,{}}};
+    return SyntheticBspBuilder{}.set_planes(planes).set_nodes(nodes).set_clipnodes(clips)
+        .set_leaves(leaves).set_models(std::span{&model,1U}).build();
+}
+
+// Two collision slopes meeting at a convex seam. One convex solid keeps the
+// expanded player hull continuous across that seam; the authored render quad
+// remains deliberately unrelated to both collision faces.
+[[nodiscard]] inline std::vector<std::byte> make_seamed_slope_bsp_v30(
+    float left_slope, float right_slope)
+{
+    const std::vector<ConvexVolume> volumes{{{
+        normalized_halfspace({-left_slope,0,1},0,false),
+        normalized_halfspace({-right_slope,0,1},0,false)},-2}};
+    std::vector<SyntheticBspPlane> planes{{{0,0,1},0,2}};
+    std::vector<SyntheticBspNode> nodes;
+    std::vector<SyntheticBspClipnode> clips;
+    SyntheticBspModel model;
+    model.minimum={-192,-192,-128}; model.maximum={192,192,128};
+    model.headnodes={compile_point_tree(volumes,planes,nodes),
+        compile_clip_tree(volumes,{16,16,36},planes,clips),-1,
+        compile_clip_tree(volumes,{16,16,18},planes,clips)};
+    model.face_count=1; model.visibility_leaf_count=1;
+    const std::array leaves{
+        SyntheticBspLeaf{-1,-1,{-192,-192,-128},{192,192,128},0,0,{}},
+        SyntheticBspLeaf{-2,-1,{-192,-192,-128},{192,192,128},0,0,{}}};
+    return SyntheticBspBuilder{}.set_planes(planes).set_nodes(nodes).set_clipnodes(clips)
+        .set_leaves(leaves).set_models(std::span{&model,1U}).build();
+}
+
+// Two adjacent convex solids are needed for a concave valley: an intersection
+// of half-spaces would make a crest instead. The x split is a collision-volume
+// boundary, not a render triangle or a client-only movement hint.
+[[nodiscard]] inline std::vector<std::byte> make_valley_bsp_v30()
+{
+    const std::vector<ConvexVolume> volumes{
+        ConvexVolume{{normalized_halfspace({1,0,0},0,false),
+                      normalized_halfspace({0.5F,0,1},0,false)},-2},
+        ConvexVolume{{normalized_halfspace({-1,0,0},0,false),
+                      normalized_halfspace({-0.5F,0,1},0,false)},-2}};
+    std::vector<SyntheticBspPlane> planes{{{0,0,1},0,2}};
+    std::vector<SyntheticBspNode> nodes;
+    std::vector<SyntheticBspClipnode> clips;
+    SyntheticBspModel model;
+    model.minimum={-192,-192,-128}; model.maximum={192,192,128};
+    model.headnodes={compile_point_tree(volumes,planes,nodes),
+        compile_clip_tree(volumes,{16,16,36},planes,clips),-1,
+        compile_clip_tree(volumes,{16,16,18},planes,clips)};
+    model.face_count=1; model.visibility_leaf_count=1;
+    const std::array leaves{
+        SyntheticBspLeaf{-1,-1,{-192,-192,-128},{192,192,128},0,0,{}},
+        SyntheticBspLeaf{-2,-1,{-192,-192,-128},{192,192,128},0,0,{}}};
+    return SyntheticBspBuilder{}.set_planes(planes).set_nodes(nodes).set_clipnodes(clips)
+        .set_leaves(leaves).set_models(std::span{&model,1U}).build();
 }
 
 } // namespace hlclient::tests::literal_movement_bsp

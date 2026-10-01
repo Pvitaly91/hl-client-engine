@@ -1,16 +1,96 @@
 #include <hlclient/app/live_visual_control.hpp>
+#include <hlclient/app/test_start_health_gate.hpp>
+#include <catch2/catch_test_macros.hpp>
+
+TEST_CASE("Optional start health waits for fresh committed server health without writing state", "[live-visual][test-start-health]") {
+  hlclient::app::TestStartHealthGate gate(true);
+  CHECK_FALSE(gate.ready());
+  gate.observe(50, false, 1); CHECK_FALSE(gate.ready());
+  gate.observe(std::nullopt, true, 2); CHECK_FALSE(gate.ready());
+  gate.observe(100, true, 3); CHECK_FALSE(gate.ready()); CHECK(gate.expired(15));
+  gate.observe(50, true, 3); CHECK_FALSE(gate.ready());
+  gate.observe(50, true, 4); CHECK(gate.ready()); CHECK_FALSE(gate.expired(30));
+  gate.observe(100, true, 5); CHECK(gate.ready());
+  CHECK(hlclient::app::TestStartHealthGate(false).ready());
+}
+
+TEST_CASE("Manual completion is independent of scripted prediction coverage and preserves real errors",
+          "[live-visual][manual-outcome][game-module]") {
+  const auto healthy = hlclient::app::evaluate_live_visual_session(
+      true, true, false, false, false, true, "");
+  CHECK(healthy.exit_code == 0);
+  CHECK(healthy.application_result == "completed");
+  CHECK(healthy.primary_error == "none");
+  CHECK(healthy.scripted_coverage == "not_evaluated");
+  CHECK(healthy.prediction_coverage == "limited");
+  const auto failed = hlclient::app::evaluate_live_visual_session(
+      true, true, true, false, false, true, "runtime_record_failed");
+  CHECK(failed.exit_code == 2);
+  CHECK(failed.application_result == "error");
+  CHECK(failed.primary_error == "runtime_record_failed");
+  CHECK(failed.prediction_coverage == "limited");
+  CHECK(hlclient::app::evaluate_live_visual_session(
+      true, false, false, false, false, false, "").exit_code == 2);
+  CHECK(hlclient::app::evaluate_live_visual_session(
+      false, true, false, false, false, true, "").application_result == "completed");
+}
+#include <hlclient/games/halflife/presentation.hpp>
 #include <hlclient/goldsrc/live_runtime_stage.hpp>
 #include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
 #include <hlclient/input/input_state_tracker.hpp>
 #include <hlclient/goldsrc/usercmd_scheduler.hpp>
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <array>
 #include <stdexcept>
 #include <vector>
 
+TEST_CASE("Production live owner latches first owning cause across secondary teardown errors",
+          "[runtime-diagnostics][live-visual][game-module]") {
+    namespace goldsrc = hlclient::goldsrc;
+    goldsrc::LiveRuntimeStageError live;
+    live.code = goldsrc::LiveRuntimeStageErrorCode::runtime_record_failed;
+    goldsrc::RuntimeReplayError first;
+    first.code = goldsrc::RuntimeReplayErrorCode::decoder_failed;
+    first.record_ordinal = 3U; first.source_sequence = 92U;
+    first.attempted_records = 3U; first.committed_records = 2U;
+    first.control_error.emplace();
+    first.control_error->code = goldsrc::RuntimeControlDecodeErrorCode::unsupported_opcode;
+    const auto summary = goldsrc::runtime_failure_summary(first);
+    live.retain_runtime_failure(std::move(first));
+    goldsrc::RuntimeReplayError secondary;
+    secondary.code = goldsrc::RuntimeReplayErrorCode::session_finished;
+    live.retain_runtime_failure(std::move(secondary));
+    REQUIRE(live.runtime_failure);
+    CHECK(goldsrc::runtime_failure_summary(*live.runtime_failure) == summary);
+    CHECK(live.runtime_record_ordinal == 3U);
+    CHECK(live.runtime_source_sequence == 92U);
+    live.code = goldsrc::LiveRuntimeStageErrorCode::driver_failed;
+    live.runtime_failure.reset();
+    live.retain_runtime_failure({});
+    CHECK_FALSE(live.runtime_failure); // an unrelated primary error is not relabeled
+}
+
 namespace {
+
+// Existing Half-Life behavior expectations exercise the same geometric camera
+// with an explicit game-produced policy; the fixture adds no policy of its own.
+class HalfLifeCameraFixture final {
+public:
+  hlclient::app::LiveVisualCameraUpdate update(
+      const hlclient::client::RuntimeClientObservationState* observation,
+      const hlclient::gameplay_input::GameplayInputIntent& intent,
+      hlclient::client::ClientWorldState& world, bool apply = true,
+      std::optional<hlclient::app::LiveVisualPredictedView> predicted = {}, double punch = 0.0) {
+    return controller_.update(observation,intent,world,
+        observation ? presentation_.camera(*observation,punch) : hlclient::game_api::CameraIntent{},
+        apply,predicted);
+  }
+  double yaw_degrees() const noexcept { return controller_.yaw_degrees(); }
+  double pitch_degrees() const noexcept { return controller_.pitch_degrees(); }
+private:
+  hlclient::app::LiveVisualCameraController controller_;
+  hlclient::games::halflife::HalfLifePresentation presentation_;
+};
 
 hlclient::gameplay_input::GameplayInputIntent intent(
     const std::uint64_t frames, const bool captured = true,
@@ -77,6 +157,33 @@ hlclient::client::RuntimeClientObservationState observation(
 
 } // namespace
 
+TEST_CASE("C dead camera uses exact server eye, ignores old prediction and restores new-life view",
+          "[damage-respawn][live-visual]") {
+  using namespace hlclient;
+  HalfLifeCameraFixture controller;
+  client::ClientWorldState world;
+  auto dead = observation();
+  dead.receiving_client->health = 0;
+  dead.receiving_client->view_offset.z = 0;
+  dead.lifecycle.state = client::LocalPlayerLifeState::dead;
+  dead.lifecycle.life_epoch = 1;
+  const app::LiveVisualPredictedView stale{{999,999,999},{0,0,28}};
+  auto view = controller.update(&dead,intent(1),world,false,stale);
+  REQUIRE(view);
+  CHECK(view.sample->eye_position.x == 10);
+  CHECK(view.sample->eye_position.y == 20);
+  CHECK(view.sample->eye_position.z == 30);
+  auto alive = observation(2);
+  alive.receiving_client->origin = {500,600,70};
+  alive.lifecycle.state = client::LocalPlayerLifeState::alive;
+  alive.lifecycle.life_epoch = 2;
+  view = controller.update(&alive,intent(2),world);
+  REQUIRE(view);
+  CHECK(view.sample->eye_position.x == 500);
+  CHECK(view.sample->eye_position.y == 600);
+  CHECK(view.sample->eye_position.z == 98);
+}
+
 TEST_CASE("Live visual input waits for one presented retained world frame") {
   using hlclient::app::live_visual_render_ready_for_input;
   CHECK_FALSE(live_visual_render_ready_for_input(0U, 1U, 1U));
@@ -140,9 +247,31 @@ TEST_CASE("Live visual scheduler begins at fresh post-presentation time") {
   CHECK(stalled.requests.empty());
 }
 
+TEST_CASE("Local event punch changes only presentation, not mouse base, input or canonical state",
+          "[weapon-presentation][live-visual][weapon-recoil]") {
+  HalfLifeCameraFixture controller;
+  hlclient::client::ClientWorldState world;
+  auto state = observation();
+  const auto canonical = state;
+  const auto look = intent(1U,true,10,5);
+  REQUIRE(controller.update(&state,look,world));
+  const auto yaw = controller.yaw_degrees();
+  const auto pitch = controller.pitch_degrees();
+  const auto baseline = world.camera().target;
+  const auto input_pitch = look.look_delta_pitch_degrees();
+  const auto next_frame = intent(2U,true,10,5);
+  REQUIRE(controller.update(&state,next_frame,world,false,{},-2.0));
+  CHECK(world.camera().target.z > baseline.z);
+  CHECK(controller.yaw_degrees() == yaw);
+  CHECK(controller.pitch_degrees() == pitch);
+  CHECK(look.look_delta_pitch_degrees() == input_pitch);
+  CHECK(next_frame.look_delta_pitch_degrees() == input_pitch);
+  CHECK(state == canonical);
+}
+
 TEST_CASE(
     "Live visual camera uses receiving-client eye and local mouse orientation") {
-  hlclient::app::LiveVisualCameraController controller;
+  HalfLifeCameraFixture controller;
   hlclient::client::ClientWorldState world;
   auto state = observation();
 
@@ -202,9 +331,31 @@ TEST_CASE(
   CHECK_FALSE(reused.sample->fresh_server_sample);
 }
 
+TEST_CASE("Server punch moves only presented camera, not local look or wire angles",
+          "[live-visual][weapon-recoil]") {
+  HalfLifeCameraFixture controller;
+  hlclient::client::ClientWorldState world;
+  auto state = observation();
+  const auto baseline = controller.update(&state, intent(1U), world);
+  REQUIRE(baseline);
+  CHECK_FALSE(baseline.sample->server_punch_angle);
+  const auto baseline_target = world.camera().target;
+  const auto canonical_before = state.canonical_state_hash;
+  state.receiving_client->punch_angle = {{4.0}, {2.0}, {0.0}};
+  const auto recoiled = controller.update(&state, intent(2U), world);
+  REQUIRE(recoiled);
+  REQUIRE(recoiled.sample->server_punch_angle);
+  CHECK(recoiled.sample->server_punch_angle->x == 4.0F);
+  CHECK(world.camera().target.z < baseline_target.z);
+  CHECK(world.camera().target.y > baseline_target.y);
+  CHECK(controller.pitch_degrees() == 0.0);
+  CHECK(controller.yaw_degrees() == 0.0);
+  CHECK(state.canonical_state_hash == canonical_before);
+}
+
 TEST_CASE(
     "Live visual camera rejects stale generation dead and incomplete views") {
-  hlclient::app::LiveVisualCameraController controller;
+  HalfLifeCameraFixture controller;
   hlclient::client::ClientWorldState world;
   auto state = observation();
   state.client_metadata.generation = 2U;
@@ -222,8 +373,9 @@ TEST_CASE(
         hlclient::app::LiveVisualViewStatus::view_offset_unavailable);
 }
 
-TEST_CASE("Live visual camera applies each typed server angle correction once") {
-  hlclient::app::LiveVisualCameraController controller;
+TEST_CASE("Live visual camera applies each typed server angle correction once",
+          "[pitch-boundary][live-visual]") {
+  HalfLifeCameraFixture controller;
   hlclient::client::ClientWorldState world;
   auto state = observation();
   state.view_angle_correction = hlclient::client::RuntimeViewAngleCorrection{
@@ -236,7 +388,8 @@ TEST_CASE("Live visual camera applies each typed server angle correction once") 
   REQUIRE(corrected);
   REQUIRE(corrected.sample);
   CHECK(corrected.sample->server_angle_correction_applied);
-  CHECK(corrected.sample->local_pitch_degrees == 12.0);
+  CHECK(corrected.sample->local_pitch_degrees == -12.0);
+  CHECK(world.camera().target.z < world.camera().position.z);
   CHECK(corrected.sample->local_yaw_degrees == 34.0);
 
   const auto continued =
@@ -245,6 +398,30 @@ TEST_CASE("Live visual camera applies each typed server angle correction once") 
   REQUIRE(continued.sample);
   CHECK_FALSE(continued.sample->server_angle_correction_applied);
   CHECK(continued.sample->local_yaw_degrees != 34.0);
+}
+
+TEST_CASE("Server angle turns are normalized before conversion to geometric camera pitch",
+          "[pitch-boundary][live-visual]") {
+  for (const double server_pitch : {10.0, 350.0, -10.0, 0.0}) {
+    CAPTURE(server_pitch);
+    HalfLifeCameraFixture controller;
+    hlclient::client::ClientWorldState world;
+    auto state = observation();
+    state.view_angle_correction = hlclient::client::RuntimeViewAngleCorrection{
+        server_pitch, 90.0, 0.0, *state.client_metadata.source};
+    state.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(state);
+    const auto hash = state.canonical_state_hash;
+    const double expected = server_pitch == 10.0 ? -10.0 : server_pitch == 0.0 ? 0.0 : 10.0;
+    const auto first = controller.update(&state, intent(1U), world);
+    REQUIRE(first);
+    CHECK(controller.pitch_degrees() == expected);
+    CHECK(state.view_angle_correction->pitch_degrees == server_pitch);
+    CHECK(state.canonical_state_hash == hash);
+    const auto again = controller.update(&state, intent(2U), world);
+    REQUIRE(again);
+    CHECK_FALSE(again.sample->server_angle_correction_applied);
+    CHECK(controller.pitch_degrees() == expected);
+  }
 }
 
 TEST_CASE("G server evaluator requires fresh origin velocity and view offset",

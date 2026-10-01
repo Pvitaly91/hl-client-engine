@@ -171,6 +171,9 @@ TEST_CASE("Light offsets use explicit signed little-endian semantics",
     fixture::SyntheticBspBuilder builder;
     builder.lump(fixture::SyntheticBspLumpId::lighting) = {std::byte{0x11}};
     auto face = fixture::SyntheticBspFace{};
+    // An active style requires an in-range sample cursor. Zero-style end
+    // cursors are independently covered by the compatibility regression.
+    face.light_styles = {0U, 255U, 255U, 255U};
     face.light_offset = 0;
     builder.set_faces(std::span{&face, 1U});
     const auto result = bsp::GoldSrcBspParser::parse(builder.build());

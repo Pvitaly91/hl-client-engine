@@ -50,6 +50,16 @@ namespace {
         return input::PhysicalKey::f1;
     case SDL_SCANCODE_F2:
         return input::PhysicalKey::f2;
+    case SDL_SCANCODE_1:
+        return input::PhysicalKey::digit_1;
+    case SDL_SCANCODE_2:
+        return input::PhysicalKey::digit_2;
+    case SDL_SCANCODE_3:
+        return input::PhysicalKey::digit_3;
+    case SDL_SCANCODE_4:
+        return input::PhysicalKey::digit_4;
+    case SDL_SCANCODE_5:
+        return input::PhysicalKey::digit_5;
     default:
         return std::nullopt;
     }

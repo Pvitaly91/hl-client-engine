@@ -23,6 +23,9 @@ include(CheckCXXCompilerFlag)
 include(cmake/CompilerWarnings.cmake)
 include(cmake/Dependencies.cmake)
 
+option(HLCLIENT_BUILD_GAME_HALFLIFE
+    "Build the concrete Half-Life client module in the normal application" ON)
+
 option(
     HLCLIENT_ENABLE_ADDRESS_SANITIZER
     "Enable MSVC AddressSanitizer for movement/collision diagnostics"
@@ -262,8 +265,18 @@ add_library(hlclient::asset_api ALIAS hlclient_asset_api)
 target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
 set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
 
+hlclient_add_library(hlclient_audio
+    include/hlclient/assets/wav_importer.hpp src/assets/wav_importer.cpp
+    include/hlclient/audio/mixer.hpp include/hlclient/audio/output.hpp src/audio/mixer.cpp)
+add_library(hlclient::audio ALIAS hlclient_audio)
+target_link_libraries(hlclient_audio PUBLIC hlclient::asset_api)
+hlclient_add_library(hlclient_audio_sdl src/audio/sdl_playback.cpp)
+add_library(hlclient::audio_sdl ALIAS hlclient_audio_sdl)
+target_link_libraries(hlclient_audio_sdl PUBLIC hlclient::audio PRIVATE SDL3::SDL3-shared)
+
 hlclient_add_library(
     hlclient_collision_api
+    include/hlclient/collision/collision_query_limits.hpp
     include/hlclient/collision/collision_contents.hpp
     include/hlclient/collision/collision_world_package.hpp
     include/hlclient/collision/collision_world_query.hpp
@@ -434,7 +447,7 @@ target_link_libraries(
     PUBLIC hlclient::goldsrc_bsp
     PRIVATE
         hlclient::goldsrc_studio_model
-        hlclient::goldsrc_sprite)
+        hlclient::goldsrc_sprite hlclient::audio)
 set_property(
     TARGET hlclient_goldsrc_builtin_importers
     PROPERTY FOLDER "Engine/Resources/GoldSrc")
@@ -669,8 +682,17 @@ set_property(
     PROPERTY FOLDER "Engine/Protocol/GoldSrc/Movement")
 
 hlclient_add_library(
-    hlclient_goldsrc_signon
+    hlclient_goldsrc_client_message
     include/hlclient/goldsrc/client_message.hpp
+    src/goldsrc/client_message.cpp)
+add_library(hlclient::goldsrc_client_message ALIAS hlclient_goldsrc_client_message)
+target_link_libraries(hlclient_goldsrc_client_message
+    PUBLIC hlclient::game_api PRIVATE hlclient::core)
+set_property(TARGET hlclient_goldsrc_client_message
+    PROPERTY FOLDER "Engine/Protocol/GoldSrc")
+
+hlclient_add_library(
+    hlclient_goldsrc_signon
     include/hlclient/goldsrc/delta_description_stage.hpp
     include/hlclient/goldsrc/initial_signon_stage.hpp
     include/hlclient/goldsrc/movement_environment_stage.hpp
@@ -688,7 +710,6 @@ hlclient_add_library(
     include/hlclient/goldsrc/service_payload_envelope.hpp
     include/hlclient/goldsrc/user_info_signon_stage.hpp
     include/hlclient/goldsrc/user_info_update.hpp
-    src/goldsrc/client_message.cpp
     src/goldsrc/delta_description_stage.cpp
     src/goldsrc/delta_description_stream.cpp
     src/goldsrc/initial_signon_stage.cpp
@@ -712,6 +733,7 @@ add_library(hlclient::goldsrc_signon ALIAS hlclient_goldsrc_signon)
 target_link_libraries(
     hlclient_goldsrc_signon
     PUBLIC
+        hlclient::goldsrc_client_message
         hlclient::goldsrc
         hlclient::goldsrc_delta_schema
         hlclient::goldsrc_move_vars_api
@@ -741,6 +763,7 @@ set_property(
 
 hlclient_add_library(
     hlclient_goldsrc_usercmd_api
+    include/hlclient/goldsrc/usercmd_movement_policy.hpp
     include/hlclient/goldsrc/usercmd_duration.hpp
     include/hlclient/goldsrc/usercmd_state.hpp
     src/goldsrc/usercmd_duration.cpp
@@ -1428,7 +1451,7 @@ add_library(
 target_link_libraries(
     hlclient_entity_interpolation
     PUBLIC hlclient::entity_visual_projection
-    PRIVATE hlclient::core)
+    PRIVATE hlclient::core hlclient::client)
 set_property(
     TARGET hlclient_entity_interpolation
     PROPERTY FOLDER "Engine/Client/Entities")
@@ -1638,19 +1661,57 @@ target_link_libraries(
     hlclient_client PRIVATE hlclient::core hlclient::world_render_api)
 set_property(TARGET hlclient_client PROPERTY FOLDER "Engine/Client")
 
+add_library(hlclient_game_api INTERFACE)
+add_library(hlclient::game_api ALIAS hlclient_game_api)
+target_include_directories(hlclient_game_api INTERFACE "${PROJECT_SOURCE_DIR}/include")
+target_sources(hlclient_game_api INTERFACE
+    include/hlclient/game_api/game_client_module.hpp
+    include/hlclient/game_api/movement_policy.hpp
+    include/hlclient/game_api/presentation.hpp
+    include/hlclient/game_api/action_evidence.hpp
+    include/hlclient/game_api/scenario.hpp)
+target_sources(hlclient_game_api INTERFACE include/hlclient/game_api/remote_player.hpp)
+target_sources(hlclient_game_api INTERFACE include/hlclient/game_api/remote_effects.hpp)
+set_property(TARGET hlclient_game_api PROPERTY FOLDER "Engine/Game API")
+
+hlclient_add_library(hlclient_game_policy
+    src/game_api/movement_policy.cpp)
+add_library(hlclient::game_policy ALIAS hlclient_game_policy)
+target_link_libraries(hlclient_game_policy
+    PUBLIC hlclient::game_api
+    PRIVATE hlclient::gameplay_input hlclient::goldsrc_local_movement)
+
+hlclient_add_library(hlclient_game_client_host
+    include/hlclient/game_api/game_client_host.hpp
+    src/game_api/game_client_host.cpp)
+add_library(hlclient::game_client_host ALIAS hlclient_game_client_host)
+target_link_libraries(hlclient_game_client_host PUBLIC hlclient::game_api)
+
 hlclient_add_library(
     hlclient_renderer_api
     include/hlclient/renderer/render_camera_math.hpp
     include/hlclient/renderer/render_scene.hpp
+    include/hlclient/renderer/transient_visuals.hpp
     include/hlclient/renderer/renderer.hpp
     src/renderer/render_camera_math.cpp
+    src/renderer/transient_visuals.cpp
     src/renderer/renderer.cpp
 )
 add_library(hlclient::renderer_api ALIAS hlclient_renderer_api)
 target_link_libraries(
-    hlclient_renderer_api PRIVATE hlclient::core hlclient::world_render_api)
+    hlclient_renderer_api PRIVATE hlclient::core hlclient::world_render_api hlclient::collision_api)
 set_property(TARGET hlclient_renderer_api PROPERTY FOLDER "Engine/Renderer")
 target_link_libraries(hlclient_client PRIVATE hlclient::renderer_api)
+
+hlclient_add_library(hlclient_goldsrc_audio
+    include/hlclient/goldsrc/local_audio.hpp src/goldsrc/local_audio.cpp
+    include/hlclient/goldsrc/server_audio.hpp src/goldsrc/server_audio.cpp)
+add_library(hlclient::goldsrc_audio ALIAS hlclient_goldsrc_audio)
+target_link_libraries(hlclient_goldsrc_audio PUBLIC hlclient::goldsrc_stock_runtime hlclient::audio hlclient::game_api)
+hlclient_add_library(hlclient_goldsrc_sound_assets
+    include/hlclient/goldsrc/sound_assets.hpp src/goldsrc/sound_assets.cpp)
+add_library(hlclient::goldsrc_sound_assets ALIAS hlclient_goldsrc_sound_assets)
+target_link_libraries(hlclient_goldsrc_sound_assets PUBLIC hlclient::goldsrc_audio hlclient::goldsrc_asset_dispatch)
 
 hlclient_add_library(
     hlclient_goldsrc_runtime_replay
@@ -1666,8 +1727,8 @@ target_link_libraries(
     hlclient_goldsrc_runtime_replay
     PUBLIC
         hlclient::client
-        hlclient::goldsrc_packet_entity_decoder
-    PRIVATE hlclient::core)
+        hlclient::goldsrc_packet_entity_decoder hlclient::goldsrc_audio
+    PRIVATE hlclient::core hlclient::game_client_host)
 set_property(
     TARGET hlclient_goldsrc_runtime_replay
     PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Replay")
@@ -1676,6 +1737,8 @@ hlclient_add_library(
     hlclient_goldsrc_live_runtime
     include/hlclient/goldsrc/live_runtime_stage.hpp
     src/goldsrc/live_runtime_stage.cpp
+    include/hlclient/goldsrc/surface_texture_query.hpp
+    src/goldsrc/surface_texture_query.cpp
 )
 add_library(
     hlclient::goldsrc_live_runtime ALIAS hlclient_goldsrc_live_runtime)
@@ -1689,6 +1752,8 @@ target_link_libraries(
     PRIVATE hlclient::core)
 target_link_libraries(
     hlclient_goldsrc_client PUBLIC hlclient::goldsrc_live_runtime)
+target_link_libraries(hlclient_goldsrc_live_runtime
+    PUBLIC hlclient::game_client_host PRIVATE hlclient::game_policy)
 set_property(
     TARGET hlclient_goldsrc_live_runtime
     PROPERTY FOLDER "Engine/Network/GoldSrc/Runtime Live")
@@ -1805,6 +1870,8 @@ hlclient_add_library(
     src/goldsrc/usercmd_transmission_stage.cpp
     src/goldsrc/reference_prediction_anchor.cpp
     src/goldsrc/reference_prediction_seed.cpp
+    src/goldsrc/reference_brush_collision.cpp
+    include/hlclient/goldsrc/reference_brush_collision.hpp
     src/goldsrc/reference_prediction_command.cpp
     src/goldsrc/reference_prediction_reconciliation.cpp
 )
@@ -1862,6 +1929,7 @@ set_property(
 
 hlclient_add_library(
     hlclient_goldsrc_collision_scene
+    include/hlclient/goldsrc/collision/brush_collision_scene_limits.hpp
     include/hlclient/goldsrc/collision/goldsrc_brush_collision_scene.hpp
     src/goldsrc/collision/goldsrc_brush_collision_scene.cpp
 )
@@ -1880,6 +1948,9 @@ set_property(
 
 hlclient_add_library(
     hlclient_goldsrc_local_movement
+    include/hlclient/goldsrc/movement/goldsrc_movement_config.hpp
+    include/hlclient/goldsrc/movement/goldsrc_movement_profile.hpp
+    include/hlclient/goldsrc/movement/local_movement_query_config.hpp
     include/hlclient/goldsrc/movement/goldsrc_local_movement.hpp
     include/hlclient/goldsrc/movement/goldsrc_movement_environment.hpp
     include/hlclient/goldsrc/movement/goldsrc_movement_math.hpp
@@ -1895,7 +1966,8 @@ add_library(
     hlclient_goldsrc_local_movement)
 target_link_libraries(
     hlclient_goldsrc_usercmd_session
-    PUBLIC hlclient::goldsrc_local_movement)
+    PUBLIC hlclient::goldsrc_local_movement
+    PRIVATE hlclient::goldsrc_brush_models)
 target_link_libraries(
     hlclient_goldsrc_local_movement
     PUBLIC
@@ -1964,6 +2036,9 @@ target_link_libraries(
         hlclient::gameplay_camera
         hlclient::prediction_api
     PRIVATE hlclient::core)
+target_link_libraries(
+    hlclient_goldsrc_live_runtime
+    PRIVATE hlclient::prediction_visual)
 set_property(
     TARGET hlclient_prediction_visual
     PROPERTY FOLDER "Engine/Renderer/Prediction")
@@ -2032,6 +2107,8 @@ hlclient_add_library(
 )
 add_library(
     hlclient::world_scene_render ALIAS hlclient_world_scene_renderer)
+target_link_libraries(hlclient_goldsrc_live_runtime
+    PRIVATE hlclient::world_scene_render)
 target_link_libraries(
     hlclient_world_scene_renderer
     PUBLIC
@@ -2144,6 +2221,10 @@ hlclient_add_library(
     src/app/runtime_replay_visual_projection.cpp
     include/hlclient/app/runtime_replay_local_assets.hpp
     src/app/runtime_replay_local_assets.cpp
+    include/hlclient/app/world_impact_presentation.hpp
+    src/app/world_impact_presentation.cpp
+    include/hlclient/app/remote_effect_presentation.hpp
+    src/app/remote_effect_presentation.cpp
 )
 add_library(
     hlclient::application_runtime_replay ALIAS
@@ -2160,6 +2241,7 @@ target_link_libraries(
         hlclient::goldsrc_world_texture_import
         hlclient::world_render_package
         hlclient::goldsrc_lightmaps
+        hlclient::goldsrc_brush_models
           hlclient::studio_pose
           hlclient::entity_frame_composition
           hlclient::goldsrc_bsp_collision
@@ -2167,6 +2249,54 @@ target_link_libraries(
 set_property(
     TARGET hlclient_application_runtime_replay
     PROPERTY FOLDER "Apps")
+target_link_libraries(hlclient_application_runtime_replay
+    PUBLIC hlclient::game_client_host hlclient::entity_interpolation)
+
+if(HLCLIENT_BUILD_GAME_HALFLIFE)
+    hlclient_add_library(hlclient_game_halflife
+        src/games/halflife/remote_effects.cpp
+        include/hlclient/games/halflife/remote_effects.hpp
+        src/games/halflife/remote_player.cpp
+        include/hlclient/games/halflife/remote_player.hpp
+        src/games/halflife/materials.cpp
+        include/hlclient/games/halflife/materials.hpp
+        src/games/halflife/movement_audio.cpp
+        include/hlclient/games/halflife/movement_audio.hpp
+        src/games/halflife/weapon_audio.cpp
+        include/hlclient/games/halflife/weapon_audio.hpp
+        src/games/halflife/weapon_visuals.cpp
+        include/hlclient/games/halflife/weapon_visuals.hpp
+        include/hlclient/games/halflife/client_module.hpp
+        include/hlclient/games/halflife/inventory.hpp
+        include/hlclient/games/halflife/server_messages.hpp
+        include/hlclient/games/halflife/local_player_lifecycle.hpp
+        include/hlclient/games/halflife/local_weapon_presentation.hpp
+        include/hlclient/games/halflife/presentation.hpp
+        include/hlclient/games/halflife/movement_policy.hpp
+        include/hlclient/games/halflife/scenario_policy.hpp
+        include/hlclient/games/halflife/action_evidence.hpp
+        include/hlclient/games/halflife/damage_respawn_script.hpp
+        include/hlclient/games/halflife/weapon_presentation_script.hpp
+        src/games/halflife/client_module.cpp
+        src/games/halflife/inventory.cpp
+        src/games/halflife/server_messages.cpp
+        src/games/halflife/local_player_lifecycle.cpp
+        src/games/halflife/local_weapon_presentation.cpp
+        src/games/halflife/presentation.cpp
+        src/games/halflife/movement_policy.cpp
+        src/games/halflife/scenario_policy.cpp)
+    target_sources(hlclient_game_halflife PRIVATE
+        src/games/halflife/action_evidence.cpp)
+    add_library(hlclient::game_halflife ALIAS hlclient_game_halflife)
+    target_link_libraries(hlclient_game_halflife
+        PUBLIC hlclient::game_api
+        PRIVATE hlclient::game_policy hlclient::client
+            hlclient::gameplay_input hlclient::goldsrc_usercmd_api
+            hlclient::goldsrc_client_message)
+    set_property(TARGET hlclient_game_halflife PROPERTY FOLDER "Games/HalfLife")
+    set_property(TARGET hlclient_game_halflife PROPERTY HLCLIENT_GAME_MODULE TRUE)
+    hlclient_enable_address_sanitizer(hlclient_game_halflife)
+endif()
 
 hlclient_add_library(
     hlclient_interactive_preview
@@ -2265,6 +2395,13 @@ target_link_libraries(
 set_property(TARGET hlclient_renderer_opengl PROPERTY FOLDER "Engine/Renderer")
 
 add_executable(hlclient apps/hlclient/main.cpp)
+target_compile_definitions(hlclient PRIVATE
+    HLCLIENT_BUILD_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+if(HLCLIENT_BUILD_GAME_HALFLIFE)
+    target_link_libraries(hlclient PRIVATE hlclient::game_halflife)
+endif()
+set_property(TARGET hlclient PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
 hlclient_enable_warnings(hlclient)
 target_link_libraries(
     hlclient
@@ -2272,12 +2409,15 @@ target_link_libraries(
         hlclient::core
         hlclient::app_support
         hlclient::application_runtime_replay
+        hlclient::audio_sdl hlclient::goldsrc_sound_assets
         hlclient::platform
         hlclient::filesystem
         hlclient::asset_api
         hlclient::asset_manager
         hlclient::goldsrc_bsp
         hlclient::goldsrc_bsp_collision
+        hlclient::goldsrc_collision_scene
+        hlclient::goldsrc_wad3
         hlclient::goldsrc_builtin_importers
         hlclient::network
         hlclient::goldsrc
@@ -2583,7 +2723,7 @@ if(WIN32)
     endforeach()
 endif()
 
-if(BUILD_TESTING)
+if(BUILD_TESTING AND HLCLIENT_BUILD_GAME_HALFLIFE)
     find_program(
         HLCLIENT_STOCK_RUNTIME_POWERSHELL_EXECUTABLE
         NAMES pwsh powershell
@@ -3370,6 +3510,7 @@ set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT
 foreach(
     _hlclient_sanitized_target
     IN ITEMS
+        hlclient_audio hlclient_audio_sdl hlclient_goldsrc_audio hlclient_goldsrc_sound_assets
         hlclient_collision_api
         hlclient_goldsrc_bsp_collision
         hlclient_goldsrc_collision_scene
@@ -3382,6 +3523,9 @@ foreach(
         hlclient_goldsrc_client_data_decoder
         hlclient_goldsrc_packet_entity_decoder
         hlclient_goldsrc_runtime_replay
+        hlclient_game_client_host
+        hlclient_game_policy
+        hlclient_goldsrc_client_message
         hlclient_goldsrc_live_runtime
         hlclient_goldsrc_runtime_capture_replay
         hlclient_application_runtime_replay
@@ -3413,6 +3557,8 @@ foreach(
 endforeach()
 
 if(WIN32)
+    # Instrument the shared log-reader lifetime as well as its test caller.
+    hlclient_enable_address_sanitizer(hlclient_windows_process_orchestrator)
     hlclient_enable_address_sanitizer(hlclient_windows_reparse_provenance)
     hlclient_enable_address_sanitizer(
         hlclient_windows_stock_external_target_api)
@@ -3425,5 +3571,11 @@ if(WIN32)
 endif()
 
 if(BUILD_TESTING)
-    add_subdirectory(tests)
+    add_subdirectory(tests/core_api)
+    if(HLCLIENT_BUILD_GAME_HALFLIFE)
+        add_subdirectory(tests)
+    endif()
 endif()
+
+include(cmake/GameModuleBoundary.cmake)
+hlclient_check_game_module_boundaries()

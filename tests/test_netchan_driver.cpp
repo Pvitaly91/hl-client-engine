@@ -547,6 +547,179 @@ TEST_CASE("Netchan driver starts without TX and would-block update is bounded",
     CHECK(releases == 0U);
 }
 
+TEST_CASE("Idle transport polling is opt-in bounded and never refreshes receive deadlines",
+          "[goldsrc][netchan][driver][idle-poll][regression]") {
+    auto config = test_config();
+    config.channel_inactivity_timeout = 2s;
+    CHECK(goldsrc::valid_configuration(config));
+    config.idle_poll_interval = -1ms;
+    CHECK_FALSE(goldsrc::valid_configuration(config));
+    config.idle_poll_interval = 99ms;
+    CHECK_FALSE(goldsrc::valid_configuration(config));
+    config.idle_poll_interval = 100ms;
+    CHECK(goldsrc::valid_configuration(config));
+    config.idle_poll_interval = 1s;
+    CHECK(goldsrc::valid_configuration(config));
+    config.idle_poll_interval = 1'001ms;
+    CHECK_FALSE(goldsrc::valid_configuration(config));
+    config.idle_poll_interval = 200ms;
+    config.channel_inactivity_timeout = 200ms;
+    CHECK_FALSE(goldsrc::valid_configuration(config));
+
+    config.channel_inactivity_timeout = 500ms;
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'015U);
+    goldsrc::NetchanDriver driver{transport,remote,config};
+    const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+    require_started(driver,transport,epoch);
+    driver.update(epoch + 400ms);
+    CHECK(transport.sent.empty()); // no poll before any admitted server packet
+    transport.queue(remote,server_packet(1U,true,0U,false,bytes("DATA")));
+    driver.update(epoch + 401ms);
+    REQUIRE(transport.sent.size() == 1U);
+    while (driver.poll_event()) {}
+    driver.update(epoch + 601ms);
+    REQUIRE(transport.sent.size() == 2U);
+    driver.update(epoch + 1s);
+    CHECK(driver.state() == goldsrc::NetchanDriverState::timed_out);
+    CHECK(transport.sent.size() == 2U); // own TX cannot renew RX inactivity
+}
+
+TEST_CASE("Idle polling follows successful TX without ACK ping-pong catch-up or input changes",
+          "[goldsrc][netchan][driver][idle-poll][regression]") {
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'015U);
+    auto config = test_config();
+    config.channel_inactivity_timeout = 2s;
+    config.idle_poll_interval = 200ms;
+    goldsrc::NetchanDriver driver{transport,remote,config};
+    const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+    require_started(driver,transport,epoch);
+    transport.queue(remote,server_packet(1U,true,0U,false,bytes("DATA")));
+    driver.update(epoch + 1ms);
+    while (driver.poll_event()) {}
+    transport.queue(remote,server_packet(2U,false,1U,false,{}));
+    driver.update(epoch + 2ms);
+    while (driver.poll_event()) {}
+    REQUIRE(transport.sent.size() == 1U); // non-reliable header is not immediately ACKed
+    driver.update(epoch + 200ms);
+    CHECK(transport.sent.size() == 1U);
+    driver.update(epoch + 201ms);
+    REQUIRE(transport.sent.size() == 2U);
+    const auto poll = goldsrc::decode_client_to_server_netchan_packet(transport.sent.back().payload);
+    REQUIRE(poll);
+    REQUIRE(poll.packet);
+    CHECK_FALSE(poll.packet->header.sequence.flags.reliable);
+    CHECK_FALSE(poll.packet->header.sequence.flags.fragmented);
+    CHECK(poll.packet->header.acknowledgement.sequence.value() == 2U);
+    CHECK(std::ranges::all_of(poll.packet->payload,[](const auto value) { return value == std::byte{1U}; }));
+    CHECK_FALSE(driver.session().in_flight_reliable_payload());
+    driver.update(epoch + 201ms);
+    CHECK(transport.sent.size() == 2U);
+    for (int frame=1; frame<=10; ++frame) {
+        REQUIRE(driver.submit_unreliable(bytes("INPUT")));
+        driver.update(epoch + 201ms + frame * 20ms);
+        REQUIRE(transport.sent.size() == static_cast<std::size_t>(frame) + 2U);
+        const auto input = goldsrc::decode_client_to_server_netchan_packet(transport.sent.back().payload);
+        REQUIRE(input);
+        REQUIRE(input.packet);
+        REQUIRE(input.packet->payload.size() >= 5U);
+        const auto expected_input = bytes("INPUT");
+        CHECK(std::equal(expected_input.begin(),expected_input.end(),input.packet->payload.begin()));
+    }
+    driver.update(epoch + 900ms); // at most one poll, never catches up missed ticks
+    CHECK(transport.sent.size() == 13U);
+    driver.update(epoch + 900ms);
+    CHECK(transport.sent.size() == 13U);
+    driver.cancel(epoch + 901ms);
+    driver.update(epoch + 1'200ms);
+    CHECK(transport.sent.size() == 13U);
+}
+
+TEST_CASE("Due idle poll cannot invalidate a committed contextual command or suppress owning RX",
+          "[goldsrc][netchan][driver][idle-poll][unreliable-context][regression]") {
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'015U);
+    auto config = test_config();
+    config.channel_inactivity_timeout = 2s;
+    config.idle_poll_interval = 200ms;
+    goldsrc::NetchanDriver driver{transport,remote,config};
+    const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+    require_started(driver,transport,epoch);
+    transport.queue(remote,server_packet(1U,true,0U,false,bytes("DATA")));
+    driver.update(epoch + 1ms);
+    while (driver.poll_event()) {}
+    auto context = driver.prepare_unreliable_context();
+    REQUIRE(context);
+    REQUIRE(context.plan);
+    const auto identity = context.plan->plan_identity();
+    REQUIRE(driver.commit_unreliable(std::move(*context.plan),bytes("MOVE")));
+    transport.queue(remote,server_packet(2U,false,1U,false,bytes("RX")));
+    transport.send_results.push_back({network::DatagramSendStatus::would_block,{}});
+    driver.update(epoch + 201ms);
+    CHECK(driver.state() == goldsrc::NetchanDriverState::active);
+    CHECK(transport.sent.size() == 1U);
+    CHECK_FALSE(transport.incoming.empty()); // committed TX context remains owner
+    driver.update(epoch + 202ms);
+    REQUIRE(transport.sent.size() == 2U);
+    CHECK(transport.incoming.empty());
+    CHECK(driver.last_sent_unreliable_context_identity() == identity);
+    const auto move = goldsrc::decode_client_to_server_netchan_packet(transport.sent.back().payload);
+    REQUIRE(move);
+    REQUIRE(move.packet);
+    CHECK(move.packet->header.sequence.sequence.value() == 2U);
+    const auto expected_move = bytes("MOVE");
+    REQUIRE(move.packet->payload.size() >= expected_move.size());
+    CHECK(std::equal(expected_move.begin(),expected_move.end(),move.packet->payload.begin()));
+    const auto rx = driver.poll_event();
+    REQUIRE(rx);
+    REQUIRE(rx->payload);
+    CHECK(rx->payload->bytes == bytes("RX"));
+    driver.update(epoch + 401ms);
+    CHECK(transport.sent.size() == 2U);
+    driver.update(epoch + 402ms);
+    CHECK(transport.sent.size() == 3U);
+}
+
+TEST_CASE("Idle poll would-block preserves sequence and strict driver remains receive-driven",
+          "[goldsrc][netchan][driver][idle-poll][regression]") {
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(27'015U);
+    auto config = test_config();
+    config.channel_inactivity_timeout = 2s;
+    SECTION("historical default") {
+        goldsrc::NetchanDriver driver{transport,remote,config};
+        const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+        require_started(driver,transport,epoch);
+        transport.queue(remote,server_packet(1U,true,0U,false,bytes("DATA")));
+        driver.update(epoch + 1ms);
+        while (driver.poll_event()) {}
+        driver.update(epoch + 900ms);
+        CHECK(transport.sent.size() == 1U);
+    }
+    SECTION("opt-in retry") {
+        config.idle_poll_interval = 200ms;
+        goldsrc::NetchanDriver driver{transport,remote,config};
+        const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+        require_started(driver,transport,epoch);
+        transport.queue(remote,server_packet(1U,true,0U,false,bytes("DATA")));
+        driver.update(epoch + 1ms);
+        while (driver.poll_event()) {}
+        transport.send_results.push_back({network::DatagramSendStatus::would_block,{}});
+        driver.update(epoch + 201ms);
+        CHECK(driver.state() == goldsrc::NetchanDriverState::active);
+        CHECK(transport.sent.size() == 1U);
+        driver.update(epoch + 202ms);
+        REQUIRE(transport.sent.size() == 2U);
+        const auto poll = goldsrc::decode_client_to_server_netchan_packet(transport.sent.back().payload);
+        REQUIRE(poll);
+        REQUIRE(poll.packet);
+        CHECK(poll.packet->header.sequence.sequence.value() == 2U);
+        driver.update(epoch + 401ms);
+        CHECK(transport.sent.size() == 2U);
+    }
+}
+
 TEST_CASE("Netchan driver permits bounded client-first reliable data only",
           "[goldsrc][netchan][driver][reliable][client-first]")
 {

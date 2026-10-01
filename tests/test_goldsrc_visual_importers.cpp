@@ -152,7 +152,7 @@ void check_single_sprite_failure(
     CHECK(dispatched.result.error->code == expected_error_code);
 }
 
-TEST_CASE("Built-in registration installs exactly BSP Studio and sprite",
+TEST_CASE("Built-in registration installs exactly BSP Studio sprite and WAV",
     "[goldsrc][visual][registration]")
 {
     assets::AssetImporterRegistries registries;
@@ -163,7 +163,7 @@ TEST_CASE("Built-in registration installs exactly BSP Studio and sprite",
     CHECK(registries.models.size() == 1U);
     CHECK(registries.sprites.size() == 1U);
     CHECK(registries.images.size() == 0U);
-    CHECK(registries.audio.size() == 0U);
+    CHECK(registries.audio.size() == 1U);
 
     const auto model = make_source(
         "models/synthetic.bin",

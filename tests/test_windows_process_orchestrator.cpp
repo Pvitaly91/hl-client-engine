@@ -346,6 +346,46 @@ TEST_CASE("Bounded log read errors are clean only for EOF or local cancellation"
               false, 0U, ERROR_INVALID_HANDLE, true) == Disposition::error);
 }
 
+TEST_CASE("Held child pipe writer cannot indefinitely delay diagnostic finalization",
+          "[platform][windows][orchestrator][logs][runtime-diagnostics]") {
+    auto log = windows::BoundedProcessLogCapture::create({});
+    REQUIRE(log);
+    HANDLE duplicate{};
+    REQUIRE(::DuplicateHandle(::GetCurrentProcess(),
+        static_cast<HANDLE>(log->inherited_write_handle()), ::GetCurrentProcess(),
+        &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    TestHandle heldWriter{duplicate}; // no EOF until after finish
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = log->finish(std::chrono::milliseconds{20});
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{3});
+    CHECK(result.capture_failed);
+    CHECK(result.native_error == WAIT_TIMEOUT);
+    CHECK(result.bytes.empty());
+}
+
+TEST_CASE("Log owner destruction and move replacement also have bounded cancellation",
+          "[platform][windows][orchestrator][logs][runtime-diagnostics]") {
+    std::optional<TestHandle> heldWriter;
+    const auto started = std::chrono::steady_clock::now();
+    {
+        auto log = windows::BoundedProcessLogCapture::create({});
+        REQUIRE(log);
+        HANDLE duplicate{};
+        REQUIRE(::DuplicateHandle(::GetCurrentProcess(),
+            static_cast<HANDLE>(log->inherited_write_handle()), ::GetCurrentProcess(),
+            &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+        heldWriter.emplace(duplicate);
+        SECTION("destructor without finish") { }
+        SECTION("move assignment closes the prior owner") {
+            auto replacement = windows::BoundedProcessLogCapture::create({});
+            REQUIRE(replacement);
+            *log = std::move(*replacement);
+            CHECK(windows::bounded_process_log_snapshot_complete(log->finish()));
+        }
+    }
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{3});
+}
+
 TEST_CASE("Raw stock capture rejects a non-orchestrator parent before side effects",
           "[platform][windows][stock-runtime][orchestrator][capture-capability]")
 {
@@ -1420,6 +1460,101 @@ TEST_CASE("Kill-on-close job owns only the exact launched fake process",
     CHECK(current_exit == STILL_ACTIVE);
 }
 
+TEST_CASE("E9 same-host listener and mover share exact bounded job cleanup", "[e9][platform][windows][orchestrator][job]") {
+    const auto identity=observe_fake_server();
+    for(bool close_early:{false,true}) {
+        auto [job,created]=windows::KillOnCloseProcessJob::create(4U); REQUIRE(created);
+        auto [listener,a]=job.launch(fake_server_spec(identity,reserve_then_release_loopback_port(),30000)); REQUIRE(a);
+        auto [mover,b]=job.launch(fake_server_spec(identity,reserve_then_release_loopback_port(),30000)); REQUIRE(b);
+        CHECK(listener.process_id()!=mover.process_id()); CHECK(job.active_process_count()==2);
+        if(close_early) {job.close(); REQUIRE(listener.wait(std::chrono::seconds{5})); REQUIRE(mover.wait(std::chrono::seconds{5}));}
+        else {mover.terminate(0);REQUIRE(mover.wait(std::chrono::seconds{5}));listener.terminate(0);REQUIRE(listener.wait(std::chrono::seconds{5}));CHECK(job.active_process_count()==0);}
+    }
+}
+
+TEST_CASE("E9 early listener failure retains peer exit and bounded log after exact cleanup",
+          "[e9][platform][windows][orchestrator][job][early-exit]")
+{
+    const auto identity = observe_fake_server();
+    auto peer_log = windows::BoundedProcessLogCapture::create({});
+    REQUIRE(peer_log);
+    auto [job, created] = windows::KillOnCloseProcessJob::create(4U);
+    REQUIRE(created);
+    windows::OwnedProcess peer;
+    const auto listener_port = reserve_then_release_loopback_port();
+    auto peer_port = reserve_then_release_loopback_port();
+    while (peer_port == listener_port) {
+        peer_port = reserve_then_release_loopback_port();
+    }
+    const auto listener_exit = [&]() -> std::optional<std::uint32_t> {
+        auto [listener, listener_result] = job.launch(fake_server_spec(
+            identity, listener_port, 200U, nullptr,
+            0U, false, 0U, {}, 25U, 2U));
+        REQUIRE(listener_result);
+        auto launched_peer = job.launch(fake_server_spec(
+            identity, peer_port, 30'000U,
+            &*peer_log));
+        REQUIRE(launched_peer.second);
+        peer = std::move(launched_peer.first);
+        peer_log->close_parent_write_handle();
+        const auto ready_deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds{2};
+        while (peer_log->snapshot().bytes.find(
+                   "[hlclient-fake-server] ready=true") == std::string::npos &&
+               std::chrono::steady_clock::now() < ready_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        REQUIRE(peer_log->snapshot().bytes.find(
+                    "[hlclient-fake-server] ready=true") != std::string::npos);
+        const auto exited = listener.wait(std::chrono::seconds{5});
+        REQUIRE(exited == 2U);
+        // Production takes this early return without reaching individual peer
+        // finalization. The exact peer owner must survive until Job accounting.
+        return exited;
+    }();
+    REQUIRE(listener_exit == 2U);
+    REQUIRE(peer.valid());
+    const auto cleanup = job.terminate_and_wait(120U, std::chrono::seconds{5});
+    REQUIRE(cleanup);
+    CHECK(cleanup.active_process_count == 0U);
+    CHECK(job.active_process_count() == 0U);
+    CHECK(peer.wait(std::chrono::milliseconds{100}) == 120U);
+    const auto snapshot = peer_log->finish();
+    REQUIRE(windows::bounded_process_log_snapshot_complete(snapshot));
+    CHECK(snapshot.bytes.find("[hlclient-fake-server] ready=true") !=
+          std::string::npos);
+    CHECK(snapshot.observed_bytes > 0U);
+    // Observing cleanup does not rewrite the original listener exit.
+    CHECK(listener_exit == 2U);
+}
+
+TEST_CASE("E9 peer diagnostic contract retains error evidence without launching a session",
+          "[e9][platform][windows][orchestrator][diagnostics]")
+{
+    const auto identity = observe_active_orchestrator();
+    auto log = windows::BoundedProcessLogCapture::create({});
+    REQUIRE(log);
+    auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+    REQUIRE(created);
+    windows::OwnedProcessLaunchSpec spec;
+    spec.executable = identity.canonical_path;
+    spec.working_directory = identity.canonical_path.parent_path();
+    spec.expected_identity = identity;
+    spec.stdout_handle = log->inherited_write_handle();
+    spec.stderr_handle = log->inherited_write_handle();
+    spec.arguments = {L"--validate-remote-audio-peer-contract"};
+    auto [child, launched] = job.launch(spec);
+    REQUIRE(launched);
+    log->close_parent_write_handle();
+    REQUIRE(child.wait(std::chrono::seconds{5}) == 0U);
+    const auto snapshot = log->finish();
+    REQUIRE(windows::bounded_process_log_snapshot_complete(snapshot));
+    CHECK(snapshot.bytes.find("remote-audio-peer-contract=passed") !=
+          std::string::npos);
+    CHECK(snapshot.bytes.find("process-launches=0") != std::string::npos);
+    CHECK(job.active_process_count() == 0U);
+}
+
 TEST_CASE("Owned launch denies child process creation without side effects",
           "[platform][windows][stock-runtime][orchestrator][job]"
           "[child-process-restriction][fake-integration]")
@@ -1694,6 +1829,42 @@ TEST_CASE("Abrupt guard loss retains redundant isolation until both Jobs are zer
     REQUIRE(release);
     redundant_owner_active = false;
     CHECK_FALSE(redundant_owner_active);
+}
+
+TEST_CASE("Long manual diagnostic logs preserve bounded startup and terminal windows",
+          "[platform][windows][orchestrator][logs][manual-timing]")
+{
+    windows::BoundedProcessLogLimits limits{1024U, 64U, 16U, 128U};
+    auto log = windows::BoundedProcessLogCapture::create(limits);
+    REQUIRE(log);
+    const auto writer = static_cast<HANDLE>(log->inherited_write_handle());
+    const auto write = [&](std::string_view bytes) {
+        DWORD written{};
+        REQUIRE(::WriteFile(writer, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) != FALSE);
+        REQUIRE(written == bytes.size());
+    };
+    write("STARTUP_CONFIRMED\n");
+    for (std::size_t i = 0; i < 600U; ++i) write("ordinary bounded diagnostic row\n");
+    write("END_OUTCOME_COMPLETED\n");
+    log->close_parent_write_handle();
+    const auto captured = log->finish();
+    CHECK(captured.bytes.starts_with("STARTUP_CONFIRMED\n"));
+    CHECK(captured.bytes.ends_with("END_OUTCOME_COMPLETED\n"));
+    CHECK(captured.bytes.size() <= limits.maximum_bytes);
+    CHECK(static_cast<std::size_t>(std::count(captured.bytes.begin(), captured.bytes.end(), '\n')) <= limits.maximum_line_count);
+    CHECK(captured.byte_truncated);
+    CHECK(captured.line_count_truncated);
+    CHECK(captured.retained_window);
+    CHECK_FALSE(captured.capture_failed);
+    CHECK_FALSE(windows::bounded_process_log_snapshot_complete(captured));
+    CHECK(windows::bounded_process_log_diagnostic_window_usable(captured));
+    auto invalid = captured;
+    invalid.capture_failed = true;
+    CHECK_FALSE(windows::bounded_process_log_diagnostic_window_usable(invalid));
+    invalid = captured; invalid.line_length_truncated = true;
+    CHECK_FALSE(windows::bounded_process_log_diagnostic_window_usable(invalid));
+    limits.retained_prefix_bytes = limits.maximum_bytes;
+    CHECK_FALSE(windows::validate_bounded_process_log_limits(limits));
 }
 
 TEST_CASE("Process logs are drained concurrently and remain bounded",

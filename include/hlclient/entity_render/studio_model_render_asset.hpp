@@ -55,7 +55,7 @@ enum class StudioRenderMaterialProfile {
 enum class StudioRenderMaterialSupportStatus {
     supported_opaque,
     supported_masked,
-    unsupported_chrome,
+    supported_chrome,
     unsupported_additive,
     unsupported_alpha,
     unsupported_unknown_bits,

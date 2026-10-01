@@ -7,6 +7,8 @@
 #include <optional>
 
 namespace hlclient::goldsrc {
+class ReferenceVerticalSupportMotion;
+struct ReferenceBrushCollisionContext;
 
 enum class ReferenceRebaseStatus : std::uint8_t {
     ready,
@@ -38,6 +40,9 @@ struct ReferenceRebaseResult final {
     const movement::GoldSrcMovementEnvironment& environment,
     const movement::ILocalMovementCollision& collision,
     movement::GoldSrcLocalMovementScratch& scratch,
-    const movement::GoldSrcLocalMovementConfig& config = {});
+    const movement::GoldSrcLocalMovementConfig& config = {},
+    const ReferenceVerticalSupportMotion* support = nullptr,
+    const ReferenceBrushCollisionContext* ladder_context = nullptr,
+    const movement::ReferenceLadderMovementPolicy* ladder_policy = nullptr);
 
 } // namespace hlclient::goldsrc

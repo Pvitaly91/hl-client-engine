@@ -22,6 +22,13 @@ enum class GoldSrcUserCmdSamplingProfile : std::uint8_t {
     stock_evidence_pending,
 };
 
+enum class GoldSrcUserCmdLagPolicy : std::uint8_t {
+    fail_closed,
+    // Manual wall-clock sampling only: do not invent input/simulation for
+    // missed slots. Emit one neutral fixed-duration command on the old grid.
+    discard_unsampled_wall_time,
+};
+
 struct GoldSrcUserCmdSchedulerConfig {
     std::uint64_t command_interval_nanoseconds{10'000'000U};
     std::size_t maximum_commands_per_update{
@@ -29,6 +36,7 @@ struct GoldSrcUserCmdSchedulerConfig {
     std::uint32_t maximum_command_sequence{UINT32_MAX};
     GoldSrcUserCmdSamplingProfile profile{
         GoldSrcUserCmdSamplingProfile::synthetic_fixed_step_v1};
+    GoldSrcUserCmdLagPolicy lag_policy{GoldSrcUserCmdLagPolicy::fail_closed};
 };
 
 [[nodiscard]] bool valid_goldsrc_usercmd_scheduler_config(
@@ -70,6 +78,8 @@ struct GoldSrcUserCmdSchedulerUpdateResult {
     std::optional<GoldSrcUserCmdSchedulerError> error;
     std::int64_t next_sample_time_nanoseconds{0};
     std::int64_t duration_remainder_nanoseconds{0};
+
+    std::uint64_t discarded_wall_time_samples{0U};
 
     [[nodiscard]] explicit operator bool() const noexcept
     {

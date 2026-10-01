@@ -128,7 +128,8 @@ package(
 // dmodel bounds prove that broad-phase rejection comes from the retained BSP
 // hull tree rather than trusting source-model metadata.
 [[nodiscard]] inline std::shared_ptr<const collision::CollisionWorldPackage>
-bounded_brush_package(const std::size_t brush_model_count = 2U)
+bounded_brush_package(const std::size_t brush_model_count = 2U,
+                      const float brush_half_height = 1.0F)
 {
     std::vector<collision::CollisionNode> nodes;
     nodes.reserve(7U);
@@ -209,8 +210,8 @@ bounded_brush_package(const std::size_t brush_model_count = 2U)
             {{1.0F, 0.0F, 0.0F}, -1.0, 21U, 0},
             {{0.0F, 1.0F, 0.0F}, 1.0, 22U, 1},
             {{0.0F, 1.0F, 0.0F}, -1.0, 23U, 1},
-            {{0.0F, 0.0F, 1.0F}, 1.0, 24U, 2},
-            {{0.0F, 0.0F, 1.0F}, -1.0, 25U, 2},
+            {{0.0F, 0.0F, 1.0F}, brush_half_height, 24U, 2},
+            {{0.0F, 0.0F, 1.0F}, -brush_half_height, 25U, 2},
         },
         std::move(nodes),
         std::vector<collision::CollisionLeaf>{

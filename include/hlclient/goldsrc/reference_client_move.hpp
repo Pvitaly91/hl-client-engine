@@ -4,14 +4,23 @@
 #include <cstdint>
 #include <hlclient/goldsrc/client_move_message.hpp>
 #include <hlclient/goldsrc/stock_runtime_transport_replay.hpp>
+#include <hlclient/goldsrc/usercmd_state.hpp>
 #include <optional>
 #include <vector>
 
 namespace hlclient::goldsrc {
+inline constexpr std::uint16_t kReferenceGoldSrcButtonUse = 1U << 5U;
+inline constexpr std::uint16_t kReferenceGoldSrcButtonForward = kGoldSrcButtonForward;
+inline constexpr std::uint16_t kReferenceGoldSrcButtonBack = kGoldSrcButtonBack;
+inline constexpr std::uint16_t kReferenceGoldSrcButtonMoveLeft = kGoldSrcButtonMoveLeft;
+inline constexpr std::uint16_t kReferenceGoldSrcButtonMoveRight = kGoldSrcButtonMoveRight;
+inline constexpr std::uint16_t kReferenceGoldSrcButtonDirections = kGoldSrcButtonDirections;
 
 // Valve common/in_buttons.h, pinned b1b5cf5892918535619b2937bb927e46cb097ba1.
+inline constexpr std::uint16_t kReferenceGoldSrcButtonAttack = 1U << 0U;
 inline constexpr std::uint16_t kReferenceGoldSrcButtonJump = 1U << 1U;
 inline constexpr std::uint16_t kReferenceGoldSrcButtonDuck = 1U << 2U;
+inline constexpr std::uint16_t kReferenceGoldSrcButtonReload = 1U << 13U;
 
 // Quantized network values, deliberately not a simulation/history command.
 // No fabricated local identity, sample clock, SDK pointer or weaponselect.

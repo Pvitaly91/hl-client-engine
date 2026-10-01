@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/assets/asset_types.hpp>
+#include <hlclient/client/runtime_observation.hpp>
 #include <hlclient/entity_visual/entity_visual_projection.hpp>
 #include <hlclient/goldsrc/entity_snapshot.hpp>
 
@@ -412,6 +413,22 @@ struct InterpolatedEntityFrameResult {
     }
 };
 
+struct RuntimeEntityInterpolationOptions {
+    EntityInterpolationLimits limits{};
+    bool no_interpolation{false};
+    std::uint32_t no_interpolation_effect_mask{};
+    std::span<const std::uint32_t> discontinuous_entities;
+    std::optional<double> teleport_distance;
+};
+struct RuntimeEntityInterpolationResult {
+    std::shared_ptr<const client::RuntimeClientObservationState> state;
+    double sample_seconds{}, alpha{};
+    EntitySnapshotPairSelectionStatus selection_status{EntitySnapshotPairSelectionStatus::held_only};
+    std::size_t interpolated_count{}, reset_count{};
+    std::optional<EntityInterpolationError> error;
+    [[nodiscard]] explicit operator bool() const noexcept { return state && !error; }
+};
+
 class EntitySnapshotInterpolator final {
   public:
     [[nodiscard]] InterpolatedEntityFrameResult
@@ -419,6 +436,12 @@ class EntitySnapshotInterpolator final {
                 const EntityInterpolationProjectionFrame& previous_projection,
                 const EntityInterpolationProjectionFrame& current_projection,
                 const EntityInterpolationLimits& limits = {}) const;
+    // Presentation-only owning sample; never publish back to RX/game/audio.
+    [[nodiscard]] RuntimeEntityInterpolationResult interpolate_runtime(
+        const client::RuntimeClientObservationState& previous,
+        const client::RuntimeClientObservationState& current,
+        double target_server_seconds,
+        const RuntimeEntityInterpolationOptions& options = {}) const;
 };
 
 [[nodiscard]] constexpr std::string_view

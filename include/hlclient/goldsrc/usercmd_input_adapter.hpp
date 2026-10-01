@@ -1,4 +1,5 @@
 #pragma once
+#include <hlclient/goldsrc/usercmd_movement_policy.hpp>
 
 #include <hlclient/gameplay_camera/first_person_camera.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
@@ -11,23 +12,6 @@
 
 namespace hlclient::goldsrc {
 
-struct GoldSrcUserCmdMovementSpeedConfig {
-    float forward_speed{400.0F};
-    float backward_speed{400.0F};
-    float side_speed{400.0F};
-};
-
-// A missing client limit is unknown. Valve's explicit zero means no client
-// clamp; a positive value limits the complete movement vector.
-struct GoldSrcReferenceMovementPolicy final {
-    float speed_key_multiplier{1.0F};
-    std::optional<float> client_maxspeed;
-};
-
-enum class GoldSrcReferenceButtonPolicy : std::uint8_t {
-    none,
-    jump_duck,
-};
 
 struct GoldSrcUserCmdBuildContext {
     GoldSrcUserCmdSequence command_sequence{};
@@ -153,9 +137,11 @@ public:
         const GoldSrcUserCmdBuildContext& context,
         const GoldSrcUserCmdLimits& limits = {}) const noexcept;
 
-    // Production-controlled adapter for the already verified public
-    // reference wire value. It deliberately exposes no keyboard/mouse,
-    // arbitrary button, impulse, weapon-select, or impact surface.
+    // Converts the upward-positive geometric camera to downward-positive
+    // GoldSrc pitch before quantization; yaw is unchanged. Returned angles
+    // are wire-native, including when retained in history or used by replay.
+    // Typed actions are restricted by the explicitly selected button policy;
+    // there is no arbitrary impulse, weapon-select or impact surface.
     [[nodiscard]] GoldSrcReferenceWireUserCmdBuildResult build_reference_wire(
         const gameplay_input::GameplayInputIntent& intent,
         const gameplay_camera::GameplayCameraState& camera,

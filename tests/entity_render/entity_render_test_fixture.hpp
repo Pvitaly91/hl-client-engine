@@ -178,7 +178,8 @@ struct PublishedVisualAssets {
         assets::SpriteTextureFormat::normal,
     const bool include_second_skin_family = false,
     const assets::SpriteOrientation sprite_orientation =
-        assets::SpriteOrientation::view_parallel)
+        assets::SpriteOrientation::view_parallel,
+    std::shared_ptr<const assets::ModelAsset> explicit_model = {})
 {
     ScopedLocalResourceTestRoot root;
     root.write("valve", "maps/test_map.bsp", "map");
@@ -197,7 +198,7 @@ struct PublishedVisualAssets {
         input.model_reference =
             visual::EntityVisualModelReference::synthetic_model_slot(1U);
         projection_inputs.push_back(input);
-        model = include_second_skin_family
+        model = explicit_model ? std::move(explicit_model) : include_second_skin_family
             ? model_asset({0U, 0U}, true)
             : model_asset();
     }
@@ -271,7 +272,8 @@ struct RenderAssets {
         assets::SpriteTextureFormat::normal,
     const bool include_second_skin_family = false,
     const assets::SpriteOrientation sprite_orientation =
-        assets::SpriteOrientation::view_parallel)
+        assets::SpriteOrientation::view_parallel,
+    std::shared_ptr<const assets::ModelAsset> explicit_model = {})
 {
     auto output = RenderAssets{
         published_visual_assets(
@@ -279,7 +281,7 @@ struct RenderAssets {
             include_sprite,
             sprite_format,
             include_second_skin_family,
-            sprite_orientation),
+            sprite_orientation, std::move(explicit_model)),
         {},
         {}};
     for (const auto& record : output.sources.library->records()) {

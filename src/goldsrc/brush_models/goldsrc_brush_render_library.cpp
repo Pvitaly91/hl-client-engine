@@ -104,7 +104,7 @@ first_incomplete_texture_reason(
     const auto binding = std::ranges::find_if(
         texture_set.bindings(),
         [](const assets::WorldMaterialTextureBinding& candidate) {
-            return !assets::is_resolved(candidate.status);
+            return !assets::is_renderable(candidate.status);
         });
     if (binding == texture_set.bindings().end()) {
         return std::nullopt;
@@ -543,7 +543,7 @@ GoldSrcBrushRenderLibraryBuildResult GoldSrcBrushRenderLibraryBuilder::build(
         auto texture_begin = WorldTextureImportOperation::begin(
             aggregate,
             retained_bsp_source,
-            std::move(environment),
+            environment,
             limits.textures);
         if (!texture_begin || !texture_begin.operation) {
             return fail(
@@ -601,7 +601,8 @@ GoldSrcBrushRenderLibraryBuildResult GoldSrcBrushRenderLibraryBuilder::build(
                 GoldSrcBrushRenderLibraryErrorCode::texture_import_failed,
                 statistics);
         }
-        statistics.decoded_texture_count = texture_set->texture_count();
+        statistics.decoded_texture_count = texture_set->statistics().decoded_texture_count;
+        statistics.placeholder_material_count = texture_set->statistics().placeholder_material_count;
 
         auto lightmap_result = lightmaps::GoldSrcWorldLightmapImporter::import(
             aggregate,
@@ -690,10 +691,51 @@ GoldSrcBrushRenderLibraryBuildResult GoldSrcBrushRenderLibraryBuilder::build(
                 statistics);
         }
 
+        // Import the alternate bank through the same approved texture provider.
+        // These directory entries need not own any face (chargers/buttons).
+        assets::WorldAsset alternate_source;
+        alternate_source.source_profile = assets::WorldGeometrySourceProfile::goldsrc_bsp_v30;
+        std::vector<std::optional<std::size_t>> alternate_by_material(render_package->materials().size());
+        for (const auto& material : render_package->materials()) {
+            const auto& texture = render_package->textured_world().textures.textures()[material.base_texture_asset_index];
+            if (texture.name.size() < 3U || texture.name[0] != '+' ||
+                (texture.name[1] != '0' && texture.name[1] != 'A' && texture.name[1] != 'a')) continue;
+            auto name = texture.name; name[1] = name[1] == '0' ? 'A' : '0';
+            const auto found = std::ranges::find_if(document.texture_directory, [&](const auto& entry) {
+                if (!entry.texture_name || entry.texture_name->size() != name.size()) return false;
+                const auto fold = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a'-'A')) : c; };
+                return std::ranges::equal(*entry.texture_name, name, [&](char a, char b) { return fold(a) == fold(b); });
+            });
+            if (found == document.texture_directory.end()) continue;
+            if (found->width != texture.width || found->height != texture.height)
+                return fail(GoldSrcBrushRenderLibraryErrorCode::texture_import_failed, statistics);
+            alternate_by_material[material.material_index] = alternate_source.materials.size();
+            alternate_source.materials.push_back(*found);
+        }
+        std::shared_ptr<const assets::WorldTextureSet> alternate_textures;
+        if (!alternate_source.materials.empty()) {
+            auto operation = WorldTextureImportOperation::begin(alternate_source, retained_bsp_source,
+                environment, limits.textures);
+            if (!operation) return fail(GoldSrcBrushRenderLibraryErrorCode::texture_import_begin_failed, statistics);
+            for (std::size_t i = 0; i < limits.maximum_texture_import_updates && !operation.operation->terminal(); ++i)
+                operation.operation->update(WorldTextureImportTimePoint{} + std::chrono::milliseconds{i});
+            auto textures = operation.operation->take_result();
+            if (!textures || !textures->renderable_for_world_materials())
+                return fail(GoldSrcBrushRenderLibraryErrorCode::texture_import_failed, statistics);
+            if (textures->statistics().total_rgba_byte_count >
+                limits.render_package.maximum_total_cpu_render_bytes - render_package->statistics().total_cpu_render_byte_count)
+                return fail(GoldSrcBrushRenderLibraryErrorCode::aggregate_limit_exceeded, statistics);
+            for (auto& index : alternate_by_material)
+                if (index) index = textures->binding_for_material(*index)->texture_asset_index;
+            statistics.decoded_texture_count += textures->statistics().decoded_texture_count;
+            statistics.placeholder_material_count += textures->statistics().placeholder_material_count;
+            alternate_textures = std::make_shared<const assets::WorldTextureSet>(std::move(*textures));
+        } else alternate_by_material.clear();
         return GoldSrcBrushRenderLibraryBuildResult{
             world_scene_render::BrushSubmodelRenderLibrary{
                 std::move(render_package),
                 std::move(models),
+                std::move(alternate_textures), std::move(alternate_by_material),
             },
             std::nullopt,
             statistics,

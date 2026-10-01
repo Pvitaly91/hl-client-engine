@@ -202,7 +202,7 @@ TEST_CASE("GoldSrc lightmap import handles unlit and malformed metadata explicit
             hlclient::goldsrc::bsp::GoldSrcBspErrorCode::invalid_light_offset);
     }
 
-    SECTION("offset without an active style is inconsistent metadata")
+    SECTION("bounded cursor without an active style consumes no samples")
     {
         fixture::SurfaceDescription description;
         description.styles = fixture::styles({});
@@ -210,10 +210,10 @@ TEST_CASE("GoldSrc lightmap import handles unlit and malformed metadata explicit
         const auto imported = lightmaps::GoldSrcWorldLightmapImporter::import(
             fixture::make_world(description),
             fixture::make_bsp_with_lighting(lighting));
-        REQUIRE_FALSE(imported);
-        REQUIRE(imported.error);
-        CHECK(imported.error->code == lightmaps::
-                GoldSrcWorldLightmapImportErrorCode::invalid_lightmap_metadata);
+        REQUIRE(imported);
+        CHECK(imported.lightmap_set->bindings()[0U].status == hlclient::assets::
+            WorldSurfaceLightmapBindingStatus::unlit_no_lightmap);
+        CHECK(imported.lightmap_set->page_count() == 0U);
     }
 
     SECTION("configured style-profile limit produces an explicit status")
@@ -316,6 +316,48 @@ TEST_CASE("GoldSrc lightmap import handles unlit and malformed metadata explicit
         REQUIRE(imported.error);
         CHECK(imported.error->code == lightmaps::
                 GoldSrcWorldLightmapImportErrorCode::atlas_memory_limit_exceeded);
+    }
+}
+
+TEST_CASE("Zero-style BSP faces allow only bounded zero-sample light cursors",
+    "[goldsrc-bsp][goldsrc-lightmap][external-map-compat]")
+{
+    for (const std::int32_t offset : {-2, -1, 0, 12, 13}) {
+        for (const bool active_style : {false, true}) {
+            CAPTURE(offset, active_style);
+            hlclient::tests::SyntheticBspBuilder builder;
+            builder.lump(hlclient::tests::SyntheticBspLumpId::lighting) =
+                fixture::sequential_rgb_samples(4U);
+            hlclient::tests::SyntheticBspFace face;
+            face.light_offset = offset;
+            if (active_style) face.light_styles[0U] = 0U;
+            builder.set_faces(std::span{&face, 1U});
+            const auto parsed = hlclient::goldsrc::bsp::GoldSrcBspParser::parse(builder.build());
+            const bool expected = offset >= -1 && offset <= 12 && (!active_style || offset < 12);
+            CHECK(static_cast<bool>(parsed) == expected);
+            if (!expected) {
+                REQUIRE(parsed.error);
+                CHECK(parsed.error->code == hlclient::goldsrc::bsp::GoldSrcBspErrorCode::invalid_light_offset);
+            }
+        }
+    }
+    for (const std::uint32_t offset : {0U, 12U, 13U}) {
+        fixture::SurfaceDescription description;
+        description.styles = fixture::styles({});
+        description.lightmap_offset = offset;
+        auto world = fixture::make_world(description);
+        const auto imported = lightmaps::GoldSrcWorldLightmapImporter::import(
+            world, fixture::make_bsp_with_lighting(fixture::sequential_rgb_samples(4U)));
+        CHECK(static_cast<bool>(imported) == (offset <= 12U));
+        CHECK(world.surfaces[0U].lightmap_offset == offset); // source metadata unchanged
+        if (imported) {
+            CHECK(imported.lightmap_set->page_count() == 0U);
+            CHECK(imported.lightmap_set->statistics().total_source_sample_count == 0U);
+            CHECK(imported.lightmap_set->complete_for_world_surfaces());
+        } else {
+            REQUIRE(imported.error);
+            CHECK(imported.error->code == lightmaps::GoldSrcWorldLightmapImportErrorCode::lightmap_range_out_of_bounds);
+        }
     }
 }
 

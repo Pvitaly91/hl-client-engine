@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/goldsrc/move_vars.hpp>
+#include <hlclient/goldsrc/delta_value_decoder.hpp>
 #include <hlclient/goldsrc/service_message_stream.hpp>
 #include <hlclient/goldsrc/stock_runtime_message_catalog.hpp>
 #include <hlclient/goldsrc/user_info_update.hpp>
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -37,6 +39,7 @@ enum class RuntimeControlStockVerification : std::uint8_t {
 
 enum class RuntimeControlOpcode : std::uint8_t {
   svc_nop = 1U,
+  svc_event = 3U,
   svc_setview = 5U,
   svc_sound = 6U,
   svc_time = 7U,
@@ -47,6 +50,7 @@ enum class RuntimeControlOpcode : std::uint8_t {
   svc_updateuserinfo = 13U,
   svc_stopsound = 16U,
   svc_particle = 18U,
+  svc_event_reliable = 21U,
   svc_temp_entity = 23U,
   svc_setpause = 24U,
   svc_signonnum = 25U,
@@ -78,16 +82,19 @@ enum class RuntimeControlMessageKind : std::uint8_t {
   choke,
   voice_initialization,
   user_message,
+  scripted_events,
 };
 
 struct RuntimeControlDecodeLimits final {
   // Project safety limits, not claims about engine maxima.
   std::size_t maximum_payload_bytes{65'536U};
   std::size_t maximum_messages_per_payload{256U};
+  std::size_t maximum_scripted_events_per_payload{128U};
 };
 
 inline constexpr std::size_t kMaximumRuntimeControlPayloadBytes = 1U << 20U;
 inline constexpr std::size_t kMaximumRuntimeControlMessagesPerPayload = 512U;
+inline constexpr std::size_t kMaximumRuntimeControlScriptedEventsPerPayload = 128U;
 
 [[nodiscard]] bool valid_runtime_control_decode_limits(
     const RuntimeControlDecodeLimits &limits) noexcept;
@@ -146,7 +153,9 @@ struct RuntimeControlText final {
 };
 
 struct RuntimeControlExactFixedBody final {
-  std::size_t body_size{0U};
+    std::size_t body_size{0U};
+    // Owning E1 projection; fixed-control kind/hash contract remains unchanged.
+    std::optional<RuntimeControlSound> sound;
 
   [[nodiscard]] friend bool
   operator==(const RuntimeControlExactFixedBody &,
@@ -171,6 +180,43 @@ struct RuntimeControlUserMessage final {
   [[nodiscard]] friend bool
   operator==(const RuntimeControlUserMessage &,
              const RuntimeControlUserMessage &) = default;
+};
+
+// Generic, owning wire observations only. No .sc execution, game-specific
+// effect selection, entity lookup, or retained event base is implied. The
+// packet index refers to a packet entity list, NOT an edict/entity number.
+struct RuntimeControlScriptedEvent final {
+  std::uint16_t event_index{0U};
+  std::optional<std::uint16_t> packet_index;
+  std::shared_ptr<const DeltaObjectState> arguments;
+  // Raw 16-bit wire delay; this framing slice does not schedule callbacks or
+  // claim stock timing units.
+  std::optional<std::uint16_t> fire_delay_ticks;
+  // Exact transmitted delta-field presence, independent of their decoded
+  // values. Event vector defaults may come from a packet entity; a genuine
+  // explicit zero component must not be mistaken for an omitted vector.
+  std::uint64_t argument_field_mask{0U};
+
+  [[nodiscard]] friend bool operator==(const RuntimeControlScriptedEvent& left,
+                                       const RuntimeControlScriptedEvent& right) {
+    return left.event_index == right.event_index &&
+           left.argument_field_mask == right.argument_field_mask &&
+           left.packet_index == right.packet_index &&
+           left.fire_delay_ticks == right.fire_delay_ticks &&
+           ((!left.arguments && !right.arguments) ||
+            (left.arguments && right.arguments &&
+             left.arguments->decode_profile() == right.arguments->decode_profile() &&
+             left.arguments->has_equal_values_as(*right.arguments)));
+  }
+};
+
+struct RuntimeControlScriptedEvents final {
+  bool reliable{false};
+  std::vector<RuntimeControlScriptedEvent> entries;
+  std::size_t encoded_body_bits{0U};
+
+  [[nodiscard]] friend bool operator==(const RuntimeControlScriptedEvents&,
+                                       const RuntimeControlScriptedEvents&) = default;
 };
 
 struct RuntimeControlServerTime final {
@@ -199,6 +245,20 @@ struct RuntimeControlBspDecal final {
   [[nodiscard]] friend bool
   operator==(const RuntimeControlBspDecal &,
              const RuntimeControlBspDecal &) = default;
+};
+
+// Owning Protocol 48 observation, not a request to render a decal or play a
+// ricochet. These byte-indexed formats are distinct from TE_BSPDECAL's shorts.
+struct RuntimeControlDecal final {
+  std::uint8_t temporary_entity_type{116U};
+  std::array<std::int16_t, 3U> coordinate_eighths{};
+  // HIGH formats add 256 to the wire byte; valid resolved range is 0..511.
+  std::uint16_t decal_reference{0U};
+  // Implicit zero for WORLDDECAL/HIGH; otherwise the unmodified wire short.
+  std::int16_t entity_reference{0};
+
+  [[nodiscard]] friend bool operator==(const RuntimeControlDecal &,
+                                       const RuntimeControlDecal &) = default;
 };
 
 struct RuntimeControlUserInfoUpdate final {
@@ -244,7 +304,8 @@ using RuntimeControlMessageBody =
                  RuntimeControlViewAngles, RuntimeControlLightStyle,
                  RuntimeControlUserInfoUpdate, RuntimeControlBspDecal,
                  RuntimeControlSignonControl, RuntimeControlVoiceInitialization,
-                 RuntimeControlUserMessage>;
+                 RuntimeControlUserMessage, RuntimeControlDecal,
+                 RuntimeControlScriptedEvents>;
 
 struct RuntimeControlEvent final {
   RuntimeControlOpcode opcode{RuntimeControlOpcode::svc_nop};
@@ -341,6 +402,10 @@ struct RuntimeControlDecodeInput final {
   std::uint64_t source_generation{0U};
   std::size_t payload_ordinal{0U};
   std::span<const PostMoveVarsUserMessageDefinition> user_message_definitions{};
+  // Borrowed for this decode call only; decoded arguments are independently
+  // owned. Missing event_t fails closed only when an arguments delta is sent.
+  const DeltaSchemaRegistryState* schemas{nullptr};
+  std::optional<double> server_time_seconds{};
 };
 
 enum class RuntimeControlDecodeErrorCode : std::uint8_t {
@@ -361,6 +426,9 @@ enum class RuntimeControlDecodeErrorCode : std::uint8_t {
   message_limit_exceeded,
   size_overflow,
   unable_to_retain_output,
+  missing_event_schema,
+  event_delta_failed,
+  scripted_event_limit_exceeded,
 };
 
 struct RuntimeControlDecodeError final {
@@ -369,6 +437,11 @@ struct RuntimeControlDecodeError final {
   std::optional<StockRuntimeSourceCursor> cursor{};
   std::optional<std::uint8_t> wire_opcode{};
   std::string context{};
+  std::optional<StockRuntimeSourceCursor> failure_cursor;
+  std::optional<std::uint8_t> registration_id;
+  std::string registration_name;
+  std::optional<std::size_t> expected_body_size;
+  std::optional<std::size_t> actual_body_size;
 };
 
 struct RuntimeControlDecodedBatch final {

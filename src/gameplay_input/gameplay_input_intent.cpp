@@ -49,6 +49,10 @@ struct ActionStates {
         GameplayButton button;
     };
     constexpr std::array mappings{
+        Mapping{GameplayInputAction::move_forward, GameplayButton::move_forward},
+        Mapping{GameplayInputAction::move_backward, GameplayButton::move_backward},
+        Mapping{GameplayInputAction::move_left, GameplayButton::move_left},
+        Mapping{GameplayInputAction::move_right, GameplayButton::move_right},
         Mapping{GameplayInputAction::jump, GameplayButton::jump},
         Mapping{GameplayInputAction::duck, GameplayButton::duck},
         Mapping{GameplayInputAction::use, GameplayButton::use},

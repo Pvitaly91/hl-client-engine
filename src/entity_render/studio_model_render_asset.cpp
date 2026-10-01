@@ -139,7 +139,7 @@ void hash_vector(StableHasher& hash, const assets::AssetVector3& value) noexcept
         return StudioRenderMaterialSupportStatus::unsupported_multiple_features;
     }
     if (chrome) {
-        return StudioRenderMaterialSupportStatus::unsupported_chrome;
+        return StudioRenderMaterialSupportStatus::supported_chrome;
     }
     if (additive) {
         return StudioRenderMaterialSupportStatus::unsupported_additive;
@@ -160,7 +160,8 @@ void hash_vector(StableHasher& hash, const assets::AssetVector3& value) noexcept
     const StudioRenderMaterialSupportStatus status) noexcept
 {
     return status == StudioRenderMaterialSupportStatus::supported_opaque ||
-        status == StudioRenderMaterialSupportStatus::supported_masked;
+        status == StudioRenderMaterialSupportStatus::supported_masked ||
+        status == StudioRenderMaterialSupportStatus::supported_chrome;
 }
 
 } // namespace

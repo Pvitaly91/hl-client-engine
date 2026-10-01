@@ -258,14 +258,13 @@ synthetic_scene_error(
     }
     if (scene->role_provider_profile() !=
         brush_collision::BrushCollisionRoleProviderProfile::
-            explicit_synthetic_brush_solidity_v1) {
+            explicit_synthetic_brush_solidity_v1 &&
+        scene->role_provider_profile() != brush_collision::BrushCollisionRoleProviderProfile::reference_entity_solid_bsp_v1) {
         return LocalMovementCollisionErrorCode::
             unsupported_collision_profile;
     }
     for (const auto& instance : scene->instances()) {
-        if (instance.role_provider_profile !=
-            brush_collision::BrushCollisionRoleProviderProfile::
-                explicit_synthetic_brush_solidity_v1) {
+        if (instance.role_provider_profile != scene->role_provider_profile()) {
             return LocalMovementCollisionErrorCode::
                 unsupported_collision_profile;
         }
@@ -427,6 +426,9 @@ struct NormalizedSceneHit {
             return std::nullopt;
         }
         hit = normalized.hit;
+        if (hit && hit->kind == player_movement::PlayerMovementHitKind::explicit_synthetic_brush &&
+            profile == LocalMovementCollisionProfile::reference_brush_scene_v1)
+            hit->kind = player_movement::PlayerMovementHitKind::brush_entity;
     }
 
     return LocalMovementTrace{
@@ -531,6 +533,8 @@ ILocalMovementCollision::session_identity() const noexcept
 std::string_view to_string(const LocalMovementCollisionProfile profile) noexcept
 {
     switch (profile) {
+    case LocalMovementCollisionProfile::reference_brush_scene_v1:
+        return "reference_brush_scene_v1";
     case LocalMovementCollisionProfile::world_only_v1:
         return "world_only_v1";
     case LocalMovementCollisionProfile::explicit_synthetic_static_brush_v1:
@@ -801,26 +805,29 @@ LocalMovementTraceQueryResult WorldOnlyMovementCollision::trace_hull(
     return {std::move(*normalized), std::nullopt};
 }
 
-SyntheticBrushMovementCollision::SyntheticBrushMovementCollision(
+BrushSceneMovementCollision::BrushSceneMovementCollision(
     std::shared_ptr<const brush_collision::BrushCollisionScene> scene) noexcept
     : scene_{std::move(scene)}
 {
 }
 
-LocalMovementCollisionProfile SyntheticBrushMovementCollision::profile()
+LocalMovementCollisionProfile BrushSceneMovementCollision::profile()
     const noexcept
 {
+    if (scene_ && scene_->role_provider_profile() ==
+        brush_collision::BrushCollisionRoleProviderProfile::reference_entity_solid_bsp_v1)
+        return LocalMovementCollisionProfile::reference_brush_scene_v1;
     return LocalMovementCollisionProfile::
         explicit_synthetic_static_brush_v1;
 }
 
-bool SyntheticBrushMovementCollision::valid() const noexcept
+bool BrushSceneMovementCollision::valid() const noexcept
 {
     return !synthetic_scene_error(scene_).has_value();
 }
 
 std::optional<LocalMovementCollisionSessionIdentity>
-SyntheticBrushMovementCollision::session_identity() const noexcept
+BrushSceneMovementCollision::session_identity() const noexcept
 {
     const auto package = world_package();
     if (!valid() || !package || !scene_) {
@@ -838,13 +845,13 @@ SyntheticBrushMovementCollision::session_identity() const noexcept
 }
 
 const std::shared_ptr<const brush_collision::BrushCollisionScene>&
-SyntheticBrushMovementCollision::scene() const noexcept
+BrushSceneMovementCollision::scene() const noexcept
 {
     return scene_;
 }
 
 std::shared_ptr<const core_collision::CollisionWorldPackage>
-SyntheticBrushMovementCollision::world_package() const noexcept
+BrushSceneMovementCollision::world_package() const noexcept
 {
     return scene_ != nullptr && scene_->model_library() != nullptr
         ? scene_->model_library()->collision_world()
@@ -852,7 +859,7 @@ SyntheticBrushMovementCollision::world_package() const noexcept
 }
 
 LocalMovementPointContentsQueryResult
-SyntheticBrushMovementCollision::point_contents(
+BrushSceneMovementCollision::point_contents(
     const assets::AssetVector3& point,
     core_collision::CollisionQueryScratch& scratch,
     const LocalMovementCollisionQueryConfig& config) const
@@ -860,13 +867,14 @@ SyntheticBrushMovementCollision::point_contents(
     if (const auto error = synthetic_scene_error(scene_)) {
         return failure<LocalMovementPointContents>(*error);
     }
-    // Synthetic static-solid brushes are deliberately not contents providers.
+    // Explicit solid brushes (synthetic or committed reference) are trace
+    // participants, not inferred liquid contents providers.
     WorldOnlyMovementCollision world{world_package()};
     return world.point_contents(point, scratch, config);
 }
 
 LocalMovementPositionQueryResult
-SyntheticBrushMovementCollision::test_position(
+BrushSceneMovementCollision::test_position(
     const assets::AssetVector3& origin,
     const player_movement::PlayerMovementHull hull,
     core_collision::CollisionQueryScratch& scratch,
@@ -892,7 +900,7 @@ SyntheticBrushMovementCollision::test_position(
     };
 }
 
-LocalMovementTraceQueryResult SyntheticBrushMovementCollision::trace_hull(
+LocalMovementTraceQueryResult BrushSceneMovementCollision::trace_hull(
     const assets::AssetVector3& start,
     const assets::AssetVector3& end,
     const player_movement::PlayerMovementHull hull,
@@ -927,7 +935,7 @@ LocalMovementTraceQueryResult SyntheticBrushMovementCollision::trace_hull(
     }
     auto normalized = normalize_trace(
         queried.result->trace,
-        LocalMovementCollisionProfile::explicit_synthetic_static_brush_v1,
+        profile(),
         queried.result->scene_hit);
     if (!normalized) {
         return failure<LocalMovementTrace>(

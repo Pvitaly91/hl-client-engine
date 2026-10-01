@@ -33,6 +33,7 @@ namespace {
     switch (mode) {
     case PlayerMovementMode::walking:
     case PlayerMovementMode::airborne:
+    case PlayerMovementMode::ladder:
     case PlayerMovementMode::unsupported_liquid:
     case PlayerMovementMode::unsupported_ladder:
     case PlayerMovementMode::invalid_or_stuck: return true;
@@ -64,6 +65,7 @@ namespace {
             !hit.stable_instance_ordinal.has_value() &&
             !hit.source_entity_index.has_value();
     case PlayerMovementHitKind::explicit_synthetic_brush:
+    case PlayerMovementHitKind::brush_entity:
         return hit.source_model_index != 0U &&
             hit.stable_instance_ordinal.has_value();
     }
@@ -215,6 +217,8 @@ LocalPlayerMovementState::LocalPlayerMovementState(
       ground_state_{create_info.ground},
       view_offset_{create_info.view_offset},
       old_buttons_{create_info.old_buttons},
+      duck_time_milliseconds_{create_info.duck_time_milliseconds},
+      in_duck_transition_{create_info.in_duck_transition},
       source_command_sequence_{create_info.source_command_sequence},
       simulation_time_nanoseconds_{create_info.simulation_time_nanoseconds},
       last_valid_contents_{create_info.last_valid_contents},
@@ -268,6 +272,14 @@ LocalPlayerMovementState::CreationResult LocalPlayerMovementState::create(
         return failure(LocalPlayerMovementStateErrorCode::invalid_hull,
             "movement hull is invalid");
     }
+    if (create_info.command_profile == GoldSrcMovementCommandProfile::
+            reference_wire_jump_duck_v2 &&
+        (create_info.duck_time_milliseconds > 1000U ||
+         (create_info.in_duck_transition &&
+          create_info.hull != PlayerMovementHull::standing))) {
+        return failure(LocalPlayerMovementStateErrorCode::invalid_hull,
+            "reference duck phase and timer are inconsistent");
+    }
     if (!valid_mode(create_info.mode)) {
         return failure(LocalPlayerMovementStateErrorCode::invalid_mode,
             "movement mode is invalid");
@@ -306,16 +318,23 @@ LocalPlayerMovementState::CreationResult LocalPlayerMovementState::create(
         return failure(LocalPlayerMovementStateErrorCode::stock_evidence_pending,
             "stock movement or usercmd semantics remain evidence-pending");
     }
+    const bool action_profile = create_info.command_profile ==
+        GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2;
     if (create_info.compatibility_profile !=
-            GoldSrcMovementCompatibilityProfile::
-                public_valve_pm_shared_dry_walk_subset_v1 ||
+            (action_profile
+                ? GoldSrcMovementCompatibilityProfile::
+                      public_valve_pm_shared_dry_actions_subset_v2
+                : GoldSrcMovementCompatibilityProfile::
+                      public_valve_pm_shared_dry_walk_subset_v1) ||
         create_info.evidence_profile !=
             GoldSrcMovementEvidenceProfile::
                 public_valve_pm_shared_and_independent_fixtures ||
         (create_info.command_profile !=
              GoldSrcMovementCommandProfile::synthetic_usercmd_semantics_v1 &&
          create_info.command_profile !=
-             GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1)) {
+             GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1 &&
+         create_info.command_profile !=
+             GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2)) {
         return failure(LocalPlayerMovementStateErrorCode::unsupported_profile,
             "movement state profile is unsupported");
     }
@@ -340,6 +359,10 @@ const assets::AssetVector3& LocalPlayerMovementState::view_offset() const noexce
 { return view_offset_; }
 std::uint16_t LocalPlayerMovementState::old_buttons() const noexcept
 { return old_buttons_; }
+std::uint32_t LocalPlayerMovementState::duck_time_milliseconds() const noexcept
+{ return duck_time_milliseconds_; }
+bool LocalPlayerMovementState::in_duck_transition() const noexcept
+{ return in_duck_transition_; }
 std::uint32_t LocalPlayerMovementState::source_command_sequence() const noexcept
 { return source_command_sequence_; }
 std::uint64_t LocalPlayerMovementState::simulation_time_nanoseconds() const noexcept
@@ -384,6 +407,11 @@ std::uint64_t local_player_movement_state_signature(
     hash_integral(hash, state.ground_state().evidence_profile());
     hash_vector(hash, state.view_offset());
     hash_integral(hash, state.old_buttons());
+    if (state.command_profile() == GoldSrcMovementCommandProfile::
+            reference_wire_jump_duck_v2) {
+        hash_integral(hash, state.duck_time_milliseconds());
+        hash_integral(hash, state.in_duck_transition());
+    }
     hash_integral(hash, state.source_command_sequence());
     hash_integral(hash, state.simulation_time_nanoseconds());
     hash_integral(hash, state.last_valid_contents());
@@ -435,6 +463,8 @@ LocalPlayerMovementStateCreateInfo local_player_movement_state_create_info(
     };
     result.view_offset = state.view_offset();
     result.old_buttons = state.old_buttons();
+    result.duck_time_milliseconds = state.duck_time_milliseconds();
+    result.in_duck_transition = state.in_duck_transition();
     result.source_command_sequence = state.source_command_sequence();
     result.simulation_time_nanoseconds = state.simulation_time_nanoseconds();
     result.last_valid_contents = state.last_valid_contents();
@@ -493,6 +523,9 @@ std::string_view to_string(
             public_valve_pm_shared_dry_walk_subset_v1:
         return "public_valve_pm_shared_dry_walk_subset_v1";
     case GoldSrcMovementCompatibilityProfile::
+            public_valve_pm_shared_dry_actions_subset_v2:
+        return "public_valve_pm_shared_dry_actions_subset_v2";
+    case GoldSrcMovementCompatibilityProfile::
             stock_pm_move_full_compatibility_evidence_pending:
         return "stock_pm_move_full_compatibility_evidence_pending";
     }
@@ -519,6 +552,8 @@ std::string_view to_string(const GoldSrcMovementCommandProfile profile) noexcept
         return "synthetic_usercmd_semantics_v1";
     case GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1:
         return "reference_wire_dry_walk_v1";
+    case GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2:
+        return "reference_wire_jump_duck_v2";
     case GoldSrcMovementCommandProfile::stock_usercmd_semantics_evidence_pending:
         return "stock_usercmd_semantics_evidence_pending";
     }
@@ -539,6 +574,7 @@ std::string_view to_string(const PlayerMovementMode mode) noexcept
     switch (mode) {
     case PlayerMovementMode::walking: return "walking";
     case PlayerMovementMode::airborne: return "airborne";
+    case PlayerMovementMode::ladder: return "ladder";
     case PlayerMovementMode::unsupported_liquid: return "unsupported_liquid";
     case PlayerMovementMode::unsupported_ladder: return "unsupported_ladder";
     case PlayerMovementMode::invalid_or_stuck: return "invalid_or_stuck";

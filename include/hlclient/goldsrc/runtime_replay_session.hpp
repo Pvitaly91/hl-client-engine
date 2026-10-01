@@ -3,6 +3,8 @@
 #include <hlclient/client/client_world_state.hpp>
 #include <hlclient/goldsrc/packet_entity_decoder.hpp>
 #include <hlclient/goldsrc/move_vars.hpp>
+#include <hlclient/game_api/game_client_host.hpp>
+#include <hlclient/goldsrc/server_audio.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -70,6 +72,11 @@ struct RuntimeReplayInitialization final {
     RuntimeReplayCompatibilityProfile profile{
         RuntimeReplayCompatibilityProfile::
             public_goldsrc48_runtime_replay_v1};
+    std::optional<std::uint32_t> receiving_player_entity;
+    // Explicit composition dependency. Empty means protocol-only replay,
+    // with no implicit game-module selection.
+    std::shared_ptr<game_api::GameClientHost> game_client;
+    std::shared_ptr<CommittedSoundQueue> sound_events;
 };
 
 // Project-owned replay envelope. `payload.bytes` is exactly one already
@@ -84,6 +91,8 @@ struct RuntimeReplayRecord final {
     RuntimeReplayCompatibilityProfile profile{
         RuntimeReplayCompatibilityProfile::
             public_goldsrc48_runtime_replay_v1};
+    // Presentation expiry only; not part of wire/canonical state or replay clock.
+    std::optional<SoundTime> received_at;
 };
 
 enum class RuntimeReplayErrorCode : std::uint8_t {
@@ -120,6 +129,15 @@ struct RuntimeReplayError final {
     std::optional<std::uint64_t> record_identity;
     std::optional<std::size_t> record_ordinal;
     std::string context;
+    std::optional<RuntimeControlDecodeError> control_error;
+    std::optional<game_api::GameMessageFailure> module_error;
+    std::optional<StockRuntimeSourceCursor> record_start_cursor;
+    std::optional<StockRuntimeSourceCursor> failure_cursor;
+    std::optional<std::uint64_t> generation, life_epoch, last_publication;
+    std::optional<client::LocalPlayerLifeState> life_state;
+    std::optional<std::uint32_t> source_sequence, source_acknowledgement;
+    std::optional<bool> reliable, reassembled, decompressed, wire_uncompressed;
+    std::optional<std::size_t> payload_size, attempted_records, committed_records;
 };
 
 struct RuntimeReplayApplyEvent final {
@@ -200,6 +218,7 @@ private:
     client::ClientWorldState* target_{nullptr};
     std::vector<RecordFingerprint> record_fingerprints_;
     std::size_t last_record_ordinal_{0U};
+    std::size_t attempted_records_{0U}, committed_records_{0U};
     std::uint64_t publication_revision_{0U};
     std::uint64_t committed_state_hash_{0U};
     RuntimeReplaySessionStatus status_{RuntimeReplaySessionStatus::active};
@@ -216,5 +235,7 @@ private:
 [[nodiscard]] std::string_view to_string(
     RuntimeReplayRecoveryStatus recovery) noexcept;
 [[nodiscard]] std::string_view to_string(RuntimeReplayErrorCode code) noexcept;
+// Bounded inert typed tokens only. No error.context, payload or auth text.
+[[nodiscard]] std::string runtime_failure_summary(const RuntimeReplayError& error);
 
 } // namespace hlclient::goldsrc

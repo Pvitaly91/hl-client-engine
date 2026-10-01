@@ -14,6 +14,7 @@ class WorldRenderPackage;
 
 namespace hlclient::world_scene_render {
 class WorldSceneRenderPackage;
+struct RuntimeBrushRenderFrame;
 }
 
 namespace hlclient::world_visibility {
@@ -121,6 +122,10 @@ public:
         std::shared_ptr<const entity_render::EntitySceneRenderPackage> package,
         std::shared_ptr<const entity_render::EntityRenderFrame> frame) noexcept;
     void clear_dynamic_entities() noexcept;
+    [[nodiscard]] bool set_runtime_brushes(
+        std::shared_ptr<const world_scene_render::RuntimeBrushRenderFrame> frame) noexcept;
+    [[nodiscard]] const std::shared_ptr<const world_scene_render::RuntimeBrushRenderFrame>&
+    runtime_brushes() const noexcept { return runtime_brushes_; }
     void set_camera(const RenderCameraState& camera) noexcept;
     [[nodiscard]] bool set_interactive_camera(
         const RenderCameraState& camera,
@@ -184,6 +189,7 @@ private:
     std::shared_ptr<const world_visibility::WorldVisibleDrawList> visible_draw_list_;
     std::shared_ptr<const entity_render::EntitySceneRenderPackage> entity_scene_;
     std::shared_ptr<const entity_render::EntityRenderFrame> entity_frame_;
+    std::shared_ptr<const world_scene_render::RuntimeBrushRenderFrame> runtime_brushes_;
     RenderCameraState camera_{};
     std::optional<InteractiveCameraMetadata> interactive_camera_metadata_;
     std::uint64_t world_revision_{0U};

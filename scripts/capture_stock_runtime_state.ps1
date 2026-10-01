@@ -24,8 +24,14 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'RestorationSelfTest')]
     [switch]$ValidateRestorationGuard,
 
+    [Parameter(ParameterSetName = 'RestorationSelfTest')]
+    [switch]$TestStartHealthProfileSelfTest,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Preflight')]
     [switch]$ValidateResearchRoot,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPreflight')]
+    [switch]$ValidateFunctionalResearchRoot,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'ActivePreflight')]
     [switch]$ValidateActiveCaptureEnvironment,
@@ -40,6 +46,10 @@ param(
     [switch]$FunctionalSmoke,
 
     [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [ValidateSet('Fast', 'Strict')]
+    [string]$ValidationMode = 'Strict',
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
     [switch]$ProjectClientStockSignon,
 
     [Parameter(ParameterSetName = 'FunctionalSmoke')]
@@ -47,12 +57,29 @@ param(
     [string]$ProjectClientStop = 'delta-schemas',
 
     [Parameter(ParameterSetName = 'FunctionalSmoke')]
-    [ValidateSet('scripted-check', 'scripted-side-check', 'scripted-jump-duck-check', 'scripted-speed-check', 'keyboard-mouse')]
+    [ValidateSet('scripted-check', 'scripted-side-check', 'scripted-jump-duck-check', 'scripted-speed-check', 'scripted-weapon-check', 'scripted-fire-reload-check', 'scripted-fire-reload-presentation-check', 'scripted-damage-respawn-check', 'keyboard-mouse')]
     [string]$ProjectClientLiveInput = 'scripted-check',
 
     [Parameter(ParameterSetName = 'FunctionalSmoke')]
     [ValidateSet('off', 'reference')]
     [string]$ProjectClientPrediction = 'off',
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [switch]$ProjectClientMuteGlockFireSound,
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [switch]$RemoteAudioPeer,
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [ValidateRange(1, 86400)]
+    [int]$ProjectClientDurationSeconds,
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [switch]$ProjectClientNoTimeLimit,
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [ValidateSet(50)]
+    [int]$TestStartHealth = 0,
 
     [Parameter(ParameterSetName = 'FunctionalSmoke')]
     [string]$SteamApiRuntimePath,
@@ -91,6 +118,12 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalFailureRetentionSelfTest')]
     [switch]$ValidateFunctionalFailureRetention,
 
+    [Parameter(ParameterSetName = 'FunctionalFailureRetentionSelfTest')]
+    [string]$RuntimeFailureRoundtripJson,
+
+    [Parameter(ParameterSetName = 'FunctionalFailureRetentionSelfTest')]
+    [string]$RuntimeFailureRoundtripStatus,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalResearchProjectionSelfTest')]
     [switch]$ValidateFunctionalResearchProjection,
 
@@ -110,6 +143,7 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [Parameter(Mandatory = $true, ParameterSetName = 'RetainedBackupRecovery')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPreflight')]
     [ValidateNotNullOrEmpty()]
     [string]$ResearchHalfLifeRoot,
 
@@ -122,6 +156,7 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateNotNullOrEmpty()]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPreflight')]
     [string]$ClientPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
@@ -133,6 +168,7 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateNotNullOrEmpty()]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPreflight')]
     [string]$HldsPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
@@ -190,6 +226,7 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
     [ValidateNotNullOrEmpty()]
+    [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalPreflight')]
     [string]$AppManifestPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'ExternalDriftControl')]
@@ -218,8 +255,12 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'PrivateServerProfileDiagnostic')]
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalSmoke')]
     [Parameter(Mandatory = $true, ParameterSetName = 'FunctionalRuntimeCapture')]
-    [ValidateSet('boot_camp', 'crossfire', 'stalkyard')]
+    [ValidatePattern('^[A-Za-z0-9_][A-Za-z0-9_-]{0,30}$')]
+    [Parameter(ParameterSetName = 'FunctionalPreflight')]
     [string]$Map,
+
+    [Parameter(ParameterSetName = 'FunctionalSmoke')]
+    [switch]$ExternalManualMap,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [ValidateSet(
@@ -390,6 +431,21 @@ $projectClientUserCmdMode = $projectClientStockSignonMode -and
     $ProjectClientStop -ceq 'live-usercmd-check'
 $projectClientVisualMode = $projectClientStockSignonMode -and
     $ProjectClientStop -ceq 'live-visual-control'
+$manualSessionTiming = $ProjectClientNoTimeLimit -or $PSBoundParameters.ContainsKey('ProjectClientDurationSeconds')
+if ($manualSessionTiming -and (-not $projectClientVisualMode -or
+    $ProjectClientLiveInput -cne 'keyboard-mouse' -or
+    ($ProjectClientNoTimeLimit -and $PSBoundParameters.ContainsKey('ProjectClientDurationSeconds')))) {
+    throw 'Manual timing requires keyboard-mouse live-visual-control and exactly one of DurationSeconds/NoTimeLimit.'
+}
+$fastManualMode = $functionalSmokeMode -and $ValidationMode -eq 'Fast'
+if ($fastManualMode -and (-not $projectClientVisualMode -or
+    $ProjectClientLiveInput -cnotin @('keyboard-mouse','scripted-damage-respawn-check'))) {
+    throw 'Fast is restricted to the manual launcher visual scenarios.'
+}
+. (Join-Path $PSScriptRoot 'stock_manual_fast.ps1')
+$script:ManualProgressEnabled = $projectClientVisualMode
+if ($projectClientVisualMode) { Write-ManualPhase preflight }
+$testHealthComponents = $null
 if ($projectClientVisualMode -and
     $ProjectClientLiveInput -ceq 'scripted-jump-duck-check') {
     Import-Module (Join-Path $PSScriptRoot 'g_jump_duck_summary.psm1') `
@@ -407,7 +463,17 @@ $functionalRuntimeCaptureMode =
 $functionalResearchProjectionSelfTestMode =
     $PSCmdlet.ParameterSetName -ceq 'FunctionalResearchProjectionSelfTest'
 $functionalPolicyMode = $functionalSmokeMode -or $functionalRuntimeCaptureMode -or
-    $functionalResearchProjectionSelfTestMode
+    $functionalResearchProjectionSelfTestMode -or
+    $PSCmdlet.ParameterSetName -ceq 'FunctionalPreflight'
+if ($ExternalManualMap -and ($ValidationMode -cne 'Fast' -or
+    $ProjectClientLiveInput -cne 'keyboard-mouse' -or
+    $ProjectClientStop -cne 'live-visual-control' -or $TestStartHealth -ne 0)) {
+    throw 'ExternalManualMap is limited to Fast manual keyboard-mouse sessions without TestStartHealth.'
+}
+if ($Map -and $Map -cnotin @('boot_camp', 'crossfire', 'stalkyard') -and
+    -not ($functionalSmokeMode -and $ExternalManualMap)) {
+    throw 'Invalid Map: external map selection requires the explicit FunctionalSmoke external-manual opt-in.'
+}
 if ($projectClientStockSignonMode -ne
     (-not [string]::IsNullOrWhiteSpace($SteamApiRuntimePath))) {
     throw 'ProjectClientStockSignon and SteamApiRuntimePath must be supplied together.'
@@ -422,6 +488,19 @@ if ($PSBoundParameters.ContainsKey('ProjectClientLiveInput') -and
 }
 if ($ProjectClientPrediction -ceq 'reference' -and -not $projectClientVisualMode) {
     throw 'ProjectClientPrediction reference requires live-visual-control.'
+}
+if ($ProjectClientMuteGlockFireSound -and
+    (-not $projectClientVisualMode -or $ProjectClientLiveInput -cne 'keyboard-mouse')) {
+    throw 'ProjectClientMuteGlockFireSound requires keyboard-mouse live-visual-control.'
+}
+if ($TestStartHealth -eq 50) {
+    if ($RemoteAudioPeer) { throw 'RemoteAudioPeer incompatible with TestStartHealth.' }
+    if (-not $projectClientVisualMode -or $Map -cne 'crossfire' -or
+        $ProjectClientLiveInput -cne 'keyboard-mouse' -or $ProjectClientPrediction -cne 'reference') {
+        throw 'test_start_health_incompatible_scenario'
+    }
+    Import-Module (Join-Path $PSScriptRoot 'test_start_health_profile.psm1') -Force
+    $testHealthComponents = Get-TestStartHealthComponents $repositoryRoot
 }
 $writerTraceModulePath = Join-Path $PSScriptRoot 'stock_writer_trace_handoff.psm1'
 if ($EnableWriterTraceHandoff) {
@@ -619,6 +698,7 @@ function Assert-NoHardLink {
 
 function Get-BoundedItems {
     param([string]$Root)
+    if (Get-Variable ManualFileWork -Scope Script -ErrorAction SilentlyContinue) { $script:ManualFileWork.tree_scans++ }
     $items = [Collections.Generic.List[object]]::new()
     $queue = [Collections.Generic.Queue[IO.DirectoryInfo]]::new()
     $queue.Enqueue([IO.DirectoryInfo](Get-Item -LiteralPath $Root -Force))
@@ -647,6 +727,7 @@ function Get-FileSha256 {
         $Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
+        if (Get-Variable ManualFileWork -Scope Script -ErrorAction SilentlyContinue) { $script:ManualFileWork.hashed_bytes += $stream.Length }
         return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '')
     } finally {
         $sha.Dispose()
@@ -2404,13 +2485,16 @@ function Assert-RunDirectoryCapability {
 }
 
 function New-RestorationGuard {
-    param([string]$Root, [object]$Snapshot)
+    param([string]$Root, [object]$Snapshot, [string]$BackupId = '')
+    if (-not $BackupId) { $BackupId = [Guid]::NewGuid().ToString('N') }
+    if ($BackupId -cnotmatch '^[0-9a-f]{32}$') { throw 'Invalid backup identity.' }
     $researchCapability = $null
     $backupRootCapability = $null
     $backupDataCapability = $null
     $guard = $null
     $temporary = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) (
-        'hlclient-stock-runtime-restore-' + [Guid]::NewGuid().ToString('N'))))
+        'hlclient-stock-runtime-restore-' + $BackupId)))
+    if (Test-Path -LiteralPath $temporary) { throw 'Restoration backup identity already exists.' }
     try {
         if ((Test-PathAtOrBelow $temporary $Root) -or
             (Test-PathAtOrBelow $temporary $repositoryRoot)) {
@@ -2454,8 +2538,9 @@ function New-RestorationGuard {
             BackupRootDirectoryCapability = $backupRootCapability
             BackupDataDirectoryCapability = $backupDataCapability
         }
-        # Back up the complete bounded tree. A whitelist-only backup can detect
-        # drift outside known mutable paths but cannot restore it transactionally.
+        # Back up exactly the supplied snapshot. Strict supplies the complete
+        # bounded tree; Fast explicitly supplies only managed mutable files and
+        # never claims restoration/attestation outside that scope.
         foreach ($entry in @($Snapshot.Entries | Where-Object {
                     $_.RelativePath -ne '.'
                 } | Sort-Object RelativePath)) {
@@ -2472,6 +2557,7 @@ function New-RestorationGuard {
                 if ((Get-FileSha256 $destination) -cne $entry.Sha256) {
                     throw 'Restoration backup digest mismatch.'
                 }
+                if (Get-Variable ManualFileWork -Scope Script -ErrorAction SilentlyContinue) { $script:ManualFileWork.copied_bytes += $entry.Length }
             }
             [void]$backed.Add($entry)
         }
@@ -2642,6 +2728,7 @@ function Restore-ResearchState {
         # Never overwrite: a raced-in link or file makes Copy fail closed.
         Assert-RestorationDirectoryCapabilities $Guard
         [IO.File]::Copy($source, $target, $false)
+        if (Get-Variable ManualFileWork -Scope Script -ErrorAction SilentlyContinue) { $script:ManualFileWork.copied_bytes += $entry.Length }
         Assert-NoReparsePoint $target 'restored file'
         Assert-NoHardLink $target 'restored file'
         $item = Get-Item -LiteralPath $target -Force
@@ -2860,15 +2947,18 @@ function Assert-FunctionalResearchProjection {
             throw 'Functional research projection mutable allowlist shape changed.'
         }
     }
-    foreach ($critical in @(
+    $criticalPaths = @(
             'hl.exe', 'hlds.exe', 'valve/cl_dlls/client.dll',
-            'valve/dlls/hl.dll', 'valve/liblist.gam',
-            'valve/maps/boot_camp.bsp')) {
+            'valve/dlls/hl.dll', 'valve/liblist.gam')
+    if (-not [string]::IsNullOrEmpty($Map)) {
+        $criticalPaths += 'valve/maps/' + $Map + '.bsp'
+    }
+    foreach ($critical in $criticalPaths) {
         if (-not $researchEntries.ContainsKey($critical) -or
             -not $sourceEntries.ContainsKey($critical) -or
             (Get-FileSha256 $researchEntries[$critical].FullName) -cne
                 (Get-FileSha256 $sourceEntries[$critical].FullName)) {
-            throw 'Functional research projection critical identity changed.'
+            throw "Functional research projection critical identity changed: $critical."
         }
     }
     return [pscustomobject]@{
@@ -3296,6 +3386,42 @@ function Assert-ApprovedLocalDriveRoot {
     }
 }
 
+function Get-FunctionalMapEvidence {
+    param([ValidatePattern('^[A-Za-z0-9_][A-Za-z0-9_-]{0,30}$')][string]$RequestedMap,
+          [AllowNull()][string]$ObservedServerInfoMap)
+    $expected = "maps/$RequestedMap.bsp"
+    # The observed value is never filled from the request, including preflight
+    # and partial native publication. This is evidence, not a map selector.
+    $observed = if ([string]::IsNullOrEmpty($ObservedServerInfoMap) -or
+        $ObservedServerInfoMap -cin @('unknown', 'not-observed')) { $null }
+        else { $ObservedServerInfoMap }
+    return [ordered]@{
+        requested_map = $RequestedMap
+        expected_serverinfo_map = $expected
+        observed_serverinfo_map = $observed
+        comparison = $(if ($null -eq $observed) { 'not_observed' }
+            elseif ($observed -ceq $expected) { 'match' } else { 'mismatch' })
+    }
+}
+
+function Resolve-SelectedResearchMap {
+    param([string]$Root, [string]$SelectedMap, [switch]$AllowExternalManualMap)
+    if ($SelectedMap -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_-]{0,30}$' -or
+        ($SelectedMap -cnotin @('boot_camp', 'crossfire', 'stalkyard') -and
+         -not $AllowExternalManualMap)) {
+        throw 'Invalid Map: expected an allowed virtual map basename for valve.'
+    }
+    $path = [IO.Path]::GetFullPath((Join-Path $Root ("valve/maps/{0}.bsp" -f $SelectedMap)))
+    Assert-PathBelowRoot $path $Root 'selected research map'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Selected map is missing: valve/maps/$SelectedMap.bsp. No fallback map is used."
+    }
+    Assert-NoReparsePointInExistingPath $path 'selected research map'
+    Assert-OnlyDefaultDataStream $path 'selected research map'
+    Assert-NoHardLink $path 'selected research map'
+    return $path
+}
+
 function Resolve-IsolatedResearchRoot {
     $requestedRoot = [IO.Path]::GetFullPath($ResearchHalfLifeRoot).TrimEnd('\', '/')
     if (-not (Test-Path -LiteralPath $requestedRoot -PathType Container)) {
@@ -3336,7 +3462,10 @@ function Resolve-IsolatedResearchRoot {
             throw 'Research root overlaps a configured Steam library.'
         }
     }
-    $boundedResearchItems = @(Get-BoundedItems $root)
+    if (-not [string]::IsNullOrEmpty($Map)) {
+        [void](Resolve-SelectedResearchMap $root $Map -AllowExternalManualMap:($functionalSmokeMode -and $ExternalManualMap))
+    }
+    $boundedResearchItems = if ($fastManualMode) { @() } else { @(Get-BoundedItems $root) }
     $marker = [IO.Path]::GetFullPath((Join-Path $root $markerName))
     if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
         throw 'Research root lacks the exact isolation marker.'
@@ -3350,9 +3479,12 @@ function Resolve-IsolatedResearchRoot {
         $markerValue -cne ($markerText + "`r`n")) {
         throw 'Research root lacks the exact isolation marker.'
     }
-    $preparationManifest = Assert-ResearchPreparationManifest `
-        $root $boundedResearchItems `
-        -AllowFunctionalMutableDrift:$functionalPolicyMode
+    $preparationManifest = if ($fastManualMode) { Assert-FastResearchPreparation $root } else {
+        if (Test-Path -LiteralPath (Join-Path $root '.hlclient-manual-fast.pending.json')) {
+            throw 'Unfinished Fast transaction: recover using the Fast launcher before Strict validation.'
+        }
+        Assert-ResearchPreparationManifest $root $boundedResearchItems -AllowFunctionalMutableDrift:$functionalPolicyMode
+    }
     $client = [IO.Path]::GetFullPath($ClientPath)
     $server = [IO.Path]::GetFullPath($HldsPath)
     $expectedProjectClient = [IO.Path]::GetFullPath(
@@ -3628,7 +3760,10 @@ function New-BoundedProcessStreamState {
         Buffer = $buffer
         Builder = [Text.StringBuilder]::new()
         Bytes = [Int64]0
+        Forwarded = 0
         Done = $false
+        RuntimeObserved = $false
+        CleanupStarted = $false
         Task = $Reader.ReadAsync($buffer, 0, $buffer.Length)
     }
 }
@@ -3650,6 +3785,23 @@ function Receive-BoundedProcessStream {
     }
     $State.Bytes += $chunkBytes
     [void]$State.Builder.Append($chunk)
+    if ($State.Name -eq 'stdout') {
+        $text = $State.Builder.ToString()
+        $end = $text.LastIndexOf("`n") + 1
+        if ($end -gt $State.Forwarded) {
+            foreach ($line in $text.Substring($State.Forwarded,$end-$State.Forwarded).Split("`n")) {
+                if ($line.TrimEnd("`r") -cmatch '^\[stock-runtime-orchestrator\] phase-(preflight|server-startup|server-ready|client-startup|runtime-observed|owned-cleanup-started|owned-cleanup-complete)-ms=([0-9]{1,18})$') {
+                    if ($Matches[1] -ceq 'runtime-observed') { $State.RuntimeObserved = $true }
+                    if ($Matches[1] -ceq 'owned-cleanup-started') { $State.CleanupStarted = $true }
+                    if ((Get-Variable ManualProgressEnabled -Scope Script -ErrorAction SilentlyContinue) -and $script:ManualProgressEnabled) {
+                        $script:ManualPhase = $Matches[1]
+                        Write-Host "[manual-launch] phase=$($Matches[1]) elapsed_ms=$($Matches[2]) clock=native observed=true"
+                    }
+                }
+            }
+            $State.Forwarded = $end
+        }
+    }
     $State.Task = $State.Reader.ReadAsync(
         $State.Buffer, 0, $State.Buffer.Length)
 }
@@ -3728,6 +3880,17 @@ function New-OrchestratorExitState {
     }
 }
 
+function Get-ManualOrchestratorRemainingMilliseconds {
+    param([long]$ElapsedMilliseconds, [int]$TimeoutSeconds,
+          [switch]$NoTimeLimit, [bool]$RuntimeObserved = $false,
+          [Nullable[long]]$CleanupStartedMilliseconds)
+    if ($null -ne $CleanupStartedMilliseconds) {
+        return [long]90000 - ($ElapsedMilliseconds - $CleanupStartedMilliseconds)
+    }
+    if ($NoTimeLimit -and $RuntimeObserved) { return [long]::MaxValue }
+    return ([long]$TimeoutSeconds * 1000) - $ElapsedMilliseconds
+}
+
 function Invoke-BoundedOrchestrator {
     param(
         [string]$Path,
@@ -3742,7 +3905,8 @@ function Invoke-BoundedOrchestrator {
         [IntPtr]$WriterTracePrelaunchReadyHandle = [IntPtr]::Zero,
         [IntPtr]$WriterTraceLaunchReleaseHandle = [IntPtr]::Zero,
         [IntPtr]$WriterTraceStockStoppedHandle = [IntPtr]::Zero,
-        [object]$WriterTraceRequest = $null
+        [object]$WriterTraceRequest = $null,
+        [switch]$ManualNoTimeLimit
     )
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Path
@@ -3905,22 +4069,34 @@ function Invoke-BoundedOrchestrator {
         # buffer it without a bound first.  These builders never admit more
         # than 64 KiB per stream; finally kills this exact process on overflow
         # or timeout, which closes its owned Job boundary in active mode.
+        [long]$nextHeartbeat = $clock.ElapsedMilliseconds + 5000
+        [Nullable[long]]$manualCleanupStarted = $null
         while (-not ($stdoutState.Done -and $stderrState.Done)) {
-            [Int64]$remainingMilliseconds =
-                ([Int64]$TimeoutSeconds * 1000) - $clock.ElapsedMilliseconds
-            if ($remainingMilliseconds -le 0) {
-                throw 'Project orchestrator exceeded its bounded deadline.'
+            if ((Get-Variable ManualProgressEnabled -Scope Script -ErrorAction SilentlyContinue) -and
+                $script:ManualProgressEnabled -and $clock.ElapsedMilliseconds -ge $nextHeartbeat) {
+                Write-Host "[manual-launch] waiting=$script:ManualPhase elapsed_ms=$($script:ManualClock.ElapsedMilliseconds) clock=wrapper"
+                $nextHeartbeat = $clock.ElapsedMilliseconds + 5000
             }
             Receive-BoundedProcessStream $stdoutState
             Receive-BoundedProcessStream $stderrState
+            if ($ManualNoTimeLimit -and $stdoutState.CleanupStarted -and $null -eq $manualCleanupStarted) {
+                $manualCleanupStarted = $clock.ElapsedMilliseconds
+            }
+            [Int64]$remainingMilliseconds = Get-ManualOrchestratorRemainingMilliseconds `
+                $clock.ElapsedMilliseconds $TimeoutSeconds -NoTimeLimit:$ManualNoTimeLimit `
+                -RuntimeObserved $stdoutState.RuntimeObserved -CleanupStartedMilliseconds $manualCleanupStarted
+            if ($remainingMilliseconds -le 0) {
+                throw 'Project orchestrator exceeded its bounded deadline.'
+            }
             if (-not ($stdoutState.Done -and $stderrState.Done)) {
-                Start-Sleep -Milliseconds ([Math]::Min(10, [int]$remainingMilliseconds))
+                Start-Sleep -Milliseconds ([int][Math]::Min([long]10, $remainingMilliseconds))
             }
         }
-        [Int64]$remainingForExit =
-            ([Int64]$TimeoutSeconds * 1000) - $clock.ElapsedMilliseconds
+        [Int64]$remainingForExit = Get-ManualOrchestratorRemainingMilliseconds `
+            $clock.ElapsedMilliseconds $TimeoutSeconds -NoTimeLimit:$ManualNoTimeLimit `
+            -RuntimeObserved $stdoutState.RuntimeObserved -CleanupStartedMilliseconds $manualCleanupStarted
         if ($remainingForExit -le 0 -or
-            -not $process.WaitForExit([int]$remainingForExit)) {
+            -not $process.WaitForExit([int][Math]::Min([long]5000, $remainingForExit))) {
             throw 'Project orchestrator exceeded its bounded deadline.'
         }
         if ($null -ne $WriterTraceRequest) {
@@ -3951,7 +4127,9 @@ function Invoke-BoundedOrchestrator {
         $stderr = $stderrState.Builder.ToString()
         $stdoutLines = @($stdout -split '\r?\n' | Where-Object { $_.Length -ne 0 })
         $stderrLines = @($stderr -split '\r?\n' | Where-Object { $_.Length -ne 0 })
-        if ($stdoutLines.Count -gt 128 -or $stderrLines.Count -gt 128 -or
+        # Only fixed application metadata expands the known native status set.
+        $phaseLineBudget = if ($projectClientVisualMode) { 7 } else { 0 }
+        if ($stdoutLines.Count -gt (128 + $phaseLineBudget + @(Get-ApplicationOutcomeFieldNames).Count) -or $stderrLines.Count -gt 128 -or
             @($stdoutLines + $stderrLines | Where-Object { $_.Length -gt 1024 }).Count -ne 0) {
             throw 'Project orchestrator output exceeded its line bound.'
         }
@@ -4011,6 +4189,8 @@ function Invoke-BoundedOrchestrator {
             'client-running-at-readiness-deadline',
             'server-process-created', 'server-process-id',
             'client-process-created', 'client-process-id',
+            'remote-audio-peer-process-id', 'remote-audio-peer-runtime-published',
+            'remote-audio-peer-exit-code', 'remote-audio-output-isolation',
             'client-image-identity', 'client-resume-result',
             'client-initialized', 'connect-requested',
             'connection-status', 'client-map-entry-status',
@@ -4060,8 +4240,36 @@ function Invoke-BoundedOrchestrator {
             $ProjectClientLiveInput -ceq 'scripted-speed-check') {
             $allowedKeys += @('speed-result')
         }
+        if ($projectClientVisualMode -and
+            $ProjectClientLiveInput -ceq 'scripted-weapon-check') {
+            $allowedKeys += @('weapon-result', 'weapon-selection-queued',
+                'weapon-selection-confirmed', 'viewmodel-pixels-distinct',
+                'hud-pixels-distinct', 'viewmodel-camera-result',
+                'viewmodel-camera-pixels-valid', 'viewmodel-camera-pixel-count')
+        }
+        if ($projectClientVisualMode -and
+            $ProjectClientLiveInput -cin @('scripted-fire-reload-check',
+                'scripted-fire-reload-presentation-check')) {
+            $allowedKeys += @('fire-reload-result', 'server-confirmed-shots',
+                'reload-completions')
+        }
+        if ($projectClientVisualMode -and
+            $ProjectClientLiveInput -ceq 'scripted-fire-reload-presentation-check') {
+            $allowedKeys += @(Get-WeaponPresentationNativeStatusKeys)
+        }
+        if ($projectClientVisualMode -and
+            $ProjectClientLiveInput -ceq 'scripted-damage-respawn-check') {
+            $allowedKeys += @('damage-respawn-result')
+        }
         if ($ProjectClientPrediction -ceq 'reference') {
             $allowedKeys += @('prediction-result')
+        }
+        $allowedKeys += @(Get-ApplicationOutcomeFieldNames | ForEach-Object {
+            'application-' + $_.Replace('_', '-')
+        })
+        if ($projectClientVisualMode) {
+            $allowedKeys += @('phase-preflight-ms','phase-server-startup-ms','phase-server-ready-ms',
+                'phase-client-startup-ms','phase-runtime-observed-ms','phase-owned-cleanup-started-ms','phase-owned-cleanup-complete-ms')
         }
         $values = [Collections.Generic.Dictionary[string, string]]::new(
             [StringComparer]::Ordinal)
@@ -4428,6 +4636,284 @@ function Write-AtomicJsonNoOverwrite {
     Assert-RunDirectoryCapability $DirectoryCapability $parent
     Assert-NoReparsePoint $Path $Label
     Assert-NoHardLink $Path $Label
+}
+
+function Get-ApplicationOutcomeFieldNames {
+    return @(
+    'result',
+    'primary_error',
+    'runtime_error',
+    'parser_error',
+    'opcode',
+    'cursor',
+    'record',
+    'source_sequence',
+    'scripted_coverage',
+    'prediction_coverage',
+    'inventory_notifications',
+    'feedback_rows',
+    'error_domain',
+    'failure_stage',
+    'replay_error',
+    'control_error',
+    'clientdata_error',
+    'delta_error',
+    'module_error',
+    'generation',
+    'life_epoch',
+    'life_state',
+    'record_identity',
+    'carrier_ack',
+    'reliable',
+    'reassembled',
+    'encoding',
+    'payload_size',
+    'record_start_byte',
+    'record_start_bit',
+    'message_start_byte',
+    'message_start_bit',
+    'failure_byte',
+    'failure_bit',
+    'user_message_name',
+    'user_message_id',
+    'expected_body',
+    'actual_body',
+    'last_publication',
+    'attempted_records',
+    'committed_records', 'use_press', 'use_release', 'use_generated', 'use_transmitted',
+    'use_clear_transmitted', 'use_sent', 'use_health_before', 'use_health_after',
+    'use_armor_before', 'use_armor_after', 'use_server_effect', 'use_reason',
+    'use_prediction_state', 'use_prediction_reason',
+    'brush_candidates', 'brush_resolved', 'brush_prepared', 'brush_hidden',
+    'brush_material_unsupported', 'brush_submitted', 'brush_culled', 'brush_uploads',
+    'texture_uploads', 'brush_reject_entity', 'brush_reject_slot', 'brush_reject_submodel',
+    'brush_reject_reason', 'brush_reject_revision',
+    'collision_revision', 'collision_brushes', 'ground_entity', 'ground_model',
+    'ground_normal_x', 'ground_normal_y', 'ground_normal_z', 'grounded_server', 'grounded_local',
+    'movement_steps', 'brush_server_changes', 'brush_render_changes', 'base_velocity', 'support_policy',
+    'prediction_fallbacks', 'prediction_raw_error', 'prediction_camera_jump', 'prediction_ground_status', 'prediction_reason', 'prediction_last_fallback',
+    'brush_server_last_entity', 'brush_server_last_model', 'brush_render_last_entity', 'brush_render_last_model',
+    'audio_backend', 'audio_error', 'audio_start_messages', 'audio_stop_messages', 'audio_static_messages', 'audio_change_messages',
+    'audio_started', 'audio_stopped', 'audio_updated', 'audio_duplicates', 'audio_unsupported', 'audio_missing',
+    'audio_expired', 'audio_limits', 'audio_loads', 'audio_queue_drops', 'audio_output_frames', 'audio_queued_frames', 'audio_underruns', 'audio_sentences', 'audio_formats',
+    'weapon_audio_actions', 'weapon_audio_fire', 'weapon_audio_reload', 'weapon_audio_deploy', 'weapon_audio_swing',
+    'weapon_audio_markers', 'weapon_audio_duplicates', 'weapon_audio_late', 'weapon_audio_cancelled', 'weapon_audio_missing',
+    'weapon_audio_submitted', 'weapon_audio_started', 'weapon_audio_invalid', 'weapon_audio_muted',
+    'weapon_audio_marker_duplicates', 'weapon_audio_delivery_duplicates', 'weapon_audio_timeline_corrections'
+    )
+}
+
+function Test-ApplicationOutcomeToken {
+    param([string]$Name,[string]$Value)
+    if ($Value.Length -lt 1 -or $Value.Length -gt 64) { return $false }
+    if ($Name -cin @('ground_normal_x','ground_normal_y','ground_normal_z',
+            'prediction_raw_error','prediction_camera_jump') -and $Value -cne 'unavailable') {
+        return $Value -cmatch '^-?[0-9]+(?:\.[0-9]+)?$'
+    }
+    return $Value -cmatch '^[A-Za-z0-9_-]{1,64}$'
+}
+
+function Get-RuntimeFailureStdoutFallback {
+    param([string]$Stdout)
+    if ([Text.Encoding]::UTF8.GetByteCount($Stdout) -gt 65536) { return $null }
+    $allowed = @(Get-ApplicationOutcomeFieldNames | ForEach-Object {
+        'application-' + $_.Replace('_', '-')
+    }) + @('client-exit-code', 'job-cleanup', 'result')
+    $values = @{}
+    foreach ($line in ($Stdout -split '\r?\n')) {
+        if ($line -cmatch '^\[stock-runtime-orchestrator\] ([a-z0-9-]{1,64})=([A-Za-z0-9_.-]{1,64})$' -and
+            $allowed -ccontains $Matches[1] -and -not $values.ContainsKey($Matches[1])) {
+            $key=$Matches[1]; $token=$Matches[2]
+            $name=$key.Replace('application-','').Replace('-','_')
+            if (Test-ApplicationOutcomeToken $name $token) { $values[$key] = $token }
+        }
+    }
+    if ($values['application-primary-error'] -cne 'runtime_record_failed') { return $null }
+    $application = [ordered]@{}
+    foreach ($name in @(Get-ApplicationOutcomeFieldNames)) {
+        $key = 'application-' + $name.Replace('_', '-')
+        $application[$name] = if ($values.ContainsKey($key)) { $values[$key] } else { $null }
+    }
+    return [pscustomobject]@{
+        schema = 'hlclient.local-research-copy-smoke.v2'
+        application_outcome = [pscustomobject]$application
+        client_exit_code = $values['client-exit-code']
+        owned_process_cleanup = $(if ($values['job-cleanup'] -ceq 'exact') { 'exact' } else { 'unknown' })
+        native_terminal_result = $values['result']
+        publication_status = 'incomplete'
+        evidence_eligible = $false
+    }
+}
+
+function Publish-FunctionalWrapperResult {
+    param([string]$RunRoot, [Collections.IDictionary]$Value, [object]$Capability)
+    # One normal publication and at most one bounded fallback in the SAME
+    # transaction-bound directory. Never overwrite or select another run.
+    $normal = Join-Path $RunRoot 'functional-smoke-wrapper.json'
+    try {
+        Write-AtomicJsonNoOverwrite $normal $Value 'functional wrapper' $Capability
+        return [pscustomobject]@{ Path = $normal; Status = 'complete'; ErrorCount = 0 }
+    } catch {
+        $Value['publication_status'] = 'incomplete'
+        $Value['publication_failure'] = 'normal_report_publication_failed'
+        $Value['cleanup_error_count'] = [int]$Value['cleanup_error_count'] + 1
+        $Value['result'] = 'local_smoke_integrity_failed'
+        $fallback = Join-Path $RunRoot 'functional-smoke-wrapper.incomplete.json'
+        try {
+            Write-AtomicJsonNoOverwrite $fallback $Value 'incomplete functional wrapper' $Capability
+            return [pscustomobject]@{ Path = $fallback; Status = 'incomplete'; ErrorCount = 1 }
+        } catch {
+            return [pscustomobject]@{ Path = $null; Status = 'unavailable'; ErrorCount = 2 }
+        }
+    }
+}
+
+function Assert-WeaponNativeSummary {
+    param([Collections.Generic.Dictionary[string, string]]$Values)
+    foreach ($key in @('weapon-result', 'weapon-selection-queued',
+            'weapon-selection-confirmed', 'viewmodel-pixels-distinct',
+            'hud-pixels-distinct')) {
+        if (-not $Values.ContainsKey($key)) {
+            throw "Weapon presentation summary is missing $key."
+        }
+    }
+    $weaponResult = $Values['weapon-result']
+    if ($weaponResult -cnotin @(
+            'live_viewmodel_weapon_selection_and_basic_hud_verified',
+            'live_viewmodel_hud_verified_selection_pending') -or
+        $Values['viewmodel-pixels-distinct'] -cne 'true' -or
+        $Values['hud-pixels-distinct'] -cne 'true') {
+        throw 'Weapon presentation result or pixel evidence is invalid.'
+    }
+    [long]$queued = 0
+    [long]$confirmed = 0
+    if (-not [long]::TryParse($Values['weapon-selection-queued'],
+            [ref]$queued) -or
+        -not [long]::TryParse($Values['weapon-selection-confirmed'],
+            [ref]$confirmed) -or
+        $queued -lt 0 -or $confirmed -lt 0 -or $confirmed -gt $queued -or
+        ($weaponResult -ceq
+            'live_viewmodel_weapon_selection_and_basic_hud_verified' -and
+            $confirmed -lt 1)) {
+        throw 'Weapon selection counters are invalid.'
+    }
+    if ($Values.ContainsKey('viewmodel-camera-result')) {
+        foreach ($key in @('viewmodel-camera-pixels-valid',
+                'viewmodel-camera-pixel-count')) {
+            if (-not $Values.ContainsKey($key)) {
+                throw "Viewmodel camera summary is missing $key."
+            }
+        }
+        $cameraResult = $Values['viewmodel-camera-result']
+        if ($cameraResult -cnotin @('live_viewmodel_camera_space_verified',
+                'viewmodel_camera_space_implemented_live_pending',
+                'unavailable') -or
+            $Values['viewmodel-camera-pixels-valid'] -cnotin @(
+                'true', 'false', 'unavailable')) {
+            throw 'Viewmodel camera result or boolean is invalid.'
+        }
+        [long]$pixelCount = 0
+        if ($Values['viewmodel-camera-pixel-count'] -cne 'unavailable' -and
+            (-not [long]::TryParse($Values['viewmodel-camera-pixel-count'],
+                    [ref]$pixelCount) -or $pixelCount -lt 0)) {
+            throw 'Viewmodel camera pixel count is invalid.'
+        }
+        if ($cameraResult -ceq 'live_viewmodel_camera_space_verified' -and
+            ($Values['viewmodel-camera-pixels-valid'] -cne 'true' -or
+             $pixelCount -le 0)) {
+            throw 'Verified viewmodel camera has no framebuffer proof.'
+        }
+    }
+}
+
+function Get-WeaponPresentationNativeStatusKeys {
+    @('presentation-result', 'server-fire-verified', 'server-reload-verified',
+      'glock-fire-animation-presented', 'glock-reload-animation-presented',
+      'glock-recoil-presented', 'crowbar-swing-presented',
+      'hud-server-state-updated', 'crowbar-hit-status')
+}
+
+function Assert-WeaponPresentationNativeSummary {
+    param([Collections.Generic.Dictionary[string, string]]$Values)
+    foreach ($key in @(Get-WeaponPresentationNativeStatusKeys)) {
+        if (-not $Values.ContainsKey($key)) { throw "B1 status missing: $key" }
+    }
+    if ($Values['presentation-result'] -cne 'live_client_predicted_weapon_presentation_verified') {
+        throw 'B1 presentation result is not verified.'
+    }
+    foreach ($key in @(Get-WeaponPresentationNativeStatusKeys |
+        Where-Object { $_ -notin @('presentation-result', 'crowbar-hit-status') })) {
+        if ($Values[$key] -cne 'true') { throw "B1 evidence is not true: $key" }
+    }
+    if ($Values['crowbar-hit-status'] -cne 'unavailable') {
+        throw 'B1 does not claim a crowbar hit/damage outcome.'
+    }
+}
+function Assert-DamageRespawnStagedSummary {
+    param($Evidence)
+    if ([string]$Evidence.result -cnotin @('live_death_respawn_verified_damage_pending',
+        'damage_death_respawn_implemented_live_pending')) {
+        throw 'C result is outside the bounded lifecycle contract.'
+    }
+    foreach ($field in @('respawn_input_submitted', 'server_alive', 'same_session',
+        'glock_bound', 'crowbar_bound', 'feature_verified')) {
+        if ($Evidence.PSObject.Properties.Name -cnotcontains $field -or
+            ($null -ne $Evidence.$field -and $Evidence.$field -isnot [bool])) {
+            throw "C boolean has invalid type: $field"
+        }
+        if ([string]$Evidence.result -ceq 'live_death_respawn_verified_damage_pending' -and
+            $Evidence.$field -ne $true) { throw "C verified field is not true: $field" }
+    }
+    if ([string]$Evidence.result -ceq 'live_death_respawn_verified_damage_pending' -and
+        [string]$Evidence.application_runtime_result -cne 'completed') {
+        throw 'C runtime error cannot be called a verified feature.'
+    }
+    if ([string]$Evidence.result -ceq 'live_death_respawn_verified_damage_pending') {
+        foreach ($field in @('generation','life_epoch','local_deaths',
+            'post_respawn_commands','post_respawn_samples','post_respawn_frames')) {
+            [long]$count=0
+            $minimum=1
+            if ($field -cin @('life_epoch','post_respawn_samples')) { $minimum=2 }
+            if (-not [long]::TryParse([string]$Evidence.$field,[ref]$count) -or $count -lt $minimum) {
+                throw "C verified count is missing/invalid: $field"
+            }
+        }
+        if ([string]$Evidence.phase -cne 'complete') { throw 'C phase is incomplete.' }
+    }
+}
+
+function Assert-FireReloadNativeSummary {
+    param([Collections.Generic.Dictionary[string, string]]$Values)
+    foreach ($key in @('fire-reload-result', 'server-confirmed-shots',
+            'reload-completions')) {
+        if (-not $Values.ContainsKey($key)) {
+            throw "Fire/reload summary is missing $key."
+        }
+    }
+    $result = $Values['fire-reload-result']
+    if ($result -cnotin @(
+            'live_primary_fire_reload_and_weapon_animation_verified',
+            'primary_fire_verified_reload_pending',
+            'primary_fire_reload_implemented_live_pending')) {
+        throw 'Fire/reload result is invalid.'
+    }
+    [long]$shots = 0
+    [long]$reloads = 0
+    if ($Values['server-confirmed-shots'] -cne 'unavailable' -and
+        (-not [long]::TryParse($Values['server-confirmed-shots'], [ref]$shots) -or
+            $shots -lt 0)) {
+        throw 'Server-confirmed shot count is invalid.'
+    }
+    if ($Values['reload-completions'] -cne 'unavailable' -and
+        (-not [long]::TryParse($Values['reload-completions'], [ref]$reloads) -or
+            $reloads -lt 0)) {
+        throw 'Server-confirmed reload count is invalid.'
+    }
+    if ($result -ceq
+            'live_primary_fire_reload_and_weapon_animation_verified' -and
+        ($shots -le 0 -or $reloads -le 0)) {
+        throw 'Verified fire/reload has no server transition proof.'
+    }
 }
 
 function Publish-FunctionalRuntimeCaptureArtifacts {
@@ -5117,6 +5603,8 @@ if ($PSCmdlet.ParameterSetName -eq 'DirectoryCapabilityBootstrap') {
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'FunctionalResearchProjectionSelfTest') {
+    # This existing literal fixture stays boot_camp; it is not a live default.
+    $script:Map = 'boot_camp'
     $systemTemporaryRoot =
         [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
     $testRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
@@ -5226,7 +5714,7 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalResearchProjectionSelfTest') {
                 $researchRoot @(Get-BoundedItems $researchRoot))
         } catch {
             if ($_.Exception.Message -ceq
-                    'Functional research projection critical identity changed.') {
+                    'Functional research projection critical identity changed: valve/maps/boot_camp.bsp.') {
                 $missingCriticalRejected = $true
             } else { throw }
         }
@@ -5235,6 +5723,35 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalResearchProjectionSelfTest') {
         }
         Write-FunctionalProjectionFixtureFile $researchRoot `
             'valve/maps/boot_camp.bsp' 'same:valve/maps/boot_camp.bsp'
+
+        # Independent selected-map fixture: boot_camp exists, but cannot satisfy
+        # missing crossfire. Exercise the production projection, not a replica.
+        $script:Map = 'crossfire'
+        $missingSelectedRejected = $false
+        try {
+            [void](Assert-FunctionalResearchProjection `
+                $researchRoot @(Get-BoundedItems $researchRoot))
+        } catch {
+            if ($_.Exception.Message -ceq
+                    'Functional research projection critical identity changed: valve/maps/crossfire.bsp.') {
+                $missingSelectedRejected = $true
+            } else { throw }
+        }
+        if (-not $missingSelectedRejected) { throw 'Selected crossfire silently fell back.' }
+        foreach ($base in @($sourceRoot, $researchRoot)) {
+            Write-FunctionalProjectionFixtureFile $base `
+                'valve/maps/crossfire.bsp' 'same:valve/maps/crossfire.bsp'
+        }
+        [void](Assert-FunctionalResearchProjection `
+            $researchRoot @(Get-BoundedItems $researchRoot))
+        # Only this unique generated fixture is removed: crossfire must not
+        # require a hidden nonselected boot_camp prerequisite.
+        [IO.File]::Delete($requiredMapPath)
+        [void](Assert-FunctionalResearchProjection `
+            $researchRoot @(Get-BoundedItems $researchRoot))
+        Write-FunctionalProjectionFixtureFile $researchRoot `
+            'valve/maps/boot_camp.bsp' 'same:valve/maps/boot_camp.bsp'
+        $script:Map = 'boot_camp'
 
         Write-FunctionalProjectionFixtureFile $researchRoot `
             'valve/config.cfg' 'allowed-runtime-mutation'
@@ -5255,6 +5772,7 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalResearchProjectionSelfTest') {
         Write-Output '[stock-runtime-projection-test] research-only-addition=rejected'
         Write-Output '[stock-runtime-projection-test] changed-critical-binary=rejected'
         Write-Output '[stock-runtime-projection-test] missing-required-map=rejected'
+        Write-Output '[stock-runtime-projection-test] selected-crossfire=verified-no-boot-camp-fallback'
         Write-Output '[stock-runtime-projection-test] mutable-path=accepted-and-restored'
         Write-Output '[stock-runtime-projection-test] strict-policy=separate'
         Write-Output '[stock-runtime-projection-test] stock-launch=absent'
@@ -5896,6 +6414,92 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalPublicationRoundtripSelfTest') {
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'FunctionalFailureRetentionSelfTest') {
+    $weaponValues = [Collections.Generic.Dictionary[string, string]]::new(
+        [StringComparer]::Ordinal)
+    $weaponValues.Add('weapon-result',
+        'live_viewmodel_weapon_selection_and_basic_hud_verified')
+    $weaponValues.Add('weapon-selection-queued', '1')
+    $weaponValues.Add('weapon-selection-confirmed', '1')
+    $weaponValues.Add('viewmodel-pixels-distinct', 'true')
+    $weaponValues.Add('hud-pixels-distinct', 'true')
+    $weaponValues.Add('viewmodel-camera-result',
+        'live_viewmodel_camera_space_verified')
+    $weaponValues.Add('viewmodel-camera-pixels-valid', 'true')
+    $weaponValues.Add('viewmodel-camera-pixel-count', '321')
+    Assert-WeaponNativeSummary $weaponValues
+    $weaponValues['weapon-result'] =
+        'live_viewmodel_hud_verified_selection_pending'
+    $weaponValues['weapon-selection-confirmed'] = '0'
+    Assert-WeaponNativeSummary $weaponValues
+    $weaponValues['viewmodel-pixels-distinct'] = '1'
+    $invalidWeaponAccepted = $false
+    try { Assert-WeaponNativeSummary $weaponValues; $invalidWeaponAccepted = $true }
+    catch { }
+    if ($invalidWeaponAccepted) {
+        throw 'Weapon summary self-test accepted a non-contract boolean.'
+    }
+    $weaponValues['viewmodel-pixels-distinct'] = 'true'
+    $weaponValues['viewmodel-camera-pixels-valid'] = '1'
+    $invalidCameraAccepted = $false
+    try { Assert-WeaponNativeSummary $weaponValues; $invalidCameraAccepted = $true }
+    catch { }
+    if ($invalidCameraAccepted) {
+        throw 'Camera summary self-test accepted a non-contract boolean.'
+    }
+    $fireValues = [Collections.Generic.Dictionary[string, string]]::new(
+        [StringComparer]::Ordinal)
+    $fireValues.Add('fire-reload-result',
+        'live_primary_fire_reload_and_weapon_animation_verified')
+    $fireValues.Add('server-confirmed-shots', '3')
+    $fireValues.Add('reload-completions', '1')
+    Assert-FireReloadNativeSummary $fireValues
+    $fireValues['fire-reload-result'] = 'primary_fire_verified_reload_pending'
+    $fireValues['reload-completions'] = '0'
+    Assert-FireReloadNativeSummary $fireValues
+    $fireValues['server-confirmed-shots'] = 'true'
+    $invalidFireAccepted = $false
+    try { Assert-FireReloadNativeSummary $fireValues; $invalidFireAccepted = $true }
+    catch { }
+    if ($invalidFireAccepted) {
+        throw 'Fire/reload summary self-test accepted a non-contract count.'
+    }
+    $presentationValues = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    foreach ($key in @(Get-WeaponPresentationNativeStatusKeys)) {
+        $presentationValues.Add($key, 'true')
+    }
+    $presentationValues['presentation-result'] = 'live_client_predicted_weapon_presentation_verified'
+    $presentationValues['crowbar-hit-status'] = 'unavailable'
+    Assert-WeaponPresentationNativeSummary $presentationValues
+    $presentationValues['glock-recoil-presented'] = '1'
+    $wrongPresentationBooleanAccepted = $false
+    try { Assert-WeaponPresentationNativeSummary $presentationValues; $wrongPresentationBooleanAccepted = $true }
+    catch { }
+    if ($wrongPresentationBooleanAccepted) { throw 'B1 accepted a non-contract native boolean.' }
+    $lifeEvidence = [pscustomobject]@{
+        result='live_death_respawn_verified_damage_pending'; application_runtime_result='completed'
+        respawn_input_submitted=$true; server_alive=$true; same_session=$true
+        glock_bound=$true; crowbar_bound=$true; feature_verified=$true
+        generation='1'; life_epoch='2'; local_deaths='1'; phase='complete'
+        post_respawn_commands='32'; post_respawn_samples='12'; post_respawn_frames='30'
+    }
+    Assert-DamageRespawnStagedSummary $lifeEvidence
+    $pendingLife = [pscustomobject]@{
+        result='damage_death_respawn_implemented_live_pending'; application_runtime_result=$null
+        respawn_input_submitted=$null; server_alive=$null; same_session=$null
+        glock_bound=$null; crowbar_bound=$null; feature_verified=$null
+    }
+    Assert-DamageRespawnStagedSummary $pendingLife # startup error is not replaced by missing coverage
+    foreach ($badLifeCase in @('boolean', 'missing', 'runtime-error', 'missing-count')) {
+        $badLife = $lifeEvidence | ConvertTo-Json | ConvertFrom-Json
+        if ($badLifeCase -ceq 'boolean') { $badLife.server_alive = 'true' }
+        elseif ($badLifeCase -ceq 'missing') { $badLife.PSObject.Properties.Remove('same_session') }
+        elseif ($badLifeCase -ceq 'runtime-error') { $badLife.application_runtime_result = 'error' }
+        else { $badLife.PSObject.Properties.Remove('post_respawn_frames') }
+        $acceptedBadLife = $false
+        try { Assert-DamageRespawnStagedSummary $badLife; $acceptedBadLife=$true } catch {}
+        if ($acceptedBadLife) { throw "C validator accepted $badLifeCase." }
+    }
+    Write-Output '[functional-failure-retention-test] damage-respawn-contract=verified'
     $systemTemporaryRoot =
         [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
     $testRoot = [IO.Path]::GetFullPath((Join-Path $systemTemporaryRoot (
@@ -5930,9 +6534,65 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalFailureRetentionSelfTest') {
             client_map_entry = 'unknown'
             last_confirmed_stage = 'connect_requested'
             primary_failure = 'client-connect-state-unknown'
+            application_outcome = [ordered]@{
+                result = 'error'; primary_error = 'runtime_record_failed'
+                runtime_error = 'decoder_failed'; parser_error = 'unsupported_opcode'
+                opcode = '255'; cursor = '1032'; record = '361'; source_sequence = '380'
+                scripted_coverage = 'not_evaluated'; prediction_coverage = 'limited'
+                inventory_notifications = '2'; feedback_rows = '1'
+                brush_candidates = '9'; brush_resolved = '8'; brush_prepared = '71'
+                brush_reject_reason = 'hidden_by_effects'; brush_reject_slot = '27'
+                collision_revision = '362'; collision_brushes = '4'; ground_entity = '42'; ground_model = '1'
+                ground_normal_z = '1'; grounded_server = 'true'; grounded_local = 'true'
+                brush_server_changes = '8'; brush_render_changes = '8'; base_velocity = 'observed_zero'
+                support_policy = 'current_server_frame_no_pusher_extrapolation'; prediction_raw_error = '0.03125'
+                prediction_last_fallback = 'collision_solid_field_unavailable'
+                brush_server_last_entity = '42'; brush_server_last_model = '21'
+                brush_render_last_entity = '42'; brush_render_last_model = '21'
+                audio_backend = 'audio_unavailable'; audio_error = 'device_unavailable'
+                audio_output_frames = '48000'; audio_underruns = 'unmeasured'
+                weapon_audio_fire = '3'; weapon_audio_muted = '1'
+                weapon_audio_marker_duplicates = '2'; weapon_audio_delivery_duplicates = '4'; weapon_audio_timeline_corrections = '5'
+            }
             owned_process_cleanup = 'exact'
             restoration_status = 'wrapper_pending'
             publication_status = 'staged_after_process_cleanup'
+        }
+        if (-not [string]::IsNullOrEmpty($RuntimeFailureRoundtripJson)) {
+            $fixture = Get-Item -LiteralPath $RuntimeFailureRoundtripJson -ErrorAction Stop
+            if ($fixture.Length -gt 65536) { throw 'Offline native fixture exceeds bounds.' }
+            $native = Get-Content -LiteralPath $fixture.FullName -Raw | ConvertFrom-Json
+            $cause = $native.application_outcome
+            $exactCause = ($cause.control_error -ceq 'unsupported_opcode' -and
+                    $cause.message_start_byte -ceq '5' -and $cause.failure_byte -ceq '6') -or
+                ($cause.control_error -ceq 'truncated_body' -and $cause.user_message_name -ceq 'Health' -and
+                    $cause.expected_body -ceq '1' -and $cause.actual_body -ceq '0') -or
+                ($cause.module_error -ceq 'invalid_token' -and $cause.user_message_name -ceq 'ItemPickup' -and
+                    $cause.failure_byte -ceq '4')
+            if ($native.schema -cne 'hlclient.runtime-diagnostics-offline.v1' -or
+                $native.client_exit_code -ne 2 -or
+                -not $exactCause -or
+                $native.application_outcome.last_publication -cne '3' -or
+                $native.application_outcome.committed_records -cne '2') {
+                throw 'Production-dispatch/native runtime fixture contract failed.'
+            }
+            $staged.application_outcome = $native.application_outcome
+            $staged['client_exit_code'] = $native.client_exit_code
+            if ($RuntimeFailureRoundtripStatus) {
+                $retained = Get-RuntimeFailureStdoutFallback (
+                    Get-Content -LiteralPath $RuntimeFailureRoundtripStatus -Raw)
+                if ($null -eq $retained -or $retained.client_exit_code -cne '2' -or
+                    $retained.owned_process_cleanup -cne 'exact' -or
+                    $retained.publication_status -cne 'incomplete' -or $retained.evidence_eligible) {
+                    throw 'Native publication failure did not retain truthful partial stdout metadata.'
+                }
+                foreach ($name in @(Get-ApplicationOutcomeFieldNames)) {
+                    if ($retained.application_outcome.$name -cne $native.application_outcome.$name) {
+                        throw 'Native stdout fallback lost the first typed application cause.'
+                    }
+                }
+                $staged = $retained # native JSON intentionally absent in this fixture
+            }
         }
         [IO.File]::WriteAllText(
             $stagedPath, (($staged | ConvertTo-Json -Depth 4) + "`r`n"),
@@ -5945,23 +6605,95 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalFailureRetentionSelfTest') {
         }
         $runCapability = New-RunDirectoryCapability $runRoot
         $wrapperPath = Join-Path $runRoot 'functional-smoke-wrapper.json'
-        Write-AtomicJsonNoOverwrite $wrapperPath ([ordered]@{
+        $wrapperValue = [ordered]@{
                 schema = 'hlclient.local-research-copy-smoke-wrapper.v2'
+                run_id = (Split-Path -Leaf $runRoot)
                 evidence_eligible = $false
                 native_summary_retained_across_restoration = $true
+                native_summary = (Get-Content -LiteralPath $stagedPath -Raw | ConvertFrom-Json)
                 owned_process_cleanup = 'exact'
                 restoration_status = 'exact'
+                publication_status = 'complete'
+                cleanup_error_count = 0
                 result = 'local_server_ready_client_blocked'
-            }) 'functional failure retention wrapper' $runCapability
+            }
+        $published = Publish-FunctionalWrapperResult $runRoot $wrapperValue $runCapability
+        if ($published.Status -cne 'complete' -or $published.Path -cne $wrapperPath) {
+            throw 'Normal wrapper publication failed.'
+        }
         $wrapper = Read-BoundedJsonWithRetainedBytes `
             $wrapperPath 65536 'functional failure retention wrapper' `
             $runCapability
         if (-not [bool]$wrapper.Value.native_summary_retained_across_restoration -or
+            $wrapper.Value.run_id -cne (Split-Path -Leaf $runRoot) -or
+            [string]$wrapper.Value.native_summary.application_outcome.primary_error -cne 'runtime_record_failed' -or
+            [string]$wrapper.Value.native_summary.application_outcome.prediction_coverage -cne 'limited' -or
+            [string]$wrapper.Value.native_summary.application_outcome.inventory_notifications -cne
+                $(if ($RuntimeFailureRoundtripJson) { '1' } else { '2' }) -or
             [string]$wrapper.Value.restoration_status -cne 'exact' -or
             [string]$wrapper.Value.result -cne
                 'local_server_ready_client_blocked') {
             throw 'Functional failure final summary contract regressed.'
         }
+        $normalHash = Get-FileSha256 $wrapperPath
+        if (-not $RuntimeFailureRoundtripJson) {
+            $brushOutcome = $wrapper.Value.native_summary.application_outcome
+            if ($brushOutcome.brush_candidates -cne '9' -or
+                $brushOutcome.brush_resolved -cne '8' -or
+                $brushOutcome.brush_prepared -cne '71' -or
+                $brushOutcome.brush_reject_reason -cne 'hidden_by_effects' -or
+                $brushOutcome.brush_reject_slot -cne '27' -or
+                $brushOutcome.collision_revision -cne '362' -or
+                $brushOutcome.ground_entity -cne '42' -or
+                $brushOutcome.prediction_raw_error -cne '0.03125' -or
+                $brushOutcome.support_policy -cne 'current_server_frame_no_pusher_extrapolation' -or
+                $brushOutcome.prediction_last_fallback -cne 'collision_solid_field_unavailable' -or
+                $brushOutcome.brush_server_last_model -cne '21' -or
+                $brushOutcome.brush_render_last_model -cne '21' -or
+                $brushOutcome.audio_backend -cne 'audio_unavailable' -or
+                $brushOutcome.audio_error -cne 'device_unavailable' -or
+                $brushOutcome.audio_output_frames -cne '48000' -or
+                $brushOutcome.audio_underruns -cne 'unmeasured' -or
+                $brushOutcome.weapon_audio_fire -cne '3' -or $brushOutcome.weapon_audio_muted -cne '1' -or
+                $brushOutcome.weapon_audio_marker_duplicates -cne '2' -or
+                $brushOutcome.weapon_audio_delivery_duplicates -cne '4' -or
+                $brushOutcome.weapon_audio_timeline_corrections -cne '5' -or
+                $brushOutcome.primary_error -cne 'runtime_record_failed') {
+                throw 'Brush diagnostic tokens were lost across restoration/publication.'
+            }
+            $decimalRoundtrip=Get-RuntimeFailureStdoutFallback (
+                "[stock-runtime-orchestrator] application-primary-error=runtime_record_failed`n"+
+                "[stock-runtime-orchestrator] application-prediction-raw-error=0.03125`n"+
+                "[stock-runtime-orchestrator] application-ground-normal-x=-0.894427`n"+
+                "[stock-runtime-orchestrator] application-runtime-error=private.config`n")
+            if ($decimalRoundtrip.application_outcome.prediction_raw_error -cne '0.03125' -or
+                $decimalRoundtrip.application_outcome.ground_normal_x -cne '-0.894427' -or
+                $null -ne $decimalRoundtrip.application_outcome.runtime_error -or
+                (Test-ApplicationOutcomeToken 'prediction_raw_error' 'nan')) {
+                throw 'Strict named decimal diagnostics roundtrip regressed.'
+            }
+        }
+        $wrapperValue.restoration_status = 'unknown' # injected secondary cleanup uncertainty
+        $wrapperValue.cleanup_error_count = 1
+        # Normal path is now occupied: deterministic secondary publication error.
+        $fallback = Publish-FunctionalWrapperResult $runRoot $wrapperValue $runCapability
+        if ($fallback.Status -cne 'incomplete' -or $fallback.ErrorCount -ne 1) {
+            throw 'Bounded fallback publication failed.'
+        }
+        $incomplete = Read-BoundedJsonWithRetainedBytes $fallback.Path 65536 'incomplete fixture' $runCapability
+        if ($incomplete.Value.publication_status -cne 'incomplete' -or
+            $incomplete.Value.native_summary.application_outcome.primary_error -cne 'runtime_record_failed' -or
+            $incomplete.Value.cleanup_error_count -ne 2 -or
+            $incomplete.Value.restoration_status -cne 'unknown' -or
+            $incomplete.Value.run_id -cne (Split-Path -Leaf $runRoot) -or
+            (Get-FileSha256 $wrapperPath) -cne $normalHash) {
+            throw 'Secondary publication failure replaced the primary cause or existing report.'
+        }
+        $absent = Publish-FunctionalWrapperResult $runRoot $wrapperValue $runCapability
+        if ($absent.Status -cne 'unavailable' -or $null -ne $absent.Path -or $absent.ErrorCount -ne 2) {
+            throw 'Double publication failure was not bounded and explicit.'
+        }
+        Write-Output '[functional-failure-retention-test] secondary-publication-failures=bounded-primary-preserved'
         Write-Output '[functional-failure-retention-test] failed-connection-summary=retained'
         Write-Output '[functional-failure-retention-test] restoration=exact'
         Write-Output '[functional-failure-retention-test] final-summary=published-after-restoration'
@@ -6369,8 +7101,18 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
         $externalNestedBefore =
             Get-RestorationSelfTestExternalObservation $externalNested
 
+        if ($TestStartHealthProfileSelfTest) {
+            Import-Module (Join-Path $PSScriptRoot 'test_start_health_profile.psm1') -Force
+            [void][IO.Directory]::CreateDirectory((Join-Path $testResearch 'valve'))
+            [IO.File]::WriteAllText((Join-Path $testResearch 'valve/liblist.gam'), "game `"Half-Life`"`r`ngamedll `"dlls\hl.dll`"`r`n", [Text.Encoding]::ASCII)
+        }
+
         $before = Get-ResearchSnapshot $testResearch
         $guard = New-RestorationGuard $testResearch $before
+        if ($TestStartHealthProfileSelfTest) {
+            [void](New-TestStartHealthProfile $repositoryRoot $testResearch ('a'*32))
+            if (-not [IO.File]::ReadAllText((Join-Path $testResearch 'valve/liblist.gam')).Contains('addons/hlclient_test50/')) { throw 'test_profile_not_materialized' }
+        }
 
         # A root-directory ADS is invisible to child enumeration. Prove that a
         # post-snapshot mutation is rejected by the independent restoration
@@ -6422,6 +7164,11 @@ if ($PSCmdlet.ParameterSetName -eq 'RestorationSelfTest') {
         [IO.File]::WriteAllBytes((Join-Path $testResearch 'created.bin'), [byte[]](0x55, 0x66))
 
         $after = Restore-ResearchState $guard
+        if ($TestStartHealthProfileSelfTest) {
+            if ([IO.File]::ReadAllText((Join-Path $testResearch 'valve/liblist.gam')).Contains('addons/hlclient_test50/') -or
+                (Test-Path -LiteralPath (Join-Path $testResearch 'valve/addons'))) { throw 'test_profile_not_removed_and_restored' }
+            Write-Output '[test-start-health-offline] run-scoped-profile-and-liblist-restoration=exact'
+        }
         if ((Get-RestorationSelfTestExternalObservation $external) -cne
             $externalBefore) {
             throw 'Restoration self-test changed an external hard-link target.'
@@ -6947,8 +7694,12 @@ if ($PSCmdlet.ParameterSetName -eq 'ExternalDriftControl') {
     return
 }
 
-if ($PSCmdlet.ParameterSetName -eq 'Preflight') {
+if ($PSCmdlet.ParameterSetName -in @('Preflight', 'FunctionalPreflight')) {
     $research = Resolve-IsolatedResearchRoot
+    if (-not [string]::IsNullOrEmpty($Map)) {
+        Write-Output "[stock-runtime-capture] requested-map=$Map"
+        Write-Output '[stock-runtime-capture] observed-map=not-observed'
+    }
     [void](Get-ResearchSnapshot $research.Root)
     Write-Output ("[stock-runtime-capture] preparation-manifest={0}" -f
         $research.PreparationManifestSchema)
@@ -6956,6 +7707,8 @@ if ($PSCmdlet.ParameterSetName -eq 'Preflight') {
         $research.ExternalTargetProfile)
     Write-Output ("[stock-runtime-capture] external-target-count={0}" -f
         $research.ExternalTargetCount)
+    Write-Output ("[stock-runtime-capture] research-inventory-status={0}" -f
+        $research.InventoryStatus)
     Write-Output '[stock-runtime-capture] research-root=policy-screened-copy-physical-identity-pending'
     Write-Output '[stock-runtime-capture] client-version=1.1.1.1'
     Write-Output '[stock-runtime-capture] server-launcher-version=4.1.1.1'
@@ -7272,6 +8025,9 @@ if ($projectClientStockSignonMode) {
         }
     }
 }
+# Fast still performs the same native validation/canary inside the owned run;
+# omit only this duplicate, separate preflight process.
+if (-not $fastManualMode) {
 $activeValidation = Invoke-BoundedOrchestrator $orchestratorPath `
     $activeValidationArguments 90
 if ($activeValidation.ExitCode -ne 0) {
@@ -7306,8 +8062,25 @@ Assert-OrchestratorValue $activeValidation timestamp-category current-session
 Assert-OrchestratorValue $activeValidation stock-processes-started 0
 Assert-OrchestratorValue $activeValidation capture-files-written 0
 Assert-OrchestratorValue $activeValidation result success
+}
 
-$before = Get-ResearchSnapshot $research.Root
+if ($projectClientVisualMode) { Write-ManualPhase test-environment-preparation }
+$runId = [Guid]::NewGuid().ToString('N')
+$fastLease = $null
+$fastPlans = $null
+if ($fastManualMode) {
+    $fastLease = Open-FastManualLease $research.Root
+    try {
+        $fastPlans = Get-FastTestHealthPlan $research.Root $testHealthComponents
+        $guard = New-FastManualGuard $research.Root $runId $fastPlans $fastLease
+        $before = $guard.Before
+    } catch {
+        Close-FastManualLease $fastLease (-not $fastLease.Existed -and $fastLease.Stream.Length -eq 0)
+        throw
+    }
+} else {
+    $before = Get-ResearchSnapshot $research.Root
+}
 $externalDriftPhase = if ($privateServerProfileDiagnosticMode) {
     'private_server_diagnostic'
 } elseif ($serverProfileDiagnosticMode) {
@@ -7317,9 +8090,12 @@ $externalBefore = if ($functionalPolicyMode) { $null } else {
     Get-ExternalSteamStateSnapshot `
         $manifestPath $research.Root $externalDriftPhase
 }
-$guard = New-RestorationGuard $research.Root $before
-$runId = [Guid]::NewGuid().ToString('N')
+if (-not $fastManualMode) { $guard = New-RestorationGuard $research.Root $before }
 $runRoot = Join-Path $output $runId
+if ($functionalSmokeMode) {
+    Write-Output ("[research-copy-smoke] run_id={0}" -f $runId)
+    Write-Output ("[research-copy-smoke] requested_map={0}" -f $Map)
+}
 $orchestratorResult = $null
 $orchestratorExitCode = 255
 $wrapperCapability = [IntPtr]::Zero
@@ -7342,6 +8118,8 @@ if ($EnableWriterTraceHandoff) {
 }
 $orchestratorExitState = New-OrchestratorExitState
 $primaryError = $null
+$testProfile = $null
+$orchestratorInvocationStarted = $false
 $cleanupErrors = [Collections.Generic.List[string]]::new()
 $after = $null
 $externalAfter = $null
@@ -7352,6 +8130,11 @@ try {
     # actual parent PID and signals the first event before any environment
     # mutation or process launch.  A distinct event is signalled only after
     # typed Job cleanup reaches zero, independently of stdout parsing.
+    if ($fastManualMode) {
+        Set-FastManagedFiles $guard $fastPlans
+    } elseif ($TestStartHealth -eq 50) {
+        $testProfile = New-TestStartHealthProfile $repositoryRoot $research.Root $runId
+    }
     $wrapperCapability = New-OrchestratorTransactionCapability
     $wrapperCleanupCapability = New-OrchestratorTransactionCapability
     $wrapperJob = New-OrchestratorProcessJobCapability
@@ -7410,6 +8193,14 @@ try {
         '--mutation-after-server-packets', [string]$MutationAfterServerPackets)
     if ($functionalSmokeMode) {
         $arguments += '--functional-smoke'
+        if ($projectClientVisualMode) { $arguments += @('--validation-mode', $ValidationMode.ToLowerInvariant()) }
+        if ($TestStartHealth -eq 50) { $arguments += @('--test-start-health', '50') }
+        if ($ProjectClientMuteGlockFireSound) { $arguments += '--project-client-mute-glock-fire-sound' }
+        if ($RemoteAudioPeer) { $arguments += '--remote-audio-peer' }
+        if ($ProjectClientNoTimeLimit) { $arguments += '--manual-no-time-limit' }
+        if ($PSBoundParameters.ContainsKey('ProjectClientDurationSeconds')) {
+            $arguments += @('--manual-duration-seconds', [string]$ProjectClientDurationSeconds)
+        }
         if ($projectClientStockSignonMode) {
             $arguments += @(
                 '--project-client-stock-signon', '--steam-api-runtime',
@@ -7457,19 +8248,25 @@ try {
     } else {
         $arguments += @('--scenario', $orchestratorScenario)
     }
+    $orchestratorInvocationStarted = $true
+    $orchestratorTimeoutSeconds = if ($manualSessionTiming -and -not $ProjectClientNoTimeLimit) {
+        $ProjectClientDurationSeconds + 180
+    } else { $MaximumDurationSeconds + 90 }
     $orchestratorResult = Invoke-BoundedOrchestrator $orchestratorPath $arguments `
-        ($MaximumDurationSeconds + 90) $wrapperCapability `
+        $orchestratorTimeoutSeconds $wrapperCapability `
         $wrapperCleanupCapability $wrapperJob $wrapperGuardJob `
         $isolationReleaseCapability $orchestratorExitState `
         $writerTracePrelaunchReadyCapability `
         $writerTraceLaunchReleaseCapability `
-        $writerTraceStockStoppedCapability $writerTraceRequest
+        $writerTraceStockStoppedCapability $writerTraceRequest -ManualNoTimeLimit:$ProjectClientNoTimeLimit
     $orchestratorExitCode = $orchestratorResult.ExitCode
     if ($functionalSmokeMode -or $functionalRuntimeCaptureMode) {
         foreach ($diagnosticKey in @(
                 'processes-started', 'server-ready', 'client-ready',
                 'server-process-created', 'server-process-id',
                 'client-process-created', 'client-process-id',
+                'remote-audio-peer-process-id', 'remote-audio-peer-runtime-published',
+                'remote-audio-peer-exit-code', 'remote-audio-output-isolation',
                 'client-image-identity', 'client-resume-result',
                 'client-initialized', 'connect-requested',
                 'connection-status', 'client-map-entry-status',
@@ -7491,7 +8288,12 @@ try {
                 'client-exit-code-hex', 'client-wait-result',
                 'client-wait-native-error',
                 'server-exit-code', 'diagnostic-publication',
-                'jump-duck-result', 'speed-result', 'prediction-result', 'jump-observed',
+                'jump-duck-result', 'speed-result', 'prediction-result',
+                'weapon-result', 'weapon-selection-queued',
+                'weapon-selection-confirmed', 'viewmodel-pixels-distinct',
+                'hud-pixels-distinct', 'viewmodel-camera-result',
+                'viewmodel-camera-pixels-valid', 'viewmodel-camera-pixel-count',
+                'jump-observed',
                 'descent-observed', 'duck-observed',
                 'release-response-observed',
                 'jump-new-submitted', 'duck-new-submitted',
@@ -7572,7 +8374,7 @@ try {
                             'fresh_project_client_live_runtime_state'
                         } else { 'fresh_project_client_stock_signon' }
                     } else { 'functional_smoke' })
-                'evidence-eligible' = $(if ($projectClientStockSignonMode) {
+                'evidence-eligible' = $(if ($projectClientStockSignonMode -and -not $fastManualMode -and $TestStartHealth -ne 50 -and -not $RemoteAudioPeer -and -not $manualSessionTiming) {
                         'true'
                     } else { 'false' })
                 route = 'direct_loopback'
@@ -7601,7 +8403,22 @@ try {
                     'authentication-status' = 'pending-or-unknown'
                     'last-confirmed-stage' = $(if (
                             $projectClientVisualMode) {
-                            if ($ProjectClientPrediction -ceq 'reference') {
+                            if ($ProjectClientPrediction -ceq 'reference' -and
+                                $ProjectClientLiveInput -ceq
+                                    'scripted-jump-duck-check') {
+                                'live_jump_duck_crouchwalk_prediction_verified'
+                            } elseif ($ProjectClientLiveInput -ceq 'scripted-damage-respawn-check') {
+                                $orchestratorResult.Values['damage-respawn-result']
+                            } elseif ($ProjectClientLiveInput -ceq
+                                    'scripted-fire-reload-presentation-check') {
+                                $orchestratorResult.Values['presentation-result']
+                            } elseif ($ProjectClientLiveInput -ceq
+                                    'scripted-fire-reload-check') {
+                                $orchestratorResult.Values['fire-reload-result']
+                            } elseif ($ProjectClientLiveInput -ceq
+                                    'scripted-weapon-check') {
+                                $orchestratorResult.Values['weapon-result']
+                            } elseif ($ProjectClientPrediction -ceq 'reference') {
                                 'live_local_prediction_and_reconciliation_verified'
                             } elseif ($ProjectClientLiveInput -ceq
                                     'scripted-jump-duck-check') {
@@ -7655,10 +8472,17 @@ try {
                             throw "Live visual control did not report a positive $countKey."
                         }
                     }
-                    if ($ProjectClientPrediction -ceq 'reference') {
+                    if ($ProjectClientPrediction -ceq 'reference' -and
+                        $ProjectClientLiveInput -cnotin @('keyboard-mouse', 'scripted-damage-respawn-check')) {
                         Assert-OrchestratorValue $orchestratorResult `
                             'prediction-result' `
                             'live_local_prediction_and_reconciliation_verified'
+                        if ($ProjectClientLiveInput -ceq
+                                'scripted-jump-duck-check') {
+                            Assert-OrchestratorValue $orchestratorResult `
+                                'h4-result' `
+                                'live_jump_duck_crouchwalk_prediction_verified'
+                        }
                     } elseif ($ProjectClientLiveInput -ceq
                             'scripted-jump-duck-check') {
                         Assert-GJumpDuckNativeSummary `
@@ -7667,6 +8491,17 @@ try {
                             'scripted-speed-check') {
                         Assert-H1SpeedNativeSummary `
                             -Values $orchestratorResult.Values
+                    }
+                    if ($ProjectClientLiveInput -ceq
+                            'scripted-weapon-check') {
+                        Assert-WeaponNativeSummary $orchestratorResult.Values
+                    }
+                    if ($ProjectClientLiveInput -ceq
+                            'scripted-fire-reload-check') {
+                        Assert-FireReloadNativeSummary $orchestratorResult.Values
+                    }
+                    if ($ProjectClientLiveInput -ceq 'scripted-fire-reload-presentation-check') {
+                        Assert-WeaponPresentationNativeSummary $orchestratorResult.Values
                     }
                 } else {
                     foreach ($entry in ([ordered]@{
@@ -7782,7 +8617,7 @@ try {
         -not [Int64]::TryParse(
             $orchestratorResult.Values['duration-ms'], [ref]$orchestratorDuration) -or
         $orchestratorDuration -lt 0 -or
-        $orchestratorDuration -gt (($MaximumDurationSeconds + 90) * 1000)) {
+        (-not $ProjectClientNoTimeLimit -and $orchestratorDuration -gt ([long]$orchestratorTimeoutSeconds * 1000))) {
         throw 'Stock runtime orchestrator duration is absent or outside its bound.'
     }
     if (-not $orchestratorResult.Values.ContainsKey('processes-started') -or
@@ -7850,6 +8685,19 @@ try {
     }
     $cleanupAttested = $orchestratorExitState.ExitConfirmed -and
         $orchestratorExitState.JobCleanupConfirmed
+    # Preparation may fail before any orchestrator/owned game exists. In that
+    # narrow branch restoring this guarded file-only transaction is safe.
+    if (($fastManualMode -or $TestStartHealth -eq 50) -and -not $orchestratorInvocationStarted) { $cleanupAttested = $true }
+    # Native environment validation can fail before it creates the run root.
+    # Publish that exact attempt only after owned cleanup, never select another run.
+    if ($fastManualMode -and $cleanupAttested -and -not (Test-Path -LiteralPath $runRoot)) {
+        try {
+            Assert-PathBelowRoot $runRoot $output 'manual failure report'
+            Assert-NoReparsePointInExistingPath $runRoot 'manual failure report'
+            [void][IO.Directory]::CreateDirectory((Join-Path $runRoot 'logs'))
+            $runDirectoryCapability = New-RunDirectoryCapability $runRoot
+        } catch { [void]$cleanupErrors.Add($_.Exception.Message) }
+    }
     if ($cleanupAttested) {
         try {
             if ($null -ne $orchestratorExitState.WriterTraceOwner) {
@@ -7857,7 +8705,8 @@ try {
                     $orchestratorExitState.WriterTraceOwner.Timeline `
                     restoration_started | Out-Null
             }
-            $after = Restore-ResearchState $guard
+            if ($projectClientVisualMode) { Write-ManualPhase $(if ($fastManualMode) { 'scoped-restoration' } else { 'full-restoration' }) }
+            $after = if ($fastManualMode) { Restore-ScopedResearchState $guard } else { Restore-ResearchState $guard }
         }
         catch { [void]$cleanupErrors.Add($_.Exception.Message) }
     } else {
@@ -7885,7 +8734,7 @@ try {
             } catch { [void]$cleanupErrors.Add($_.Exception.Message) }
         }
     }
-    if ($null -ne $after) {
+    if ($null -ne $after -and -not $fastManualMode) {
         try {
             Assert-RestorationDirectoryCapabilities $guard
             Close-RestorationBackupCapabilities $guard
@@ -7898,10 +8747,15 @@ try {
             Assert-NoReparsePointInExistingPath $guard.TemporaryRoot 'restoration backup cleanup'
             Remove-SafeTree $guard.TemporaryRoot $systemTemporaryRoot
         } catch { [void]$cleanupErrors.Add($_.Exception.Message) }
+    } elseif ($fastManualMode -and $null -ne $after) {
+        Write-Host "[manual-launch] scoped_backup_retained=$($guard.TemporaryRoot)"
     } else {
         Write-Warning "Restoration backup retained for recovery at '$($guard.TemporaryRoot)'."
     }
-    Close-RestorationGuardCapabilities $guard
+    try { Close-RestorationGuardCapabilities $guard }
+    catch { [void]$cleanupErrors.Add('Restoration capability final close failed.') }
+    try { Close-FastManualLease $fastLease ($null -ne $after) }
+    catch { [void]$cleanupErrors.Add($_.Exception.Message) }
 }
 
 $runExists = Test-Path -LiteralPath $runRoot -PathType Container
@@ -7913,12 +8767,16 @@ if ($runExists) {
     }
 }
 $ownedStopped = $cleanupAttested
-$restorationExact = $null -ne $after -and
+$restorationSucceeded = $null -ne $after -and
     $after.ManifestSha256 -ceq $before.ManifestSha256
+$restorationExact = -not $fastManualMode -and $restorationSucceeded
+$restorationStatus = if ($fastManualMode) {
+    if ($restorationSucceeded) { 'scoped_exact' } else { 'scoped_not_verified' }
+} elseif ($restorationExact) { 'exact' } elseif ($null -eq $after) { 'unknown' } else { 'not_exact' }
 if ($functionalSmokeMode) {
     $orchestratorValues = if ($null -ne $orchestratorResult) {
         $orchestratorResult.Values
-    } else { $null }
+    } else { [Collections.Generic.Dictionary[string,string]]::new() }
     $functionalStaged = $null
     $functionalStagedPath = Join-Path $runRoot 'functional-smoke.staged.json'
     if ($runExists -and $null -ne $runDirectoryCapability -and
@@ -7955,7 +8813,7 @@ if ($functionalSmokeMode) {
                 } else { 'research_root' }
             $expectedActualClientArgvProfile =
                 if ($projectClientVisualMode) {
-                    "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=$ProjectClientLiveInput;basedir=research-root;game=valve$(if ($ProjectClientPrediction -ceq 'reference') {';prediction=reference'})"
+                    "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=$ProjectClientLiveInput;basedir=research-root;game=valve$(if ($ProjectClientPrediction -ceq 'reference') {';prediction=reference'})$(if ($ProjectClientMuteGlockFireSound) {';glock-fire-sound=muted'})"
                 } elseif ($projectClientUserCmdMode) {
                     'renderer=null;auth-provider=steam;stop-after=live-usercmd-check;resource-advertisement=empty'
                 } elseif ($projectClientLiveRuntimeMode) {
@@ -7968,8 +8826,9 @@ if ($functionalSmokeMode) {
                 [string]$functionalStaged.mode -cne $expectedFunctionalMode -or
                 [string]$functionalStaged.purpose -cne
                     $expectedFunctionalPurpose -or
+                [string]$functionalStaged.validation_mode -cne $ValidationMode.ToLowerInvariant() -or
                 [bool]$functionalStaged.evidence_eligible -ne
-                    $projectClientStockSignonMode -or
+                    ($projectClientStockSignonMode -and $TestStartHealth -ne 50 -and -not $fastManualMode) -or
                 [string]$functionalStaged.route -cne 'direct_loopback' -or
                 [string]$functionalStaged.game -cne 'valve' -or
                 [string]$functionalStaged.map -cne $Map -or
@@ -8034,10 +8893,106 @@ if ($functionalSmokeMode) {
                     throw 'Staged project-client authentication status is invalid.'
                 }
                 if ($projectClientVisualMode -and
+                    $ProjectClientPrediction -ceq 'reference' -and
+                    $ProjectClientLiveInput -ceq 'scripted-jump-duck-check') {
+                    if ($functionalStaged.PSObject.Properties.Name -cnotcontains
+                            'h4_result' -or
+                        $functionalStaged.PSObject.Properties.Name -cnotcontains
+                            'h4_phases' -or
+                        $null -eq $functionalStaged.h4_phases -or
+                        $functionalStaged.h4_phases.Count -ne 5) {
+                        throw 'Staged H4 phase summary is missing.'
+                    }
+                    foreach ($phase in $functionalStaged.h4_phases) {
+                        foreach ($field in @('active_frames', 'fallback_frames',
+                                'local_steps', 'corrections')) {
+                            if ($phase.PSObject.Properties.Name -cnotcontains
+                                    $field -or
+                                ($null -ne $phase.$field -and
+                                 [long]$phase.$field -lt 0)) {
+                                throw "Staged H4 phase field is invalid: $field."
+                            }
+                        }
+                    }
+                }
+                if ($projectClientVisualMode -and
                     $ProjectClientLiveInput -ceq
                         'scripted-jump-duck-check') {
                     Assert-GJumpDuckStagedContract `
                         -Summary $functionalStaged
+                } elseif ($projectClientVisualMode -and
+                    $ProjectClientLiveInput -ceq 'scripted-weapon-check') {
+                    foreach ($field in @('weapon_result',
+                            'weapon_selection_queued',
+                            'weapon_selection_confirmed',
+                            'viewmodel_pixels_distinct',
+                            'hud_pixels_distinct')) {
+                        if ($functionalStaged.PSObject.Properties.Name -cnotcontains
+                                $field) {
+                            throw "Staged weapon field is missing: $field."
+                        }
+                    }
+                    foreach ($field in @('viewmodel_pixels_distinct',
+                            'hud_pixels_distinct',
+                            'viewmodel_camera_pixels_valid')) {
+                        if ($null -ne $functionalStaged.$field -and
+                            $functionalStaged.$field -isnot [bool]) {
+                            throw "Staged weapon boolean has wrong type: $field."
+                        }
+                    }
+                    if ($functionalStaged.PSObject.Properties.Name -ccontains
+                            'viewmodel_camera_result' -and
+                        $null -ne $functionalStaged.viewmodel_camera_result -and
+                        [string]$functionalStaged.viewmodel_camera_result -cnotin @(
+                            'live_viewmodel_camera_space_verified',
+                            'viewmodel_camera_space_implemented_live_pending')) {
+                        throw 'Staged viewmodel camera result is invalid.'
+                    }
+                    if ($functionalStaged.PSObject.Properties.Name -ccontains
+                            'viewmodel_camera_pixel_count' -and
+                        $null -ne $functionalStaged.viewmodel_camera_pixel_count -and
+                        [long]$functionalStaged.viewmodel_camera_pixel_count -lt 0) {
+                        throw 'Staged viewmodel camera pixel count is invalid.'
+                    }
+                } elseif ($projectClientVisualMode -and
+                    $ProjectClientLiveInput -ceq 'scripted-damage-respawn-check') {
+                    if ($functionalStaged.PSObject.Properties.Name -cnotcontains 'damage_respawn' -or
+                        $null -eq $functionalStaged.damage_respawn) {
+                        throw 'C lifecycle evidence is missing.'
+                    }
+                    Assert-DamageRespawnStagedSummary $functionalStaged.damage_respawn
+                } elseif ($projectClientVisualMode -and
+                    $ProjectClientLiveInput -ceq 'scripted-fire-reload-presentation-check') {
+                    if ($functionalStaged.PSObject.Properties.Name -cnotcontains 'weapon_prediction' -or
+                        $null -eq $functionalStaged.weapon_prediction) {
+                        throw 'Staged B1 presentation evidence is missing.'
+                    }
+                    foreach ($key in @(Get-WeaponPresentationNativeStatusKeys |
+                        Where-Object { $_ -notin @('presentation-result', 'crowbar-hit-status') })) {
+                        $field = $key.Replace('-', '_')
+                        if ($functionalStaged.weapon_prediction.PSObject.Properties.Name -cnotcontains $field -or
+                            ($null -ne $functionalStaged.weapon_prediction.$field -and
+                             $functionalStaged.weapon_prediction.$field -isnot [bool])) {
+                            throw "Staged B1 boolean has invalid type: $field"
+                        }
+                    }
+                } elseif ($projectClientVisualMode -and
+                    $ProjectClientLiveInput -ceq 'scripted-fire-reload-check') {
+                    foreach ($field in @('fire_reload_result',
+                            'server_confirmed_shots', 'reload_completions')) {
+                        if ($functionalStaged.PSObject.Properties.Name -cnotcontains
+                                $field) {
+                            throw "Staged fire/reload field is missing: $field."
+                        }
+                    }
+                    foreach ($field in @('server_confirmed_shots',
+                            'reload_completions')) {
+                        if ($null -ne $functionalStaged.$field -and
+                            $functionalStaged.$field -isnot [int] -and
+                            $functionalStaged.$field -isnot [long]) {
+                            throw "Staged fire/reload count has wrong type: $field."
+                        }
+                    }
                 } elseif ($projectClientVisualMode -and
                     $ProjectClientLiveInput -ceq 'scripted-speed-check' -and
                     $ProjectClientPrediction -cne 'reference') {
@@ -8094,6 +9049,12 @@ if ($functionalSmokeMode) {
         [void]$cleanupErrors.Add(
             'Staged functional smoke summary was not retained before restoration.')
     }
+    $retainedNativeSummary = $functionalStaged
+    $nativeSummaryStatus = 'staged_verified'
+    if ($null -eq $retainedNativeSummary) {
+        $retainedNativeSummary = Get-RuntimeFailureStdoutFallback $orchestratorExitState.StartupStdout
+        $nativeSummaryStatus = if ($null -ne $retainedNativeSummary) { 'stdout_partial' } else { 'unavailable' }
+    }
     $serverReady = $null -ne $orchestratorValues -and
         $orchestratorValues.ContainsKey('server-ready') -and
         $orchestratorValues['server-ready'] -ceq 'true'
@@ -8102,14 +9063,36 @@ if ($functionalSmokeMode) {
         $orchestratorValues['client-ready'] -ceq 'true'
     $functionalSuccess = $null -eq $primaryError -and
         $cleanupErrors.Count -eq 0 -and $runExists -and $ownedStopped -and
-        $restorationExact -and $serverReady -and $clientReady -and
+        $restorationSucceeded -and $serverReady -and $clientReady -and
         $orchestratorExitCode -eq 0
+    $testHealthEvidence = $null
+    if ($TestStartHealth -eq 50) {
+        $testHealthEvidence = Get-TestStartHealthEvidence $runRoot $runId
+        if ($testHealthEvidence.result -cne 'confirmed') { $functionalSuccess = $false }
+    }
     $functionalResult = if ($functionalSuccess) {
         if ($projectClientStockSignonMode) {
             if ($projectClientVisualMode) {
                 if ($ProjectClientLiveInput -ceq
+                        'scripted-jump-duck-check' -and
+                    $ProjectClientPrediction -ceq 'reference') {
+                    'live_jump_duck_crouchwalk_prediction_verified'
+                } elseif ($ProjectClientLiveInput -ceq 'scripted-damage-respawn-check') {
+                    $orchestratorResult.Values['damage-respawn-result']
+                } elseif ($ProjectClientLiveInput -ceq
+                        'scripted-fire-reload-presentation-check') {
+                    $orchestratorResult.Values['presentation-result']
+                } elseif ($ProjectClientLiveInput -ceq
+                        'scripted-fire-reload-check') {
+                    $orchestratorResult.Values['fire-reload-result']
+                } elseif ($ProjectClientLiveInput -ceq
+                        'scripted-weapon-check') {
+                    $orchestratorResult.Values['weapon-result']
+                } elseif ($ProjectClientLiveInput -ceq
                         'scripted-jump-duck-check') {
                     'fresh_project_client_jump_duck_server_verified'
+                } elseif ($ProjectClientLiveInput -ceq 'keyboard-mouse') {
+                    'fresh_project_client_live_visual_control_integrated'
                 } elseif ($ProjectClientPrediction -ceq 'reference') {
                     'live_local_prediction_and_reconciliation_verified'
                 } elseif ($ProjectClientLiveInput -ceq
@@ -8124,16 +9107,59 @@ if ($functionalSmokeMode) {
                 'fresh_project_client_live_runtime_state_verified'
             } else { 'fresh_project_client_stock_signon_verified' }
         } else { 'local_client_server_smoke_passed' }
-    } elseif (-not $ownedStopped -or -not $restorationExact -or
+    } elseif (-not $ownedStopped -or -not $restorationSucceeded -or
         $cleanupErrors.Count -ne 0) {
         'local_smoke_integrity_failed'
+    } elseif ($orchestratorExitCode -eq 0 -and $null -ne $testHealthEvidence -and $testHealthEvidence.result -cne 'confirmed') {
+        'test_start_health_not_confirmed'
+    } elseif ($projectClientVisualMode -and
+        $ProjectClientLiveInput -ceq 'scripted-damage-respawn-check' -and
+        $null -ne $functionalStaged -and
+        $functionalStaged.PSObject.Properties.Name -ccontains 'damage_respawn' -and
+        $null -ne $functionalStaged.damage_respawn -and
+        [string]$functionalStaged.damage_respawn.result -ceq
+            'damage_death_respawn_implemented_live_pending') {
+        'damage_death_respawn_implemented_live_pending'
+    } elseif ($projectClientVisualMode -and
+        $ProjectClientLiveInput -ceq 'scripted-fire-reload-presentation-check' -and
+        $null -ne $functionalStaged -and
+        $functionalStaged.PSObject.Properties.Name -ccontains 'weapon_prediction' -and
+        $null -ne $functionalStaged.weapon_prediction -and
+        [string]$functionalStaged.weapon_prediction.result -ceq
+            'client_weapon_presentation_implemented_live_pending') {
+        'client_weapon_presentation_implemented_live_pending'
+    } elseif ($projectClientVisualMode -and
+        $ProjectClientLiveInput -ceq 'scripted-fire-reload-check' -and
+        $null -ne $functionalStaged -and
+        [string]$functionalStaged.fire_reload_result -in @(
+            'primary_fire_verified_reload_pending',
+            'primary_fire_reload_implemented_live_pending')) {
+        [string]$functionalStaged.fire_reload_result
+    } elseif ($projectClientVisualMode -and
+        $ProjectClientLiveInput -ceq 'scripted-weapon-check' -and
+        $null -ne $functionalStaged -and
+        [string]$functionalStaged.weapon_result -in @(
+            'live_viewmodel_hud_verified_selection_pending',
+            'viewmodel_hud_implemented_live_pending')) {
+        [string]$functionalStaged.weapon_result
+    } elseif ($projectClientVisualMode -and
+        $ProjectClientPrediction -ceq 'reference' -and
+        $ProjectClientLiveInput -ceq 'scripted-jump-duck-check' -and
+        $null -ne $functionalStaged -and
+        [string]$functionalStaged.h4_result -in @(
+            'jump_prediction_verified_duck_pending',
+            'jump_duck_prediction_implemented_live_pending',
+            'crouch_walk_prediction_context_blocked')) {
+        [string]$functionalStaged.h4_result
     } elseif ($serverReady) {
         'local_server_ready_client_blocked'
     } else {
         'local_server_startup_failed'
     }
     if ($runExists -and $null -ne $runDirectoryCapability) {
-        $orchestratorSha256 = Get-FileSha256 $orchestratorPath
+        $orchestratorSha256 = $null
+        try { $orchestratorSha256 = Get-FileSha256 $orchestratorPath }
+        catch { [void]$cleanupErrors.Add('orchestrator_hash_publication_failed') }
         $functionalWrapper = [ordered]@{
             schema = 'hlclient.local-research-copy-smoke-wrapper.v2'
             mode = $(if ($projectClientStockSignonMode) {
@@ -8154,8 +9180,31 @@ if ($functionalSmokeMode) {
                         'fresh_project_client_live_runtime_state'
                     } else { 'fresh_project_client_stock_signon' }
                 } else { 'functional_smoke' })
-            evidence_eligible = $projectClientStockSignonMode
+            evidence_eligible = $projectClientStockSignonMode -and -not $fastManualMode -and $TestStartHealth -ne 50 -and -not $RemoteAudioPeer
+            validation_mode = $ValidationMode.ToLowerInvariant()
+            backup_scope = $(if ($fastManualMode) { 'managed_mutable_files' } else { 'full_tree' })
+            full_tree_backup = -not $fastManualMode
+            full_asset_hash_scan = -not $fastManualMode
+            scoped_restoration_status = $(if ($fastManualMode) { $restorationStatus } else { 'not_applicable' })
+            full_tree_restoration = $(if ($fastManualMode) { 'not_verified' } else { $restorationStatus })
+            wrapper_file_work = $script:ManualFileWork
+            wrapper_elapsed_ms = $script:ManualClock.ElapsedMilliseconds
+            native_phase_elapsed_ms = $(
+                $phaseTimes = [ordered]@{}
+                foreach ($phaseKey in @('phase-preflight-ms','phase-server-startup-ms','phase-server-ready-ms',
+                    'phase-client-startup-ms','phase-runtime-observed-ms','phase-owned-cleanup-started-ms','phase-owned-cleanup-complete-ms')) {
+                    if ($orchestratorValues.ContainsKey($phaseKey)) { $phaseTimes[$phaseKey] = $orchestratorValues[$phaseKey] }
+                }
+                $phaseTimes)
+            runner_failure = $(if ($null -ne $primaryError) { ([string]$primaryError.Exception.Message).Substring(0,[Math]::Min(2048,([string]$primaryError.Exception.Message).Length)) } else { $null })
             run_id = $runId
+            map_evidence = (Get-FunctionalMapEvidence $Map $(if (
+                $null -ne $retainedNativeSummary -and
+                $null -ne $retainedNativeSummary.PSObject.Properties['serverinfo_map']) {
+                    [string]$retainedNativeSummary.serverinfo_map
+                } elseif ($orchestratorValues.ContainsKey('serverinfo-map')) {
+                    $orchestratorValues['serverinfo-map']
+                } else { $null }))
             route = 'direct_loopback'
             launch = [ordered]@{
                 configuration = 'Release'
@@ -8177,6 +9226,8 @@ if ($functionalSmokeMode) {
                         Split-Path -Parent $research.Client
                     } else { $research.Root })
                 connect_argument = "127.0.0.1:$ServerPort"
+                game_time_limit_mode = $(if ($ProjectClientNoTimeLimit) { 'unlimited' } elseif ($manualSessionTiming) { 'timed' } else { 'legacy' })
+                game_duration_seconds = $(if ($ProjectClientNoTimeLimit -or -not $manualSessionTiming) { $null } else { $ProjectClientDurationSeconds })
             }
             startup = [ordered]@{
                 status = $orchestratorExitState.StartupStatus
@@ -8185,8 +9236,9 @@ if ($functionalSmokeMode) {
                 stderr_bytes = $orchestratorExitState.StartupStderrBytes
             }
             native_summary_retained_across_restoration =
-                ($null -ne $functionalStaged)
-            native_summary = $functionalStaged
+                ($null -ne $retainedNativeSummary)
+            native_summary_status = $nativeSummaryStatus
+            native_summary = $retainedNativeSummary
             external_steam_state = $(if ($projectClientStockSignonMode) {
                     'current_user_session_used'
                 } else { 'not_assessed' })
@@ -8194,19 +9246,27 @@ if ($functionalSmokeMode) {
                     'provider_runtime_only_no_credentials_or_material_retained'
                 } else { 'functional_observation_only' })
             owned_process_cleanup = $(if ($ownedStopped) { 'exact' } else { 'incomplete' })
-            restoration_status = $(if ($restorationExact) { 'exact' } else { 'not_exact' })
+            restoration_status = $restorationStatus
+            publication_status = 'complete'
+            cleanup_error_count = $cleanupErrors.Count
             result = $functionalResult
         }
-        try {
-            Write-AtomicJsonNoOverwrite `
-                (Join-Path $runRoot 'functional-smoke-wrapper.json') `
-                $functionalWrapper 'functional smoke wrapper result' `
-                $runDirectoryCapability
-        } catch {
+        if ($null -ne $testHealthEvidence) {
+            $functionalWrapper.evidence_eligible = $false
+            $functionalWrapper['test_start_health'] = $testHealthEvidence
+            Write-Output "[test-start-health] requested_start_health=50 server_setup_applied=$($testHealthEvidence.server_setup_applied) client_observed_health=$($testHealthEvidence.client_observed_health) max_health=$($testHealthEvidence.max_health) max_health_source=$($testHealthEvidence.max_health_source) result=$($testHealthEvidence.result) profile=test-server-assisted"
+        }
+        if ($projectClientVisualMode) { Write-ManualPhase report-publication }
+        $wrapperPublication = Publish-FunctionalWrapperResult $runRoot $functionalWrapper $runDirectoryCapability
+        if ($wrapperPublication.Status -cne 'complete') {
             $functionalSuccess = $false
             $functionalResult = 'local_smoke_integrity_failed'
-            [void]$cleanupErrors.Add($_.Exception.Message)
+            [void]$cleanupErrors.Add('functional_wrapper_publication_failed')
         }
+        if ($null -ne $wrapperPublication.Path) {
+            Write-Output ("[research-copy-smoke] report_path={0}" -f $wrapperPublication.Path)
+        }
+        Write-Output ("[research-copy-smoke] publication_status={0}" -f $wrapperPublication.Status)
     }
     Write-Output ("[research-copy-smoke] mode={0}" -f $(if (
             $projectClientStockSignonMode) { if (
@@ -8229,7 +9289,7 @@ if ($functionalSmokeMode) {
                 } else { 'fresh_project_client_stock_signon' } }
             else { 'functional_smoke' }))
     Write-Output ("[research-copy-smoke] evidence_eligible={0}" -f
-        $projectClientStockSignonMode.ToString().ToLowerInvariant())
+        ($projectClientStockSignonMode -and $TestStartHealth -ne 50 -and -not $fastManualMode).ToString().ToLowerInvariant())
     Write-Output ("[research-copy-smoke] external_steam_state={0}" -f $(if (
             $projectClientStockSignonMode) { 'current_user_session_used' }
             else { 'not_assessed' }))
@@ -8255,7 +9315,12 @@ if ($functionalSmokeMode) {
             'signon-reply-acknowledged', 'live-service-payloads-received',
             'client-world-state-published', 'usercmd-transmitted',
             'usercmd-movement-verified', 'live-visual-verified',
-            'jump-duck-result', 'speed-result', 'prediction-result', 'jump-observed', 'descent-observed',
+            'jump-duck-result', 'speed-result', 'prediction-result', 'h4-result',
+            'weapon-result', 'weapon-selection-queued',
+            'weapon-selection-confirmed', 'viewmodel-pixels-distinct',
+            'hud-pixels-distinct', 'viewmodel-camera-result',
+            'viewmodel-camera-pixels-valid', 'viewmodel-camera-pixel-count',
+            'jump-observed', 'descent-observed',
             'duck-observed', 'release-response-observed',
             'jump-new-submitted', 'duck-new-submitted',
             'usercmd-generated', 'usercmd-new',
@@ -8278,10 +9343,34 @@ if ($functionalSmokeMode) {
             $summaryKey, $summaryValue)
     }
     Write-Output ("[research-copy-smoke] diagnostic_root={0}" -f $runRoot)
+    if ($RemoteAudioPeer) {
+        foreach($key in @('remote-audio-peer-process-id','remote-audio-peer-runtime-published',
+            'remote-audio-peer-exit-code','remote-audio-output-isolation')) {
+            $value=if($orchestratorValues.ContainsKey($key)) { $orchestratorValues[$key] } else { 'not-observed' }
+            Write-Output "[research-copy-smoke] $key=$value"
+        }
+    }
+    if ($null -ne $retainedNativeSummary -and $null -ne $retainedNativeSummary.application_outcome) {
+        foreach ($field in $retainedNativeSummary.application_outcome.PSObject.Properties) {
+            $token = [string]$field.Value
+            if ($field.Name -cmatch '^[a-z_]{1,64}$' -and (Test-ApplicationOutcomeToken $field.Name $token)) {
+                Write-Output ("[research-copy-smoke] application_{0}={1}" -f $field.Name, $token)
+            }
+        }
+    }
+    Write-Output ("[research-copy-smoke] secondary_error_count={0}" -f $cleanupErrors.Count)
     Write-Output ("[research-copy-smoke] owned_process_cleanup={0}" -f
         $(if ($ownedStopped) { 'exact' } else { 'incomplete' }))
     Write-Output ("[research-copy-smoke] restoration_status={0}" -f
-        $(if ($restorationExact) { 'exact' } else { 'not_exact' }))
+        $restorationStatus)
+    Write-Output "[research-copy-smoke] validation_mode=$($ValidationMode.ToLowerInvariant())"
+    if ($fastManualMode) {
+        Write-Output '[research-copy-smoke] backup_scope=managed_mutable_files'
+        Write-Output '[research-copy-smoke] full_tree_backup=false'
+        Write-Output '[research-copy-smoke] full_asset_hash_scan=false'
+        Write-Output '[research-copy-smoke] full_tree_restoration=not_verified'
+        Write-Output "[research-copy-smoke] scoped_restoration_status=$restorationStatus"
+    }
     Write-Output ("[research-copy-smoke] result={0}" -f $functionalResult)
     if ($null -ne $runDirectoryCapability) {
         $runDirectoryCapability.Dispose()

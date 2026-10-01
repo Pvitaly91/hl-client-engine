@@ -1,4 +1,6 @@
 #include <hlclient/goldsrc/reference_prediction_seed.hpp>
+#include <hlclient/goldsrc/reference_client_move.hpp>
+#include <hlclient/goldsrc/reference_brush_collision.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -84,7 +86,8 @@ ReferencePredictionSeedResult inspect_reference_prediction_seed(
         return missing(ReferencePredictionSeedField::water_level);
     if (!client.dead_flag)
         return missing(ReferencePredictionSeedField::dead_flag);
-    if (!client.in_duck)
+    if (!client.in_duck &&
+        !(retained && retained->in_duck_transition))
         return missing(ReferencePredictionSeedField::in_duck);
     if (!player->move_type)
         return missing(ReferencePredictionSeedField::move_type);
@@ -104,7 +107,7 @@ ReferencePredictionSeedResult inspect_reference_prediction_seed(
     // kernel has no basevelocity, train or liquid implementation.
     constexpr std::uint32_t kUnsupportedFlags =
         (1U << 11U) | (1U << 12U) | (1U << 24U) | (1U << 26U);
-    if (*player->move_type != 3U)
+    if (*player->move_type != 3U && *player->move_type != 5U)
         return unsupported(ReferencePredictionSeedField::move_type);
     if (*client.dead_flag != 0U)
         return unsupported(ReferencePredictionSeedField::dead_flag);
@@ -118,7 +121,12 @@ ReferencePredictionSeedResult inspect_reference_prediction_seed(
         return unsupported(ReferencePredictionSeedField::base_velocity);
     if (*player->use_hull > 1U)
         return unsupported(ReferencePredictionSeedField::use_hull);
-    if ((*player->use_hull == 1U) != *client.in_duck)
+    constexpr std::uint32_t kDuckFlag = 1U << 14U;
+    const bool completed_duck = (*client.flags & kDuckFlag) != 0U;
+    const bool in_duck = client.in_duck.value_or(
+        retained ? retained->in_duck_transition.value_or(false) : false);
+    if ((*player->use_hull == 1U) != completed_duck ||
+        (completed_duck && in_duck))
         return unsupported(ReferencePredictionSeedField::in_duck);
     if (!std::isfinite(*player->gravity_multiplier) ||
         *player->gravity_multiplier <= 0.0)
@@ -140,8 +148,18 @@ ReferencePredictionSeedResult inspect_reference_prediction_seed(
         old_buttons = retained->old_buttons;
         old_buttons_origin = ReferencePredictionFieldOrigin::
             exact_retained_prediction_slot;
-    } else if (anchor.last_new_value->buttons != 0U) {
+    } else if ((anchor.last_new_value->buttons &
+                (kReferenceGoldSrcButtonJump |
+                 kReferenceGoldSrcButtonDuck)) != 0U) {
+        // A carrier boundary cannot establish a jump/duck edge. Use's speed
+        // rule depends on current ground/buttons, not previous button edges.
         return {ReferencePredictionSeedStatus::matching_prediction_slot_required};
+    } else if ((anchor.last_new_value->buttons & kReferenceGoldSrcButtonUse) != 0U) {
+        old_buttons_origin = ReferencePredictionFieldOrigin::reference_anchored_use_non_edge_policy;
+    } else if ((anchor.last_new_value->buttons &
+                (kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload)) != 0U) {
+        old_buttons_origin = ReferencePredictionFieldOrigin::
+            reference_anchored_weapon_only_policy;
     }
 
     ReferencePredictionSeed seed;
@@ -166,7 +184,23 @@ ReferencePredictionSeedResult inspect_reference_prediction_seed(
     seed.move_type = *player->move_type;
     seed.use_hull = *player->use_hull;
     seed.water_level = *client.water_level;
-    seed.in_duck = *client.in_duck;
+    seed.in_duck = in_duck;
+    seed.in_duck_origin = client.in_duck
+        ? ReferencePredictionFieldOrigin::clientdata_observed
+        : ReferencePredictionFieldOrigin::exact_retained_prediction_slot;
+    if (client.duck_time) {
+        if (*client.duck_time > 1000U)
+            return unsupported(ReferencePredictionSeedField::duck_time);
+        seed.duck_time_milliseconds = *client.duck_time;
+        seed.duck_time_origin = ReferencePredictionFieldOrigin::
+            clientdata_observed;
+    } else if (retained && retained->duck_time_milliseconds) {
+        seed.duck_time_milliseconds = *retained->duck_time_milliseconds;
+        seed.duck_time_origin = ReferencePredictionFieldOrigin::
+            exact_retained_prediction_slot;
+    } else if (in_duck) {
+        return missing(ReferencePredictionSeedField::duck_time);
+    }
     seed.old_buttons = old_buttons;
     seed.maximum_speed = client.maximum_speed;
     seed.gravity_multiplier = player->gravity_multiplier;
@@ -180,12 +214,15 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
     const GoldSrcWireUserCmd& boundary_command,
     const movement::ILocalMovementCollision& collision,
     movement::GoldSrcLocalMovementScratch& scratch,
-    const movement::GoldSrcLocalMovementConfig& config)
+    const movement::GoldSrcLocalMovementConfig& config,
+    const hlclient::movement::GoldSrcMovementCommandProfile command_profile,
+    const ReferenceBrushCollisionContext* ladder_context)
 {
     namespace player = hlclient::movement;
     const auto identity = collision.session_identity();
     if (!collision.valid() || !identity || !identity->valid() ||
-        identity->profile != movement::LocalMovementCollisionProfile::world_only_v1 ||
+        (identity->profile != movement::LocalMovementCollisionProfile::world_only_v1 &&
+         identity->profile != movement::LocalMovementCollisionProfile::reference_brush_scene_v1) ||
         !movement::valid_goldsrc_local_movement_config(config))
         return {ReferencePredictionGroundStatus::invalid_collision_identity};
     if (!finite_vector(seed.origin) || !finite_vector(seed.velocity) ||
@@ -194,7 +231,9 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         !std::isfinite(*seed.gravity_multiplier) ||
         !std::isfinite(*seed.friction_multiplier))
         return {ReferencePredictionGroundStatus::invalid_movement_state};
-    if (seed.use_hull > 1U || seed.in_duck != (seed.use_hull == 1U))
+    if (seed.use_hull > 1U ||
+        ((seed.flags & (1U << 14U)) != 0U) != (seed.use_hull == 1U) ||
+        (seed.in_duck && seed.use_hull != 0U))
         return {ReferencePredictionGroundStatus::unsupported_hull};
     const auto hull = seed.use_hull == 0U ? player::PlayerMovementHull::standing
                                            : player::PlayerMovementHull::ducked;
@@ -205,6 +244,12 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         static_cast<float>(*seed.velocity.x),
         static_cast<float>(*seed.velocity.y),
         static_cast<float>(*seed.velocity.z)};
+    const bool server_ladder = seed.move_type == 5U;
+    if (seed.move_type != 3U && !server_ladder)
+        return {ReferencePredictionGroundStatus::invalid_movement_state};
+    if (server_ladder && (!ladder_context || !query_reference_ladder_contact(
+            *ladder_context, origin, hull, scratch.collision, config.collision_query)))
+        return {ReferencePredictionGroundStatus::invalid_movement_state};
     const auto position = collision.test_position(
         origin, hull, scratch.collision, config.collision_query);
     if (!position || !position.result)
@@ -243,7 +288,9 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
             if (!hit.hit || !hit.collision_plane ||
                 !std::isfinite(hit.collision_plane->normal.z))
                 return {ReferencePredictionGroundStatus::invalid_ground_trace};
-            if (hit.hit->kind != player::PlayerMovementHitKind::world)
+            if (hit.hit->kind != player::PlayerMovementHitKind::world &&
+                !(identity->profile == movement::LocalMovementCollisionProfile::reference_brush_scene_v1 &&
+                  hit.hit->kind == player::PlayerMovementHitKind::brush_entity))
                 return {ReferencePredictionGroundStatus::unsupported_contents};
             if (hit.collision_plane->normal.z >=
                 config.minimum_walkable_normal_z) {
@@ -257,8 +304,9 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         }
     }
     constexpr std::uint32_t kValveOnGroundFlag = 1U << 9U;
-    if (((seed.flags & kValveOnGroundFlag) != 0U) != ground.grounded)
+    if (!server_ladder && ((seed.flags & kValveOnGroundFlag) != 0U) != ground.grounded)
         return {ReferencePredictionGroundStatus::ground_flag_disagreement};
+    if (server_ladder) ground = {};
 
     player::LocalPlayerMovementStateCreateInfo state;
     state.origin = origin;
@@ -269,7 +317,8 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         static_cast<float>(boundary_command.angle_turns[1U]) * kDegreesPerTurn,
         static_cast<float>(boundary_command.angle_turns[2U]) * kDegreesPerTurn};
     state.hull = hull;
-    state.mode = ground.grounded ? player::PlayerMovementMode::walking
+    state.mode = server_ladder ? player::PlayerMovementMode::ladder :
+                 ground.grounded ? player::PlayerMovementMode::walking
                                  : player::PlayerMovementMode::airborne;
     state.ground = ground;
     state.view_offset = {
@@ -277,12 +326,18 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         static_cast<float>(*seed.view_offset.y),
         static_cast<float>(*seed.view_offset.z)};
     state.old_buttons = seed.old_buttons;
+    state.duck_time_milliseconds = seed.duck_time_milliseconds;
+    state.in_duck_transition = seed.in_duck;
     state.source_command_sequence = seed.command_boundary.value();
     state.last_valid_contents = player::PlayerMovementContents::empty;
     state.gravity_multiplier = static_cast<float>(*seed.gravity_multiplier);
     state.friction_multiplier = static_cast<float>(*seed.friction_multiplier);
-    state.command_profile =
-        player::GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1;
+    state.command_profile = command_profile;
+    if (command_profile == player::GoldSrcMovementCommandProfile::
+            reference_wire_jump_duck_v2)
+        state.compatibility_profile = player::
+            GoldSrcMovementCompatibilityProfile::
+                public_valve_pm_shared_dry_actions_subset_v2;
     const auto created = player::LocalPlayerMovementState::create(
         state, config.state_limits);
     if (!created)

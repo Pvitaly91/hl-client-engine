@@ -12,6 +12,7 @@ namespace hlclient::movement {
 
 enum class GoldSrcMovementCompatibilityProfile : std::uint8_t {
     public_valve_pm_shared_dry_walk_subset_v1,
+    public_valve_pm_shared_dry_actions_subset_v2,
     stock_pm_move_full_compatibility_evidence_pending,
 };
 
@@ -23,6 +24,7 @@ enum class GoldSrcMovementEvidenceProfile : std::uint8_t {
 enum class GoldSrcMovementCommandProfile : std::uint8_t {
     synthetic_usercmd_semantics_v1,
     reference_wire_dry_walk_v1,
+    reference_wire_jump_duck_v2,
     stock_usercmd_semantics_evidence_pending,
 };
 
@@ -37,6 +39,7 @@ enum class PlayerMovementMode : std::uint8_t {
     unsupported_liquid,
     unsupported_ladder,
     invalid_or_stuck,
+    ladder,
 };
 
 enum class PlayerMovementContents : std::uint8_t {
@@ -53,6 +56,7 @@ enum class PlayerMovementContents : std::uint8_t {
 enum class PlayerMovementHitKind : std::uint8_t {
     world,
     explicit_synthetic_brush,
+    brush_entity,
 };
 
 enum class PlayerGroundEvidenceProfile : std::uint8_t {
@@ -161,6 +165,10 @@ struct LocalPlayerMovementStateCreateInfo {
     PlayerGroundStateCreateInfo ground{};
     assets::AssetVector3 view_offset{0.0F, 0.0F, 28.0F};
     std::uint16_t old_buttons{0U};
+    // Valve flDuckTime is a remaining millisecond timer. bInDuck describes
+    // the transition; a completed crouch is represented by the duck hull.
+    std::uint32_t duck_time_milliseconds{0U};
+    bool in_duck_transition{false};
     std::uint32_t source_command_sequence{0U};
     std::uint64_t simulation_time_nanoseconds{0U};
     PlayerMovementContents last_valid_contents{PlayerMovementContents::empty};
@@ -226,6 +234,8 @@ public:
     [[nodiscard]] const PlayerGroundState& ground_state() const noexcept;
     [[nodiscard]] const assets::AssetVector3& view_offset() const noexcept;
     [[nodiscard]] std::uint16_t old_buttons() const noexcept;
+    [[nodiscard]] std::uint32_t duck_time_milliseconds() const noexcept;
+    [[nodiscard]] bool in_duck_transition() const noexcept;
     [[nodiscard]] std::uint32_t source_command_sequence() const noexcept;
     [[nodiscard]] std::uint64_t simulation_time_nanoseconds() const noexcept;
     [[nodiscard]] PlayerMovementContents last_valid_contents() const noexcept;
@@ -249,6 +259,8 @@ private:
     PlayerGroundState ground_state_;
     assets::AssetVector3 view_offset_{};
     std::uint16_t old_buttons_{0U};
+    std::uint32_t duck_time_milliseconds_{0U};
+    bool in_duck_transition_{false};
     std::uint32_t source_command_sequence_{0U};
     std::uint64_t simulation_time_nanoseconds_{0U};
     PlayerMovementContents last_valid_contents_{PlayerMovementContents::empty};

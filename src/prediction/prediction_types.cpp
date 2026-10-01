@@ -18,7 +18,8 @@ bool PredictionSessionIdentity::valid() const noexcept
     if (collision_profile !=
             goldsrc::movement::LocalMovementCollisionProfile::world_only_v1 &&
         collision_profile != goldsrc::movement::LocalMovementCollisionProfile::
-            explicit_synthetic_static_brush_v1) {
+            explicit_synthetic_static_brush_v1 &&
+        collision_profile != goldsrc::movement::LocalMovementCollisionProfile::reference_brush_scene_v1) {
         return false;
     }
     if (prediction_profile == PredictionCompatibilityProfile::
@@ -41,7 +42,20 @@ bool PredictionSessionIdentity::valid() const noexcept
             reference_sent_carrier_boundary_v1 &&
         command_profile == movement::GoldSrcMovementCommandProfile::
             reference_wire_dry_walk_v1;
-    return synthetic || reference;
+    const bool action_reference = prediction_profile ==
+            PredictionCompatibilityProfile::reference_carrier_jump_duck_v2 &&
+        acknowledgement_profile == PredictionAcknowledgementProfile::
+            reference_sent_carrier_boundary_v1 &&
+        command_profile == movement::GoldSrcMovementCommandProfile::
+            reference_wire_jump_duck_v2;
+    const bool weapon_reference = (prediction_profile ==
+            PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_v3 ||
+        prediction_profile == PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4) &&
+        acknowledgement_profile == PredictionAcknowledgementProfile::
+            reference_sent_carrier_boundary_v1 &&
+        command_profile == movement::GoldSrcMovementCommandProfile::
+            reference_wire_jump_duck_v2;
+    return synthetic || reference || action_reference || weapon_reference;
 }
 
 bool valid_local_prediction_history_limits(
@@ -86,6 +100,12 @@ std::string_view to_string(const PredictionCompatibilityProfile profile) noexcep
         return "stock_protocol_48_authoritative_reconciliation_evidence_pending";
     case PredictionCompatibilityProfile::reference_carrier_dry_walk_v1:
         return "reference_carrier_dry_walk_v1";
+    case PredictionCompatibilityProfile::reference_carrier_jump_duck_v2:
+        return "reference_carrier_jump_duck_v2";
+    case PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_v3:
+        return "reference_carrier_jump_duck_weapon_v3";
+    case PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4:
+        return "reference_carrier_jump_duck_weapon_use_v4";
     }
     return "unknown";
 }

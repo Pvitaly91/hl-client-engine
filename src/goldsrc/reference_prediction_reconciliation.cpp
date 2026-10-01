@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/reference_prediction_reconciliation.hpp>
+#include <hlclient/goldsrc/reference_brush_collision.hpp>
 
 #include <hlclient/prediction/local_prediction.hpp>
 
@@ -14,14 +15,21 @@ ReferenceRebaseResult rebase_reference_prediction(
     const movement::GoldSrcMovementEnvironment& environment,
     const movement::ILocalMovementCollision& collision,
     movement::GoldSrcLocalMovementScratch& scratch,
-    const movement::GoldSrcLocalMovementConfig& config)
+    const movement::GoldSrcLocalMovementConfig& config,
+    const ReferenceVerticalSupportMotion* support,
+    const ReferenceBrushCollisionContext* ladder_context,
+    const movement::ReferenceLadderMovementPolicy* ladder_policy)
 {
     ReferenceRebaseResult result;
     const auto& old_session = previous.session();
-    if (old_session.prediction_profile != prediction::
-            PredictionCompatibilityProfile::reference_carrier_dry_walk_v1 ||
-        correction.command_profile() != hlclient::movement::
-            GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1)
+    if ((old_session.prediction_profile != prediction::
+             PredictionCompatibilityProfile::reference_carrier_dry_walk_v1 &&
+         old_session.prediction_profile != prediction::
+             PredictionCompatibilityProfile::reference_carrier_jump_duck_v2 &&
+         old_session.prediction_profile != prediction::
+             PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_v3 &&
+         old_session.prediction_profile != prediction::PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4) ||
+        correction.command_profile() != old_session.command_profile)
         return result;
     const auto boundary = correction.source_command_sequence();
     if (boundary == 0U)
@@ -49,8 +57,7 @@ ReferenceRebaseResult rebase_reference_prediction(
         old_session.session_generation,
         old_session.prediction_generation + 1U, collision, environment, config,
         correction,
-        prediction::PredictionCompatibilityProfile::
-            reference_carrier_dry_walk_v1,
+        old_session.prediction_profile,
         prediction::PredictionAcknowledgementProfile::
             reference_sent_carrier_boundary_v1);
     if (!session)
@@ -75,8 +82,9 @@ ReferenceRebaseResult rebase_reference_prediction(
                 return {ReferenceRebaseStatus::history_gap};
             if (suffix.size() >= maximum)
                 return {ReferenceRebaseStatus::replay_limit};
-            const auto simulated = movement::GoldSrcLocalMovementKernel::simulate(
-                *current, *old.command(), environment, collision, scratch, config);
+            const auto simulated = simulate_reference_movement(
+                *current, *old.command(), environment, collision, scratch, config,
+                support, ladder_context, ladder_policy);
             if (!simulated) {
                 result.status = ReferenceRebaseStatus::simulation_failed;
                 if (simulated.error)

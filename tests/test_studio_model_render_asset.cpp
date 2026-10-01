@@ -96,6 +96,24 @@ TEST_CASE("Studio render asset retains exact bone-local aggregate geometry",
     CHECK(asset.vertices()[0U].raw_texture_s == -8);
 }
 
+TEST_CASE("Studio chrome plus flatshade remains a typed renderable material",
+    "[entity-render][studio][chrome]")
+{
+    const auto model = fixture::model_asset({
+        studio::kGoldSrcStudioTextureChrome |
+            studio::kGoldSrcStudioTextureFlatshade,
+        0U, 0U, 0U});
+    auto built = render::StudioModelRenderAssetBuilder{}.build(
+        *model, {0x301U, 0x302U});
+    REQUIRE(built);
+    REQUIRE(built.asset);
+    REQUIRE(built.asset->materials().size() >= 1U);
+    CHECK(built.asset->materials()[0U].support_status ==
+        render::StudioRenderMaterialSupportStatus::supported_chrome);
+    CHECK(built.asset->materials()[0U].profile ==
+        render::StudioRenderMaterialProfile::opaque);
+}
+
 TEST_CASE("Studio render asset publication is stable owning and bounded",
     "[entity-render][studio][identity][limits]")
 {

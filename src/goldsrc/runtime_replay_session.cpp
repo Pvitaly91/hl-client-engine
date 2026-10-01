@@ -1,6 +1,8 @@
 #include <hlclient/goldsrc/runtime_replay_session.hpp>
+#include <hlclient/game_api/game_client_host.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -23,6 +25,110 @@ using client::RuntimeWeaponSlotObservation;
 
 constexpr std::uint64_t kFnvOffset = 14'695'981'039'346'656'037ULL;
 constexpr std::uint64_t kFnvPrime = 1'099'511'628'211ULL;
+
+// Neutral reconstruction of committed event arguments. A packet reference is
+// an ordinal in the exact preceding same-payload packet snapshot, never an
+// edict number or an index into the later rendered/cull-filtered scene.
+[[nodiscard]] std::optional<double> event_number(const DeltaObjectState* object,
+    std::string_view name) noexcept {
+    const auto* field=object ? object->find_exact(name) : nullptr;
+    if(!field) return {};
+    if(const auto* v=std::get_if<double>(&field->value())) return std::isfinite(*v) ? std::optional{*v} : std::nullopt;
+    if(const auto* v=std::get_if<std::uint32_t>(&field->value())) return static_cast<double>(*v);
+    if(const auto* v=std::get_if<std::int32_t>(&field->value())) return static_cast<double>(*v);
+    return {};
+}
+[[nodiscard]] std::optional<assets::AssetVector3> event_vector(const DeltaObjectState* object,
+    const std::array<std::string_view,3>& fields) noexcept {
+    if(!object) return {};
+    for(const auto name:fields) {
+        const auto* field=object->find_exact(name);
+        if(!field || (field->base_type()!=DeltaFieldBaseType::float_value &&
+            field->base_type()!=DeltaFieldBaseType::angle) ||
+            !std::holds_alternative<double>(field->value())) return {};
+    }
+    const auto x=event_number(object,fields[0]),y=event_number(object,fields[1]),z=event_number(object,fields[2]);
+    if(!x||!y||!z || std::abs(*x)>1'000'000 || std::abs(*y)>1'000'000 || std::abs(*z)>1'000'000) return {};
+    return assets::AssetVector3{static_cast<float>(*x),static_cast<float>(*y),static_cast<float>(*z)};
+}
+[[nodiscard]] bool event_vector_transmitted(const RuntimeControlScriptedEvent& event,
+    const std::array<std::string_view,3>& fields) noexcept {
+    for(const auto name:fields) if(const auto* field=event.arguments ? event.arguments->find_exact(name) : nullptr)
+        if(field->wire_index()<64U && (event.argument_field_mask&(std::uint64_t{1}<<field->wire_index()))) return true;
+    return false;
+}
+void publish_scripted_events(game_api::GameClientHost& host,
+    const RuntimeReplayRecord& record,const PacketEntityDecodedBatch& batch,
+    std::uint32_t max_clients) noexcept {
+    using Resolution=game_api::ScriptedEventResolution;
+    constexpr std::array<std::string_view,3> origins{"origin[0]","origin[1]","origin[2]"};
+    constexpr std::array<std::string_view,3> angles{"angles[0]","angles[1]","angles[2]"};
+    constexpr std::array<std::string_view,3> velocities{"velocity[0]","velocity[1]","velocity[2]"};
+    const EntitySnapshotState* packet=nullptr;
+    for(const auto& item:batch.events) {
+        if(const auto* entities=std::get_if<PacketEntityMessageEvent>(&item)) {
+            packet=entities->snapshot.get(); continue;
+        }
+        const auto* control=std::get_if<RuntimeControlEvent>(&item);
+        const auto* events=control ? std::get_if<RuntimeControlScriptedEvents>(&control->body) : nullptr;
+        if(!events) continue;
+        for(std::size_t ordinal=0;ordinal<events->entries.size();++ordinal) {
+            const auto& wire=events->entries[ordinal];
+            game_api::CommittedScriptedEvent event;
+            event.generation=record.generation; event.record=record.record_identity;
+            event.message_bit_offset=static_cast<std::uint32_t>(control->provenance.start_cursor.absolute_bit_offset());
+            event.entry_ordinal=static_cast<std::uint32_t>(ordinal); event.event_index=wire.event_index;
+            event.received_at_seconds=std::chrono::duration<double>(
+                record.received_at.value_or(std::chrono::steady_clock::now()).time_since_epoch()).count();
+            const DeltaObjectState* entity=nullptr;
+            if(wire.packet_index) {
+                if(!packet) event.resolution=Resolution::missing_packet;
+                else if(*wire.packet_index>=packet->entities().size()) event.resolution=Resolution::invalid_packet_index;
+                else {
+                    const auto& selected=packet->entities()[*wire.packet_index];
+                    event.emitter_entity=selected.entity_number(); entity=&selected.object();
+                }
+            } else if(const auto emitter=event_number(wire.arguments.get(),"entindex");
+                emitter && *emitter>0 && *emitter<=max_clients && std::floor(*emitter)==*emitter) {
+                event.emitter_entity=static_cast<std::uint32_t>(*emitter);
+                if(packet) for(const auto& selected:packet->entities())
+                    if(selected.entity_number()==event.emitter_entity) entity=&selected.object();
+            } else event.resolution=Resolution::missing_arguments;
+            if(event.resolution==Resolution::ready) {
+                if(!event.emitter_entity || event.emitter_entity>max_clients)
+                    event.resolution=Resolution::invalid_arguments;
+                if(wire.packet_index) {
+                    const auto stated=event_number(wire.arguments.get(),"entindex");
+                    if(stated && *stated!=0.0 && *stated!=event.emitter_entity)
+                        event.resolution=Resolution::invalid_arguments;
+                }
+                // Reliable events carry their own position/orientation; zero
+                // is a valid null-base value, not a request to find an entity.
+                const bool explicit_origin=events->reliable || event_vector_transmitted(wire,origins);
+                const bool explicit_angles=events->reliable || event_vector_transmitted(wire,angles);
+                event.angles_from_entity=!explicit_angles;
+                const auto origin=event_vector(explicit_origin ? wire.arguments.get() : entity,origins);
+                const auto orientation=event_vector(explicit_angles ? wire.arguments.get() : entity,angles);
+                if(!origin || !orientation) event.resolution=Resolution::missing_arguments;
+                else {event.origin=*origin;event.angles=*orientation;}
+                // Velocity is not advertised by the pinned event_t. An exact
+                // packet/schema value is used when present, otherwise shell
+                // inheritance is explicitly zero in this compatible profile.
+                event.velocity=event_vector(wire.arguments.get(),velocities).value_or(
+                    event_vector(entity,velocities).value_or(assets::AssetVector3{}));
+                const auto ducking=event_number(wire.arguments.get(),"ducking").value_or(0.0);
+                const auto spread_x=event_number(wire.arguments.get(),"fparam1").value_or(0.0);
+                const auto spread_y=event_number(wire.arguments.get(),"fparam2").value_or(0.0);
+                if((ducking!=0.0 && ducking!=1.0) || std::abs(spread_x)>1 || std::abs(spread_y)>1)
+                    event.resolution=Resolution::invalid_arguments;
+                event.ducking=ducking==1.0;
+                event.spread_x=static_cast<float>(spread_x);event.spread_y=static_cast<float>(spread_y);
+                if(wire.fire_delay_ticks.value_or(0)!=0) event.resolution=Resolution::unsupported_delay;
+            }
+            host.committed_scripted_event(event);
+        }
+    }
+}
 
 [[nodiscard]] RuntimeReplayError failure(
     const RuntimeReplayErrorCode code,
@@ -58,6 +164,9 @@ constexpr std::uint64_t kFnvPrime = 1'099'511'628'211ULL;
     if (!valid_profile(initialization.profile) || initialization.generation == 0U ||
         initialization.max_clients == 0U ||
         initialization.max_clients > 255U || !initialization.schemas ||
+        (initialization.receiving_player_entity &&
+         (*initialization.receiving_player_entity == 0U ||
+          *initialization.receiving_player_entity > initialization.max_clients)) ||
         !initialization.baselines || !valid_bindings(initialization.schema_bindings) ||
         !valid_runtime_replay_limits(initialization.limits) ||
         !valid_runtime_user_message_definitions(
@@ -147,6 +256,42 @@ void hash_unsigned(std::uint64_t& hash, const Value value) noexcept
         metadata.freshness = RuntimeObservationFreshness::retained;
     }
     return metadata;
+}
+
+[[nodiscard]] std::optional<RuntimeReplayError> frame_game_messages(
+    std::vector<game_api::GameMessageView>& messages,
+    const RuntimeReplayRecord& record,
+    const PacketEntityDecodedBatch& batch,
+    std::span<const PostMoveVarsUserMessageDefinition> definitions)
+{
+    for (const auto& item : batch.events) {
+        const auto* event = std::get_if<RuntimeControlEvent>(&item);
+        if (!event) continue;
+        const bool animation = event->opcode == RuntimeControlOpcode::svc_weaponanim;
+        const auto* message = std::get_if<RuntimeControlUserMessage>(&event->body);
+        if (!animation && !message) continue;
+        std::string_view name;
+        const std::size_t length = animation ? 2U : message->body_size;
+        if (message) {
+            const auto definition = std::find_if(definitions.begin(), definitions.end(),
+                [&](const auto& value) { return value.identifier == message->identifier; });
+            if (definition == definitions.end()) return failure(
+                RuntimeReplayErrorCode::semantic_schema_mismatch,
+                "framed user message lost its current registration");
+            name = definition->name;
+        }
+        const auto end = event->provenance.end_cursor.byte_offset();
+        if (end < length || end > record.payload.bytes.size()) return failure(
+            RuntimeReplayErrorCode::semantic_value_mismatch,
+            "framed game message body exceeds its owning record");
+        messages.push_back({
+            animation ? game_api::GameMessageKind::weapon_animation
+                      : game_api::GameMessageKind::user_message,
+            name, std::span<const std::byte>{record.payload.bytes}.subspan(end - length, length),
+            source_for(record, event->provenance.start_cursor, event->provenance.end_cursor),
+            message ? std::optional{message->identifier} : std::nullopt});
+    }
+    return {};
 }
 
 struct ExpectedField final {
@@ -334,6 +479,7 @@ struct OptionalBoolResult final {
 struct ProjectionResult final {
     std::shared_ptr<const RuntimeClientObservationState> state;
     std::optional<RuntimeReplayError> error;
+    std::optional<game_api::GameRecordState> game_state;
 };
 
 [[nodiscard]] std::optional<RuntimeReplayError> project_visual_fields(
@@ -363,9 +509,30 @@ struct ProjectionResult final {
         std::pair{"effects", &target.effects}}) {
         if (auto error = unsigned_field(name, DeltaFieldBaseType::integer_value, *output)) { return error; }
     }
+    if (auto error = unsigned_field("solid", DeltaFieldBaseType::short_value, target.solid)) return error;
+    const auto brush_move = optional_unsigned(schema, object, "movetype");
+    if (brush_move.error) return brush_move.error;
+    target.brush_move_type = brush_move.value;
     const auto frame = optional_double(schema, object, "frame", {DeltaFieldBaseType::float_value, false, {}, {}});
     if (frame.error) { return frame.error; }
     target.frame = frame.value;
+    const auto animation_time = optional_double(schema, object, "animtime",
+        {DeltaFieldBaseType::time_window_8, false, {}, {}});
+    if (animation_time.error) return animation_time.error;
+    target.animation_time_seconds = animation_time.value;
+    const auto rate = optional_double(schema, object, "framerate",
+        {DeltaFieldBaseType::float_value, true, {}, {}});
+    if (rate.error) return rate.error;
+    target.frame_rate = rate.value;
+    if (auto error = unsigned_field("weaponmodel", DeltaFieldBaseType::integer_value,
+            target.weapon_model_index)) return error;
+    if (schema.name() == "entity_state_player_t") {
+        if (auto error = unsigned_field("gaitsequence", DeltaFieldBaseType::integer_value,
+                target.gait_sequence)) return error;
+    }
+    if (auto error = project_vector(schema, object, "velocity[0]", "velocity[1]",
+            "velocity[2]", {DeltaFieldBaseType::float_value, true, {}, {}},
+            target.velocity)) return error;
     if (const auto* definition = find_definition(schema, "skin")) {
         const auto* field = object.find_exact("skin");
         if (!matches_expected(*definition, {DeltaFieldBaseType::short_value, true, {}, {}}) ||
@@ -422,7 +589,10 @@ struct ProjectionResult final {
     const PacketEntityDecodedBatch* batch,
     const RuntimeClientObservationState* previous,
     const std::uint64_t publication_revision,
-    const RuntimeReplayLimits& limits)
+    const RuntimeReplayLimits& limits,
+    std::span<const PostMoveVarsUserMessageDefinition> user_message_definitions,
+    std::optional<std::uint32_t> receiving_player_entity = {},
+    game_api::GameClientHost* game_client = nullptr)
 {
     try {
         auto candidate = std::make_shared<RuntimeClientObservationState>();
@@ -549,6 +719,18 @@ struct ProjectionResult final {
                 {DeltaFieldBaseType::float_value, true, {}, {}});
             if (health.error) return {{}, health.error};
             receiving.health = health.value;
+            const auto viewmodel = optional_unsigned(*client_schema,
+                client_frame->client_data(), "viewmodel");
+            if (viewmodel.error) return {{}, viewmodel.error};
+            receiving.viewmodel_index = viewmodel.value;
+            const auto owned = optional_unsigned(*client_schema,
+                client_frame->client_data(), "weapons");
+            if (owned.error) return {{}, owned.error};
+            receiving.owned_weapon_bits = owned.value;
+            const auto weapon_anim = optional_unsigned(*client_schema,
+                client_frame->client_data(), "weaponanim");
+            if (weapon_anim.error) return {{}, weapon_anim.error};
+            receiving.weapon_animation = weapon_anim.value;
             if (const auto error = project_vector(
                     *client_schema, client_frame->client_data(),
                     "origin[0]", "origin[1]", "origin[2]",
@@ -570,6 +752,13 @@ struct ProjectionResult final {
                     receiving.view_offset)) {
                 return {{}, error};
             }
+            if (const auto error = project_vector(
+                    *client_schema, client_frame->client_data(),
+                    "punchangle[0]", "punchangle[1]", "punchangle[2]",
+                    {DeltaFieldBaseType::float_value, true, {}, {}},
+                    receiving.punch_angle)) {
+                return {{}, error};
+            }
             for (const auto& [name, output] : std::array{
                     std::pair{"flags", &receiving.flags},
                     std::pair{"flDuckTime", &receiving.duck_time},
@@ -585,6 +774,11 @@ struct ProjectionResult final {
                 {DeltaFieldBaseType::float_value, false, {}, {}});
             if (maxspeed.error) return {{}, maxspeed.error};
             receiving.maximum_speed = maxspeed.value;
+            const auto next_attack = optional_double(*client_schema,
+                client_frame->client_data(), "m_flNextAttack",
+                {DeltaFieldBaseType::float_value, true, {}, {}});
+            if (next_attack.error) return {{}, next_attack.error};
+            receiving.next_weapon_attack = next_attack.value;
             const auto in_duck = optional_bool(*client_schema,
                 client_frame->client_data(), "bInDuck");
             if (in_duck.error) return {{}, in_duck.error};
@@ -600,6 +794,10 @@ struct ProjectionResult final {
                 }
                 RuntimeWeaponSlotObservation weapon;
                 weapon.wire_slot = slot.wire_index();
+                const auto weapon_id = optional_unsigned(
+                    *weapon_schema, slot.object(), "m_iId");
+                if (weapon_id.error) return {{}, weapon_id.error};
+                weapon.weapon_id = weapon_id.value;
                 const auto clip = optional_signed(
                     *weapon_schema, slot.object(), "m_iClip");
                 if (clip.error) return {{}, clip.error};
@@ -618,6 +816,16 @@ struct ProjectionResult final {
                     {DeltaFieldBaseType::float_value, true, {}, {}});
                 if (next_primary.error) return {{}, next_primary.error};
                 weapon.next_primary_attack = next_primary.value;
+                const auto next_secondary = optional_double(
+                    *weapon_schema, slot.object(), "m_flNextSecondaryAttack",
+                    {DeltaFieldBaseType::float_value, true, {}, {}});
+                if (next_secondary.error) return {{}, next_secondary.error};
+                weapon.next_secondary_attack = next_secondary.value;
+                const auto idle = optional_double(
+                    *weapon_schema, slot.object(), "m_flTimeWeaponIdle",
+                    {DeltaFieldBaseType::float_value, true, {}, {}});
+                if (idle.error) return {{}, idle.error};
+                weapon.time_weapon_idle = idle.value;
                 candidate->weapon_slots.push_back(std::move(weapon));
             }
             if (client_event != nullptr && record != nullptr) {
@@ -631,6 +839,40 @@ struct ProjectionResult final {
             }
         }
 
+        std::optional<game_api::GameRecordState> staged_game;
+        if (game_client) {
+            std::vector<game_api::GameMessageView> messages;
+            if (record != nullptr && batch != nullptr) {
+                if (auto error = frame_game_messages(
+                        messages, *record, *batch, user_message_definitions))
+                    return {{}, std::move(error)};
+            }
+            auto result = game_client->stage_record(
+                {previous, *candidate, messages, receiving_player_entity});
+            if (!result || !result.state) {
+                auto rejected = failure(RuntimeReplayErrorCode::semantic_value_mismatch,
+                    result.error ? std::move(*result.error) : "game module rejected staged record");
+                rejected.module_error = std::move(result.message_failure);
+                if (rejected.module_error && record) {
+                    rejected.decoder_wire_opcode = rejected.module_error->registration_id;
+                    const auto start = rejected.module_error->source.start_bit_offset;
+                    rejected.decoder_cursor = StockRuntimeSourceCursor::create(
+                        start / 8U, static_cast<std::uint8_t>(start % 8U), record->payload.bytes.size());
+                    if (rejected.module_error->body_byte_offset) {
+                        const auto body_start = rejected.module_error->source.end_bit_offset -
+                            rejected.module_error->actual_body_size * 8U;
+                        const auto bit = body_start + *rejected.module_error->body_byte_offset * 8U;
+                        rejected.failure_cursor = StockRuntimeSourceCursor::create(
+                            bit / 8U, bit % 8U, record->payload.bytes.size());
+                    }
+                }
+                return {{}, std::move(rejected)};
+            }
+            candidate->weapon_hud = result.state->weapon_hud;
+            candidate->life_events = result.state->life_events;
+            candidate->lifecycle = result.state->lifecycle;
+            staged_game = std::move(result.state);
+        }
         candidate->canonical_state_hash =
             client::runtime_observation_canonical_hash(*candidate);
         if (!client::valid_runtime_observation(*candidate)) {
@@ -638,7 +880,7 @@ struct ProjectionResult final {
                 RuntimeReplayErrorCode::bridge_rejected_candidate,
                 "projected runtime observation violates the client boundary")};
         }
-        return {std::move(candidate), std::nullopt};
+        return {std::move(candidate), std::nullopt, std::move(staged_game)};
     } catch (const std::bad_alloc&) {
         return {{}, failure(RuntimeReplayErrorCode::unable_to_retain_candidate,
             "unable to retain the staged runtime projection")};
@@ -712,9 +954,10 @@ RuntimeReplayInitializeResult RuntimeReplaySession::initialize(
             return {{}, failure(RuntimeReplayErrorCode::invalid_configuration,
                 "A/B/C/D decoder state cannot be initialized")};
         }
-        const auto projected = project_candidate(
+        auto projected = project_candidate(
             decoder_state, *initialization.schemas, nullptr, nullptr, nullptr,
-            1U, initialization.limits);
+            1U, initialization.limits, initialization.user_message_definitions,
+            initialization.receiving_player_entity, initialization.game_client.get());
         if (projected.error || !projected.state) {
             return {{}, projected.error ? std::move(projected.error)
                                         : std::optional<RuntimeReplayError>{
@@ -732,6 +975,12 @@ RuntimeReplayInitializeResult RuntimeReplaySession::initialize(
                 std::move(initialization), std::move(decoder_state),
                 std::move(decoder), target, 1U,
                 projected.state->canonical_state_hash}};
+        if (session->initialization_.game_client && projected.game_state) {
+            session->initialization_.game_client->reset({
+                session->initialization_.generation, session->initialization_.generation,
+                session->initialization_.receiving_player_entity});
+            session->initialization_.game_client->commit_record(std::move(*projected.game_state));
+        }
         target = std::move(world_candidate);
         return {std::move(session), std::nullopt};
     } catch (const std::bad_alloc&) {
@@ -743,9 +992,26 @@ RuntimeReplayInitializeResult RuntimeReplaySession::initialize(
 RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
     const RuntimeReplayRecord& record)
 {
+    ++attempted_records_;
     auto record_failure = [&](RuntimeReplayError error) {
         error.record_identity = record.record_identity;
         error.record_ordinal = record.record_ordinal;
+        error.record_start_cursor = record.initial_cursor;
+        error.generation = record.generation;
+        if (target_ && target_->runtime_observation()) {
+            error.life_epoch = target_->runtime_observation()->lifecycle.life_epoch;
+            error.life_state = target_->runtime_observation()->lifecycle.state;
+        }
+        error.last_publication = publication_revision_;
+        error.source_sequence = record.payload.source_sequence;
+        error.source_acknowledgement = record.payload.source_acknowledgement;
+        error.reliable = record.payload.source_reliable;
+        error.reassembled = record.payload.reassembled;
+        error.decompressed = record.payload.decompressed;
+        error.wire_uncompressed = record.payload.wire_uncompressed;
+        error.payload_size = record.payload.bytes.size();
+        error.attempted_records = attempted_records_;
+        error.committed_records = committed_records_;
         return RuntimeReplayApplyResult{std::nullopt, std::move(error)};
     };
     if (status_ != RuntimeReplaySessionStatus::active) {
@@ -812,7 +1078,7 @@ RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
 
     try {
         auto staged_decoder = decoder_state_;
-        const auto decoded = decoder_.decode_and_apply(
+        auto decoded = decoder_.decode_and_apply(
             PacketEntityDecodeInput{
                 record.payload,
                 record.initial_cursor,
@@ -824,7 +1090,8 @@ RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
                 initialization_.schema_bindings.client_data,
                 initialization_.schema_bindings.weapon_data,
                 ClientDataReceiverMode::ordinary_game_client,
-                initialization_.user_message_definitions},
+                initialization_.user_message_definitions,
+                initialization_.receiving_player_entity},
             staged_decoder);
         if (!decoded || !decoded.batch) {
             auto error = failure(
@@ -839,13 +1106,19 @@ RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
                 error.delta_error = decoded.error->delta_error;
                 error.decoder_cursor = decoded.error->cursor;
                 error.decoder_wire_opcode = decoded.error->wire_opcode;
+                error.control_error = decoded.error->control_error;
+                if (error.control_error) error.failure_cursor = error.control_error->failure_cursor;
+                // Other decoders expose a message boundary, not an exact
+                // failure checkpoint. Do not relabel it as the failure cursor.
             }
             return record_failure(std::move(error));
         }
-        const auto projection = project_candidate(
+        auto projection = project_candidate(
             staged_decoder, *initialization_.schemas, &record,
             &*decoded.batch, target_->runtime_observation().get(),
-            publication_revision_ + 1U, initialization_.limits);
+            publication_revision_ + 1U, initialization_.limits,
+            initialization_.user_message_definitions,
+            initialization_.receiving_player_entity, initialization_.game_client.get());
         if (projection.error || !projection.state) {
             return record_failure(projection.error
                     ? std::move(*projection.error)
@@ -877,12 +1150,23 @@ RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
 
         // These move assignments are the single commit boundary. All work
         // that can reject or allocate has completed above.
+        if (initialization_.game_client && projection.game_state)
+            initialization_.game_client->commit_record(std::move(*projection.game_state));
         decoder_state_ = std::move(staged_decoder);
         *target_ = std::move(staged_world);
         record_fingerprints_ = std::move(staged_fingerprints);
         last_record_ordinal_ = record.record_ordinal;
         ++publication_revision_;
+        ++committed_records_;
         committed_state_hash_ = projection.state->canonical_state_hash;
+        if(initialization_.game_client)
+            publish_scripted_events(*initialization_.game_client,record,*decoded.batch,
+                initialization_.max_clients);
+        if (initialization_.sound_events)
+            for (const auto& item : decoded.batch->events)
+                if (const auto* control = std::get_if<RuntimeControlEvent>(&item))
+                    initialization_.sound_events->publish(record.record_identity,record.record_ordinal,*control,
+                        record.received_at.value_or(std::chrono::steady_clock::now()));
         RuntimeReplayApplyEvent event{
             record.record_identity,
             record.record_ordinal,
@@ -935,9 +1219,11 @@ std::optional<RuntimeReplayError> RuntimeReplaySession::reset_generation(
             return failure(RuntimeReplayErrorCode::invalid_configuration,
                 "A/B/C/D state rejected generation initialization");
         }
-        const auto projection = project_candidate(
+        auto projection = project_candidate(
             staged_decoder, *initialization.schemas, nullptr, nullptr, nullptr,
-            publication_revision_ + 1U, initialization.limits);
+            publication_revision_ + 1U, initialization.limits,
+            initialization.user_message_definitions, initialization.receiving_player_entity,
+            initialization.game_client.get());
         if (projection.error || !projection.state) {
             return projection.error ? std::move(projection.error)
                                     : std::optional<RuntimeReplayError>{failure(
@@ -950,9 +1236,15 @@ std::optional<RuntimeReplayError> RuntimeReplaySession::reset_generation(
             return failure(RuntimeReplayErrorCode::bridge_rejected_candidate,
                 "ClientWorldState rejected generation reset");
         }
+        if (initialization.game_client && projection.game_state) {
+            initialization.game_client->reset({initialization.generation,
+                initialization.generation, initialization.receiving_player_entity});
+            initialization.game_client->commit_record(std::move(*projection.game_state));
+        }
         decoder_state_ = std::move(staged_decoder);
         decoder_ = std::move(staged_parser);
         initialization_ = std::move(initialization);
+        if (initialization_.sound_events) initialization_.sound_events->reset_generation(initialization_.generation);
         *target_ = std::move(staged_world);
         record_fingerprints_.clear();
         last_record_ordinal_ = 0U;
@@ -1034,6 +1326,69 @@ std::string_view to_string(const RuntimeReplayRecoveryStatus recovery) noexcept
         return "clientdata_no_base_required";
     }
     return "unknown";
+}
+
+std::string runtime_failure_summary(const RuntimeReplayError& error) {
+    std::string out;
+    const auto field = [&](std::string_view key, std::string_view value) {
+        out += " "; out += key; out += "="; out += value;
+    };
+    const auto scalar = [](const auto& value) {
+        return value ? std::to_string(*value) : std::string{"unavailable"};
+    };
+    const auto token = [](std::string_view value) {
+        return !value.empty() && value.size() <= 63U &&
+            std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_';
+            }) ? std::string{value} : std::string{"unavailable"};
+    };
+    field("error_domain", error.module_error ? "game_module" :
+        error.decoder_error ? "protocol_decoder" : "runtime_projection");
+    field("failure_stage", error.module_error ? "game_message_handler" :
+        error.decoder_error ? "service_dispatch" : "transaction_validation");
+    field("replay_error", to_string(error.code));
+    field("control_error", error.control_error ? to_string(error.control_error->code) : "unavailable");
+    field("clientdata_error", error.clientdata_error ? to_string(*error.clientdata_error) : "unavailable");
+    field("delta_error", error.delta_error ? to_string(*error.delta_error) : "unavailable");
+    field("module_error", error.module_error ? game_api::to_string(error.module_error->code) : "unavailable");
+    field("generation", scalar(error.generation)); field("life_epoch", scalar(error.life_epoch));
+    std::string_view life = "unavailable";
+    if (error.life_state) switch (*error.life_state) {
+    case client::LocalPlayerLifeState::unknown: life = "unknown"; break;
+    case client::LocalPlayerLifeState::alive: life = "alive"; break;
+    case client::LocalPlayerLifeState::dead: life = "dead"; break;
+    case client::LocalPlayerLifeState::awaiting_respawn: life = "awaiting_respawn"; break;
+    }
+    field("life_state", life);
+    field("record_identity", scalar(error.record_identity));
+    field("carrier_ack", scalar(error.source_acknowledgement));
+    field("reliable", scalar(error.reliable)); field("reassembled", scalar(error.reassembled));
+    field("encoding", error.decompressed.value_or(false) ? "decompressed" :
+        error.wire_uncompressed.value_or(false) ? "wire_uncompressed" : "unavailable");
+    field("payload_size", scalar(error.payload_size));
+    const auto cursor = [&](std::string_view byte_key, std::string_view bit_key,
+                            const std::optional<StockRuntimeSourceCursor>& value) {
+        field(byte_key, value ? std::to_string(value->byte_offset()) : "unavailable");
+        field(bit_key, value ? std::to_string(value->bit_offset()) : "unavailable");
+    };
+    cursor("record_start_byte", "record_start_bit", error.record_start_cursor);
+    cursor("message_start_byte", "message_start_bit", error.decoder_cursor);
+    cursor("failure_byte", "failure_bit", error.failure_cursor);
+    const auto name = error.module_error ? error.module_error->message_name :
+        error.control_error ? error.control_error->registration_name : std::string{};
+    const auto id = error.module_error ? error.module_error->registration_id :
+        error.control_error ? error.control_error->registration_id : std::optional<std::uint8_t>{};
+    const auto expected = error.module_error ? error.module_error->expected_body_size :
+        error.control_error ? error.control_error->expected_body_size : std::optional<std::size_t>{};
+    const auto actual = error.module_error ? std::optional{error.module_error->actual_body_size} :
+        error.control_error ? error.control_error->actual_body_size : std::optional<std::size_t>{};
+    field("user_message_name", token(name)); field("user_message_id", scalar(id));
+    field("expected_body", scalar(expected)); field("actual_body", scalar(actual));
+    field("last_publication", scalar(error.last_publication));
+    field("attempted_records", scalar(error.attempted_records));
+    field("committed_records", scalar(error.committed_records));
+    return out;
 }
 
 std::string_view to_string(const RuntimeReplayErrorCode code) noexcept

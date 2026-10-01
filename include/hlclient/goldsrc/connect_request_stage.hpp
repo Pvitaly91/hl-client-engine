@@ -400,10 +400,16 @@ public:
         ChallengeExchangeTimePoint now) noexcept;
     [[nodiscard]] bool activate_live_visual_control(
         ChallengeExchangeTimePoint now) noexcept;
+    [[nodiscard]] bool request_weapon_selection(std::uint8_t weapon_id);
     [[nodiscard]] std::optional<LiveUserCmdCheckState>
     live_usercmd_snapshot() const;
+    [[nodiscard]] std::size_t live_use_new_submission_count() const noexcept;
+    [[nodiscard]] std::optional<LiveWeaponCommandSubmission>
+    poll_weapon_command_submission();
     [[nodiscard]] bool attach_reference_prediction_collision(
         std::shared_ptr<const hlclient::collision::CollisionWorldPackage> package);
+    [[nodiscard]] bool attach_reference_prediction_surfaces(
+        std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> package);
     [[nodiscard]] LiveReferencePredictionSnapshot
     live_reference_prediction_snapshot(ChallengeExchangeTimePoint now) const;
     [[nodiscard]] const std::optional<PrecacheManifestSignonState>&

@@ -476,6 +476,21 @@ TEST_CASE("Historical world import does not materialize malformed brush geometry
     CHECK(imported.value().surfaces.size() == 1U);
     CHECK(imported.value().source_content_fingerprint ==
         historical_parse.document->world_asset.source_content_fingerprint);
+
+    // Production live preparation opts in at the same single parser boundary.
+    // Its malformed brush must fail, without changing the world-only importer.
+    const bsp::GoldSrcBspWorldImporter live_importer{{}, {true}};
+    CHECK_FALSE(live_importer.import(*created_source.source));
+    auto valid_source = assets::AssetSource::create(
+        "maps/live-brush.bsp", two_face_bsp(true));
+    REQUIRE(valid_source);
+    const auto full_import = live_importer.import(*valid_source.source);
+    REQUIRE(full_import);
+    const auto attachment = std::dynamic_pointer_cast<
+        const bsp::GoldSrcBspCollisionImportAttachment>(full_import.attachment());
+    REQUIRE(attachment);
+    REQUIRE(attachment->document().brush_submodels.size() == 1U);
+    CHECK(attachment->document().brush_submodels.front().geometry.surfaces.size() == 1U);
 }
 
 TEST_CASE("Aggregate brush geometry applies exact output limits",

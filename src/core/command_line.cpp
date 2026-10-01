@@ -1,4 +1,5 @@
 #include <hlclient/core/command_line.hpp>
+#include <hlclient/core/manual_session_timing.hpp>
 
 #include <charconv>
 #include <limits>
@@ -14,7 +15,7 @@ namespace {
 
 [[nodiscard]] bool needs_value(const std::string_view argument) noexcept
 {
-    return argument == "--basedir" || argument == "--game" || argument == "--connect" ||
+    return argument == "--audio-volume" || argument == "--basedir" || argument == "--game" || argument == "--connect" ||
            argument == "+connect" || argument == "--renderer" ||
            argument == "--stop-after" || argument == "--auth-provider" ||
            argument == "--auth-material-file" || argument == "--steam-api-runtime" ||
@@ -29,7 +30,7 @@ namespace {
            argument == "--runtime-replay-record-budget" ||
            argument == "--runtime-replay-byte-budget" ||
            argument == "--live-input" || argument == "--prediction" ||
-           argument == "--live-session-seconds";
+           argument == "--live-session-seconds" || argument == "--test-start-health";
 }
 
 [[nodiscard]] std::optional<std::size_t> positive_size(
@@ -82,6 +83,23 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             options.net_trace = true;
             continue;
         }
+        if (argument == "--live-session-unlimited") {
+            if (options.live_session_unlimited) return failure("duplicate --live-session-unlimited");
+            options.live_session_unlimited = true;
+            continue;
+        }
+        if (argument == "--audio-on-focus-loss") {
+            if (options.audio_on_focus_loss) return failure("duplicate --audio-on-focus-loss");
+            options.audio_on_focus_loss = true;
+            continue;
+        }
+        if (argument == "--mute-glock-fire-sound") {
+            if (options.mute_glock_fire_sound) {
+                return failure("--mute-glock-fire-sound may be specified only once");
+            }
+            options.mute_glock_fire_sound = true;
+            continue;
+        }
         if (argument == "--view-world") {
             if (options.view_world) {
                 return failure("--view-world may be specified only once");
@@ -109,7 +127,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             return failure("Empty value after " + std::string{argument});
         }
 
-        if (argument == "--basedir") {
+        if (argument == "--audio-volume") {
+            if (value == "0") options.audio_volume=0;
+            else if (auto parsed=positive_size(value,100)) options.audio_volume=static_cast<unsigned>(*parsed);
+            else return failure("Audio volume must be an integer from 0 to 100");
+        } else if (argument == "--basedir") {
             options.base_directory = std::string{value};
         } else if (argument == "--game") {
             options.game_directory = std::string{value};
@@ -210,10 +232,18 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                 options.live_input = LiveInputMode::scripted_jump_duck_check;
             } else if (value == "scripted-speed-check") {
                 options.live_input = LiveInputMode::scripted_speed_check;
+            } else if (value == "scripted-weapon-check") {
+                options.live_input = LiveInputMode::scripted_weapon_check;
+            } else if (value == "scripted-fire-reload-check") {
+                options.live_input = LiveInputMode::scripted_fire_reload_check;
+            } else if (value == "scripted-fire-reload-presentation-check") {
+                options.live_input = LiveInputMode::scripted_fire_reload_presentation_check;
+            } else if (value == "scripted-damage-respawn-check") {
+                options.live_input = LiveInputMode::scripted_damage_respawn_check;
             } else {
                 return failure(
                     "Unsupported --live-input value: " + std::string{value} +
-                    " (expected keyboard-mouse, scripted-check, scripted-side-check, scripted-jump-duck-check or scripted-speed-check)");
+                    " (expected keyboard-mouse, scripted-check, scripted-side-check, scripted-jump-duck-check, scripted-speed-check, scripted-weapon-check or scripted-fire-reload-check)");
             }
         } else if (argument == "--live-session-seconds") {
             if (live_session_seconds_seen) {
@@ -221,10 +251,10 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
                     "--live-session-seconds may be specified only once");
             }
             live_session_seconds_seen = true;
-            options.live_session_seconds = positive_size(value, 300U);
+            options.live_session_seconds = positive_size(value, kMaximumManualSessionSeconds);
             if (!options.live_session_seconds) {
                 return failure(
-                    "--live-session-seconds must be in range 1..300");
+                    "--live-session-seconds must be in range 1..86400");
             }
         } else if (argument == "--auth-provider") {
             connect_request_setting_seen = true;
@@ -254,6 +284,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         } else if (argument == "--name") {
             connect_request_setting_seen = true;
             options.player_name = std::string{value};
+        } else if (argument == "--test-start-health") {
+            connect_request_setting_seen = true;
+            if (value != "50" || options.test_start_health)
+                return failure("--test-start-health accepts 50 once, in the owned manual test only");
+            options.test_start_health = true;
         } else if (argument == "--model") {
             connect_request_setting_seen = true;
             options.player_model = std::string{value};
@@ -418,13 +453,14 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             return failure("Non-visual runtime replay requires --renderer null");
         }
         if (options.connect_endpoint || (options.base_directory && !local_assets) ||
+            options.mute_glock_fire_sound ||
             options.authentication_provider ||
             options.authentication_material_file ||
             options.resource_consistency_provider || stop_after_seen ||
             options.view_world || options.view_entity_snapshot ||
             connect_request_setting_seen || resource_consistency_provider_seen ||
             visibility_seen || brush_submodels_seen || camera_seen ||
-            live_input_seen || live_session_seconds_seen) {
+            live_input_seen || live_session_seconds_seen || options.live_session_unlimited) {
             return failure(
                 "Offline runtime replay is incompatible with connect, asset, "
                 "authentication, stop, view, visibility, brush, and camera options");
@@ -453,12 +489,15 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             return failure(
                 "live-visual-control requires explicit --basedir and --game valve");
         }
-        if (options.live_session_seconds &&
+        if (options.live_session_seconds && options.live_session_unlimited) {
+            return failure("--live-session-seconds and --live-session-unlimited are mutually exclusive");
+        }
+        if ((options.live_session_seconds || options.live_session_unlimited) &&
             options.live_input != LiveInputMode::keyboard_mouse) {
             return failure(
                 "--live-session-seconds requires keyboard-mouse live input");
         }
-    } else if (live_input_seen || live_session_seconds_seen || prediction_seen) {
+    } else if (live_input_seen || live_session_seconds_seen || options.live_session_unlimited || prediction_seen) {
         return failure(
             "live input options require --stop-after live-visual-control");
     }
@@ -591,6 +630,23 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             "The server-baselines, entity-snapshot, and usercmd-boundary stop points require "
             "--resource-consistency-provider local");
     }
+    if (options.test_start_health &&
+        (options.stop_after != ConnectionStopPoint::live_visual_control ||
+         options.live_input != LiveInputMode::keyboard_mouse || !options.reference_prediction ||
+         !options.connect_endpoint || !options.connect_endpoint->starts_with("127.0.0.1:") ||
+         options.game_directory != "valve" || !options.player_name.starts_with("HLC50_"))) {
+        return failure("--test-start-health requires the owned loopback manual reference profile");
+    }
+    if (options.audio_on_focus_loss &&
+        (options.stop_after != ConnectionStopPoint::live_visual_control ||
+         options.live_input != LiveInputMode::keyboard_mouse))
+        return failure("--audio-on-focus-loss requires live visual keyboard-mouse");
+    if (options.mute_glock_fire_sound &&
+        (options.stop_after != ConnectionStopPoint::live_visual_control ||
+         options.live_input != LiveInputMode::keyboard_mouse ||
+         options.game_directory != "valve")) {
+        return failure("--mute-glock-fire-sound requires the Half-Life keyboard-mouse live visual profile");
+    }
     if ((options.stop_after == ConnectionStopPoint::live_runtime_state ||
          options.stop_after == ConnectionStopPoint::live_usercmd_check ||
          options.stop_after == ConnectionStopPoint::live_visual_control) &&
@@ -720,14 +776,24 @@ Options:
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
+  --audio-volume <0..100>  Interactive application volume (default 35, 0=mute)
+  --audio-on-focus-loss  Explicit manual listener; server audio stays on in background
+  --mute-glock-fire-sound  Manual diagnostic: mute only local Glock fire audio
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
   --live-input <mode> Input for live-visual-control: keyboard-mouse,
-  --prediction <mode> Live visual movement view: off (default) or reference
                       scripted-check, scripted-side-check,
-                      scripted-jump-duck-check or scripted-speed-check
+                      scripted-jump-duck-check, scripted-speed-check,
+                      scripted-weapon-check, scripted-fire-reload-check,
+                      or scripted-fire-reload-presentation-check or scripted-damage-respawn-check
+  --prediction <mode> Live visual movement view: off (default) or reference
+  --test-start-health 50
+                      Read-only health readiness gate for the owned test server;
+                      no local HP/HUD override or addon dependency
   --live-session-seconds <seconds>
-                      Optional 1..300 second bound for keyboard-mouse mode;
+                      Optional 1..86400 second bound for keyboard-mouse mode;
                       expiry reports timed_session_complete and shuts down
+  --live-session-unlimited
+                      Explicit user-ended keyboard-mouse session; no game timer
   --runtime-replay-fixture <name>
                       Run an owning offline replay in the normal application
                       update loop: basic-mixed, missing-entity-base, or

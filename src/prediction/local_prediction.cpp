@@ -84,6 +84,12 @@ std::uint64_t prediction_movement_config_signature(
     hash_value(hash, config.duck_profile);
     hash_value(hash, config.air_profile);
     hash_value(hash, config.airborne_duck_policy);
+    // Preserve existing inactive-profile signatures; enabled policy is part
+    // of session identity and cannot be swapped during replay.
+    if (config.ground_button_speed_limit_mask != 0U) {
+        hash_value(hash, config.ground_button_speed_limit_mask);
+        hash_value(hash, config.ground_button_speed_limit_multiplier);
+    }
     hash_value(hash, config.collision_query.query_limits.maximum_traversal_steps);
     hash_value(hash, config.collision_query.query_limits.maximum_stack_entries);
     hash_value(hash, config.collision_query.query_limits.maximum_fraction_splits);
@@ -124,8 +130,13 @@ PredictionSessionCreateResult create_prediction_session_identity(
                 "stock prediction acknowledgement and player-state evidence is pending"}};
     }
     const auto collision_identity = collision.session_identity();
-    const bool reference = profile ==
-            PredictionCompatibilityProfile::reference_carrier_dry_walk_v1 &&
+    const bool reference = (profile ==
+            PredictionCompatibilityProfile::reference_carrier_dry_walk_v1 ||
+        profile == PredictionCompatibilityProfile::
+            reference_carrier_jump_duck_v2 ||
+        profile == PredictionCompatibilityProfile::
+            reference_carrier_jump_duck_weapon_v3 ||
+        profile == PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4) &&
         acknowledgement_profile == PredictionAcknowledgementProfile::
             reference_sent_carrier_boundary_v1;
     if (session_generation == 0U || prediction_generation == 0U ||
@@ -137,10 +148,17 @@ PredictionSessionCreateResult create_prediction_session_identity(
         (reference ? initial_state.source_command_sequence() == 0U
                    : initial_state.source_command_sequence() != 0U) ||
         initial_state.command_profile() !=
-            (reference ? movement::GoldSrcMovementCommandProfile::
-                             reference_wire_dry_walk_v1
-                       : movement::GoldSrcMovementCommandProfile::
-                             synthetic_usercmd_semantics_v1)) {
+            (profile == PredictionCompatibilityProfile::
+                    reference_carrier_jump_duck_v2 ||
+                profile == PredictionCompatibilityProfile::
+                    reference_carrier_jump_duck_weapon_v3 ||
+                profile == PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4
+                ? movement::GoldSrcMovementCommandProfile::
+                      reference_wire_jump_duck_v2
+                : reference ? movement::GoldSrcMovementCommandProfile::
+                                  reference_wire_dry_walk_v1
+                            : movement::GoldSrcMovementCommandProfile::
+                                  synthetic_usercmd_semantics_v1)) {
         return {std::nullopt,
             PredictionError{PredictionErrorCode::invalid_session_identity,
                 std::nullopt,

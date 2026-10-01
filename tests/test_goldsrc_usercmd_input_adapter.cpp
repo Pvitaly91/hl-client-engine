@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <initializer_list>
+#include <cmath>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -179,6 +180,95 @@ TEST_CASE("Controlled reference adapter produces only the bounded E movement axe
     CHECK(backward.command->side == 0);
 }
 
+TEST_CASE("R1 physical direction holds survive neutral axes in reference usercmd buttons",
+          "[r1-ladder-input][reference][input-adapter]")
+{
+    auto context=build_context();
+    context.command_msec=20U;
+    context.command_sample_duration_nanoseconds=20'000'000U;
+    context.reference_button_policy=goldsrc::GoldSrcReferenceButtonPolicy::
+        jump_duck_primary_reload_use;
+    const auto camera_state=make_camera();
+    const auto verify=[&](const std::initializer_list<input::InputEvent> events,
+                          const std::uint16_t expected_buttons,
+                          const std::int16_t expected_forward,
+                          const std::int16_t expected_side) {
+        const auto intent=intent_from_events(events);
+        auto wire=goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+            intent,camera_state,context);
+        REQUIRE(wire);
+        CHECK(wire.command->buttons==expected_buttons);
+        CHECK(wire.command->forward==expected_forward);
+        CHECK(wire.command->side==expected_side);
+    };
+    verify({input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::w)},
+        1U<<3U,320,0);
+    verify({input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::s)},
+        1U<<4U,-280,0);
+    verify({input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::a)},
+        1U<<9U,0,-240);
+    verify({input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::d)},
+        1U<<10U,0,240);
+    verify({input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::w),
+            input::InputEvent::key_pressed(input::PhysicalKey::s)},
+        (1U<<3U)|(1U<<4U),0,0);
+    verify({input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::w),
+            input::InputEvent::focus_lost()},0,0,0);
+    const auto tap=intent_from_events({input::InputEvent::focus_gained(),
+        input::InputEvent::key_pressed(input::PhysicalKey::w),
+        input::InputEvent::key_released(input::PhysicalKey::w)});
+    CHECK(tap.forward_axis()==0.0F);
+    const auto forward_action=gameplay::gameplay_button_mask(
+        gameplay::GameplayButton::move_forward);
+    CHECK((tap.pressed_buttons() & forward_action)!=0U);
+    context.one_shot_buttons=tap.pressed_buttons();
+    const auto short_press=goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+        tap,camera_state,context);
+    REQUIRE(short_press);
+    CHECK(short_press.command->forward==0);
+    CHECK(short_press.command->buttons==(1U<<3U));
+    REQUIRE(short_press.one_shot_plan);
+    CHECK(short_press.one_shot_plan->consumes_buttons()==forward_action);
+}
+
+TEST_CASE("Reference camera rays agree with GoldSrc wire rays above and below the horizon",
+          "[pitch-boundary][goldsrc][input-adapter][reference]")
+{
+    auto context = build_context();
+    context.command_msec = 20U;
+    context.command_sample_duration_nanoseconds = 20'000'000U;
+    const auto neutral = intent_from_events({input::InputEvent::focus_gained()});
+    constexpr double radians = 3.14159265358979323846 / 180.0;
+    for (const double yaw : {0.0, 84.3, 90.0, 180.0, 270.0}) {
+        for (const double pitch : {-89.0, -41.3, -10.0, 0.0, 10.0, 41.3, 89.0}) {
+            CAPTURE(yaw, pitch);
+            const auto camera_state = make_camera(yaw, pitch);
+            const auto wire = goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+                neutral, camera_state, context);
+            REQUIRE(wire);
+            const auto forward = camera::forward_from_yaw_pitch(yaw, pitch);
+            REQUIRE(forward);
+            // Independent GoldSrc AngleVectors convention: Z = -sin(pitch).
+            // Decode the quantized wire angle, not a second camera adapter.
+            const double p = wire.command->angle_turns[0] * 360.0 / 65536.0 * radians;
+            const double y = wire.command->angle_turns[1] * 360.0 / 65536.0 * radians;
+            CHECK(std::cos(p) * std::cos(y) == Catch::Approx(forward->x).margin(0.0002));
+            CHECK(std::cos(p) * std::sin(y) == Catch::Approx(forward->y).margin(0.0002));
+            CHECK(-std::sin(p) == Catch::Approx(forward->z).margin(0.0002));
+            CHECK(camera_state.pitch_degrees() == pitch);
+            CHECK(wire.command->msec == 20U);
+            CHECK(wire.command->buttons == 0U);
+            CHECK(wire.command->angle_turns[2] == 0U);
+        }
+    }
+}
+
 TEST_CASE("Reference jump/duck policy maps only typed Space and Left Ctrl",
           "[goldsrc][usercmd][input-adapter][reference][jump-duck]")
 {
@@ -200,7 +290,7 @@ TEST_CASE("Reference jump/duck policy maps only typed Space and Left Ctrl",
     const auto allowed = adapter.build_reference_wire(
         buttons, make_camera(), context);
     REQUIRE(allowed);
-    CHECK(allowed.command->buttons == 6U); // Valve IN_JUMP | IN_DUCK
+    CHECK(allowed.command->buttons == (6U | (1U<<3U) | (1U<<9U)));
     CHECK(allowed.command->up == 0);
     CHECK(allowed.command->impulse == 0U);
     CHECK(allowed.command->forward > 0);
@@ -225,6 +315,19 @@ TEST_CASE("Reference jump/duck policy maps only typed Space and Left Ctrl",
             input::PhysicalMouseButton::left)});
     CHECK_FALSE(adapter.build_reference_wire(
         captured_click, make_camera(), context));
+    context.reference_button_policy =
+        goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_reload;
+    const auto live_attack = adapter.build_reference_wire(
+        captured_click, make_camera(), context);
+    REQUIRE(live_attack);
+    CHECK(live_attack.command->buttons == 1U); // pinned Valve IN_ATTACK
+    const auto live_reload = adapter.build_reference_wire(
+        intent_from_events({input::InputEvent::focus_gained(),
+            input::InputEvent::key_pressed(input::PhysicalKey::r)}),
+        make_camera(), context);
+    REQUIRE(live_reload);
+    CHECK(live_reload.command->buttons == 8192U); // pinned IN_RELOAD
+    CHECK_FALSE(adapter.build_reference_wire(use, make_camera(), context));
 
     context.one_shot_buttons = gameplay::gameplay_button_mask(
         gameplay::GameplayButton::jump);
@@ -282,7 +385,7 @@ TEST_CASE("Reference live speed key scales before uniform client limit",
     CHECK(slow.requested_forward == 400.0F);
     CHECK(slow.applied_speed_multiplier == 0.3F);
     CHECK(slow.command->forward == 120);
-    CHECK(slow.command->buttons == 6U);
+    CHECK(slow.command->buttons == (6U | (1U<<3U)));
     CHECK(slow.command->impulse == 0U);
     context.reference_movement.client_maxspeed = 200.0F;
     const auto normal_limited = build_wire({input::InputEvent::focus_gained(),

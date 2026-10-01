@@ -307,6 +307,38 @@ inline void studio_write_vector3(
     return bytes;
 }
 
+// Entirely project-authored triangle and sequence motion for presentation CI.
+// No stock model/animation bytes are embedded.
+[[nodiscard]] inline std::vector<std::byte> synthetic_weapon_presentation_studio()
+{
+    auto bytes = literal_minimal_goldsrc_studio_v10();
+    const auto sequence_offset = bytes.size();
+    constexpr std::size_t sequence_count = 10U;
+    bytes.resize(sequence_offset + sequence_count * 176U + sequence_count * 18U);
+    studio_write_i32le(bytes, 72U, static_cast<std::int32_t>(bytes.size()));
+    studio_write_i32le(bytes, 164U, static_cast<std::int32_t>(sequence_count));
+    studio_write_i32le(bytes, 168U, static_cast<std::int32_t>(sequence_offset));
+    studio_write_vector3(bytes, kSyntheticStudioVerticesOffset, 16.0F, -4.0F, -5.0F);
+    studio_write_vector3(bytes, kSyntheticStudioVerticesOffset + 12U, 16.0F, 4.0F, -5.0F);
+    studio_write_vector3(bytes, kSyntheticStudioVerticesOffset + 24U, 16.0F, 0.0F, 3.0F);
+    for (std::size_t i = 0; i < sequence_count; ++i) {
+        const auto seq = sequence_offset + i * 176U;
+        std::copy_n(bytes.begin() + kSyntheticStudioSequenceOffset, 176U, bytes.begin() + seq);
+        const auto animation = sequence_offset + sequence_count * 176U + i * 18U;
+        const auto frames = i == 5U || i == 6U ? 46U : 16U;
+        studio_write_fixed_string(bytes, seq, 32U, i == 0U ? "idle" : "owned_action");
+        studio_write_i32le(bytes, seq + 36U, i == 0U ? 1 : 0);
+        studio_write_i32le(bytes, seq + 56U, static_cast<std::int32_t>(frames));
+        studio_write_i32le(bytes, seq + 124U, static_cast<std::int32_t>(animation));
+        studio_write_u16le(bytes, animation + 2U, 12U); // Y motion
+        bytes[animation + 12U] = std::byte{2U};
+        bytes[animation + 13U] = std::byte{static_cast<std::uint8_t>(frames)};
+        studio_write_i16le(bytes, animation + 14U, 0);
+        studio_write_i16le(bytes, animation + 16U, static_cast<std::int16_t>(i));
+    }
+    return bytes;
+}
+
 [[nodiscard]] inline std::vector<std::byte> synthetic_external_sequence_main()
 {
     auto bytes = literal_minimal_goldsrc_studio_v10();

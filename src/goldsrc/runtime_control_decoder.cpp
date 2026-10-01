@@ -12,6 +12,30 @@
 namespace hlclient::goldsrc {
 namespace {
 
+// Valve SDK common/const.h and dlls/util.cpp (UTIL_DecalTrace and
+// UTIL_GunshotDecalTrace). No body-size guess or opcode resynchronization.
+enum class DecalLayout { world, entity, gunshot };
+
+[[nodiscard]] std::optional<DecalLayout>
+decal_layout(const std::uint8_t type) noexcept {
+  switch (type) {
+  case 104U: // TE_DECAL
+  case 118U: // TE_DECALHIGH
+    return DecalLayout::entity;
+  case 109U: // TE_GUNSHOTDECAL: entity BEFORE the decal byte
+    return DecalLayout::gunshot;
+  case 116U: // TE_WORLDDECAL
+  case 117U: // TE_WORLDDECALHIGH
+    return DecalLayout::world;
+  default:
+    return std::nullopt;
+  }
+}
+
+[[nodiscard]] std::uint16_t decal_index_base(const std::uint8_t type) noexcept {
+  return type == 117U || type == 118U ? 256U : 0U;
+}
+
 [[nodiscard]] RuntimeControlDecodeResult
 failure(const RuntimeControlDecodeErrorCode code, std::string context,
         std::optional<StockRuntimeSourceCursor> cursor = std::nullopt,
@@ -114,7 +138,10 @@ bool valid_runtime_control_decode_limits(
          limits.maximum_payload_bytes <= kMaximumRuntimeControlPayloadBytes &&
          limits.maximum_messages_per_payload != 0U &&
          limits.maximum_messages_per_payload <=
-             kMaximumRuntimeControlMessagesPerPayload;
+             kMaximumRuntimeControlMessagesPerPayload &&
+         limits.maximum_scripted_events_per_payload != 0U &&
+         limits.maximum_scripted_events_per_payload <=
+             kMaximumRuntimeControlScriptedEventsPerPayload;
 }
 
 bool valid_runtime_user_message_definitions(
@@ -286,11 +313,141 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
                           input.initial_cursor);
   }
 
+  std::optional<std::size_t> bit_failure_offset;
+  const auto body_failure = [&](const RuntimeControlDecodeErrorCode code,
+      std::string context, std::optional<StockRuntimeSourceCursor> cursor = {},
+      std::optional<std::uint8_t> opcode = {}) {
+    auto rejected = single_failure(code, std::move(context), cursor, opcode);
+    if (bit_failure_offset)
+      rejected.error->failure_cursor = StockRuntimeSourceCursor::create(
+          *bit_failure_offset / 8U, *bit_failure_offset % 8U, input.payload.bytes.size());
+    else if (wire_opcode != static_cast<std::uint8_t>(RuntimeControlOpcode::svc_sound))
+      rejected.error->failure_cursor = cursor_at(initial_byte_offset + reader.position(),
+                                                 input.payload.bytes.size());
+    return rejected;
+  };
   RuntimeControlMessageKind kind = RuntimeControlMessageKind::nop;
   RuntimeControlMessageBody body{RuntimeControlNop{}};
   switch (*wire_opcode) {
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop):
     break;
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_event):
+  case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_event_reliable): {
+    // Public Protocol 48 event framing, not a guessed skip length. See the
+    // parser-author protocol tables linked in REMOTE_PLAYER_MOVEMENT_AUDIO_E9.
+    // SDK network/delta.lst names the transmitted schema event_t. There is
+    // one final byte alignment after the entire queue, not after each entry.
+    const auto body_start = (initial_byte_offset + reader.position()) * 8U;
+    BitReader bits{input.payload.bytes, body_start};
+    const auto read = [&](const std::size_t width) -> std::optional<std::uint32_t> {
+      const auto value = bits.read_bits(width);
+      if (!value) { bit_failure_offset = bits.bit_offset(); return std::nullopt; }
+      return value.value;
+    };
+    RuntimeControlScriptedEvents observed;
+    observed.reliable = *wire_opcode ==
+        static_cast<std::uint8_t>(RuntimeControlOpcode::svc_event_reliable);
+    const auto count = observed.reliable ? std::optional<std::uint32_t>{1U} : read(5U);
+    if (!count) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+        "scripted event count is truncated", input.initial_cursor, wire_opcode);
+    if (*count > limits_.maximum_scripted_events_per_payload)
+      return body_failure(RuntimeControlDecodeErrorCode::scripted_event_limit_exceeded,
+          "scripted event count exceeds the payload bound", input.initial_cursor, wire_opcode);
+    try {
+      observed.entries.reserve(*count);
+      for (std::uint32_t index = 0U; index < *count; ++index) {
+        RuntimeControlScriptedEvent entry;
+        const auto event_index = read(10U);
+        if (!event_index) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "scripted event index is truncated", input.initial_cursor, wire_opcode);
+        entry.event_index = static_cast<std::uint16_t>(*event_index);
+        bool has_arguments = observed.reliable;
+        if (!observed.reliable) {
+          const auto has_packet = read(1U);
+          if (!has_packet) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+              "scripted event packet flag is truncated", input.initial_cursor, wire_opcode);
+          if (*has_packet != 0U) {
+            const auto packet_index = read(11U);
+            const auto has_delta = read(1U);
+            if (!packet_index || !has_delta)
+              return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+                  "scripted event packet reference or delta flag is truncated",
+                  input.initial_cursor, wire_opcode);
+            entry.packet_index = static_cast<std::uint16_t>(*packet_index);
+            has_arguments = *has_delta != 0U;
+          }
+        }
+        if (has_arguments) {
+          const auto* schema = input.schemas ? input.schemas->find_exact("event_t") : nullptr;
+          if (!schema) {
+            bit_failure_offset = bits.bit_offset();
+            return body_failure(RuntimeControlDecodeErrorCode::missing_event_schema,
+                "scripted event arguments require the advertised event_t schema",
+                input.initial_cursor, wire_opcode);
+          }
+          GoldSrcDeltaValueLimits delta_limits;
+          delta_limits.maximum_fields_per_object = 64U;
+          delta_limits.maximum_total_value_bytes = 4'096U;
+          delta_limits.maximum_string_bytes = 256U;
+          constexpr auto delta_profile = DeltaValueCompatibilityProfile::public_goldsrc48_delta_v1;
+          const auto defaults = DeltaObjectBuilder{delta_limits, delta_profile}.build_default(*schema);
+          if (!defaults) {
+            bit_failure_offset = bits.bit_offset();
+            return body_failure(RuntimeControlDecodeErrorCode::event_delta_failed,
+                "event_t schema cannot construct bounded null arguments",
+                input.initial_cursor, wire_opcode);
+          }
+          auto decoded = GoldSrcDeltaValueDecoder{delta_limits, delta_profile}.decode_delta(
+              *schema, &*defaults.state,
+              DeltaValueDecodeContext{input.payload.bytes, bits.bit_offset(), bits.remaining_bits(),
+                                     std::nullopt, input.server_time_seconds, false});
+          if (!decoded) {
+            bit_failure_offset = decoded.error ? decoded.error->bit_offset : bits.bit_offset();
+            return body_failure(RuntimeControlDecodeErrorCode::event_delta_failed,
+                decoded.error ? decoded.error->context : "scripted event delta failed",
+                input.initial_cursor, wire_opcode);
+          }
+          bits = BitReader{input.payload.bytes, decoded.next_bit_offset};
+          // decode_delta already validated the bounded mask; retain its wire
+          // presence as provenance without changing field values or grammar.
+          BitReader presence{input.payload.bytes,
+              decoded.next_bit_offset-decoded.bits_consumed};
+          const auto count_bytes=presence.read_bits(3U);
+          if(count_bytes) for(std::uint32_t mask=0;mask<count_bytes.value;++mask) {
+            const auto byte=presence.read_bits(8U);
+            if(byte) entry.argument_field_mask|=
+                static_cast<std::uint64_t>(byte.value)<<(mask*8U);
+          }
+          entry.arguments = std::make_shared<const DeltaObjectState>(std::move(*decoded.state));
+        }
+        const auto has_delay = read(1U);
+        if (!has_delay) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "scripted event delay flag is truncated", input.initial_cursor, wire_opcode);
+        if (*has_delay != 0U) {
+          const auto delay = read(16U);
+          if (!delay) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+              "scripted event delay is truncated", input.initial_cursor, wire_opcode);
+          entry.fire_delay_ticks = static_cast<std::uint16_t>(*delay);
+        }
+        observed.entries.push_back(std::move(entry));
+      }
+    } catch (const std::bad_alloc&) {
+      return body_failure(RuntimeControlDecodeErrorCode::unable_to_retain_output,
+          "unable to retain bounded scripted event arguments", input.initial_cursor, wire_opcode);
+    }
+    observed.encoded_body_bits = bits.bit_offset() - body_start;
+    // The public byte-alignment contract ignores unused padding values. Read
+    // the exact remaining bits; never scan ahead for a plausible opcode.
+    const auto padding = (8U - bits.bit_offset() % 8U) % 8U;
+    if (!read(padding)) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+        "scripted event alignment is truncated", input.initial_cursor, wire_opcode);
+    if (!reader.read_bytes(bits.bit_offset() / 8U - initial_byte_offset - reader.position()))
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "scripted event body exceeds its owning payload", input.initial_cursor, wire_opcode);
+    kind = RuntimeControlMessageKind::scripted_events;
+    body = std::move(observed);
+    break;
+  }
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_sound): {
     // ReHLDS Protocol 48 writes this body LSB-first and rounds the bit
     // field to the next byte. MSG_EndBitReading ignores those padding
@@ -303,15 +460,17 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto body_start_bit = (initial_byte_offset + reader.position()) * 8U;
     BitReader bits{input.payload.bytes, body_start_bit};
     auto read = [&](const std::size_t width) -> std::optional<std::uint32_t> {
+      if (bit_failure_offset) return std::nullopt;
       const auto value = bits.read_bits(width);
       if (!value) {
+        bit_failure_offset = bits.bit_offset();
         return std::nullopt;
       }
       return value.value;
     };
     const auto field_mask = read(9U);
     if (!field_mask) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_sound requires its 9-bit field mask",
                             input.initial_cursor, wire_opcode);
     }
@@ -319,7 +478,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     if ((*field_mask & kVolumeFlag) != 0U) {
       const auto value = read(8U);
       if (!value) {
-        return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                               "svc_sound volume field is truncated",
                               input.initial_cursor, wire_opcode);
       }
@@ -329,7 +488,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     if ((*field_mask & kAttenuationFlag) != 0U) {
       const auto value = read(8U);
       if (!value) {
-        return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                               "svc_sound attenuation field is truncated",
                               input.initial_cursor, wire_opcode);
       }
@@ -339,7 +498,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto entity = read(11U);
     const auto sound = read((*field_mask & kLargeIndexFlag) != 0U ? 16U : 8U);
     if (!channel || !entity || !sound) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::truncated_body,
           "svc_sound channel/entity/sound reference is truncated",
           input.initial_cursor, wire_opcode);
@@ -350,7 +509,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     for (auto &&present : component_present) {
       const auto value = read(1U);
       if (!value) {
-        return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                               "svc_sound origin presence mask is truncated",
                               input.initial_cursor, wire_opcode);
       }
@@ -364,7 +523,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
       const auto has_integer = read(1U);
       const auto has_fraction = read(1U);
       if (!has_integer || !has_fraction) {
-        return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                               "svc_sound bit-coordinate flags are truncated",
                               input.initial_cursor, wire_opcode);
       }
@@ -377,7 +536,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
       const auto fraction =
           *has_fraction != 0U ? read(3U) : std::optional<std::uint32_t>{0U};
       if (!negative || !integer || !fraction) {
-        return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                               "svc_sound bit-coordinate value is truncated",
                               input.initial_cursor, wire_opcode);
       }
@@ -389,7 +548,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     if ((*field_mask & kPitchFlag) != 0U) {
       const auto value = read(8U);
       if (!value) {
-        return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                               "svc_sound pitch field is truncated",
                               input.initial_cursor, wire_opcode);
       }
@@ -398,13 +557,13 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto encoded_body_bits = bits.bit_offset() - body_start_bit;
     const auto padding = (8U - (bits.bit_offset() & 7U)) & 7U;
     if (padding != 0U && !bits.read_bits(padding)) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_sound byte-alignment padding is truncated",
                             input.initial_cursor, wire_opcode);
     }
     const auto body_bytes = (bits.bit_offset() - body_start_bit) / 8U;
     if (!reader.read_bytes(body_bytes)) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_sound rounded body exceeds its owning payload",
                             input.initial_cursor, wire_opcode);
     }
@@ -431,7 +590,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto terminator =
         std::find(remaining.begin(), remaining.end(), std::byte{0U});
     if (terminator == remaining.end()) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::truncated_body,
           "runtime text control has no in-payload NUL terminator",
           input.initial_cursor, wire_opcode);
@@ -439,7 +598,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto text_length =
         static_cast<std::size_t>(std::distance(remaining.begin(), terminator));
     if (!reader.read_bytes(text_length + 1U)) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "runtime text control exceeds its owning payload",
                             input.initial_cursor, wire_opcode);
     }
@@ -458,25 +617,44 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_soundfade): {
     const auto body_size = exact_fixed_control_body_size(
         static_cast<RuntimeControlOpcode>(*wire_opcode));
-    if (!body_size || !reader.read_bytes(*body_size)) {
-      return single_failure(
+    const auto bytes = body_size ? reader.read_bytes(*body_size) : std::nullopt;
+    if (!bytes) {
+      return body_failure(
           RuntimeControlDecodeErrorCode::truncated_body,
           "exact fixed-size runtime control body is truncated",
           input.initial_cursor, wire_opcode);
     }
     kind = RuntimeControlMessageKind::exact_fixed_control;
-    body = RuntimeControlExactFixedBody{*body_size};
+    RuntimeControlExactFixedBody fixed{*body_size};
+    if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_stopsound)) {
+      ByteReader fields{*bytes};
+      const auto packed=*fields.read_uint16_le();
+      RuntimeControlSound sound;
+      sound.field_mask=32; sound.entity_reference=packed>>3U;
+      sound.channel=static_cast<std::uint8_t>(packed&7U);
+      fixed.sound=sound;
+    } else if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_spawnstaticsound)) {
+      ByteReader fields{*bytes};
+      RuntimeControlSound sound;
+      for(auto& coordinate:sound.origin) coordinate=static_cast<float>(*fields.read_int16_le())/8.0F;
+      sound.sound_reference=*fields.read_uint16_le();
+      sound.volume=*fields.read_uint8(); sound.attenuation=*fields.read_uint8();
+      sound.entity_reference=*fields.read_uint16_le(); sound.pitch=*fields.read_uint8();
+      sound.field_mask=*fields.read_uint8(); sound.channel=6;
+      fixed.sound=sound;
+    }
+    body = std::move(fixed);
     break;
   }
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_time): {
     const auto value = reader.read_float32_le();
     if (!value) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_time requires one little-endian float32 body",
                             input.initial_cursor, wire_opcode);
     }
     if (!std::isfinite(*value)) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::invalid_numeric_value,
           "svc_time requires a finite float32 value", input.initial_cursor,
           wire_opcode);
@@ -488,7 +666,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_setview): {
     const auto value = reader.read_int16_le();
     if (!value) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_setview requires one little-endian int16 body",
                             input.initial_cursor, wire_opcode);
     }
@@ -501,7 +679,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     for (auto &angle : angles) {
       const auto value = reader.read_int16_le();
       if (!value) {
-        return single_failure(
+        return body_failure(
             RuntimeControlDecodeErrorCode::truncated_body,
             "svc_setangle requires three little-endian int16 angles",
             input.initial_cursor, wire_opcode);
@@ -515,7 +693,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_lightstyle): {
     const auto style_index = reader.read_uint8();
     if (!style_index) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_lightstyle requires a style-index byte",
                             input.initial_cursor, wire_opcode);
     }
@@ -525,7 +703,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto terminator =
         std::find(remaining.begin(), remaining.end(), std::byte{0U});
     if (terminator == remaining.end()) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::truncated_body,
           "svc_lightstyle pattern has no in-payload NUL terminator",
           input.initial_cursor, wire_opcode);
@@ -533,7 +711,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto pattern_length =
         static_cast<std::size_t>(std::distance(remaining.begin(), terminator));
     if (!reader.read_bytes(pattern_length + 1U)) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_lightstyle pattern exceeds its owning payload",
                             input.initial_cursor, wire_opcode);
     }
@@ -548,7 +726,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
       const auto error_cursor = cursor_at(
           parsed.error ? parsed.error->byte_offset : initial_byte_offset,
           input.payload.bytes.size());
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::user_info_update_failed,
           parsed.error ? "svc_updateuserinfo typed parser failed: " +
                              std::string{to_string(parsed.error->code)}
@@ -558,7 +736,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     }
     const auto remaining_body_bytes = parsed.bytes_consumed - 1U;
     if (!reader.read_bytes(remaining_body_bytes)) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::truncated_body,
           "svc_updateuserinfo typed body exceeds its owning payload",
           input.initial_cursor, wire_opcode);
@@ -573,21 +751,54 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     constexpr std::uint8_t kBspDecalType = 13U;
     const auto type = reader.read_uint8();
     if (!type) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_temp_entity requires a subtype",
                             input.initial_cursor, wire_opcode);
     }
+    if (const auto layout = decal_layout(*type)) {
+      RuntimeControlDecal decal;
+      decal.temporary_entity_type = *type;
+      for (auto &coordinate : decal.coordinate_eighths) {
+        const auto value = reader.read_int16_le();
+        if (!value) {
+          return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+                              "decal requires three Protocol 48 coordinate shorts",
+                              input.initial_cursor, wire_opcode);
+        }
+        coordinate = *value;
+      }
+      std::optional<std::int16_t> entity{std::int16_t{0}};
+      if (*layout == DecalLayout::gunshot) {
+        entity = reader.read_int16_le();
+      }
+      const auto index = reader.read_uint8();
+      if (*layout == DecalLayout::entity) {
+        entity = reader.read_int16_le();
+      }
+      if (!index || !entity) {
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+                            "decal requires its exact index/entity fields",
+                            input.initial_cursor, wire_opcode);
+      }
+      decal.decal_reference = static_cast<std::uint16_t>(
+          decal_index_base(*type) + *index);
+      decal.entity_reference = *entity;
+      kind = RuntimeControlMessageKind::temporary_entity;
+      body = decal;
+      break;
+    }
     if (*type != kBspDecalType) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::unsupported_temporary_entity_type,
-          "unsupported svc_temp_entity subtype; body length was not guessed",
+          "unsupported svc_temp_entity subtype " + std::to_string(*type) +
+              "; body length was not guessed",
           input.initial_cursor, wire_opcode);
     }
     std::array<std::int16_t, 3U> coordinates{};
     for (auto &coordinate : coordinates) {
       const auto value = reader.read_int16_le();
       if (!value) {
-        return single_failure(
+        return body_failure(
             RuntimeControlDecodeErrorCode::truncated_body,
             "TE_BSPDECAL requires three Protocol 48 coordinate shorts",
             input.initial_cursor, wire_opcode);
@@ -597,7 +808,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto decal = reader.read_int16_le();
     const auto entity = reader.read_int16_le();
     if (!decal || !entity) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "TE_BSPDECAL requires decal and entity references",
                             input.initial_cursor, wire_opcode);
     }
@@ -605,7 +816,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     if (*entity != 0) {
       model = reader.read_int16_le();
       if (!model) {
-        return single_failure(
+        return body_failure(
             RuntimeControlDecodeErrorCode::truncated_body,
             "TE_BSPDECAL with an entity requires a model reference",
             input.initial_cursor, wire_opcode);
@@ -618,12 +829,12 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_signonnum): {
     const auto value = reader.read_uint8();
     if (!value) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_signonnum requires one uint8 body",
                             input.initial_cursor, wire_opcode);
     }
     if (*value != 1U) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::invalid_numeric_value,
           "runtime-control v1 supports the referenced signon value 1",
           input.initial_cursor, wire_opcode);
@@ -643,7 +854,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto terminator =
         std::find(remaining.begin(), remaining.end(), std::byte{0U});
     if (terminator == remaining.end()) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::truncated_body,
           "svc_voiceinit codec has no in-payload NUL terminator",
           input.initial_cursor, wire_opcode);
@@ -651,13 +862,13 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     const auto codec_name_length =
         static_cast<std::size_t>(std::distance(remaining.begin(), terminator));
     if (!reader.read_bytes(codec_name_length + 1U)) {
-      return single_failure(RuntimeControlDecodeErrorCode::truncated_body,
+      return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_voiceinit codec exceeds its owning payload",
                             input.initial_cursor, wire_opcode);
     }
     const auto quality = reader.read_uint8();
     if (!quality) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::truncated_body,
           "svc_voiceinit requires a quality byte after its codec",
           input.initial_cursor, wire_opcode);
@@ -674,7 +885,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
           return candidate.identifier == *wire_opcode;
         });
     if (definition == input.user_message_definitions.end()) {
-      return single_failure(
+      return body_failure(
           RuntimeControlDecodeErrorCode::unsupported_opcode,
           "unsupported runtime-control opcode; body length was not guessed",
           input.initial_cursor, wire_opcode);
@@ -684,7 +895,7 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     if (variable_size) {
       const auto wire_size = reader.read_uint8();
       if (!wire_size) {
-        return single_failure(
+        return body_failure(
             RuntimeControlDecodeErrorCode::truncated_body,
             "variable registered user message requires a length byte",
             input.initial_cursor, wire_opcode);
@@ -694,10 +905,15 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
       body_size = static_cast<std::size_t>(definition->declared_size);
     }
     if (!reader.read_bytes(body_size)) {
-      return single_failure(
+      auto rejected = body_failure(
           RuntimeControlDecodeErrorCode::truncated_body,
           "registered user-message body exceeds its owning payload",
           input.initial_cursor, wire_opcode);
+      rejected.error->registration_id = definition->identifier;
+      rejected.error->registration_name = definition->name;
+      rejected.error->expected_body_size = body_size;
+      rejected.error->actual_body_size = reader.remaining();
+      return rejected;
     }
     kind = RuntimeControlMessageKind::user_message;
     body = RuntimeControlUserMessage{definition->identifier,
@@ -708,13 +924,13 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
 
   std::size_t end_byte = 0U;
   if (!checked_add(initial_byte_offset, reader.position(), end_byte)) {
-    return single_failure(RuntimeControlDecodeErrorCode::size_overflow,
+    return body_failure(RuntimeControlDecodeErrorCode::size_overflow,
                           "runtime-control end cursor overflowed",
                           input.initial_cursor, wire_opcode);
   }
   const auto end_cursor = cursor_at(end_byte, input.payload.bytes.size());
   if (!end_cursor) {
-    return single_failure(RuntimeControlDecodeErrorCode::size_overflow,
+    return body_failure(RuntimeControlDecodeErrorCode::size_overflow,
                           "runtime-control end cursor cannot be represented",
                           input.initial_cursor, wire_opcode);
   }
@@ -744,6 +960,7 @@ std::optional<RuntimeControlDecodeError> RuntimeControlDecoder::apply_events(
         std::nullopt, "runtime-control state and decoder profiles differ"};
   }
   RuntimeControlState next = state;
+  std::size_t scripted_event_count = 0U;
   for (const auto &event : events) {
     if (event.provenance.source_generation != state.source_generation_ ||
         event.provenance.profile != profile_) {
@@ -754,6 +971,40 @@ std::optional<RuntimeControlDecodeError> RuntimeControlDecoder::apply_events(
           "decoded control event does not belong to the staged generation"};
     }
     switch (event.kind) {
+    case RuntimeControlMessageKind::scripted_events: {
+      const auto* observed = std::get_if<RuntimeControlScriptedEvents>(&event.body);
+      const bool reliable = event.opcode == RuntimeControlOpcode::svc_event_reliable;
+      if (!observed ||
+          (event.opcode != RuntimeControlOpcode::svc_event && !reliable) ||
+          observed->reliable != reliable ||
+          (reliable ? observed->entries.size() != 1U : observed->entries.size() > 31U) ||
+          observed->encoded_body_bits == 0U ||
+          observed->encoded_body_bits > limits_.maximum_payload_bytes * 8U ||
+          !std::all_of(observed->entries.begin(), observed->entries.end(),
+              [reliable](const RuntimeControlScriptedEvent& entry) {
+                return entry.event_index <= 1'023U &&
+                    (!entry.packet_index || *entry.packet_index <= 2'047U) &&
+                    (!reliable || (!entry.packet_index && entry.arguments)) &&
+                    (!entry.arguments ||
+                     ((reliable || entry.packet_index) &&
+                      entry.arguments->schema_name() == "event_t" &&
+                      entry.arguments->decode_profile() ==
+                          DeltaValueCompatibilityProfile::public_goldsrc48_delta_v1 &&
+                      entry.arguments->field_count() <= 64U &&
+                      entry.arguments->accounted_value_bytes() <= 4'096U));
+              })) {
+        return RuntimeControlDecodeError{RuntimeControlDecodeErrorCode::invalid_configuration,
+            event.provenance.start_cursor, static_cast<std::uint8_t>(event.opcode),
+            "decoded scripted events have incompatible typed metadata"};
+      }
+      if (observed->entries.size() > limits_.maximum_scripted_events_per_payload -
+              scripted_event_count)
+        return RuntimeControlDecodeError{RuntimeControlDecodeErrorCode::scripted_event_limit_exceeded,
+            event.provenance.start_cursor, static_cast<std::uint8_t>(event.opcode),
+            "scripted events exceed the complete payload bound"};
+      scripted_event_count += observed->entries.size();
+      break;
+    }
     case RuntimeControlMessageKind::nop:
       if (!std::holds_alternative<RuntimeControlNop>(event.body) ||
           event.opcode != RuntimeControlOpcode::svc_nop) {
@@ -885,6 +1136,21 @@ std::optional<RuntimeControlDecodeError> RuntimeControlDecoder::apply_events(
       break;
     }
     case RuntimeControlMessageKind::temporary_entity: {
+      if (const auto *decal = std::get_if<RuntimeControlDecal>(&event.body)) {
+        const auto layout = decal_layout(decal->temporary_entity_type);
+        const auto base = decal_index_base(decal->temporary_entity_type);
+        if (event.opcode != RuntimeControlOpcode::svc_temp_entity || !layout ||
+            decal->decal_reference < base ||
+            decal->decal_reference > base + 255U ||
+            (*layout == DecalLayout::world && decal->entity_reference != 0)) {
+          return RuntimeControlDecodeError{
+              RuntimeControlDecodeErrorCode::invalid_configuration,
+              event.provenance.start_cursor,
+              static_cast<std::uint8_t>(event.opcode),
+              "decoded decal event has incompatible typed fields"};
+        }
+        break;
+      }
       const auto *body = std::get_if<RuntimeControlBspDecal>(&event.body);
       if (body == nullptr ||
           event.opcode != RuntimeControlOpcode::svc_temp_entity ||
@@ -1007,6 +1273,10 @@ RuntimeControlDecoder::decode_and_apply(const RuntimeControlDecodeInput &input,
   }
 
   auto current = input.initial_cursor;
+  std::size_t scripted_event_count = 0U;
+  auto staged_server_time = input.server_time_seconds;
+  if (!staged_server_time && state.server_time())
+    staged_server_time = state.server_time()->seconds;
   while (current.byte_offset() != input.payload.bytes.size()) {
     if (events.size() >= limits_.maximum_messages_per_payload) {
       return failure(
@@ -1018,11 +1288,21 @@ RuntimeControlDecoder::decode_and_apply(const RuntimeControlDecodeInput &input,
         decode_one(RuntimeControlDecodeInput{input.payload, current,
                                              input.source_generation,
                                              input.payload_ordinal,
-                                             input.user_message_definitions},
+                                             input.user_message_definitions,
+                                             input.schemas, staged_server_time},
                    events.size());
     if (!one) {
       return RuntimeControlDecodeResult{std::nullopt, one.error};
     }
+    if (const auto* observed = std::get_if<RuntimeControlScriptedEvents>(&one.event->body)) {
+      if (observed->entries.size() > limits_.maximum_scripted_events_per_payload - scripted_event_count)
+        return failure(RuntimeControlDecodeErrorCode::scripted_event_limit_exceeded,
+            "scripted events exceed the complete payload bound", current,
+            static_cast<std::uint8_t>(one.event->opcode));
+      scripted_event_count += observed->entries.size();
+    }
+    if (const auto* time = std::get_if<RuntimeControlServerTime>(&one.event->body))
+      staged_server_time = time->seconds;
     try {
       events.push_back(*one.event);
     } catch (const std::bad_alloc &) {
@@ -1089,6 +1369,10 @@ std::string_view to_string(const RuntimeControlOpcode opcode) noexcept {
   switch (opcode) {
   case RuntimeControlOpcode::svc_nop:
     return "svc_nop";
+  case RuntimeControlOpcode::svc_event:
+    return "svc_event";
+  case RuntimeControlOpcode::svc_event_reliable:
+    return "svc_event_reliable";
   case RuntimeControlOpcode::svc_setview:
     return "svc_setview";
   case RuntimeControlOpcode::svc_sound:
@@ -1171,6 +1455,8 @@ std::string_view to_string(const RuntimeControlMessageKind kind) noexcept {
     return "voice_initialization";
   case RuntimeControlMessageKind::user_message:
     return "user_message";
+  case RuntimeControlMessageKind::scripted_events:
+    return "scripted_events";
   }
   return "unknown";
 }
@@ -1205,6 +1491,12 @@ std::string_view to_string(const RuntimeControlDecodeErrorCode code) noexcept {
     return "unsupported_temporary_entity_type";
   case RuntimeControlDecodeErrorCode::unsupported_opcode:
     return "unsupported_opcode";
+  case RuntimeControlDecodeErrorCode::missing_event_schema:
+    return "missing_event_schema";
+  case RuntimeControlDecodeErrorCode::event_delta_failed:
+    return "event_delta_failed";
+  case RuntimeControlDecodeErrorCode::scripted_event_limit_exceeded:
+    return "scripted_event_limit_exceeded";
   case RuntimeControlDecodeErrorCode::message_limit_exceeded:
     return "message_limit_exceeded";
   case RuntimeControlDecodeErrorCode::size_overflow:

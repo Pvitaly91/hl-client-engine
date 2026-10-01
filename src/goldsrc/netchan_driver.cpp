@@ -343,6 +343,10 @@ bool valid_configuration(const NetchanDriverConfig& config) noexcept
     if (!valid_session_limits_for(config) ||
         config.channel_inactivity_timeout <= std::chrono::milliseconds::zero() ||
         config.channel_inactivity_timeout > kMaximumNetchanChannelInactivityTimeout ||
+        (config.idle_poll_interval != std::chrono::milliseconds::zero() &&
+         (config.idle_poll_interval < std::chrono::milliseconds{100} ||
+          config.idle_poll_interval > std::chrono::milliseconds{1'000} ||
+          config.idle_poll_interval >= config.channel_inactivity_timeout)) ||
         config.fragment_transfer_timeout <= std::chrono::milliseconds::zero() ||
         config.fragment_transfer_timeout > kMaximumNetchanFragmentTransferTimeout ||
         config.maximum_datagram_size <
@@ -2020,8 +2024,12 @@ private:
             if (before_first_acknowledgement && !reliable_work) {
                 return;
             }
+            const bool idle_poll_due =
+                config_.idle_poll_interval > std::chrono::milliseconds::zero() &&
+                last_transport_send_time_ &&
+                now - *last_transport_send_time_ >= config_.idle_poll_interval;
             if (!acknowledgement_pending_ && pending_unreliable_payload_.empty() &&
-                !reliable_work) {
+                !reliable_work && !idle_poll_due) {
                 return;
             }
 
@@ -2186,6 +2194,9 @@ private:
             return false;
         }
         ++transmitted_packet_count_;
+        // Only a successful send advances the idle poll clock. A blocked send
+        // retains its sequence and can retry without a burst/catch-up schedule.
+        last_transport_send_time_ = now;
         emit_trace(
             NetchanDriverTraceClassification::packet_sent,
             remote_endpoint_,
@@ -2352,6 +2363,7 @@ private:
     std::optional<NetchanDriverTimePoint> started_at_;
     std::optional<NetchanDriverTimePoint> last_update_;
     std::optional<NetchanDriverTimePoint> last_valid_packet_time_;
+    std::optional<NetchanDriverTimePoint> last_transport_send_time_;
     std::vector<std::byte> pending_unreliable_payload_;
     std::optional<NetchanTransmitPlan> pending_contextual_plan_;
     std::optional<std::uint64_t> pending_contextual_plan_identity_;

@@ -10,6 +10,7 @@ namespace hlclient::goldsrc {
 // importer state is retained.
 [[nodiscard]] assets::AssetImporterRegistrationResult register_builtin_asset_importers(
     assets::AssetImporterRegistries& registries,
-    bsp::GoldSrcBspImportLimits bsp_limits = {});
+    bsp::GoldSrcBspImportLimits bsp_limits = {},
+    bsp::GoldSrcBspParseOptions bsp_options = {false});
 
 } // namespace hlclient::goldsrc

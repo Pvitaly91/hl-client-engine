@@ -49,6 +49,10 @@ inline constexpr std::size_t kNetchanDriverDiagnosticTextLimit = 256U;
 struct NetchanDriverConfig {
     std::chrono::milliseconds channel_inactivity_timeout{
         kDefaultNetchanChannelInactivityTimeout};
+    // Opt-in transport-only polling after the first server acknowledgement.
+    // Zero preserves historical receive-driven/strict behavior. Empty packets
+    // use the existing codec's padding; no reliable command is repeated.
+    std::chrono::milliseconds idle_poll_interval{0};
     std::chrono::milliseconds fragment_transfer_timeout{
         kDefaultNetchanFragmentTransferTimeout};
     std::size_t maximum_datagram_size{kDefaultNetchanDatagramSize};

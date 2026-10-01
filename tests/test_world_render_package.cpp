@@ -1,4 +1,5 @@
 #include "world_render_test_fixture.hpp"
+#include "missing_texture_test_fixture.hpp"
 
 #include <hlclient/world_render/world_render_package_builder.hpp>
 
@@ -196,6 +197,25 @@ TEST_CASE("World render package supports unlit, masked and multiple-page materia
         CHECK(built.package->surface_ranges()[1].index_count == 6U);
         CHECK(built.package->surface_ranges()[1].source_batch_index == 1U);
     }
+}
+
+TEST_CASE("Missing-texture package preserves source UV dimensions and lighting",
+    "[world-render][world-textures][external-map-compat]")
+{
+    auto world = fixture::make_world();
+    world.materials[0U].texture_storage = assets::WorldTextureStorage::external_reference;
+    world.materials[0U].texture_name = "ABSENT";
+    world.materials[0U].width = 64U;
+    world.materials[0U].height = 32U;
+    auto built = world_render::WorldRenderPackageBuilder{}.build(
+        {std::move(world), hlclient::tests::make_missing_texture_set()}, fixture::make_lightmap_set({}));
+    REQUIRE(built);
+    CHECK_FALSE(built.package->textured_world().textures.complete_for_world_materials());
+    CHECK(built.package->textured_world().textures.renderable_for_world_materials());
+    CHECK(built.package->vertices()[2U].base_texture_coordinate.x == Catch::Approx(0.25F));
+    CHECK(built.package->vertices()[2U].base_texture_coordinate.y == Catch::Approx(0.5F));
+    CHECK(built.package->materials()[0U].lightmap_mode == world_render::WorldRenderLightmapMode::atlas);
+    CHECK(built.package->materials()[0U].base_texture_alpha_mode == assets::WorldTextureAlphaMode::opaque);
 }
 
 TEST_CASE("World render package construction is deterministic and owning",

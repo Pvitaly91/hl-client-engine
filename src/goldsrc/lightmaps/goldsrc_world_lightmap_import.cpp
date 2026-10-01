@@ -487,7 +487,17 @@ GoldSrcWorldLightmapImportResult GoldSrcWorldLightmapImporter::import(
             binding.sample_height = extents.sample_height;
             binding.source_styles = styles;
 
-            if (!surface.lightmap_offset) {
+            if (!surface.lightmap_offset || styles.style_count == 0U) {
+                if (surface.lightmap_offset &&
+                    *surface.lightmap_offset > lighting.bytes->size()) {
+                    return import_failure(
+                        GoldSrcWorldLightmapImportErrorCode::lightmap_range_out_of_bounds,
+                        surface_index,
+                        assets::WorldSurfaceLightmapBindingStatus::invalid_metadata,
+                        std::nullopt,
+                        std::nullopt,
+                        "Zero-style surface cursor is outside the lighting lump");
+                }
                 if (styles.style_count != 0U) {
                     return import_failure(
                         GoldSrcWorldLightmapImportErrorCode::
@@ -504,15 +514,6 @@ GoldSrcWorldLightmapImportResult GoldSrcWorldLightmapImporter::import(
                 continue;
             }
 
-            if (styles.style_count == 0U) {
-                return import_failure(
-                    GoldSrcWorldLightmapImportErrorCode::invalid_lightmap_metadata,
-                    surface_index,
-                    assets::WorldSurfaceLightmapBindingStatus::invalid_metadata,
-                    std::nullopt,
-                    std::nullopt,
-                    "Lightmapped surface has no active source light style");
-            }
             if (styles.style_count > limits.maximum_style_count) {
                 return import_failure(
                     GoldSrcWorldLightmapImportErrorCode::invalid_lightmap_metadata,

@@ -96,11 +96,11 @@ struct ActualOpenGlVersion {
 
 class HiddenContext final {
 public:
-    HiddenContext()
+    HiddenContext(const int width = 96, const int height = 96)
         : runtime_{std::make_unique<platform::SdlRuntime>()},
           window_{std::make_unique<platform::SdlWindow>(
               platform::SdlWindowConfig{
-                  "HL Client entity rendering test", 96, 96, true})}
+                  "HL Client entity rendering test", width, height, true})}
     {
     }
 
@@ -122,10 +122,11 @@ private:
     std::unique_ptr<opengl::OpenGlRenderer> renderer_;
 };
 
-[[nodiscard]] inline std::unique_ptr<HiddenContext> try_context()
+[[nodiscard]] inline std::unique_ptr<HiddenContext> try_context(
+    const int width = 96, const int height = 96)
 {
     try {
-        return std::make_unique<HiddenContext>();
+        return std::make_unique<HiddenContext>(width, height);
     } catch (const std::exception& error) {
         if (platform::classify_opengl_startup_capability_failure(error) !=
             platform::OpenGlStartupCapabilityFailure::none) {

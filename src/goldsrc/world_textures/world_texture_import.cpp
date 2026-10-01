@@ -119,12 +119,43 @@ struct ExternalTextureBinding {
     std::size_t texture_asset_index{0U};
 };
 
+// Project-owned diagnostic image, not decoded or attributed to an archive.
+// One small shared allocation per import; source material UV dimensions remain
+// unchanged in the render package.
+[[nodiscard]] assets::WorldTextureAsset missing_texture_image()
+{
+    assets::WorldTextureAsset texture;
+    texture.name = "__MISSING_TEXTURE__";
+    texture.width = texture.height = 16U;
+    texture.source_kind = assets::WorldTextureSourceKind::generated_missing_texture;
+    texture.compatibility_profile = assets::WorldTextureCompatibilityProfile::missing_texture_checker_v1;
+    texture.evidence_profile = assets::WorldTextureEvidenceProfile::project_generated_placeholder;
+    for (std::size_t level = 0U; level < texture.mip_levels.size(); ++level) {
+        auto& mip = texture.mip_levels[level];
+        mip.width = mip.height = 16U >> level;
+        mip.rgba_pixels.resize(static_cast<std::size_t>(mip.width) * mip.height * 4U);
+        for (std::uint32_t y = 0U; y < mip.height; ++y) {
+            for (std::uint32_t x = 0U; x < mip.width; ++x) {
+                const bool magenta = (x < mip.width / 2U) != (y < mip.height / 2U);
+                const auto offset = (static_cast<std::size_t>(y) * mip.width + x) * 4U;
+                mip.rgba_pixels[offset] = magenta ? std::byte{255U} : std::byte{0U};
+                mip.rgba_pixels[offset + 1U] = std::byte{0U};
+                mip.rgba_pixels[offset + 2U] = mip.rgba_pixels[offset];
+                mip.rgba_pixels[offset + 3U] = std::byte{255U};
+            }
+        }
+    }
+    return texture;
+}
+
 } // namespace
 
 bool valid_goldsrc_world_texture_import_limits(
     const GoldSrcWorldTextureImportLimits& limits) noexcept
 {
     if (limits.maximum_material_count == 0U ||
+        (limits.missing_texture_policy != MissingWorldTexturePolicy::reject &&
+         limits.missing_texture_policy != MissingWorldTexturePolicy::placeholder_for_absent_name) ||
         limits.maximum_material_count > kHardMaximumWorldTextureMaterials ||
         limits.maximum_texture_asset_count == 0U ||
         limits.maximum_texture_asset_count > kHardMaximumWorldTextureAssets ||
@@ -923,6 +954,28 @@ private:
                         binding.status = assets::
                             WorldMaterialTextureBindingStatus::
                                 external_wad_archive_missing;
+                    } else if (limits_.missing_texture_policy ==
+                                   MissingWorldTexturePolicy::placeholder_for_absent_name &&
+                               !archive_metadata_.empty() &&
+                               std::ranges::all_of(archive_metadata_, [](const auto& archive) {
+                                   return archive.status == assets::WorldTextureArchiveStatus::resolved;
+                               })) {
+                        if (!missing_texture_index_) {
+                            auto image = missing_texture_image();
+                            if (textures_.size() >= limits_.maximum_texture_asset_count ||
+                                !retain_decoded_bytes(image)) {
+                                fail(WorldTextureImportErrorCode::texture_set_build_failed,
+                                    "Missing-texture image exceeds texture storage limits");
+                                return;
+                            }
+                            missing_texture_index_ = textures_.size();
+                            textures_.push_back(std::move(image));
+                        }
+                        binding.status = assets::WorldMaterialTextureBindingStatus::substituted_missing_texture;
+                        binding.texture_asset_index = missing_texture_index_;
+                        binding.source_archive_ordinal.reset();
+                        binding.compatibility_profile = assets::WorldTextureCompatibilityProfile::missing_texture_checker_v1;
+                        binding.evidence_profile = assets::WorldTextureEvidenceProfile::project_generated_placeholder;
                     }
                 }
             }
@@ -953,7 +1006,7 @@ private:
                     : std::nullopt);
             return;
         }
-        const bool complete = built.texture_set->complete_for_world_materials();
+        const bool complete = built.texture_set->renderable_for_world_materials();
         result_.emplace(std::move(*built.texture_set));
         source_document_.reset();
         wad_references_.reset();
@@ -1072,6 +1125,7 @@ public:
     std::optional<bsp::GoldSrcWadReferenceList> wad_references_;
     std::vector<assets::WorldTextureAsset> textures_;
     std::vector<assets::WorldMaterialTextureBinding> bindings_;
+    std::optional<std::size_t> missing_texture_index_;
     std::vector<assets::WorldTextureArchiveMetadata> archive_metadata_;
     std::vector<EmbeddedTextureBinding> embedded_bindings_;
     std::vector<ExternalTextureBinding> external_bindings_;

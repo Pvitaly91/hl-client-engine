@@ -373,6 +373,67 @@ TEST_CASE("Missing archives and textures publish typed incomplete sets",
     }
 }
 
+TEST_CASE("Absent-name placeholder policy is explicit and never hides resource errors",
+    "[world-textures][external-map-compat]")
+{
+    ScopedLocalResourceTestRoot temporary;
+    goldsrc::GoldSrcWorldTextureImportLimits limits;
+    limits.missing_texture_policy = goldsrc::MissingWorldTexturePolicy::placeholder_for_absent_name;
+    temporary.write("valve", "valid.wad", fixture::synthetic_valid_wad3("OTHER").bytes);
+    auto storage = SyntheticTextureStorage::external;
+    std::string wads = "valid.wad";
+    bool expect_placeholder = true;
+    bool expect_error = false;
+    SECTION("absent name from a resolved valid archive") {}
+    SECTION("missing archive remains unavailable") { wads = "absent.wad"; expect_placeholder = false; }
+    SECTION("missing WAD list remains unavailable") { wads.clear(); expect_placeholder = false; }
+    SECTION("any unresolved declared archive prevents substitution") { wads = "valid.wad;absent.wad"; expect_placeholder = false; }
+    SECTION("missing BSP reference remains unavailable") { storage = SyntheticTextureStorage::missing; expect_placeholder = false; }
+    SECTION("malformed archive remains an error") {
+        temporary.write("valve", "valid.wad", std::string_view{"not a WAD"});
+        expect_placeholder = false; expect_error = true;
+    }
+    SECTION("dimension mismatch remains unavailable") {
+        fixture::SyntheticWad3Entry entry;
+        entry.name = "ABSENT";
+        entry.payload = fixture::synthetic_goldsrc_miptex("ABSENT", 32U, 16U);
+        temporary.write("valve", "valid.wad", fixture::synthetic_wad3({entry}).bytes);
+        expect_placeholder = false;
+    }
+    SECTION("placeholder allocation respects aggregate byte budget") {
+        limits.maximum_total_decoded_rgba_bytes = 100U;
+        expect_placeholder = false; expect_error = true;
+    }
+    auto imported = import_world(make_bsp_bytes(storage, "ABSENT", wads));
+    auto operation = begin_operation(imported, make_environment(temporary), limits);
+    run_to_terminal(operation);
+    if (expect_error) {
+        CHECK(operation.result() == nullptr);
+        REQUIRE(operation.error());
+    } else {
+        REQUIRE(operation.result());
+        const auto& set = *operation.result();
+        CHECK_FALSE(set.complete_for_world_materials());
+        CHECK(set.renderable_for_world_materials() == expect_placeholder);
+        CHECK(set.statistics().decoded_texture_count == 0U);
+        CHECK(set.statistics().placeholder_material_count == (expect_placeholder ? 1U : 0U));
+        if (expect_placeholder) {
+            REQUIRE(set.texture_count() == 1U);
+            CHECK(set.bindings()[0U].status == assets::WorldMaterialTextureBindingStatus::substituted_missing_texture);
+            CHECK_FALSE(assets::is_resolved(set.bindings()[0U].status));
+            CHECK_FALSE(set.bindings()[0U].source_archive_ordinal);
+            const auto& texture = set.textures()[0U];
+            CHECK(texture.source_kind == assets::WorldTextureSourceKind::generated_missing_texture);
+            CHECK(texture.evidence_profile == assets::WorldTextureEvidenceProfile::project_generated_placeholder);
+            CHECK_FALSE(texture.source_bsp_texture_index);
+            CHECK_FALSE(texture.source_archive_ordinal);
+            CHECK(set.statistics().total_rgba_byte_count == 1360U);
+            CHECK(texture.mip_levels[0U].rgba_pixels[0U] == std::byte{0U});
+            CHECK(texture.mip_levels[0U].rgba_pixels[8U * 4U] == std::byte{255U});
+        }
+    }
+}
+
 TEST_CASE("Dimension mismatch is typed and does not search later archives",
     "[world-textures][resolution][dimensions]")
 {

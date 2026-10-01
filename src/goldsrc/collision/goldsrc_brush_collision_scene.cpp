@@ -82,6 +82,7 @@ namespace brush = hlclient::goldsrc::brush_models;
         explicit_synthetic_brush_solidity_v1:
     case BrushCollisionRoleProviderProfile::
         stock_brush_solidity_evidence_pending:
+    case BrushCollisionRoleProviderProfile::reference_entity_solid_bsp_v1:
         return true;
     }
     return false;
@@ -1118,6 +1119,8 @@ std::string_view to_string(
     case BrushCollisionRoleProviderProfile::
         stock_brush_solidity_evidence_pending:
         return "stock_brush_solidity_evidence_pending";
+    case BrushCollisionRoleProviderProfile::reference_entity_solid_bsp_v1:
+        return "reference_entity_solid_bsp_v1";
     }
     return "unknown";
 }

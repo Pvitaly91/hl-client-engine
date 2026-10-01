@@ -1,6 +1,9 @@
 #include <hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp>
+#include <hlclient/goldsrc/brush_models/goldsrc_brush_entity.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_world_scene_builder.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_parser.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_entity_document.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_entity_transform.hpp>
 #include <hlclient/goldsrc/lightmaps/goldsrc_world_lightmap_import.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import.hpp>
 #include <hlclient/local_assets/local_asset_source.hpp>
@@ -41,6 +44,7 @@ struct Options {
     std::optional<std::string> game_directory;
     std::optional<std::string> virtual_map;
     std::optional<ValidationStage> validate_through;
+    bool inspect_entities{false};
 };
 
 struct CompatibilitySummary {
@@ -94,6 +98,11 @@ struct CompatibilitySummary {
     Options options;
     for (int index = 1; index < argument_count; ++index) {
         const std::wstring_view argument{arguments[index]};
+        if (argument == L"--inspect-entities") {
+            if (options.inspect_entities) return std::nullopt;
+            options.inspect_entities = true;
+            continue;
+        }
         if (argument != L"--basedir" && argument != L"--game" &&
             argument != L"--map" && argument != L"--validate-through") {
             return std::nullopt;
@@ -159,7 +168,8 @@ void print_usage()
         << "Usage: hlclient_bsp_compat_check --basedir <Half-Life root> "
            "--game <directory> --map <maps/name.bsp> "
            "--validate-through "
-           "<geometry|textures|render-package|spatial-scene>\n";
+           "<geometry|textures|render-package|spatial-scene> "
+           "[--inspect-entities]\n";
 }
 
 void print_failure(
@@ -263,16 +273,18 @@ open_map_source(
 }
 
 [[nodiscard]] std::optional<hlclient::assets::WorldTextureSet>
-import_complete_textures(
+import_renderable_textures(
     const hlclient::assets::WorldAsset& world,
     const std::span<const std::byte> retained_bsp_source,
     const std::shared_ptr<
         const hlclient::local_resources::LocalResourceEnvironment>& environment)
 {
+    hlclient::goldsrc::GoldSrcWorldTextureImportLimits limits;
+    limits.missing_texture_policy = hlclient::goldsrc::MissingWorldTexturePolicy::placeholder_for_absent_name;
     auto started = hlclient::goldsrc::WorldTextureImportOperation::begin(
         world,
         retained_bsp_source,
-        environment);
+        environment, limits);
     if (!started) {
         return std::nullopt;
     }
@@ -286,7 +298,7 @@ import_complete_textures(
         operation.update(now);
     }
     if (!operation.terminal() || operation.result() == nullptr ||
-        !operation.result()->complete_for_world_materials()) {
+        !operation.result()->renderable_for_world_materials()) {
         return std::nullopt;
     }
     return operation.take_result();
@@ -373,6 +385,86 @@ void print_summary(const CompatibilitySummary& summary)
     std::cout << "[compat] supported-instances="
               << summary.supported_instance_count << '\n';
     std::cout << "[compat] result=success\n";
+}
+
+// Opt-in read-only metadata inspection. Reuses the production BSP/entity
+// parsers and prints only bounded inert identifiers and finite coordinates.
+// No entity is spawned and no gameplay meaning is assigned by this tool.
+[[nodiscard]] bool print_entities(
+    const hlclient::goldsrc::bsp::GoldSrcBspParsedDocument& bsp_document)
+{
+    namespace bsp = hlclient::goldsrc::bsp;
+    const auto parsed = bsp::GoldSrcEntityDocumentParser::parse(
+        bsp_document.entity_lump_bytes);
+    if (!parsed || !parsed.document) {
+        print_failure("entity_document_failed");
+        return false;
+    }
+    const auto print_vector = [](const auto& value) {
+        std::cout << value.x << ',' << value.y << ',' << value.z;
+    };
+    std::cout.imbue(std::locale::classic());
+    std::cout << std::setprecision(std::numeric_limits<float>::max_digits10);
+    std::size_t ordinal = 0U;
+    for (const auto& entity : parsed.document->entities()) {
+        const auto* name = bsp::find_interpreted_key(entity,
+            bsp::GoldSrcInterpretedEntityKey::classname).unique_pair(entity);
+        const bool safe_name = name && !name->value.empty() && name->value.size() <= 128U &&
+            name->value.find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == std::string::npos;
+        std::cout << "[bsp-entity] index=" << ordinal++
+                  << " classname=" << (safe_name ? name->value : "unavailable")
+                  << " initial_origin=";
+        const auto* origin = bsp::find_interpreted_key(entity,
+            bsp::GoldSrcInterpretedEntityKey::origin).unique_pair(entity);
+        const auto position = origin ? bsp::parse_entity_vector3(origin->value)
+                                     : bsp::GoldSrcEntityVectorResult{};
+        if (position) print_vector(*position.value);
+        else std::cout << "unavailable";
+        const auto* model = bsp::find_interpreted_key(entity,
+            bsp::GoldSrcInterpretedEntityKey::model).unique_pair(entity);
+        if (model) {
+            const auto reference = hlclient::goldsrc::brush_models::parse_brush_model_reference(
+                model->value, static_cast<std::size_t>(bsp_document.geometry_statistics.source_model_count));
+            if (reference) {
+                const auto index = *reference.source_model_index;
+                for (const auto& brush : bsp_document.brush_submodels) {
+                    if (brush.source_model_index != index) continue;
+                    std::cout << " brush_model=" << index << " initial_bounds_min=";
+                    print_vector(brush.source_model_bounds.minimum);
+                    std::cout << " initial_bounds_max=";
+                    print_vector(brush.source_model_bounds.maximum);
+                    std::cout << " source_origin=";
+                    print_vector(brush.source_model_origin);
+                    std::cout << " faces=" << brush.geometry.surfaces.size()
+                              << " first_face=" << brush.geometry.surfaces.front().source_surface_ordinal.value_or(0U)
+                              << " textures=";
+                    for (const auto& material : brush.geometry.materials)
+                        if (material.texture_name) std::cout << *material.texture_name << ',';
+                    const auto metadata = hlclient::goldsrc::brush_models::interpret_brush_entity(
+                        entity, ordinal - 1U, static_cast<std::size_t>(bsp_document.geometry_statistics.source_model_count));
+                    if (metadata.metadata) {
+                        std::cout << " rendermode=" << metadata.metadata->rendermode << " renderamt=";
+                        if (metadata.metadata->render_amount) std::cout << *metadata.metadata->render_amount;
+                        else std::cout << "unavailable";
+                    }
+                    break;
+                }
+            }
+        }
+        for (const auto key : {"target", "targetname", "master", "angle", "angles",
+                               "speed", "wait", "lip", "height", "spawnflags"}) {
+            std::size_t count = 0U;
+            std::string_view value;
+            for (const auto& pair : entity.pairs()) if (pair.key == key) { ++count; value = pair.value; }
+            const bool safe = count == 1U && value.size() <= 128U &&
+                value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-. ") == std::string_view::npos;
+            std::cout << ' ' << key << '=' << (safe ? value : "unavailable");
+        }
+        std::cout << '\n';
+    }
+    std::cout << "[bsp-entities] count=" << ordinal << " result=success\n";
+    return true;
 }
 
 [[nodiscard]] int run_checker(const int argument_count, wchar_t* arguments[])
@@ -474,13 +566,15 @@ void print_summary(const CompatibilitySummary& summary)
         return 1;
     }
 
+    if (options->inspect_entities && !print_entities(document)) return 1;
+
     if (!stage_includes(
             *options->validate_through, ValidationStage::textures)) {
         print_summary(summary);
         return 0;
     }
 
-    auto textures = import_complete_textures(
+    auto textures = import_renderable_textures(
         document.world_asset,
         retained_bsp_source,
         environment);
@@ -489,7 +583,13 @@ void print_summary(const CompatibilitySummary& summary)
         return 1;
     }
     summary.texture_count = static_cast<std::uint64_t>(
-        textures->statistics().decoded_texture_count);
+        textures->texture_count());
+    if (textures->statistics().placeholder_material_count != 0U) {
+        std::cout << "[compat-warning] classification=missing_texture_placeholder;bindings="
+                  << textures->statistics().placeholder_material_count
+                  << ";generated_images=" << textures->statistics().generated_placeholder_texture_count
+                  << ";source_textures_complete=false\n";
+    }
     if (summary.texture_count == 0U) {
         print_failure("empty_texture_set");
         return 1;

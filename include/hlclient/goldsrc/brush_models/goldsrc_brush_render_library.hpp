@@ -63,6 +63,7 @@ struct GoldSrcBrushRenderLibraryStatistics {
     std::uint64_t unique_material_reference_count{0U};
     std::uint64_t deduplicated_material_reference_count{0U};
     std::uint64_t decoded_texture_count{0U};
+    std::uint64_t placeholder_material_count{0U};
     std::uint64_t lightmap_atlas_page_count{0U};
     std::uint64_t texture_import_update_count{0U};
 };

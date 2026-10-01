@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -323,6 +324,70 @@ TEST_CASE("Entity render frame rejects forged interpolation metadata",
         REQUIRE(built.frame);
         CHECK(built.frame->interpolation().sample_time_seconds == -1.0);
     }
+}
+
+TEST_CASE("E10 public runtime time provenance retains bounded interpolation validation",
+    "[entity-render][frame][interpolation][e10]")
+{
+    auto scene = fixture::scene_package(fixture::render_assets());
+    REQUIRE(scene);
+    auto input = mixed_frame_input(*scene.package);
+    input.interpolation.profile = render::EntityRenderInterpolationProfile::
+        public_runtime_server_seconds_v1;
+    const auto built = render::EntityRenderFrameBuilder{}.build(
+        *scene.package, input);
+    REQUIRE(built);
+    CHECK(built.frame->interpolation().alpha == 0.5F);
+    CHECK(built.frame->interpolation().profile ==
+        render::EntityRenderInterpolationProfile::public_runtime_server_seconds_v1);
+
+    SECTION("mismatched alpha") { input.interpolation.alpha = 1.0F; }
+    SECTION("unordered times") { input.interpolation.previous_time_seconds = 2.0; }
+    SECTION("nonfinite sample") {
+        input.interpolation.sample_time_seconds =
+            std::numeric_limits<double>::infinity();
+    }
+    SECTION("sample outside selected pair") {
+        input.interpolation.sample_time_seconds = 2.0;
+    }
+    SECTION("unconfirmed identity") {
+        input.interpolation.current_state_identity = 0U;
+    }
+    const auto rejected = render::EntityRenderFrameBuilder{}.build(
+        *scene.package, std::move(input));
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error);
+    CHECK(rejected.error->code == render::EntityRenderFrameErrorCode::
+        invalid_interpolation_metadata);
+}
+
+TEST_CASE("E10 neutral Studio static light is optional finite and bounded",
+    "[entity-render][frame][lighting][e10]")
+{
+    auto scene = fixture::scene_package(fixture::render_assets());
+    REQUIRE(scene);
+    auto input = mixed_frame_input(*scene.package);
+    const auto fallback = render::EntityRenderFrameBuilder{}.build(
+        *scene.package, input);
+    REQUIRE(fallback);
+    CHECK_FALSE(fallback.frame->studio_instances()[0U].static_light_rgb);
+    const std::array<float, 3U> expected_light{0.1F, 0.4F, 0.9F};
+    input.studio_instances[0U].static_light_rgb = expected_light;
+    const auto lit = render::EntityRenderFrameBuilder{}.build(*scene.package, input);
+    REQUIRE(lit);
+    REQUIRE(lit.frame->studio_instances()[0U].static_light_rgb);
+    CHECK(*lit.frame->studio_instances()[0U].static_light_rgb == expected_light);
+    SECTION("negative") { (*input.studio_instances[0U].static_light_rgb)[0U] = -0.1F; }
+    SECTION("above neutral range") { (*input.studio_instances[0U].static_light_rgb)[0U] = 1.1F; }
+    SECTION("nonfinite") {
+        (*input.studio_instances[0U].static_light_rgb)[0U] =
+            std::numeric_limits<float>::quiet_NaN();
+    }
+    const auto rejected = render::EntityRenderFrameBuilder{}.build(
+        *scene.package, std::move(input));
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error);
+    CHECK(rejected.error->code == render::EntityRenderFrameErrorCode::invalid_instance);
 }
 
 TEST_CASE("Entity render frame applies PVS and frustum-only visibility",

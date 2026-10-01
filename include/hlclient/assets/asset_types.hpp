@@ -199,6 +199,9 @@ struct AudioAsset {
     std::uint32_t sample_rate{0};
     std::uint16_t channel_count{0};
     std::vector<float> interleaved_samples;
+    // Frame indices, end exclusive. Intro [0,begin) plays once.
+    struct Loop { std::uint32_t begin{}, end{}; };
+    std::optional<Loop> loop;
 };
 
 } // namespace hlclient::assets

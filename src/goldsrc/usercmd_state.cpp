@@ -51,7 +51,45 @@ namespace {
            info.schema_binding_profile ==
                GoldSrcUserCmdSchemaBindingProfile::
                    public_goldsrc48_usercmd_schema_v1 &&
-           info.up_move == 0.0F && info.buttons == 0U &&
+           info.up_move == 0.0F &&
+           (info.buttons & ~kGoldSrcButtonDirections) == 0U &&
+           info.impulse == 0U && info.weapon_select == 0U &&
+           info.impact_index == 0;
+}
+
+[[nodiscard]] bool reference_jump_duck_profile_tuple(
+    const GoldSrcUserCmdCreateInfo& info) noexcept
+{
+    constexpr std::uint16_t actions =
+        kGoldSrcButtonDirections |
+        kSyntheticGoldSrcButtonJump | kSyntheticGoldSrcButtonDuck;
+    return info.compatibility_profile == GoldSrcUserCmdCompatibilityProfile::
+               public_goldsrc48_jump_duck_prediction_v2 &&
+           info.input_mapping_profile == GoldSrcUserCmdInputMappingProfile::
+               reference_immutable_wire_v1 &&
+           info.schema_binding_profile == GoldSrcUserCmdSchemaBindingProfile::
+               public_goldsrc48_usercmd_schema_v1 &&
+           info.up_move == 0.0F && (info.buttons & ~actions) == 0U &&
+           info.impulse == 0U && info.weapon_select == 0U &&
+           info.impact_index == 0;
+}
+
+[[nodiscard]] bool reference_jump_duck_weapon_profile_tuple(
+    const GoldSrcUserCmdCreateInfo& info) noexcept
+{
+    const bool use = info.compatibility_profile == GoldSrcUserCmdCompatibilityProfile::
+        public_goldsrc48_jump_duck_weapon_use_prediction_v4;
+    const std::uint16_t actions = kGoldSrcButtonDirections |
+        kSyntheticGoldSrcButtonAttack |
+        kSyntheticGoldSrcButtonJump | kSyntheticGoldSrcButtonDuck |
+        kSyntheticGoldSrcButtonReload | (use ? kSyntheticGoldSrcButtonUse : 0U);
+    return (use || info.compatibility_profile == GoldSrcUserCmdCompatibilityProfile::
+               public_goldsrc48_jump_duck_weapon_prediction_v3) &&
+           info.input_mapping_profile == GoldSrcUserCmdInputMappingProfile::
+               reference_immutable_wire_v1 &&
+           info.schema_binding_profile == GoldSrcUserCmdSchemaBindingProfile::
+               public_goldsrc48_usercmd_schema_v1 &&
+           info.up_move == 0.0F && (info.buttons & ~actions) == 0U &&
            info.impulse == 0U && info.weapon_select == 0U &&
            info.impact_index == 0;
 }
@@ -127,7 +165,9 @@ GoldSrcUserCmdState::CreationResult GoldSrcUserCmdState::create(
             "A controlled stock usercmd profile requires accepted wire evidence");
     }
     if (!synthetic_profile_tuple(create_info) &&
-        !reference_dry_walk_profile_tuple(create_info)) {
+        !reference_dry_walk_profile_tuple(create_info) &&
+        !reference_jump_duck_profile_tuple(create_info) &&
+        !reference_jump_duck_weapon_profile_tuple(create_info)) {
         return failure(
             create_info.compatibility_profile ==
                     GoldSrcUserCmdCompatibilityProfile::

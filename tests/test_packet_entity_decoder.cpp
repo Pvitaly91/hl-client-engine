@@ -2,6 +2,7 @@
 #include <hlclient/goldsrc/entity_baseline_decoder.hpp>
 
 #include "delta_test_fixture.hpp"
+#include "player_origin_test_fixture.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -279,6 +280,85 @@ void finish_entities(fixture::BitWriter& writer)
 
 } // namespace
 
+TEST_CASE("E10 receiving origin is restored before full packet player inheritance",
+          "[e10-origin][goldsrc][packet-entities]")
+{
+    namespace p = hlclient::test::player_origin_fixture;
+    for(const auto receiver : {1U,2U}) {
+        INFO("receiving entity=" << receiver);
+        auto schemas=p::schemas();
+        goldsrc::PacketEntitySnapshotState state{1U,2U,schemas,p::baselines(*schemas)};
+        const p::Position local{-432.0,930.0,-1660.0}, remote{-602.5,834.0,-1660.0};
+        auto source=p::payload(p::full(receiver,local,remote),100U);
+        goldsrc::PacketEntityDecodeInput input{source,{},1U,1U};
+        input.receiving_player_entity=receiver;
+        const auto result=goldsrc::GoldSrcPacketEntityDecoder{}.decode_and_apply(input,state);
+        REQUIRE(result);
+        REQUIRE(state.current_snapshot());
+        const auto& snapshot=*state.current_snapshot();
+        CHECK(p::value(snapshot,receiver,"origin[0]")==local[0]);
+        CHECK(p::value(snapshot,receiver,"origin[1]")==local[1]);
+        CHECK(p::value(snapshot,receiver,"origin[2]")==local[2]);
+        CHECK(p::value(snapshot,3U-receiver,"origin[0]")==remote[0]);
+        CHECK(p::value(snapshot,3U-receiver,"origin[1]")==remote[1]);
+        CHECK(p::value(snapshot,3U-receiver,"origin[2]")==remote[2]);
+        CHECK(snapshot.find_exact(2U)->state_base_reference().kind()==
+            goldsrc::EntityStateBaseReferenceKind::intra_message_entity);
+        // A later delta may inherit from that exact immutable full snapshot.
+        auto retained=p::payload(zero_delta(2U,100U,30.02F),101U);
+        const auto next=goldsrc::GoldSrcPacketEntityDecoder{}.decode_and_apply(
+            {retained,{},1U,2U,"entity_state_t","entity_state_player_t","custom_entity_state_t",
+             "clientdata_t","weapon_data_t",goldsrc::ClientDataReceiverMode::ordinary_game_client,{},receiver},state);
+        REQUIRE(next);
+        CHECK(p::value(*state.current_snapshot(),3U-receiver,"origin[2]")==remote[2]);
+        CHECK(p::value(snapshot,3U-receiver,"origin[2]")==remote[2]);
+        const auto before=state.current_snapshot();
+        auto malformed=p::full(receiver,local,remote); malformed.push_back(std::byte{0xff});
+        auto bad=p::payload(std::move(malformed),102U);
+        const auto rejected=goldsrc::GoldSrcPacketEntityDecoder{}.decode_and_apply(
+            {bad,{},1U,3U,"entity_state_t","entity_state_player_t","custom_entity_state_t",
+             "clientdata_t","weapon_data_t",goldsrc::ClientDataReceiverMode::ordinary_game_client,{},receiver},state);
+        CHECK_FALSE(rejected);
+        CHECK(state.current_snapshot()==before);
+    }
+}
+
+TEST_CASE("E10 origin transfer needs exact receiver and fresh complete clientdata",
+          "[e10-origin][goldsrc][packet-entities]")
+{
+    namespace p = hlclient::test::player_origin_fixture;
+    const p::Position local{-432.03125,930.0625,-1660.03125}, remote{-602.5,834.0,-1660.0};
+    for(const int mode : {0,1,2,3,4,5}) {
+        INFO("availability mode=" << mode);
+        const bool complete=mode!=2;
+        auto schemas=p::schemas(complete);
+        goldsrc::PacketEntitySnapshotState state{1U,2U,schemas,p::baselines(*schemas)};
+        auto source=p::payload(p::full(1U,local,remote,true,mode!=1,complete,mode==3),100U);
+        goldsrc::PacketEntityDecodeInput input{source,{},1U,1U};
+        if(mode!=0) input.receiving_player_entity=mode==5 ? 3U : 1U;
+        if(mode==4) input.client_receiver_mode=goldsrc::ClientDataReceiverMode::proxy_or_hltv;
+        const auto result=goldsrc::GoldSrcPacketEntityDecoder{}.decode_and_apply(input,state);
+        if(mode>=4) { CHECK_FALSE(result); CHECK_FALSE(state.current_snapshot()); continue; }
+        REQUIRE(result);
+        CHECK(p::value(*state.current_snapshot(),1U,"origin[2]")==0.0);
+        // Explicit remote coordinates must never be replaced with local ones.
+        CHECK(p::value(*state.current_snapshot(),2U,"origin[2]")==remote[2]);
+    }
+    auto schemas=p::schemas();
+    goldsrc::PacketEntitySnapshotState state{1U,2U,schemas,p::baselines(*schemas)};
+    auto fresh=p::payload(p::full(1U,local,remote),100U);
+    REQUIRE(goldsrc::GoldSrcPacketEntityDecoder{}.decode_and_apply(
+        {fresh,{},1U,1U,"entity_state_t","entity_state_player_t","custom_entity_state_t",
+         "clientdata_t","weapon_data_t",goldsrc::ClientDataReceiverMode::ordinary_game_client,{},1U},state));
+    CHECK(p::value(*state.current_snapshot(),1U,"origin[2]")==local[2]);
+    CHECK(p::value(*state.current_snapshot(),2U,"origin[2]")==remote[2]);
+    auto stale=p::payload(p::full(1U,local,remote,true,false),101U);
+    REQUIRE(goldsrc::GoldSrcPacketEntityDecoder{}.decode_and_apply(
+        {stale,{},1U,2U,"entity_state_t","entity_state_player_t","custom_entity_state_t",
+         "clientdata_t","weapon_data_t",goldsrc::ClientDataReceiverMode::ordinary_game_client,{},1U},state));
+    CHECK(p::value(*state.current_snapshot(),1U,"origin[2]")==0.0);
+}
+
 TEST_CASE("Reference packet-entity profile is explicit and executable",
           "[goldsrc][packet-entities][profile]")
 {
@@ -488,6 +568,56 @@ TEST_CASE("Delta absolute-number branch can add from an exact identity baseline"
           50U);
 }
 
+TEST_CASE("New entities absent from signon use a distinct null baseline",
+          "[goldsrc][packet-entities][dynamic][null-baseline]")
+{
+    PacketFixture fixture_state;
+    CHECK(fixture_state.baselines->find_exact(
+              goldsrc::EntityBaselineKey::for_entity(100U)) == nullptr);
+
+    fixture::BitWriter full;
+    prefix(full, 100.0F, goldsrc::kGoldSrcSvcPacketEntitiesOpcode, 1U);
+    full.write(0U, 1U);    // not sequential
+    full.write(1U, 1U);    // absolute entity number
+    full.write(100U, 11U);
+    full.write(0U, 1U);    // ordinary schema
+    full.write(0U, 1U);    // not instanced
+    full.write(0U, 1U);    // no intra-message baseline
+    byte_delta(full, 77U);
+    finish_entities(full);
+
+    const auto first = decode(fixture_state, full.bytes(), 250U);
+    const auto& first_event = entity_event(first);
+    REQUIRE(first_event.snapshot);
+    CHECK(byte_value(*first_event.snapshot, 100U) == 77U);
+    REQUIRE(first_event.snapshot->find_exact(100U));
+    CHECK(first_event.snapshot->find_exact(100U)->state_base_reference().kind() ==
+          goldsrc::EntityStateBaseReferenceKind::null_baseline);
+    CHECK(first_event.snapshot->find_exact(100U)->state_base_reference().value() ==
+          100U);
+    CHECK(fixture_state.baselines->find_exact(
+              goldsrc::EntityBaselineKey::for_entity(100U)) == nullptr);
+
+    fixture::BitWriter delta;
+    prefix(delta, 101.0F, goldsrc::kGoldSrcSvcDeltaPacketEntitiesOpcode,
+           1U, 250U);
+    delta.write(0U, 1U);   // non-removal
+    delta.write(1U, 1U);   // absolute entity number
+    delta.write(100U, 11U);
+    delta.write(0U, 1U);   // ordinary schema
+    delta.write(0U, 1U);   // not instanced
+    byte_delta(delta, 88U);
+    finish_entities(delta);
+
+    const auto second = decode(fixture_state, delta.bytes(), 251U);
+    const auto& second_event = entity_event(second);
+    REQUIRE(second_event.snapshot);
+    CHECK(byte_value(*second_event.snapshot, 100U) == 88U);
+    REQUIRE(second_event.snapshot->find_exact(100U));
+    CHECK(second_event.snapshot->find_exact(100U)->state_base_reference().kind() ==
+          goldsrc::EntityStateBaseReferenceKind::previous_snapshot_entity);
+}
+
 TEST_CASE("Zero-record delta preserves base and full replaces prior set",
           "[goldsrc][packet-entities][zero-change][full-replace]")
 {
@@ -668,6 +798,25 @@ TEST_CASE("Malformed record order baseline choice count and padding are rejected
         writer.write(1U, 1U);
         writer.write(2U, 6U); // only slot 0 exists
         byte_delta(writer, 80U);
+        finish_entities(writer);
+        require_error_unchanged(
+            fixture_state, writer.bytes(), 20U,
+            goldsrc::PacketEntityDecodeErrorCode::invalid_baseline_reference);
+    }
+
+    SECTION("explicit intra-message offset is not a null baseline")
+    {
+        PacketFixture fixture_state;
+        fixture::BitWriter writer;
+        prefix(writer, 1.0F, goldsrc::kGoldSrcSvcPacketEntitiesOpcode,
+               1U);
+        writer.write(0U, 1U);   // not sequential
+        writer.write(1U, 1U);   // absolute entity number
+        writer.write(100U, 11U);
+        writer.write(0U, 1U);   // ordinary schema
+        writer.write(0U, 1U);   // not instanced
+        writer.write(1U, 1U);   // explicit intra-message offset
+        writer.write(1U, 6U);   // no earlier record exists
         finish_entities(writer);
         require_error_unchanged(
             fixture_state, writer.bytes(), 20U,

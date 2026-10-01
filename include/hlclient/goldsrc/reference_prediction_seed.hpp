@@ -9,18 +9,24 @@
 #include <string_view>
 
 namespace hlclient::goldsrc {
+struct ReferenceBrushCollisionContext;
 
 enum class ReferencePredictionFieldOrigin : std::uint8_t {
     clientdata_observed,
     matched_player_entity_observed,
     reference_anchored_neutral_command,
+    reference_anchored_weapon_only_policy,
     exact_retained_prediction_slot,
     reference_vertical_only_view_offset_policy,
+    reference_completed_duck_timer_policy,
+    reference_anchored_use_non_edge_policy,
 };
 
 struct ReferenceRetainedPredictionButtons final {
     GoldSrcUserCmdSequence command_identity;
     std::uint16_t old_buttons{0U};
+    std::optional<std::uint32_t> duck_time_milliseconds;
+    std::optional<bool> in_duck_transition;
 };
 
 // A semantic correction candidate, not a complete PM_Move or authoritative
@@ -43,6 +49,11 @@ struct ReferencePredictionSeed final {
     std::uint32_t use_hull{0U};
     std::uint32_t water_level{0U};
     bool in_duck{false};
+    ReferencePredictionFieldOrigin in_duck_origin{
+        ReferencePredictionFieldOrigin::clientdata_observed};
+    std::uint32_t duck_time_milliseconds{0U};
+    ReferencePredictionFieldOrigin duck_time_origin{
+        ReferencePredictionFieldOrigin::reference_completed_duck_timer_policy};
     std::uint16_t old_buttons{0U};
     std::optional<double> maximum_speed;
     std::optional<double> gravity_multiplier;
@@ -65,7 +76,7 @@ enum class ReferencePredictionSeedStatus : std::uint8_t {
 
 enum class ReferencePredictionSeedField : std::uint8_t {
     origin, velocity, view_offset, flags, water_level, dead_flag,
-    in_duck, move_type, use_hull, gravity_multiplier,
+    in_duck, duck_time, move_type, use_hull, gravity_multiplier,
     friction_multiplier, base_velocity, spectator, maximum_speed,
 };
 
@@ -97,6 +108,7 @@ enum class ReferencePredictionSeedField : std::uint8_t {
     case ReferencePredictionSeedField::water_level: return "water_level";
     case ReferencePredictionSeedField::dead_flag: return "dead_flag";
     case ReferencePredictionSeedField::in_duck: return "in_duck";
+    case ReferencePredictionSeedField::duck_time: return "duck_time";
     case ReferencePredictionSeedField::move_type: return "move_type";
     case ReferencePredictionSeedField::use_hull: return "use_hull";
     case ReferencePredictionSeedField::gravity_multiplier: return "gravity_multiplier";
@@ -165,7 +177,11 @@ struct ReferencePredictionGroundResult final {
     const GoldSrcWireUserCmd& boundary_command,
     const movement::ILocalMovementCollision& collision,
     movement::GoldSrcLocalMovementScratch& scratch,
-    const movement::GoldSrcLocalMovementConfig& config = {});
+    const movement::GoldSrcLocalMovementConfig& config = {},
+    hlclient::movement::GoldSrcMovementCommandProfile command_profile =
+        hlclient::movement::GoldSrcMovementCommandProfile::
+            reference_wire_dry_walk_v1,
+    const ReferenceBrushCollisionContext* ladder_context = nullptr);
 
 // ServerInfo's client slot is zero based; ReHLDS serializes its player entity
 // as slot + 1. Both substates must be freshly observed in the same record.

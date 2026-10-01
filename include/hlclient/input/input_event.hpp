@@ -27,6 +27,11 @@ enum class PhysicalKey : std::uint8_t {
     right,
     f1,
     f2,
+    digit_1,
+    digit_2,
+    digit_3,
+    digit_4,
+    digit_5,
     count,
 };
 

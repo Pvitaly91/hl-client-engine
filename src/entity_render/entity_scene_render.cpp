@@ -101,7 +101,9 @@ void hash_transform(
     if ((interpolation.profile !=
              EntityRenderInterpolationProfile::synthetic_seconds_v1 &&
          interpolation.profile != EntityRenderInterpolationProfile::
-             decoded_discrete_runtime_replay_v1) ||
+             decoded_discrete_runtime_replay_v1 &&
+         interpolation.profile != EntityRenderInterpolationProfile::
+             public_runtime_server_seconds_v1) ||
         !std::isfinite(interpolation.sample_time_seconds) ||
         !std::isfinite(interpolation.previous_time_seconds) ||
         !std::isfinite(interpolation.current_time_seconds) ||
@@ -671,7 +673,9 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
              ++index) {
             auto& instance = input.studio_instances[index];
             if (!finite_entity_render_transform(instance.transform) ||
-                !finite_entity_render_bounds(instance.interpolated_bounds)) {
+                !finite_entity_render_bounds(instance.interpolated_bounds) ||
+                (instance.static_light_rgb && !std::ranges::all_of(*instance.static_light_rgb,
+                    [](const float value) { return std::isfinite(value) && value >= 0.0F && value <= 1.0F; }))) {
                 return frame_fail(EntityRenderFrameErrorCode::invalid_instance,
                     instance.entity_number,
                     "Studio entity transform or interpolated bounds are invalid");
@@ -894,6 +898,10 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             hash_bounds(signature, instance.interpolated_bounds);
             signature.add(static_cast<std::uint32_t>(
                 instance.visibility_status));
+            if (instance.static_light_rgb) {
+                signature.add(std::uint32_t{0x4C495445U});
+                for (const auto value : *instance.static_light_rgb) signature.add(value);
+            }
         }
         for (const auto& instance : input.sprite_instances) {
             signature.add(instance.entity_number);

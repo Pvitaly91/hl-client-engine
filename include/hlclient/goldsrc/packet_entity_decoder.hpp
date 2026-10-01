@@ -171,6 +171,7 @@ struct PacketEntityDecodeError final {
     std::optional<DeltaValueErrorCode> delta_error;
     std::optional<ClientDataDecodeErrorCode> clientdata_error;
     std::string context;
+    std::optional<RuntimeControlDecodeError> control_error;
 };
 
 struct PacketEntityDecodeResult final {
@@ -249,6 +250,10 @@ struct PacketEntityDecodeInput final {
         ClientDataReceiverMode::ordinary_game_client};
     std::span<const PostMoveVarsUserMessageDefinition>
         user_message_definitions{};
+    // Exact serverinfo client slot + 1, never svc_setview or a model guess.
+    // Ordinary receivers restore their own origin from same-payload clientdata
+    // before another full-packet entity can inherit this entity as its base.
+    std::optional<std::uint32_t> receiving_player_entity;
 };
 
 class GoldSrcPacketEntityDecoder final {

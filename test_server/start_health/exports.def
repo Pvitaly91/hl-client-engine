@@ -1,0 +1,6 @@
+LIBRARY hlclient_test_start_health
+EXPORTS
+ GiveFnptrsToDll=_GiveFnptrsToDll@8
+ Meta_Query
+ Meta_Attach
+ Meta_Detach

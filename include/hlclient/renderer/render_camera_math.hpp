@@ -83,5 +83,9 @@ struct RenderMatrixResult {
 [[nodiscard]] RenderMatrixResult camera_view_projection(
     const RenderCamera& camera,
     RenderExtent extent) noexcept;
+// Uses the world camera's optical parameters but a fixed +X-forward, Z-up
+// camera at the origin. First-person Studio geometry stays camera-local.
+[[nodiscard]] RenderCamera camera_local_first_person_camera(
+    const RenderCamera& world_camera) noexcept;
 
 } // namespace hlclient::renderer

@@ -283,7 +283,12 @@ void add_history_statistics(HistorySignatureHasher& hash,
         return anchor->value() == UINT32_MAX ? 0U : anchor->value() + 1U;
     }
     if (history.session().prediction_profile ==
-        PredictionCompatibilityProfile::reference_carrier_dry_walk_v1) {
+            PredictionCompatibilityProfile::reference_carrier_dry_walk_v1 ||
+        history.session().prediction_profile == PredictionCompatibilityProfile::
+            reference_carrier_jump_duck_v2 ||
+        history.session().prediction_profile == PredictionCompatibilityProfile::
+            reference_carrier_jump_duck_weapon_v3 ||
+        history.session().prediction_profile == PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4) {
         const auto boundary =
             history.anchor().movement_state()->source_command_sequence();
         return boundary == UINT32_MAX ? 0U : boundary + 1U;
@@ -444,7 +449,12 @@ LocalPredictionHistoryState::create_initial(
                                  : "prediction-history limits are invalid")};
     }
     const bool reference = session.prediction_profile ==
-        PredictionCompatibilityProfile::reference_carrier_dry_walk_v1;
+            PredictionCompatibilityProfile::reference_carrier_dry_walk_v1 ||
+        session.prediction_profile == PredictionCompatibilityProfile::
+            reference_carrier_jump_duck_v2 ||
+        session.prediction_profile == PredictionCompatibilityProfile::
+            reference_carrier_jump_duck_weapon_v3 ||
+        session.prediction_profile == PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4;
     if ((reference ? initial_state.source_command_sequence() == 0U
                    : initial_state.source_command_sequence() != 0U) ||
         initial_state.command_profile() != session.command_profile ||
@@ -607,13 +617,25 @@ LocalPredictionAppendResult append_local_prediction_commands(
                 return result;
             }
             const auto required_command_profile =
-                history.session().prediction_profile ==
+                history.session().prediction_profile == PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4
+                    ? goldsrc::GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_jump_duck_weapon_use_prediction_v4
+                    : history.session().prediction_profile ==
                         PredictionCompatibilityProfile::
-                            reference_carrier_dry_walk_v1
+                            reference_carrier_jump_duck_v2
                     ? goldsrc::GoldSrcUserCmdCompatibilityProfile::
-                          public_goldsrc48_dry_walk_prediction_v1
-                    : goldsrc::GoldSrcUserCmdCompatibilityProfile::
-                          synthetic_usercmd_v1;
+                          public_goldsrc48_jump_duck_prediction_v2
+                    : history.session().prediction_profile ==
+                              PredictionCompatibilityProfile::
+                                  reference_carrier_jump_duck_weapon_v3
+                        ? goldsrc::GoldSrcUserCmdCompatibilityProfile::
+                              public_goldsrc48_jump_duck_weapon_prediction_v3
+                    : history.session().prediction_profile ==
+                              PredictionCompatibilityProfile::
+                                  reference_carrier_dry_walk_v1
+                        ? goldsrc::GoldSrcUserCmdCompatibilityProfile::
+                              public_goldsrc48_dry_walk_prediction_v1
+                        : goldsrc::GoldSrcUserCmdCompatibilityProfile::
+                              synthetic_usercmd_v1;
             if (append.command->compatibility_profile() !=
                     required_command_profile ||
                 append.pre_command_state->command_profile() !=

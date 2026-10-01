@@ -1,15 +1,130 @@
 #include <hlclient/core/command_line.hpp>
+#include <hlclient/core/remote_audio_peer_plan.hpp>
+#include <hlclient/core/manual_session_timing.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
 using hlclient::core::parse_command_line;
 using hlclient::core::RendererBackend;
+
+TEST_CASE("Same-host peer plan keeps both clients audible when focused", "[e9][core][command-line]") {
+    const std::vector<std::wstring> args{L"--renderer",L"opengl",L"--connect",L"127.0.0.1:27243",
+        L"--stop-after",L"live-visual-control",L"--live-input",L"keyboard-mouse",L"--game",L"valve",
+        L"--name",L"fixture",L"--auth-provider",L"steam",L"--steam-api-runtime",L"D:/fixture/steam_api.dll",
+        L"--basedir",L"D:/fixture",L"--live-session-seconds",L"45",L"--prediction",L"reference"};
+    const auto plan=hlclient::core::remote_audio_peer_plan(args); REQUIRE(plan);
+    std::size_t client_index = 0;
+    for(const auto& client:{plan->listener,plan->mover}) {
+        std::vector<std::string> narrow;
+        for(const auto& arg:client) {
+            std::string converted; for(const auto c:arg) converted.push_back(static_cast<char>(c));
+            narrow.push_back(std::move(converted));
+        }
+        std::vector<std::string_view> views; for(const auto& arg:narrow) views.push_back(arg);
+        const auto parsed=parse_command_line(views); REQUIRE(parsed);
+        CHECK(parsed.options->connect_endpoint=="127.0.0.1:27243");
+        CHECK(parsed.options->reference_prediction);
+        CHECK(parsed.options->live_input==hlclient::core::LiveInputMode::keyboard_mouse);
+        CHECK(parsed.options->player_name==(client_index++==0 ? "HLC_E9_A" : "HLC_E9_B"));
+        CHECK(parsed.options->audio_volume==35);
+        CHECK_FALSE(parsed.options->audio_on_focus_loss);
+    }
+    for(const auto key:{L"--connect",L"--live-input",L"--renderer",L"--name",L"--auth-provider",L"--basedir",L"--live-session-seconds"}) {
+        auto bad=args; *std::next(std::find(bad.begin(),bad.end(),key))=L"";
+        CHECK_FALSE(hlclient::core::remote_audio_peer_plan(bad));
+    }
+    for(const auto& override_arguments : std::vector<std::vector<std::wstring>>{
+            {L"--audio-volume", L"0"}, {L"--audio-on-focus-loss"}}) {
+        auto bad=args;
+        bad.insert(bad.end(),override_arguments.begin(),override_arguments.end());
+        CHECK_FALSE(hlclient::core::remote_audio_peer_plan(bad));
+    }
+    const std::array<std::string_view,1> invalid{"--audio-on-focus-loss"}; CHECK_FALSE(parse_command_line(invalid));
+}
+
+TEST_CASE("Manual timers accept long or explicitly user-ended sessions without relaxing startup", "[core][command-line][manual-timing]") {
+    const std::vector<std::string_view> base{"--connect", "127.0.0.1:27243", "--stop-after", "live-visual-control",
+        "--live-input", "keyboard-mouse", "--basedir", "D:/fixture", "--game", "valve",
+        "--auth-provider", "steam", "--steam-api-runtime", "D:/fixture/api.dll"};
+    for (const auto value : {"1", "45", "300", "3600", "86400"}) {
+        auto args = base; args.insert(args.end(), {"--live-session-seconds", value});
+        const auto parsed = parse_command_line(args); INFO(parsed.error); REQUIRE(parsed);
+        CHECK(parsed.options->live_session_seconds);
+        CHECK_FALSE(parsed.options->live_session_unlimited);
+    }
+    for (const auto value : {"0", "-1", "86401", "999999999999999999999", "1.5", "none"}) {
+        auto args = base; args.insert(args.end(), {"--live-session-seconds", value});
+        CHECK_FALSE(parse_command_line(args));
+    }
+    auto unlimited = base; unlimited.push_back("--live-session-unlimited");
+    const auto parsed = parse_command_line(unlimited); REQUIRE(parsed);
+    CHECK(parsed.options->live_session_unlimited); CHECK_FALSE(parsed.options->live_session_seconds);
+    auto duplicate = unlimited; duplicate.push_back("--live-session-unlimited"); CHECK_FALSE(parse_command_line(duplicate));
+    auto conflicting = unlimited; conflicting.insert(conflicting.end(), {"--live-session-seconds", "45"}); CHECK_FALSE(parse_command_line(conflicting));
+    unlimited[5] = "scripted-damage-respawn-check"; CHECK_FALSE(parse_command_line(unlimited));
+    const std::array<std::string_view, 1> out_of_context{"--live-session-unlimited"}; CHECK_FALSE(parse_command_line(out_of_context));
+    using hlclient::core::manual_client_wait_expired;
+    CHECK_FALSE(manual_client_wait_expired(59'999U, false, std::nullopt));
+    CHECK(manual_client_wait_expired(60'000U, false, std::nullopt));
+    CHECK_FALSE(manual_client_wait_expired(86'400'000U, true, std::nullopt));
+    CHECK_FALSE(manual_client_wait_expired(359'999U, true, 300U));
+    CHECK(manual_client_wait_expired(360'000U, true, 300U));
+    std::vector<std::wstring> peer{L"--connect",L"127.0.0.1:27243",L"--stop-after",L"live-visual-control",
+        L"--live-input",L"keyboard-mouse",L"--renderer",L"opengl",L"--game",L"valve",L"--name",L"fixture",
+        L"--auth-provider",L"steam",L"--steam-api-runtime",L"D:/fixture/api.dll",L"--basedir",L"D:/fixture",L"--live-session-unlimited"};
+    const auto plan = hlclient::core::remote_audio_peer_plan(peer); REQUIRE(plan);
+    for (const auto& client : {plan->listener, plan->mover}) {
+        CHECK(std::find(client.begin(), client.end(), L"--live-session-unlimited") != client.end());
+        CHECK(std::find(client.begin(), client.end(), L"--live-session-seconds") == client.end());
+    }
+    peer.insert(peer.end(), {L"--live-session-seconds", L"45"});
+    CHECK_FALSE(hlclient::core::remote_audio_peer_plan(peer));
+}
+
+TEST_CASE("Test start health accepts only the explicit owned reference manual profile", "[core][command-line][test-start-health]") {
+    std::array<std::string_view, 18> args{"--connect", "127.0.0.1:27243", "--stop-after", "live-visual-control",
+        "--live-input", "keyboard-mouse", "--prediction", "reference", "--auth-provider", "steam",
+        "--steam-api-runtime", "D:/fixture/steam_api.dll", "--name", "HLC50_0123456789abcdef01234567",
+        "--basedir", "D:/fixture", "--test-start-health", "50"};
+    const auto parsed = parse_command_line(args);
+    REQUIRE(parsed); CHECK(parsed.options->test_start_health);
+    args[17]="100"; CHECK_FALSE(parse_command_line(args)); args[17]="50";
+    args[1]="192.0.2.1:27243"; CHECK_FALSE(parse_command_line(args)); args[1]="127.0.0.1:27243";
+    args[7]="off"; CHECK_FALSE(parse_command_line(args)); args[7]="reference";
+    args[5]="scripted-damage-respawn-check"; CHECK_FALSE(parse_command_line(args));
+}
+
+TEST_CASE("Glock fire mute diagnostic is opt-in and restricted to manual Half-Life visuals",
+          "[core][command-line][audio-diagnostic]") {
+    const std::array<std::string_view, 17> manual{
+        "--renderer", "opengl", "--connect", "127.0.0.1:27243",
+        "--stop-after", "live-visual-control", "--live-input", "keyboard-mouse",
+        "--basedir", "D:/fixture", "--game", "valve",
+        "--auth-provider", "steam", "--steam-api-runtime", "D:/fixture/steam_api.dll",
+        "--mute-glock-fire-sound"};
+    const auto accepted=parse_command_line(manual);
+    REQUIRE(accepted);
+    CHECK(accepted.options->mute_glock_fire_sound);
+    auto invalid=manual;
+    invalid[7]="scripted-fire-reload-check";
+    CHECK_FALSE(parse_command_line(invalid));
+    invalid[7]="keyboard-mouse";
+    invalid[5]="delta-schemas";
+    CHECK_FALSE(parse_command_line(invalid));
+    auto duplicate=std::vector<std::string_view>{manual.begin(),manual.end()};
+    duplicate.push_back("--mute-glock-fire-sound");
+    CHECK_FALSE(parse_command_line(duplicate));
+    const std::array<std::string_view, 5> replay{"--renderer", "null",
+        "--runtime-replay-fixture", "basic-mixed", "--mute-glock-fire-sound"};
+    CHECK_FALSE(parse_command_line(replay));
+}
 
 TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
 {
@@ -23,6 +138,7 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     CHECK_FALSE(result.options->net_trace);
     CHECK_FALSE(result.options->view_world);
     CHECK_FALSE(result.options->view_entity_snapshot);
+    CHECK_FALSE(result.options->mute_glock_fire_sound);
     CHECK_FALSE(result.options->base_directory.has_value());
     CHECK(result.options->game_directory == "valve");
     CHECK_FALSE(result.options->connect_endpoint.has_value());
@@ -411,6 +527,43 @@ TEST_CASE("Command line parser validates explicit connect request mode", "[core]
         const std::array wrong_mode{
             std::string_view{"--prediction"}, std::string_view{"reference"}};
         CHECK_FALSE(parse_command_line(wrong_mode));
+    }
+
+    SECTION("bounded fire and reload input requires explicit live visual mode")
+    {
+        const std::array arguments{
+            std::string_view{"--renderer"}, std::string_view{"opengl"},
+            std::string_view{"--connect"}, std::string_view{"127.0.0.1:27243"},
+            std::string_view{"--stop-after"},
+            std::string_view{"live-visual-control"},
+            std::string_view{"--live-input"},
+            std::string_view{"scripted-fire-reload-check"},
+            std::string_view{"--prediction"}, std::string_view{"reference"},
+            std::string_view{"--basedir"}, std::string_view{"D:/Half-Life"},
+            std::string_view{"--game"}, std::string_view{"valve"},
+            std::string_view{"--auth-provider"}, std::string_view{"steam"},
+            std::string_view{"--steam-api-runtime"},
+            std::string_view{"D:/Steam/steam_api.dll"},
+        };
+        const auto result = parse_command_line(arguments);
+        REQUIRE(result);
+        CHECK(result.options->live_input ==
+              hlclient::core::LiveInputMode::scripted_fire_reload_check);
+        CHECK(result.options->reference_prediction);
+        auto presentation_arguments = arguments;
+        presentation_arguments[7] = "scripted-fire-reload-presentation-check";
+        const auto presentation = parse_command_line(presentation_arguments);
+        REQUIRE(presentation);
+        CHECK(presentation.options->live_input ==
+              hlclient::core::LiveInputMode::scripted_fire_reload_presentation_check);
+        CHECK(presentation.options->reference_prediction);
+        auto lifecycle_arguments = arguments;
+        lifecycle_arguments[7] = "scripted-damage-respawn-check";
+        const auto lifecycle = parse_command_line(lifecycle_arguments);
+        REQUIRE(lifecycle);
+        CHECK(lifecycle.options->live_input ==
+              hlclient::core::LiveInputMode::scripted_damage_respawn_check);
+        CHECK(lifecycle.options->reference_prediction);
     }
 
     SECTION("live visual mode rejects D renderer and missing explicit input")

@@ -1,6 +1,7 @@
 #include <hlclient/goldsrc/movement/goldsrc_local_movement.hpp>
 
 #include <hlclient/goldsrc/movement/goldsrc_movement_math.hpp>
+#include <hlclient/goldsrc/reference_client_move.hpp>
 
 #include <algorithm>
 #include <array>
@@ -31,8 +32,11 @@ struct WorkingState {
     PlayerMovementMode mode{PlayerMovementMode::airborne};
     PlayerGroundStateCreateInfo ground{};
     assets::AssetVector3 view_offset{};
+    std::uint32_t duck_time_milliseconds{0U};
+    bool in_duck_transition{false};
     PlayerMovementContents last_contents{PlayerMovementContents::empty};
     float friction_multiplier{1.0F};
+    bool reference_walk{false};
 };
 
 struct OperationError {
@@ -227,6 +231,7 @@ void record_diagnostic(
     switch (profile) {
     case LocalMovementCollisionProfile::world_only_v1:
     case LocalMovementCollisionProfile::explicit_synthetic_static_brush_v1:
+    case LocalMovementCollisionProfile::reference_brush_scene_v1:
         return true;
     }
     return false;
@@ -271,6 +276,9 @@ void record_diagnostic(
     const LocalMovementCollisionProfile profile) noexcept
 {
     switch (hit.kind) {
+    case hlclient::movement::PlayerMovementHitKind::brush_entity:
+        return profile == LocalMovementCollisionProfile::reference_brush_scene_v1 &&
+            hit.source_model_index != 0U && hit.stable_instance_ordinal && hit.source_entity_index;
     case hlclient::movement::PlayerMovementHitKind::world:
         return hit.source_model_index == 0U &&
             !hit.stable_instance_ordinal && !hit.source_entity_index;
@@ -422,8 +430,14 @@ void record_diagnostic(
     output.ground.probe_fraction = state.ground_state().probe_fraction();
     output.ground.evidence_profile = state.ground_state().evidence_profile();
     output.view_offset = state.view_offset();
+    output.duck_time_milliseconds = state.duck_time_milliseconds();
+    output.in_duck_transition = state.in_duck_transition();
     output.last_contents = state.last_valid_contents();
     output.friction_multiplier = state.friction_multiplier();
+    output.reference_walk = state.command_profile() ==
+        hlclient::movement::GoldSrcMovementCommandProfile::reference_wire_dry_walk_v1 ||
+        state.command_profile() ==
+        hlclient::movement::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2;
     return output;
 }
 
@@ -722,7 +736,7 @@ void record_diagnostic(
     }
     const auto into_ground = movement_dot(
         state.velocity, trace.collision_plane->normal);
-    if (into_ground < 0.0F) {
+    if (!state.reference_walk && into_ground < 0.0F) {
         const auto clipped = clip_velocity(
             state.velocity, trace.collision_plane->normal, 1.0F,
             static_cast<float>(config.stop_epsilon));
@@ -803,6 +817,47 @@ void record_diagnostic(
         state.view_offset = config.standing_view_offset;
         ++statistics.duck_exit_count;
     }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<OperationError> apply_reference_duck(
+    WorkingState& state, const bool held, const bool pressed,
+    const ILocalMovementCollision& collision,
+    GoldSrcLocalMovementScratch& scratch,
+    const GoldSrcLocalMovementConfig& config,
+    PlayerMovementStatistics& statistics)
+{
+    if (!held) {
+        if (auto error = apply_duck_transition(
+                state, false, collision, scratch, config, statistics))
+            return error;
+        if (state.hull == PlayerMovementHull::standing) {
+            state.in_duck_transition = false;
+            state.duck_time_milliseconds = 0U;
+            state.view_offset = config.standing_view_offset;
+        }
+        return std::nullopt;
+    }
+    if (pressed && state.hull == PlayerMovementHull::standing) {
+        state.duck_time_milliseconds = 1000U;
+        state.in_duck_transition = true;
+    }
+    if (!state.in_duck_transition)
+        return std::nullopt;
+    if (state.duck_time_milliseconds <= 600U || !state.ground.grounded) {
+        if (auto error = apply_duck_transition(
+                state, true, collision, scratch, config, statistics))
+            return error;
+        state.in_duck_transition = false;
+        return std::nullopt;
+    }
+    const auto elapsed = 1000.0F -
+        static_cast<float>(state.duck_time_milliseconds);
+    const auto t = std::clamp(elapsed / 400.0F, 0.0F, 1.0F);
+    const auto eased = t * t * (3.0F - 2.0F * t);
+    // During the standing-hull phase the final origin adjustment has not
+    // occurred. The eye trajectory therefore targets duck view minus 18.
+    state.view_offset.z = 28.0F + (-6.0F - 28.0F) * eased;
     return std::nullopt;
 }
 
@@ -1204,6 +1259,23 @@ void record_diagnostic(
     return output;
 }
 
+// A computed plane intersection is double precision but a movement origin is
+// binary32. Resolve only that generated contact (never a server seed), at most
+// one representable value outward on each nonzero plane axis. The full hull
+// must still be free; no tolerance changes the BSP's solid classification.
+[[nodiscard]] assets::AssetVector3 outward_contact(
+    assets::AssetVector3 contact, const assets::AssetVector3& normal) noexcept
+{
+    const auto outward = [](float value, float direction) {
+        return direction == 0.0F ? value : std::nextafter(value,
+            std::copysign(std::numeric_limits<float>::infinity(), direction));
+    };
+    contact.x = outward(contact.x, normal.x);
+    contact.y = outward(contact.y, normal.y);
+    contact.z = outward(contact.z, normal.z);
+    return contact;
+}
+
 [[nodiscard]] StepResult step_candidate(
     const assets::AssetVector3& start_origin,
     const assets::AssetVector3& start_velocity,
@@ -1211,6 +1283,7 @@ void record_diagnostic(
     const PlayerMovementHull hull,
     const std::uint32_t command_sequence,
     const float step_size,
+    const bool reference_walk,
     const ILocalMovementCollision& collision,
     hlclient::collision::CollisionQueryScratch& query_scratch,
     GoldSrcLocalMovementScratch& scratch,
@@ -1242,7 +1315,7 @@ void record_diagnostic(
         return output;
     }
     if (up_trace.result->start_solid || up_trace.result->all_solid ||
-        trace_has_contact(*up_trace.result)) {
+        (!reference_walk && trace_has_contact(*up_trace.result))) {
         return output;
     }
     auto horizontal = slide_move(
@@ -1259,7 +1332,7 @@ void record_diagnostic(
         horizontal.origin.y,
         static_cast<float>(
             horizontal.origin.z - step_size -
-            static_cast<float>(config.ground_probe_distance)),
+            (reference_walk ? 0.0F : static_cast<float>(config.ground_probe_distance))),
     };
     const auto down_trace = collision.trace_hull(
         horizontal.origin, downward, hull, query_scratch,
@@ -1290,8 +1363,15 @@ void record_diagnostic(
             static_cast<float>(config.minimum_walkable_normal_z)) {
         return output;
     }
-    const auto clearance = collision.test_position(
-        landing.end_position, hull, query_scratch, config.collision_query);
+    auto landing_position = landing.end_position;
+    auto clearance = collision.test_position(
+        landing_position, hull, query_scratch, config.collision_query);
+    if (reference_walk && clearance && clearance.result &&
+        clearance.result->status == LocalMovementPositionStatus::blocking) {
+        landing_position = outward_contact(landing_position, landing.collision_plane->normal);
+        clearance = collision.test_position(landing_position, hull, query_scratch,
+            config.collision_query);
+    }
     if (!clearance || !clearance.result) {
         output.error = collision_failure(
             clearance.error, "step landing clearance query failed");
@@ -1316,7 +1396,7 @@ void record_diagnostic(
         return output;
     }
     output.available = true;
-    output.origin = landing.end_position;
+    output.origin = landing_position;
     output.velocity = horizontal.velocity;
     return output;
 }
@@ -1325,9 +1405,32 @@ void record_diagnostic(
     WorkingState& state,
     const GoldSrcMovementEnvironment& environment);
 
+[[nodiscard]] std::array<float, 2U> movement_axes(
+    const GoldSrcUserCmdState& command, const float scale,
+    const float maximum_speed) noexcept
+{
+    auto forward = command.forward_move();
+    auto side = command.side_move();
+    if (scale != 1.0F) {
+        // Valve PM_CheckParameters caps the unmodified command before
+        // PM_Duck scales the simulation-local movement copy.
+        const auto length = std::hypot(forward, side);
+        if (length > maximum_speed && length > 0.0F) {
+            const auto cap = maximum_speed / length;
+            forward *= cap;
+            side *= cap;
+        }
+        forward *= scale;
+        side *= scale;
+    }
+    return {forward, side};
+}
+
 [[nodiscard]] std::optional<OperationError> apply_walk_move(
     WorkingState& state,
     const GoldSrcUserCmdState& command,
+    const float movement_scale,
+    const float command_maximum_speed,
     const float duration,
     const GoldSrcMovementEnvironment& environment,
     const ILocalMovementCollision& collision,
@@ -1336,6 +1439,9 @@ void record_diagnostic(
     PlayerMovementStatistics& statistics,
     std::vector<PlayerMovementTouch>& touches)
 {
+    // PM_PlayerMove/PM_WalkMove accelerate horizontally; contact clipping
+    // belongs to the slide candidate, not to wish-direction construction.
+    if (state.reference_walk) state.velocity.z = 0.0F;
     auto friction = apply_horizontal_ground_friction(
         state.velocity, environment.stop_speed(), environment.friction(),
         state.friction_multiplier, duration);
@@ -1346,9 +1452,11 @@ void record_diagnostic(
             "ground friction failed"};
     }
     state.velocity = *friction.value;
+    const auto axes = movement_axes(
+        command, movement_scale, command_maximum_speed);
     const auto wish = yaw_only_wish_direction(
-        command.view_angles()[1U], command.forward_move(), command.side_move(),
-        environment.maximum_speed());
+        command.view_angles()[1U], axes[0U], axes[1U],
+        command_maximum_speed);
     if (!wish || !wish.wish) {
         return OperationError{
             LocalMovementSimulationErrorCode::non_finite_result,
@@ -1356,7 +1464,7 @@ void record_diagnostic(
             "ground wish direction failed"};
     }
     auto wish_direction = wish.wish->direction;
-    if (state.ground.grounded) {
+    if (state.ground.grounded && !state.reference_walk) {
         const auto projection = movement_dot(
             wish_direction, state.ground.plane.normal);
         const auto projected = subtract(
@@ -1382,7 +1490,7 @@ void record_diagnostic(
             "ground acceleration failed"};
     }
     auto ground_velocity = accelerated.value;
-    if (state.ground.grounded) {
+    if (state.ground.grounded && !state.reference_walk) {
         const auto projected_velocity = clip_velocity(
             *accelerated.value, state.ground.plane.normal, 1.0F,
             static_cast<float>(config.stop_epsilon));
@@ -1431,12 +1539,17 @@ void record_diagnostic(
         return direct.error;
     }
     const auto direct_diagnostic = scratch.last_diagnostic;
-    ++statistics.step_attempt_count;
-    auto step = step_candidate(
+    StepResult step;
+    // A clear horizontal walk returns directly in the pinned reference.
+    // In particular, do not invent step-down snapping when walking off an edge.
+    if (!state.reference_walk || !direct_touches.empty()) {
+      ++statistics.step_attempt_count;
+      step = step_candidate(
         start, velocity, duration, state.hull,
-        command.command_sequence().value(), environment.step_size(), collision,
+        command.command_sequence().value(), environment.step_size(), state.reference_walk, collision,
         scratch.step_candidate_collision, scratch, config, step_statistics,
         step_touches);
+    }
     if (step.error) {
         return step.error;
     }
@@ -1445,7 +1558,7 @@ void record_diagnostic(
         ? horizontal_progress_squared(start, step.origin)
         : -1.0;
     const bool select_step =
-        step.available && step_progress > direct_progress;
+        step.available && (state.reference_walk ? step_progress >= direct_progress : step_progress > direct_progress);
     const auto selected_diagnostic =
         select_step ? scratch.last_diagnostic : direct_diagnostic;
     const auto& selected_touches = select_step ? step_touches : direct_touches;
@@ -1468,6 +1581,7 @@ void record_diagnostic(
     }
     state.origin = select_step ? step.origin : direct.origin;
     state.velocity = select_step ? step.velocity : direct.velocity;
+    if (select_step && state.reference_walk) state.velocity.z = direct.velocity.z;
     // Step probing is speculative. Recommit the chosen route's terminal
     // diagnostic so a rejected step cannot label a successful direct result.
     if (selected_diagnostic) {
@@ -1496,6 +1610,8 @@ void record_diagnostic(
 [[nodiscard]] std::optional<OperationError> apply_air_move(
     WorkingState& state,
     const GoldSrcUserCmdState& command,
+    const float movement_scale,
+    const float command_maximum_speed,
     const float duration,
     const float effective_gravity,
     const GoldSrcMovementEnvironment& environment,
@@ -1509,9 +1625,11 @@ void record_diagnostic(
     if (auto error = clamp_velocity(state, environment)) {
         return error;
     }
+    const auto axes = movement_axes(
+        command, movement_scale, command_maximum_speed);
     const auto wish = yaw_only_wish_direction(
-        command.view_angles()[1U], command.forward_move(), command.side_move(),
-        environment.maximum_speed());
+        command.view_angles()[1U], axes[0U], axes[1U],
+        command_maximum_speed);
     if (!wish || !wish.wish) {
         return OperationError{
             LocalMovementSimulationErrorCode::non_finite_result,
@@ -1562,6 +1680,8 @@ void record_diagnostic(
     info.ground = state.ground;
     info.view_offset = state.view_offset;
     info.old_buttons = command.buttons();
+    info.duck_time_milliseconds = state.duck_time_milliseconds;
+    info.in_duck_transition = state.in_duck_transition;
     info.source_command_sequence = command.command_sequence().value();
     info.simulation_time_nanoseconds = simulation_time;
     info.last_valid_contents = state.last_contents;
@@ -1579,7 +1699,11 @@ void record_diagnostic(
 bool valid_goldsrc_local_movement_config(
     const GoldSrcLocalMovementConfig& config) noexcept
 {
-    return finite(config.maximum_command_duration_seconds) &&
+    return finite(config.ground_button_speed_limit_multiplier) &&
+        config.ground_button_speed_limit_multiplier > 0.0F &&
+        config.ground_button_speed_limit_multiplier <= 1.0F &&
+        (config.ground_button_speed_limit_mask != 0U || config.ground_button_speed_limit_multiplier == 1.0F) &&
+        finite(config.maximum_command_duration_seconds) &&
         config.maximum_command_duration_seconds > 0.0 &&
         config.maximum_command_duration_seconds <= 1.0 &&
         finite(config.maximum_substep_duration_seconds) &&
@@ -1735,10 +1859,16 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
     const bool reference_dry_walk = previous_state.command_profile() ==
         hlclient::movement::GoldSrcMovementCommandProfile::
             reference_wire_dry_walk_v1;
-    if (previous_state.compatibility_profile() != hlclient::movement::
-            GoldSrcMovementCompatibilityProfile::
-                public_valve_pm_shared_dry_walk_subset_v1 ||
-        (!reference_dry_walk &&
+    const bool reference_actions = previous_state.command_profile() ==
+        hlclient::movement::GoldSrcMovementCommandProfile::
+            reference_wire_jump_duck_v2;
+    if (previous_state.compatibility_profile() !=
+            (reference_actions
+                ? hlclient::movement::GoldSrcMovementCompatibilityProfile::
+                      public_valve_pm_shared_dry_actions_subset_v2
+                : hlclient::movement::GoldSrcMovementCompatibilityProfile::
+                      public_valve_pm_shared_dry_walk_subset_v1) ||
+        (!reference_dry_walk && !reference_actions &&
          previous_state.command_profile() != hlclient::movement::
              GoldSrcMovementCommandProfile::synthetic_usercmd_semantics_v1) ||
         previous_state.mode() == PlayerMovementMode::invalid_or_stuck) {
@@ -1760,11 +1890,19 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
         return fail(LocalMovementSimulationErrorCode::invalid_environment,
             statistics, "movement environment is not executable");
     }
-    const auto expected_command_profile = reference_dry_walk
+    const auto expected_command_profile = reference_actions
+        ? GoldSrcUserCmdCompatibilityProfile::
+              public_goldsrc48_jump_duck_prediction_v2
+        : reference_dry_walk
         ? GoldSrcUserCmdCompatibilityProfile::
               public_goldsrc48_dry_walk_prediction_v1
         : GoldSrcUserCmdCompatibilityProfile::synthetic_usercmd_v1;
-    if (command.compatibility_profile() != expected_command_profile) {
+    if (command.compatibility_profile() != expected_command_profile &&
+        !(reference_actions && command.compatibility_profile() ==
+              GoldSrcUserCmdCompatibilityProfile::
+                  public_goldsrc48_jump_duck_weapon_prediction_v3) &&
+        !(reference_actions && command.compatibility_profile() ==
+              GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_jump_duck_weapon_use_prediction_v4)) {
         return fail(
             command.compatibility_profile() ==
                     GoldSrcUserCmdCompatibilityProfile::
@@ -1796,13 +1934,32 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
     // reference dry-walk slice accepts at most that duration and executes
     // one kernel step; the older synthetic profile keeps its own 10 ms cap.
     if (reference_dry_walk &&
-        (command.msec() > 50U || command.buttons() != 0U ||
+        (command.msec() > 50U ||
+         (command.buttons() & ~kReferenceGoldSrcButtonDirections) != 0U ||
          command.up_move() != 0.0F || command.impulse() != 0U)) {
         return fail(LocalMovementSimulationErrorCode::stock_semantics_pending,
             statistics,
             "reference dry-walk kernel excludes long commands and action buttons");
     }
-    const auto substep_count_wide = reference_dry_walk ? 1U :
+    const bool use_profile = command.compatibility_profile() ==
+        GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_jump_duck_weapon_use_prediction_v4;
+    const bool weapon_inert_profile = use_profile || command.compatibility_profile() ==
+        GoldSrcUserCmdCompatibilityProfile::
+            public_goldsrc48_jump_duck_weapon_prediction_v3;
+    const std::uint16_t action_mask =
+        kReferenceGoldSrcButtonDirections |
+        kSyntheticGoldSrcButtonJump | kSyntheticGoldSrcButtonDuck |
+        (weapon_inert_profile
+            ? kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload
+            : 0U) | (use_profile ? kReferenceGoldSrcButtonUse : 0U);
+    if (reference_actions &&
+        (command.msec() > 50U || (command.buttons() & ~action_mask) != 0U ||
+         command.up_move() != 0.0F || command.impulse() != 0U)) {
+        return fail(LocalMovementSimulationErrorCode::stock_semantics_pending,
+            statistics, "reference action kernel excludes unsupported fields");
+    }
+    const auto substep_count_wide =
+        (reference_dry_walk || reference_actions) ? 1U :
         static_cast<std::size_t>(
             std::ceil(duration / config.maximum_substep_duration_seconds));
     if (substep_count_wide == 0U ||
@@ -1870,6 +2027,8 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
         (previous_state.old_buttons() & kSyntheticGoldSrcButtonJump) == 0U;
     const bool duck_requested =
         (command.buttons() & kSyntheticGoldSrcButtonDuck) != 0U;
+    const bool duck_pressed = duck_requested &&
+        (previous_state.old_buttons() & kSyntheticGoldSrcButtonDuck) == 0U;
     const auto equal_substep = duration /
         static_cast<double>(substep_count_wide);
     double consumed_duration = 0.0;
@@ -1893,12 +2052,29 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
             return fail(error->code, statistics, error->context,
                 std::move(error->collision_error));
         }
+        const auto movement_scale = reference_actions &&
+                state.hull == PlayerMovementHull::ducked
+            ? (1.0F / 3.0F) : 1.0F;
+        // Initial ground state, before jump/duck. This local cap is recomputed
+        // once per simulation step and is never written into MoveVars/history.
+        const auto command_maximum_speed = environment.maximum_speed() *
+            (reference_actions && state.ground.grounded &&
+             (command.buttons() & config.ground_button_speed_limit_mask) != 0U
+                ? config.ground_button_speed_limit_multiplier : 1.0F);
         if (substep == 0U) {
-            if (auto error = apply_duck_transition(
-                    state, duck_requested, collision, scratch, config,
-                    statistics)) {
-                return fail(error->code, statistics,
-                    error->context, std::move(error->collision_error));
+            if (reference_actions)
+                state.duck_time_milliseconds =
+                    state.duck_time_milliseconds > command.msec()
+                        ? state.duck_time_milliseconds - command.msec() : 0U;
+            const auto transition_error = reference_actions
+                ? apply_reference_duck(state, duck_requested, duck_pressed,
+                      collision, scratch, config, statistics)
+                : apply_duck_transition(state, duck_requested, collision,
+                      scratch, config, statistics);
+            if (transition_error) {
+                return fail(transition_error->code, statistics,
+                    transition_error->context,
+                    std::move(transition_error->collision_error));
             }
         }
         bool jumped = false;
@@ -1913,18 +2089,21 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
         if (state.ground.grounded && !jumped) {
             ++statistics.grounded_command_count;
             error = apply_walk_move(
-                state, command, dt, environment, collision, scratch, config,
+                state, command, movement_scale, command_maximum_speed, dt, environment, collision, scratch, config,
                 statistics, touches);
+            if (!error && state.reference_walk && !state.ground.grounded)
+                state.velocity.z -= effective_gravity * dt * 0.5F;
         } else {
             ++statistics.airborne_command_count;
             error = apply_air_move(
-                state, command, dt, effective_gravity, environment, collision,
+                state, command, movement_scale, command_maximum_speed, dt, effective_gravity, environment, collision,
                 scratch, config, statistics, touches);
         }
         if (error) {
             return fail(error->code, statistics, error->context,
                 std::move(error->collision_error));
         }
+        if (state.reference_walk && state.ground.grounded) state.velocity.z = 0.0F;
         if (auto clamp_error = clamp_velocity(state, environment)) {
             return fail(clamp_error->code, statistics,
                 clamp_error->context,

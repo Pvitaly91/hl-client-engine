@@ -397,6 +397,7 @@ evaluate_blend_pose(const assets::SkeletalModelAssetData& model,
             return error;
         }
         std::array<float, 6U> values{};
+        std::array<float, 3U> rotation_zero{}, rotation_one{};
         for (std::size_t channel_index = 0U; channel_index < 6U;
              ++channel_index) {
             const auto sampled = StudioFractionalAnimationChannelSampler::
@@ -411,6 +412,10 @@ evaluate_blend_pose(const assets::SkeletalModelAssetData& model,
                 return error;
             }
             values[channel_index] = sampled.sample->interpolated_value;
+            if (channel_index >= 3U) {
+                rotation_zero[channel_index - 3U] = sampled.sample->scaled_zero;
+                rotation_one[channel_index - 3U] = sampled.sample->scaled_one;
+            }
             ++output.channel_samples;
             if (sampled.sample->runs_examined >
                 std::numeric_limits<std::size_t>::max() -
@@ -441,11 +446,25 @@ evaluate_blend_pose(const assets::SkeletalModelAssetData& model,
             }
             values[channel_index] +=
                 controllers.values_by_controller_record[index];
+            if (channel_index >= 3U) {
+                rotation_zero[channel_index - 3U] +=
+                    controllers.values_by_controller_record[index];
+                rotation_one[channel_index - 3U] +=
+                    controllers.values_by_controller_record[index];
+            }
         }
         const assets::AssetVector3 translation{values[0U], values[1U],
                                                values[2U]};
-        const assets::AssetVector3 rotation{values[3U], values[4U], values[5U]};
-        const auto quaternion = quaternion_from_euler(rotation);
+        // Rotation channels describe endpoint orientations. Interpolating
+        // their Euler scalars first takes a long path at angle wraps and a
+        // different path for simultaneous rotations on multiple axes.
+        const assets::AssetVector3 first_rotation{
+            rotation_zero[0U], rotation_zero[1U], rotation_zero[2U]};
+        const assets::AssetVector3 second_rotation{
+            rotation_one[0U], rotation_one[1U], rotation_one[2U]};
+        const auto quaternion = slerp(quaternion_from_euler(first_rotation),
+                                      quaternion_from_euler(second_rotation),
+                                      frame.fraction);
         if (!finite_vector(translation) || !finite_quaternion(quaternion)) {
             return make_error(StudioPoseErrorCode::non_finite_pose,
                               "Sampled local bone transform is non-finite",
@@ -465,6 +484,65 @@ valid_model_identity(const StudioPoseModelIdentity& identity) noexcept
            identity.resource_identity.find('\\') == std::string::npos &&
            identity.resource_identity.find(':') == std::string::npos &&
            identity.resource_identity.front() != '/';
+}
+
+[[nodiscard]] std::optional<StudioPoseError> build_world_pose(
+    const assets::SkeletalModelAssetData& model,
+    const std::span<const ModelBoneLocalPose> local_bones,
+    std::vector<ModelBoneWorldPose>& world_bones,
+    const std::uint32_t sequence_index)
+{
+    if (local_bones.size() != model.bones.size()) {
+        return make_error(StudioPoseErrorCode::invalid_hierarchy,
+                          "Local pose count differs from model hierarchy", sequence_index);
+    }
+    world_bones.resize(model.bones.size());
+    std::vector<std::uint8_t> visit_state(model.bones.size(), 0U);
+    std::vector<std::size_t> chain;
+    chain.reserve(model.bones.size());
+    for (std::size_t start = 0U; start < model.bones.size(); ++start) {
+        if (visit_state[start] == 2U) continue;
+        chain.clear();
+        auto cursor = start;
+        while (visit_state[cursor] != 2U) {
+            if (visit_state[cursor] == 1U) {
+                return make_error(StudioPoseErrorCode::invalid_hierarchy,
+                                  "Studio bone hierarchy contains a cycle", sequence_index,
+                                  static_cast<std::uint32_t>(cursor));
+            }
+            visit_state[cursor] = 1U;
+            chain.push_back(cursor);
+            const auto parent = model.bones[cursor].parent_index;
+            if (parent == -1) break;
+            if (parent < 0 || static_cast<std::size_t>(parent) >= model.bones.size()) {
+                return make_error(StudioPoseErrorCode::invalid_hierarchy,
+                                  "Studio bone parent index is invalid", sequence_index,
+                                  static_cast<std::uint32_t>(cursor));
+            }
+            cursor = static_cast<std::size_t>(parent);
+        }
+        for (auto iterator = chain.rbegin(); iterator != chain.rend(); ++iterator) {
+            const auto index = *iterator;
+            if (!finite_vector(local_bones[index].translation) ||
+                !finite_quaternion(local_bones[index].rotation)) {
+                return make_error(StudioPoseErrorCode::non_finite_pose,
+                                  "Studio local pose is non-finite", sequence_index,
+                                  static_cast<std::uint32_t>(index));
+            }
+            const auto matrix = local_matrix(local_bones[index]);
+            const auto parent = model.bones[index].parent_index;
+            world_bones[index].transform = parent == -1 ? matrix :
+                concatenate(world_bones[static_cast<std::size_t>(parent)].transform, matrix);
+            if (!finite_matrix(world_bones[index].transform)) {
+                return make_error(StudioPoseErrorCode::non_finite_pose,
+                                  "Studio world bone matrix is non-finite", sequence_index,
+                                  static_cast<std::uint32_t>(index));
+            }
+            world_bones[index].normal_rotation = matrix_rotation(world_bones[index].transform);
+            visit_state[index] = 2U;
+        }
+    }
+    return std::nullopt;
 }
 
 struct CacheKey {
@@ -540,6 +618,10 @@ bool valid_studio_pose_evaluation_limits(
            limits.maximum_pose_cache_entries > 0U &&
            limits.maximum_pose_cache_entries <=
                kHardMaximumStudioPoseCacheEntries &&
+           limits.maximum_composition_samples > 0U &&
+           limits.maximum_composition_samples <= 3U &&
+           limits.maximum_composition_blend_evaluations > 0U &&
+           limits.maximum_composition_blend_evaluations <= 12U &&
            std::isfinite(limits.maximum_entity_scale) &&
            limits.maximum_entity_scale > 0.0F &&
            limits.maximum_entity_scale <= 65'536.0F;
@@ -1085,60 +1167,10 @@ StudioPoseEvaluator::evaluate(const StudioPoseModelIdentity& model_identity,
             }
         }
 
-        std::vector<ModelBoneWorldPose> world_bones(model.bones.size());
-        std::vector<std::uint8_t> visit_state(model.bones.size(), 0U);
-        std::vector<std::size_t> chain;
-        chain.reserve(model.bones.size());
-        for (std::size_t start = 0U; start < model.bones.size(); ++start) {
-            if (visit_state[start] == 2U) {
-                continue;
-            }
-            chain.clear();
-            auto cursor = start;
-            while (visit_state[cursor] != 2U) {
-                if (visit_state[cursor] == 1U) {
-                    return fail_pose(StudioPoseErrorCode::invalid_hierarchy,
-                                     "Studio bone hierarchy contains a cycle",
-                                     input.sequence_index,
-                                     static_cast<std::uint32_t>(cursor));
-                }
-                visit_state[cursor] = 1U;
-                chain.push_back(cursor);
-                const auto parent = model.bones[cursor].parent_index;
-                if (parent == -1) {
-                    break;
-                }
-                if (parent < 0 ||
-                    static_cast<std::size_t>(parent) >= model.bones.size()) {
-                    return fail_pose(StudioPoseErrorCode::invalid_hierarchy,
-                                     "Studio bone parent index is invalid",
-                                     input.sequence_index,
-                                     static_cast<std::uint32_t>(cursor));
-                }
-                cursor = static_cast<std::size_t>(parent);
-            }
-            for (auto iterator = chain.rbegin(); iterator != chain.rend();
-                 ++iterator) {
-                const auto bone_index = *iterator;
-                const auto matrix = local_matrix(local_bones[bone_index]);
-                const auto parent = model.bones[bone_index].parent_index;
-                world_bones[bone_index].transform =
-                    parent == -1
-                        ? matrix
-                        : concatenate(
-                              world_bones[static_cast<std::size_t>(parent)]
-                                  .transform,
-                              matrix);
-                if (!finite_matrix(world_bones[bone_index].transform)) {
-                    return fail_pose(StudioPoseErrorCode::non_finite_pose,
-                                     "Studio world bone matrix is non-finite",
-                                     input.sequence_index,
-                                     static_cast<std::uint32_t>(bone_index));
-                }
-                world_bones[bone_index].normal_rotation =
-                    matrix_rotation(world_bones[bone_index].transform);
-                visit_state[bone_index] = 2U;
-            }
+        std::vector<ModelBoneWorldPose> world_bones;
+        if (auto error = build_world_pose(model, local_bones, world_bones,
+                                          input.sequence_index)) {
+            return {std::nullopt, std::move(error)};
         }
 
         StudioPoseStatistics statistics;
@@ -1204,6 +1236,141 @@ StudioPoseEvaluator::evaluate(const StudioPoseModelIdentity& model_identity,
                          "Studio pose container length is invalid",
                          input.sequence_index);
     }
+}
+
+StudioPoseEvaluationResult StudioPoseEvaluator::compose(
+    const StudioPoseModelIdentity& identity,
+    const assets::SkeletalModelAssetData& model,
+    const StudioPoseCompositionInput& input,
+    const StudioPoseEvaluationLimits& limits) const
+{
+    if (!valid_studio_pose_evaluation_limits(limits))
+        return fail_pose(StudioPoseErrorCode::invalid_configuration, "Invalid composition limits");
+    if (!valid_model_identity(identity))
+        return fail_pose(StudioPoseErrorCode::invalid_model_identity, "Invalid composition model identity");
+    if (model.bones.size() > limits.maximum_bones)
+        return fail_pose(StudioPoseErrorCode::bone_limit_exceeded, "Composition bone limit exceeded");
+    if (!std::isfinite(input.previous_weight) || input.previous_weight < 0.0F ||
+        input.previous_weight > 1.0F || (!input.previous && input.previous_weight != 0.0F) ||
+        (input.layer.has_value() != !input.lower_bone_indices.empty()) ||
+        input.lower_bone_indices.size() > model.bones.size())
+        return fail_pose(StudioPoseErrorCode::invalid_composition, "Invalid previous weight or numeric layer mask");
+    const auto samples = 1U + static_cast<std::size_t>(input.previous.has_value()) +
+        static_cast<std::size_t>(input.layer.has_value());
+    if (samples > limits.maximum_composition_samples ||
+        model.bones.size() > limits.maximum_pose_matrices / (samples + 1U))
+        return fail_pose(StudioPoseErrorCode::composition_limit_exceeded, "Composition sample/matrix working-set limit exceeded");
+    try {
+        std::vector<bool> selected(model.bones.size(), false);
+        for (const auto index : input.lower_bone_indices) {
+            if (index >= selected.size() || selected[index])
+                return fail_pose(StudioPoseErrorCode::invalid_composition, "Layer bone index is invalid or duplicated");
+            selected[index] = true;
+        }
+        std::size_t blends = 0U;
+        for (const auto* sample : {&input.main,
+                input.previous ? &*input.previous : nullptr,
+                input.layer ? &*input.layer : nullptr}) {
+            if (!sample) continue;
+            if (sample->sequence_index >= model.sequences.size())
+                return fail_pose(StudioPoseErrorCode::invalid_sequence, "Composition sample sequence is unavailable", sample->sequence_index);
+            if (sample->entity_scale.x != input.main.entity_scale.x ||
+                sample->entity_scale.y != input.main.entity_scale.y ||
+                sample->entity_scale.z != input.main.entity_scale.z ||
+                sample->compatibility_profile != input.main.compatibility_profile)
+                return fail_pose(StudioPoseErrorCode::invalid_composition, "Composition samples disagree on scale/profile");
+            if (!checked_add(blends, model.sequences[sample->sequence_index].blend_count, blends) ||
+                blends > limits.maximum_composition_blend_evaluations)
+                return fail_pose(StudioPoseErrorCode::composition_limit_exceeded, "Composition total blend limit exceeded");
+        }
+        auto main = evaluate(identity, model, input.main, limits);
+        if (!main) return main;
+        auto previous = input.previous ? evaluate(identity, model, *input.previous, limits) : StudioPoseEvaluationResult{};
+        if (input.previous && !previous) return previous;
+        auto layer = input.layer ? evaluate(identity, model, *input.layer, limits) : StudioPoseEvaluationResult{};
+        if (input.layer && !layer) return layer;
+        std::vector<ModelBoneLocalPose> locals(main.pose->local_bones().begin(), main.pose->local_bones().end());
+        if (previous) for (std::size_t i = 0U; i < locals.size(); ++i)
+            locals[i] = blend_local_pose(locals[i], previous.pose->local_bones()[i], input.previous_weight);
+        if (layer) for (const auto index : input.lower_bone_indices)
+            locals[index] = layer.pose->local_bones()[index];
+        std::vector<ModelBoneWorldPose> worlds;
+        if (auto error = build_world_pose(model, locals, worlds, input.main.sequence_index))
+            return {std::nullopt, std::move(error)};
+        auto statistics = main.pose->statistics();
+        statistics.composition_sample_count = samples;
+        std::size_t working_bytes = statistics.accounted_pose_bytes;
+        for (const auto* result : {&previous, &layer}) if (*result) {
+            const auto& extra = result->pose->statistics();
+            statistics.blend_evaluation_count += extra.blend_evaluation_count;
+            statistics.channel_sample_count += extra.channel_sample_count;
+            statistics.channel_runs_examined += extra.channel_runs_examined;
+            if (!checked_add(working_bytes, extra.accounted_pose_bytes, working_bytes))
+                return fail_pose(StudioPoseErrorCode::pose_byte_limit_exceeded, "Composition byte accounting overflow");
+        }
+        std::size_t output_bytes = 0U;
+        std::size_t mask_bytes = 0U;
+        if (!checked_multiply(locals.size(), sizeof(ModelBoneLocalPose) + sizeof(ModelBoneWorldPose), output_bytes) ||
+            !checked_multiply(input.lower_bone_indices.size(), sizeof(std::uint32_t), mask_bytes) ||
+            !checked_add(working_bytes, output_bytes, working_bytes) ||
+            !checked_add(working_bytes, mask_bytes, working_bytes) || working_bytes > limits.maximum_pose_bytes)
+            return fail_pose(StudioPoseErrorCode::pose_byte_limit_exceeded, "Composition accounted working set exceeds byte limit");
+        statistics.accounted_pose_bytes = working_bytes;
+        return {StudioPoseState{identity, main.pose->sequence_index(), main.pose->frame_sample(),
+            main.pose->entity_scale(), std::move(locals), std::move(worlds),
+            main.pose->body_selection(), main.pose->skin_selection(), statistics,
+            main.pose->compatibility_profile()}, std::nullopt};
+    } catch (const std::bad_alloc&) {
+        return fail_pose(StudioPoseErrorCode::unable_to_retain_pose, "Unable to retain composed pose");
+    } catch (const std::length_error&) {
+        return fail_pose(StudioPoseErrorCode::composition_limit_exceeded, "Composition container limit exceeded");
+    }
+}
+
+StudioPosedBoundsResult StudioPoseEvaluator::posed_bounds(
+    const StudioPoseModelIdentity& identity,
+    const assets::SkeletalModelAssetData& model,
+    const StudioPoseState& pose,
+    const std::size_t maximum_vertices) const
+{
+    const auto reject = [](const StudioPoseErrorCode code, const char* context) {
+        return StudioPosedBoundsResult{std::nullopt, make_error(code, context)};
+    };
+    if (!valid_model_identity(identity) || pose.model_identity() != identity ||
+        pose.world_bones().size() != model.bones.size())
+        return reject(StudioPoseErrorCode::invalid_model_identity, "Posed bounds model/pose identity mismatch");
+    if (maximum_vertices == 0U || maximum_vertices > 4'194'304U)
+        return reject(StudioPoseErrorCode::invalid_configuration, "Invalid posed vertex limit");
+    assets::ModelBounds bounds{{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()},
+        {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()}};
+    std::size_t vertices = 0U;
+    for (const auto& part : pose.body_selection().bodyparts) {
+        if (part.bodypart_index >= model.bodyparts.size() || part.submodel_index >= model.submodels.size() ||
+            part.local_model_index >= model.bodyparts[part.bodypart_index].submodel_indices.size() ||
+            model.bodyparts[part.bodypart_index].submodel_indices[part.local_model_index] != part.submodel_index)
+            return reject(StudioPoseErrorCode::invalid_body_value, "Posed bounds body selection mismatch");
+        const auto& source = model.submodels[part.submodel_index];
+        if (source.vertices.size() > maximum_vertices - vertices)
+            return reject(StudioPoseErrorCode::composition_limit_exceeded, "Posed vertex limit exceeded");
+        vertices += source.vertices.size();
+        for (const auto& vertex : source.vertices) {
+            if (vertex.position_bone_index >= pose.world_bones().size() || !finite_vector(vertex.source_position))
+                return reject(StudioPoseErrorCode::invalid_model, "Invalid selected skinned vertex");
+            const auto& m = pose.world_bones()[vertex.position_bone_index].transform.values;
+            const auto& p = vertex.source_position;
+            const assets::AssetVector3 transformed{m[0]*p.x+m[1]*p.y+m[2]*p.z+m[3],
+                m[4]*p.x+m[5]*p.y+m[6]*p.z+m[7], m[8]*p.x+m[9]*p.y+m[10]*p.z+m[11]};
+            if (!finite_vector(transformed)) return reject(StudioPoseErrorCode::non_finite_pose, "Non-finite posed vertex");
+            bounds.minimum.x = std::min(bounds.minimum.x, transformed.x);
+            bounds.minimum.y = std::min(bounds.minimum.y, transformed.y);
+            bounds.minimum.z = std::min(bounds.minimum.z, transformed.z);
+            bounds.maximum.x = std::max(bounds.maximum.x, transformed.x);
+            bounds.maximum.y = std::max(bounds.maximum.y, transformed.y);
+            bounds.maximum.z = std::max(bounds.maximum.z, transformed.z);
+        }
+    }
+    if (vertices == 0U) return reject(StudioPoseErrorCode::invalid_model, "Selected pose has no vertices");
+    return {bounds, std::nullopt};
 }
 
 struct StudioPoseCache::Entry {

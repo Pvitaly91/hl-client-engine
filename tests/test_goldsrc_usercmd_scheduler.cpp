@@ -255,6 +255,84 @@ TEST_CASE("Copied GoldSrc schedulers form independent speculative timelines",
     CHECK(original_second.requests[0U].command_sequence.value() == 2U);
 }
 
+TEST_CASE("Manual wall-clock stalls discard unsampled slots without resetting identities",
+          "[goldsrc][usercmd][scheduler][stall-recovery]") {
+    auto config = goldsrc::GoldSrcUserCmdSchedulerConfig{};
+    config.profile = goldsrc::GoldSrcUserCmdSamplingProfile::stock_protocol_48_live_usercmd_check_v1;
+    config.command_interval_nanoseconds = 20'000'000U;
+    config.maximum_commands_per_update = 8U;
+    config.lag_policy = goldsrc::GoldSrcUserCmdLagPolicy::discard_unsampled_wall_time;
+    goldsrc::GoldSrcUserCmdScheduler scheduler{config};
+    const auto input = sample_intent(true);
+    const auto camera = sample_camera();
+    REQUIRE(scheduler.update(0, input, camera));
+    REQUIRE(scheduler.update(20'000'000, input, camera));
+    const auto stalled = scheduler.update(621'158'000, input, camera);
+    REQUIRE(stalled);
+    REQUIRE(stalled.requests.size() == 1U);
+    CHECK(stalled.discarded_wall_time_samples == 29U);
+    CHECK(stalled.requests.front().command_sequence.value() == 2U);
+    CHECK(stalled.requests.front().sample_time_nanoseconds == 620'000'000);
+    CHECK(stalled.requests.front().sample_duration_nanoseconds == 20'000'000U);
+    CHECK(stalled.requests.front().command_msec == 20U);
+    CHECK_FALSE(stalled.requests.front().one_shot_eligible);
+    CHECK_FALSE(stalled.requests.front().focused);
+    CHECK(stalled.next_sample_time_nanoseconds == 640'000'000);
+    CHECK(scheduler.config().maximum_commands_per_update == 8U);
+    const auto next = scheduler.update(640'000'000, input, camera);
+    REQUIRE(next);
+    REQUIRE(next.requests.size() == 1U);
+    CHECK(next.discarded_wall_time_samples == 0U);
+    CHECK(next.requests.front().command_sequence.value() == 3U);
+    CHECK(next.requests.front().focused);
+    require_error(scheduler.update(639'000'000, input, camera),
+                  goldsrc::GoldSrcUserCmdSchedulerErrorCode::time_moved_backwards);
+    auto strict_config = config;
+    strict_config.lag_policy = goldsrc::GoldSrcUserCmdLagPolicy::fail_closed;
+    goldsrc::GoldSrcUserCmdScheduler strict{strict_config};
+    REQUIRE(strict.update(0, input, camera));
+    require_error(strict.update(601'158'000, input, camera),
+                  goldsrc::GoldSrcUserCmdSchedulerErrorCode::lag_limit_exceeded);
+    config.profile = goldsrc::GoldSrcUserCmdSamplingProfile::synthetic_fixed_step_v1;
+    CHECK_FALSE(goldsrc::valid_goldsrc_usercmd_scheduler_config(config));
+}
+
+TEST_CASE("Manual stall recovery retains hard errors and ordinary scheduler behavior",
+          "[goldsrc][usercmd][scheduler][stall-recovery]") {
+    auto config = goldsrc::GoldSrcUserCmdSchedulerConfig{};
+    config.profile = goldsrc::GoldSrcUserCmdSamplingProfile::stock_protocol_48_live_usercmd_check_v1;
+    config.command_interval_nanoseconds = 20'000'000U;
+    config.lag_policy = goldsrc::GoldSrcUserCmdLagPolicy::discard_unsampled_wall_time;
+    const auto input = sample_intent(true);
+    const auto camera = sample_camera();
+    goldsrc::GoldSrcUserCmdScheduler manual{config};
+    config.lag_policy = goldsrc::GoldSrcUserCmdLagPolicy::fail_closed;
+    goldsrc::GoldSrcUserCmdScheduler strict{config};
+    REQUIRE(manual.update(0,input,camera));
+    REQUIRE(strict.update(0,input,camera));
+    for (std::int64_t t : {20'000'000LL,80'000'000LL,240'000'000LL}) {
+        const auto a=manual.update(t,input,camera), b=strict.update(t,input,camera);
+        REQUIRE(a); REQUIRE(b); REQUIRE(a.requests.size()==b.requests.size());
+        for(std::size_t i=0; i<a.requests.size(); ++i) {
+            CHECK(a.requests[i].command_sequence==b.requests[i].command_sequence);
+            CHECK(a.requests[i].sample_time_nanoseconds==b.requests[i].sample_time_nanoseconds);
+            CHECK(a.requests[i].command_msec==b.requests[i].command_msec);
+            CHECK(a.requests[i].one_shot_eligible==b.requests[i].one_shot_eligible);
+        }
+    }
+    config.lag_policy=goldsrc::GoldSrcUserCmdLagPolicy::discard_unsampled_wall_time;
+    config.maximum_command_sequence=1;
+    goldsrc::GoldSrcUserCmdScheduler exhausted{config};
+    REQUIRE(exhausted.update(0,input,camera)); REQUIRE(exhausted.update(20'000'000,input,camera));
+    require_error(exhausted.update(601'000'000,input,camera),goldsrc::GoldSrcUserCmdSchedulerErrorCode::sequence_exhausted);
+    CHECK(exhausted.state().next_sample_time_nanoseconds==40'000'000);
+    config.maximum_command_sequence=UINT32_MAX;
+    goldsrc::GoldSrcUserCmdScheduler overflow{config};
+    REQUIRE(overflow.update(std::numeric_limits<std::int64_t>::max()-1'000'000'000,input,camera));
+    require_error(overflow.update(std::numeric_limits<std::int64_t>::max(),input,camera),goldsrc::GoldSrcUserCmdSchedulerErrorCode::time_overflow);
+    CHECK(overflow.state().next_command_sequence==1U);
+}
+
 TEST_CASE("GoldSrc scheduler detects sequence exhaustion and reset restores identity one",
           "[goldsrc][usercmd][scheduler][sequence][overflow]")
 {

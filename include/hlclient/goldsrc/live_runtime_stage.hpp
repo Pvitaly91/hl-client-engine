@@ -1,4 +1,5 @@
 #pragma once
+#include <hlclient/game_api/game_client_host.hpp>
 
 #include <hlclient/client/client_world_state.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
@@ -24,7 +25,9 @@
 #include <string_view>
 #include <vector>
 
+namespace hlclient::world_scene_render { class WorldSceneRenderPackage; }
 namespace hlclient::goldsrc {
+namespace collision { class BrushCollisionScene; }
 
 using LiveRuntimeStageClock = ResourceClientResponseStageClock;
 using LiveRuntimeStageTimePoint = ResourceClientResponseStageTimePoint;
@@ -52,6 +55,10 @@ enum class LiveVisualControlInputSource : std::uint8_t {
     scripted_side_check,
     scripted_jump_duck_check,
     scripted_speed_check,
+    scripted_weapon_check,
+    scripted_fire_reload_check,
+    scripted_fire_reload_presentation_check,
+    scripted_damage_respawn_check,
     keyboard_mouse,
 };
 
@@ -60,13 +67,12 @@ enum class LiveVisualControlInputSource : std::uint8_t {
     return source == LiveVisualControlInputSource::scripted_check ||
            source == LiveVisualControlInputSource::scripted_side_check ||
            source == LiveVisualControlInputSource::scripted_jump_duck_check ||
-           source == LiveVisualControlInputSource::scripted_speed_check;
+           source == LiveVisualControlInputSource::scripted_speed_check ||
+           source == LiveVisualControlInputSource::scripted_weapon_check ||
+           source == LiveVisualControlInputSource::scripted_fire_reload_check ||
+           source == LiveVisualControlInputSource::scripted_fire_reload_presentation_check ||
+           source == LiveVisualControlInputSource::scripted_damage_respawn_check;
 }
-
-// Pinned Valve cl_dll/input.cpp defaults, for live manual input only.
-inline constexpr GoldSrcUserCmdMovementSpeedConfig kLiveReferenceManualSpeeds{
-    400.0F, 400.0F, 400.0F};
-inline constexpr float kLiveReferenceSpeedKeyMultiplier = 0.3F;
 
 struct LiveVisualControlInput final {
     std::uint64_t generation{0U};
@@ -81,6 +87,7 @@ struct LiveVisualControlInput final {
     bool d_held{false};
     gameplay_input::GameplayButtonMask held_buttons{0U};
     gameplay_input::GameplayButtonMask pressed_buttons{0U};
+    gameplay_input::GameplayButtonMask released_buttons{0U};
 };
 
 // Bounded project-action edge latch. The owning stage adds presses only after
@@ -97,15 +104,25 @@ public:
         pending_ &= ~consumed;
     }
     void clear() noexcept { pending_ = 0U; }
+    void clear(gameplay_input::GameplayButtonMask mask) noexcept { pending_ &= ~mask; }
     [[nodiscard]] gameplay_input::GameplayButtonMask pending() const noexcept {
         return pending_;
     }
     [[nodiscard]] static constexpr gameplay_input::GameplayButtonMask
     allowed() noexcept {
         return gameplay_input::gameplay_button_mask(
+                   gameplay_input::GameplayButton::move_forward) |
+               gameplay_input::gameplay_button_mask(
+                   gameplay_input::GameplayButton::move_backward) |
+               gameplay_input::gameplay_button_mask(
+                   gameplay_input::GameplayButton::move_left) |
+               gameplay_input::gameplay_button_mask(
+                   gameplay_input::GameplayButton::move_right) |
+               gameplay_input::gameplay_button_mask(
                    gameplay_input::GameplayButton::jump) |
                gameplay_input::gameplay_button_mask(
-                   gameplay_input::GameplayButton::duck);
+                   gameplay_input::GameplayButton::duck) |
+               gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::use);
     }
 private:
     gameplay_input::GameplayButtonMask pending_{0U};
@@ -177,6 +194,8 @@ struct LiveRuntimeStageConfig final {
         LiveVisualControlInputSource::scripted_check};
     LiveUserCmdScenarioConfig usercmd_scenario{};
     bool reference_prediction{false};
+    std::shared_ptr<game_api::GameClientHost> game_client;
+    std::shared_ptr<CommittedSoundQueue> sound_events;
 };
 
 enum class LiveReferencePredictionState : std::uint8_t {
@@ -196,6 +215,18 @@ enum class LiveReferencePredictionState : std::uint8_t {
 }
 
 struct LiveReferencePredictionSnapshot final {
+    // Derived render-only scene at exactly the player presentation time.
+    std::shared_ptr<const collision::BrushCollisionScene> presented_brush_scene;
+    std::uint64_t collision_context_revision{};
+    std::size_t collision_brush_count{}, server_brush_transform_changes{};
+    std::optional<std::uint32_t> last_changed_brush_entity, last_changed_brush_model;
+    std::uint64_t step_selections{};
+    std::optional<hlclient::movement::PlayerMovementHitIdentity> ground_hit;
+    std::optional<assets::AssetVector3> ground_normal;
+    std::optional<bool> server_grounded, local_grounded;
+    std::string_view base_velocity_status{"unavailable"};
+    std::string_view support_policy{"current_server_frame_no_pusher_extrapolation"};
+    std::string_view last_fallback_reason{"none"};
     LiveReferencePredictionState state{LiveReferencePredictionState::off};
     std::string_view reason{"off"};
     std::uint64_t generation{0U};
@@ -209,8 +240,27 @@ struct LiveReferencePredictionSnapshot final {
     std::optional<double> maximum_raw_position_error;
     std::optional<assets::AssetVector3> canonical_origin;
     std::optional<assets::AssetVector3> predicted_origin;
+    std::optional<assets::AssetVector3> predicted_velocity;
+    std::optional<assets::AssetVector3> predicted_view_offset;
+    std::optional<hlclient::movement::PlayerMovementHull> predicted_hull;
+    std::optional<hlclient::movement::PlayerMovementMode> predicted_mode;
+    std::optional<std::uint16_t> predicted_old_buttons;
+    std::optional<std::uint32_t> predicted_duck_time_milliseconds;
+    std::optional<bool> predicted_in_duck_transition;
     std::optional<assets::AssetVector3> presented_origin;
     std::optional<assets::AssetVector3> presented_view_offset;
+    std::string_view presentation_reason{"inactive"};
+    std::optional<std::uint32_t> presentation_from_command;
+    std::optional<std::uint32_t> presentation_to_command;
+    std::optional<std::int64_t> presentation_from_time_ns;
+    std::optional<std::int64_t> presentation_to_time_ns;
+    std::optional<double> presentation_alpha;
+    std::size_t presentation_scratch_bytes{0U};
+    std::size_t presentation_trace_queries_total{0U};
+    std::size_t presentation_scratch_growths_total{0U};
+    double presentation_cpu_ms{0.0};
+    std::optional<double> last_camera_correction_jump;
+    std::optional<double> maximum_camera_correction_jump;
     std::optional<std::uint64_t> last_record_identity;
     std::optional<std::uint32_t> anchor_command;
     std::optional<ReferencePredictionSeedStatus> last_seed_status;
@@ -300,7 +350,14 @@ struct LiveRuntimeStageError final {
         usercmd_transmission_code;
     std::optional<NetchanDriverErrorCode> driver_code;
     std::optional<std::uint8_t> wire_opcode;
+    std::optional<PacketEntityDecodeErrorCode> runtime_decoder_error;
+    std::optional<StockRuntimeSourceCursor> runtime_cursor;
+    std::optional<std::size_t> runtime_record_ordinal;
+    std::optional<std::uint32_t> runtime_source_sequence;
+    std::optional<RuntimeReplayError> runtime_failure;
     std::string context;
+    // First-cause latch. Secondary runtime/cleanup errors cannot replace it.
+    void retain_runtime_failure(RuntimeReplayError failure) noexcept;
 };
 
 struct LiveUserCmdServerSample final {
@@ -351,7 +408,21 @@ struct LiveUserCmdTransmitRange final {
     std::size_t backup_command_count{0U};
 };
 
+// Exactly one notification for each newly submitted immutable command carrying
+// a weapon bit. Backup transmission and reconciliation never publish here.
+struct LiveWeaponCommandSubmission final {
+    std::uint64_t generation{0U};
+    std::uint32_t command_sequence{0U};
+    std::uint16_t buttons{0U};
+    // Exact scheduler sample deadline in the host monotonic clock domain;
+    // recovery can skip wall slots without skipping command identities.
+    std::int64_t command_end_nanoseconds{0};
+    std::array<std::uint16_t, 3> angle_turns{};
+};
+
 struct LiveUserCmdCheckState final {
+    std::size_t use_generated_count{}, use_command_press_count{}, use_command_release_count{};
+    std::size_t use_new_submission_count{}, use_clear_after_release_count{};
     std::uint64_t generation{0U};
     bool production_handoff_complete{false};
     bool same_driver_retained{false};
@@ -360,6 +431,7 @@ struct LiveUserCmdCheckState final {
     bool terminal_rejection_observed{false};
     std::chrono::milliseconds command_interval{};
     std::array<std::chrono::milliseconds, kLiveUserCmdPhaseCount> durations{};
+    game_api::DamageRespawnScriptSnapshot damage_respawn;
     std::int16_t forward_amplitude{0};
     double fixed_yaw_degrees{0.0};
     double fixed_pitch_degrees{0.0};
@@ -405,6 +477,15 @@ struct LiveUserCmdCheckState final {
     std::size_t duck_generated_count{0U};
     std::size_t jump_new_submission_count{0U};
     std::size_t duck_new_submission_count{0U};
+    std::size_t attack_generated_count{0U};
+    std::size_t reload_generated_count{0U};
+    std::size_t attack_command_press_count{0U};
+    std::size_t attack_command_release_count{0U};
+    std::size_t reload_command_press_count{0U};
+    std::size_t reload_command_release_count{0U};
+    std::size_t attack_new_submission_count{0U};
+    std::size_t reload_new_submission_count{0U};
+    std::size_t weapon_command_submission_drops{0U};
     std::optional<std::uint32_t> first_jump_sent_sequence;
     std::optional<std::uint32_t> last_jump_sent_sequence;
     std::optional<std::uint32_t> first_duck_sent_sequence;
@@ -422,6 +503,8 @@ struct LiveUserCmdCheckState final {
     std::int64_t scheduler_next_sample_time_nanoseconds{0};
     std::size_t scheduler_last_due_command_count{0U};
     std::size_t scheduler_maximum_commands_per_update{0U};
+    std::uint64_t scheduler_stall_recoveries{0U};
+    std::uint64_t scheduler_discarded_wall_time_samples{0U};
     std::array<std::size_t, kLiveUserCmdPhaseCount> generated_by_phase{};
     std::array<std::size_t, kLiveUserCmdPhaseCount> sent_by_phase{};
     std::array<std::size_t, kLiveUserCmdPhaseCount> fresh_samples_by_phase{};
@@ -583,6 +666,7 @@ public:
         LiveRuntimeStageTimePoint now) noexcept;
     [[nodiscard]] bool activate_live_visual_control(
         LiveRuntimeStageTimePoint now) noexcept;
+    [[nodiscard]] bool request_weapon_selection(std::uint8_t weapon_id);
 
     [[nodiscard]] std::optional<LiveRuntimeStageEvent> poll_event();
     [[nodiscard]] LiveRuntimeStageState state() const noexcept;
@@ -606,8 +690,13 @@ public:
     [[nodiscard]] const ServerInfoState* live_server_info() const noexcept;
     [[nodiscard]] std::optional<LiveUserCmdCheckState>
     live_usercmd_snapshot() const;
+    [[nodiscard]] std::size_t live_use_new_submission_count() const noexcept;
+    [[nodiscard]] std::optional<LiveWeaponCommandSubmission>
+    poll_weapon_command_submission();
     [[nodiscard]] bool attach_reference_prediction_collision(
         std::shared_ptr<const hlclient::collision::CollisionWorldPackage> package);
+    [[nodiscard]] bool attach_reference_prediction_surfaces(
+        std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> package);
     [[nodiscard]] LiveReferencePredictionSnapshot
     live_reference_prediction_snapshot(LiveRuntimeStageTimePoint now) const;
 

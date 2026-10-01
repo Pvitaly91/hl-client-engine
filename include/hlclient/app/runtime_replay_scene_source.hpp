@@ -125,12 +125,14 @@ public:
         goldsrc::RuntimeReplayFixture fixture,
         RuntimeReplaySchedulingLimits limits = {},
         bool diagnostic_visuals = false,
-        RuntimeReplayVisualProjectionLimits visual_limits = {});
+        RuntimeReplayVisualProjectionLimits visual_limits = {},
+        std::shared_ptr<game_api::GameClientHost> game_client = {});
     [[nodiscard]] static RuntimeReplaySceneSourceCreateResult create_capture(
         const std::filesystem::path& exact_functional_run_directory,
         RuntimeReplaySchedulingLimits limits = {},
         std::optional<std::filesystem::path> local_basedir = std::nullopt,
-        std::string_view game = "valve", bool paced = false);
+        std::string_view game = "valve", bool paced = false,
+        std::shared_ptr<game_api::GameClientHost> game_client = {});
 
     [[nodiscard]] RuntimeReplaySourceOperationResult start();
     [[nodiscard]] RuntimeReplaySourceOperationResult restart(

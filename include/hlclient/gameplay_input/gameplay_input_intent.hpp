@@ -29,6 +29,10 @@ enum class GameplayButton : std::uint8_t {
     attack_primary,
     attack_secondary,
     scoreboard,
+    move_forward,
+    move_backward,
+    move_left,
+    move_right,
     count,
 };
 

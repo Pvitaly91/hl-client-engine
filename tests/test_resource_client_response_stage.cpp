@@ -6,9 +6,14 @@
 #include "user_info_test_fixture.hpp"
 #include "goldsrc_usercmd_test_fixture.hpp"
 #include "collision_brush_test_fixture.hpp"
+#include "vertical_lift_test_fixture.hpp"
+#include <catch2/catch_approx.hpp>
 
 #include <hlclient/client/client_world_state.hpp>
+#include <hlclient/game_api/game_client_host.hpp>
+#include <hlclient/games/halflife/client_module.hpp>
 #include <hlclient/goldsrc/live_runtime_stage.hpp>
+#include <hlclient/goldsrc/local_audio.hpp>
 #include <hlclient/goldsrc/netchan_packet.hpp>
 #include <hlclient/goldsrc/resource_client_response_stage.hpp>
 #include <hlclient/goldsrc/stock_spawn_request.hpp>
@@ -434,13 +439,19 @@ live_response_config() {
                                         post_delta);
 }
 
-[[nodiscard]] std::vector<std::byte> resource_semantic_payload() {
+[[nodiscard]] std::vector<std::byte> resource_semantic_payload(const bool brush = false) {
   constexpr std::array prefix{
       std::byte{45U}, std::byte{1U}, std::byte{0U},
       std::byte{0U},  std::byte{0U}, std::byte{0U},
       std::byte{0U},  std::byte{0U}, std::byte{0U},
   };
   std::vector<std::byte> payload{prefix.begin(), prefix.end()};
+  if (brush) {
+    const auto list = resource_list_test_fixture::make_message({
+        {2U,"maps/test_map.bsp",7U,1U,0U},{2U,"*1",27U,0U,0U}});
+    payload.insert(payload.end(),list.bytes.begin(),list.bytes.end());
+    return payload;
+  }
   payload.insert(payload.end(),
                  resource_list_test_fixture::kExactResourceListMessage.begin(),
                  resource_list_test_fixture::kExactResourceListMessage.end());
@@ -581,6 +592,8 @@ constexpr delta_fixture::Field kLiveEntityFields[]{
     {"angles[1]", 0x0000'0010U, 16U, 16U},
     {"angles[2]", 0x0000'0010U, 20U, 16U},
     {"modelindex", 0x0000'0008U, 24U, 16U},
+    {"solid", 0x0000'0002U, 28U, 3U},
+    {"movetype", 0x0000'0008U, 32U, 4U},
 };
 
 constexpr delta_fixture::Field kLiveClientFields[]{
@@ -760,7 +773,12 @@ live_runtime_record(const float server_time, const std::uint32_t health,
 // An independently packed coherent airborne player record. The world-only
 // collision fixture is empty, so flags=0 is an explicit airborne contract.
 [[nodiscard]] std::vector<std::byte> live_prediction_air_record(
-    const float server_time, const std::uint32_t origin_x) {
+    const float server_time, const std::uint32_t origin_x,
+    const std::uint32_t origin_eighths = 0U,
+    const std::uint32_t origin_z_eighths = 512U,
+    const std::uint32_t health = 100U,
+    const std::uint32_t dead_flag = 0U,
+    const bool brush = false, const std::optional<unsigned> lift_z_eighths = {}) {
   delta_fixture::BitWriter writer;
   writer.write(7U, 8U);
   writer.write(std::bit_cast<std::uint32_t>(server_time), 32U);
@@ -768,24 +786,24 @@ live_runtime_record(const float server_time, const std::uint32_t health,
   writer.write(0U, 1U);
   writer.write(2U, 3U);
   writer.write(0x1fffU, 16U);
-  writer.write(goldsrc_signed_positive(100U), 10U);
+  writer.write(goldsrc_signed_positive(health), 10U);
   writer.write(0U, 16U);
   writer.write(0U, 16U);
   writer.write(0U, 16U);
   writer.write(goldsrc_signed_positive(112U), 10U);
-  writer.write(goldsrc_signed_positive(origin_x * 8U), 16U);
+  writer.write(goldsrc_signed_positive(origin_x * 8U + origin_eighths), 16U);
   writer.write(0U, 16U);
-  writer.write(goldsrc_signed_positive(512U), 16U);
-  writer.write(0U, 32U);
+  writer.write(goldsrc_signed_positive(origin_z_eighths), 16U);
+  writer.write(lift_z_eighths ? 1U<<9U : 0U, 32U);
   writer.write(3'200U, 16U);
   writer.write(0U, 1U);
   writer.write(0U, 2U);
-  writer.write(0U, 3U);
+  writer.write(dead_flag, 3U);
   writer.write(0U, 1U);
   writer.align_zero();
 
   writer.write(goldsrc::kGoldSrcSvcPacketEntitiesOpcode, 8U);
-  writer.write(1U, 16U);
+  writer.write(brush ? 2U : 1U, 16U);
   writer.write(0U, 1U);
   writer.write(0U, 1U);
   writer.write(1U, 6U);
@@ -801,6 +819,15 @@ live_runtime_record(const float server_time, const std::uint32_t health,
   writer.write(0U, 16U);
   writer.write(0U, 16U);
   writer.write(0U, 1U);
+  if (brush) {
+    // Keep the brush outside the server's reserved player entity range.
+    writer.write(0U,1U); writer.write(0U,1U); writer.write(41U,6U);
+    writer.write(0U,1U); writer.write(0U,1U);
+    writer.write(2U,3U); writer.write(0x01ffU,16U);
+    for (unsigned component=0; component<6; ++component)
+      writer.write(component==2 && lift_z_eighths ? goldsrc_signed_positive(*lift_z_eighths) : 0U,16U);
+    writer.write(27U,16U); writer.write(4U,3U); writer.write(7U,4U);
+  }
   writer.write(0U, 16U);
   writer.align_zero();
   return writer.bytes();
@@ -820,6 +847,10 @@ live_baseline_and_runtime_payload(const float server_time,
   baseline.write(2U, 11U);
   baseline.write(0U, 2U);
   write_live_delta(baseline, 0U);
+  if (with_player_baseline) {
+    baseline.write(42U,11U); baseline.write(0U,2U);
+    write_live_delta(baseline,0U);
+  }
   baseline.write(0xffffU, 16U);
   baseline.write(0U, 6U);
   baseline.align_zero();
@@ -954,6 +985,8 @@ drive_live_initial(goldsrc::LiveRuntimeStage &stage, FakeTransport &transport,
 
 [[nodiscard]] goldsrc::LiveRuntimeStageConfig live_test_config() {
   goldsrc::LiveRuntimeStageConfig config;
+  config.game_client = std::make_shared<hlclient::game_api::GameClientHost>(
+      hlclient::games::halflife::make_half_life_client_module());
   // Reproduce the production coordinator replacement that previously
   // discarded the nested live-session compatibility policy.
   config.resource_response = test_config();
@@ -2253,6 +2286,191 @@ TEST_CASE("Reference waiting mode delivers each committed clientdata before an e
   }
 }
 
+TEST_CASE("Reference live stage keeps action commands in active history",
+          "[d4][goldsrc][live-runtime][integration][reference-actions]") {
+  bool brush=false, lift=false;
+  SECTION("unchanged world-only host") {}
+  SECTION("same host with committed server brush context") { brush=true; }
+  SECTION("vertical lift uses source time for carry replay and camera") { brush=true; lift=true; }
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27'850U);
+  const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 60s;
+  hlclient::client::ClientWorldState world;
+  auto config = live_test_config();
+  config.operation_mode = goldsrc::LiveRuntimeOperationMode::live_visual_control;
+  config.live_visual_input_source = goldsrc::
+      LiveVisualControlInputSource::scripted_jump_duck_check;
+  config.reference_prediction = true;
+  config.usercmd_scenario.durations = {20ms, 40ms, 20ms, 80ms, 20ms};
+  if (lift) {
+    config.live_visual_input_source=goldsrc::LiveVisualControlInputSource::scripted_speed_check;
+    config.usercmd_scenario.durations={2000ms,2000ms,2000ms,2000ms,2000ms};
+  }
+  goldsrc::LiveRuntimeStage stage{transport, remote, world, config};
+  const auto driven = drive_live_initial(stage, transport, remote, epoch,
+                                         false, false, true, true);
+  const auto resource_sequence = driven.last_server_sequence + 1U;
+  transport.queue(remote, server_packet(resource_sequence, false,
+      driven.transition_request.header.sequence.sequence.value(), false,
+      service_envelope(resource_semantic_payload(brush))));
+  transport.queue(remote, server_packet(resource_sequence + 1U, false,
+      driven.transition_request.header.sequence.sequence.value(), false,
+      {std::byte{1U}}));
+  for (std::size_t step = 1U; step <= 8U; ++step)
+    stage.update(driven.now + std::chrono::milliseconds{step});
+  constexpr std::array empty_response{std::byte{0x05U}, std::byte{0U},
+                                      std::byte{0U}};
+  const auto response = require_latest_payload(transport, empty_response);
+  const auto first_runtime_at = driven.now + 9ms;
+  transport.queue(remote, server_packet(resource_sequence + 2U, false,
+      response.header.sequence.sequence.value(),
+      response.header.sequence.flags.reliable));
+  stage.update(first_runtime_at);
+  const auto spawn = require_latest_payload(transport,
+      goldsrc::StockSpawnRequestBuilder::build(
+          0x1234'5678U,
+          goldsrc::decode_stock_server_world_map_crc(0xdead'beefU, 0U))
+          .encoding->semantic_bytes());
+  transport.queue(remote, server_packet(resource_sequence + 3U, true,
+      spawn.header.sequence.sequence.value(), false,
+      live_baseline_and_runtime_payload(100.0F, 100U, 80U, true)));
+  stage.update(first_runtime_at + 1ms);
+  stage.update(first_runtime_at + 2ms);
+  const auto sendents = require_latest_payload(transport,
+      goldsrc::StockSendEntitiesRequestBuilder::build().semantic_bytes());
+  transport.queue(remote, server_packet(resource_sequence + 4U, false,
+      sendents.header.sequence.sequence.value(),
+      sendents.header.sequence.flags.reliable,
+      service_envelope(live_runtime_record(101.0F, 90U, 96U))));
+  stage.update(first_runtime_at + 3ms);
+  stage.update(first_runtime_at + 2s + 2ms);
+  REQUIRE(stage.live_visual_input_ready());
+  REQUIRE(stage.attach_reference_prediction_collision(
+      lift ? hlclient::tests::vertical_lift::package() : hlclient::tests::collision_brush_fixture::package(false)));
+  REQUIRE(stage.activate_live_visual_control(first_runtime_at + 2s + 3ms));
+  const auto active_at = first_runtime_at + 2s + 23ms;
+  stage.update(active_at);
+  const auto sent = decode_sent(transport.sent.back());
+  if (lift) {
+    auto now=active_at;
+    std::uint32_t server_sequence=resource_sequence+4;
+    auto receive=[&](float time,unsigned height,std::chrono::milliseconds delay) {
+      const auto ack=decode_sent(transport.sent.back()).header.sequence.sequence.value();
+      transport.queue(remote,server_packet(++server_sequence,false,ack,false,
+          service_envelope(live_prediction_air_record(time,0,0,(height+36)*8,100,0,true,height*8))));
+      now+=delay; stage.update(now);
+      const auto result=stage.live_reference_prediction_snapshot(now);
+      INFO(result.reason); REQUIRE(result.state==goldsrc::LiveReferencePredictionState::active);
+      return result;
+    };
+    receive(102.F,50,20ms);
+    auto moving=receive(102.1F,60,20ms);
+    REQUIRE(moving.presented_brush_scene);
+    REQUIRE(moving.predicted_origin);
+    CHECK(moving.support_policy=="derived_vertical_support_bounded_250ms_v1");
+    const auto initial_steps=moving.local_steps;
+    const auto initial_z=moving.predicted_origin->z;
+    const auto initial_fallback=moving.fallback_count;
+    now+=80ms; stage.update(now); // four commands in one application update
+    auto batch=stage.live_reference_prediction_snapshot(now);
+    INFO(batch.reason); REQUIRE(batch.state==goldsrc::LiveReferencePredictionState::active);
+    CHECK(batch.local_steps==initial_steps+4);
+    REQUIRE(batch.predicted_origin);
+    CHECK(batch.predicted_origin->z==Catch::Approx(initial_z+8).margin(.002));
+    const auto tx=transport.sent.size();
+    for (auto frame=now-19ms;frame<=now;frame+=1ms) {
+      auto sample=stage.live_reference_prediction_snapshot(frame);
+      REQUIRE(sample.presented_origin); REQUIRE(sample.presented_brush_scene);
+      CHECK(sample.presented_origin->z-sample.presented_brush_scene->instances().front().transform.translation.z==Catch::Approx(36).margin(.002));
+      CHECK(sample.fallback_count==initial_fallback);
+      CHECK(sample.local_steps==batch.local_steps);
+    }
+    CHECK(transport.sent.size()==tx);
+    // Ack the last generated command at its independently expected source
+    // height; latest-command correction must retain its presentation predecessor.
+    const auto before=stage.live_reference_prediction_snapshot(now);
+    const auto target_height=static_cast<unsigned>(std::lround(before.predicted_origin->z-36.F));
+    const float target_time=102.1F+static_cast<float>(target_height-60)*.01F;
+    auto corrected=receive(target_time,target_height,0ms);
+    REQUIRE(corrected.last_raw_position_error);
+    CHECK(*corrected.last_raw_position_error<.002);
+    REQUIRE(corrected.presented_origin);
+    CHECK(corrected.presented_origin->z==Catch::Approx(before.presented_origin->z).margin(.002));
+    CHECK(corrected.fallback_count==initial_fallback);
+    CHECK(corrected.local_steps==batch.local_steps);
+    auto repeated=receive(target_time,target_height,0ms);
+    REQUIRE(repeated.presented_origin); REQUIRE(repeated.presented_brush_scene);
+    CHECK(repeated.presented_origin->z==Catch::Approx(corrected.presented_origin->z).margin(.002));
+    CHECK(repeated.fallback_count==initial_fallback);
+    CHECK(repeated.local_steps==batch.local_steps);
+    return;
+  }
+  transport.queue(remote, server_packet(resource_sequence + 5U, false,
+      sent.header.sequence.sequence.value(), false,
+      service_envelope(live_prediction_air_record(102.0F, 10U,0U,512U,100U,0U,brush))));
+  stage.update(active_at + 20ms);
+  INFO("brush=" << brush << " reason=" << stage.live_reference_prediction_snapshot(active_at+20ms).reason);
+  INFO((stage.error() ? stage.error()->context : "no stage error"));
+  REQUIRE(stage.live_reference_prediction_snapshot(active_at + 20ms).state ==
+          goldsrc::LiveReferencePredictionState::active);
+  stage.update(active_at + 40ms);
+  const auto during_jump = stage.live_reference_prediction_snapshot(active_at + 40ms);
+  CHECK(during_jump.state == goldsrc::LiveReferencePredictionState::active);
+  CHECK(during_jump.collision_brush_count == (brush ? 1U : 0U));
+  if (brush) {
+    REQUIRE(during_jump.collision_identity);
+    CHECK(during_jump.collision_identity->profile == goldsrc::movement::LocalMovementCollisionProfile::reference_brush_scene_v1);
+    CHECK(during_jump.collision_context_revision > 0U);
+  }
+  REQUIRE(during_jump.predicted_old_buttons);
+  CHECK((*during_jump.predicted_old_buttons &
+         goldsrc::kReferenceGoldSrcButtonJump) != 0U);
+  const auto jump_sent = decode_sent(transport.sent.back());
+  transport.queue(remote, server_packet(resource_sequence + 6U, false,
+      jump_sent.header.sequence.sequence.value(), false,
+      service_envelope(live_prediction_air_record(102.1F, 10U,0U,512U,100U,0U,brush))));
+  stage.update(active_at + 50ms);
+  CHECK(stage.live_reference_prediction_snapshot(active_at + 50ms).state ==
+        goldsrc::LiveReferencePredictionState::active);
+  stage.update(active_at + 140ms);
+  const auto crouched = stage.live_reference_prediction_snapshot(active_at + 140ms);
+  CAPTURE(crouched.reason, crouched.last_seed_status,
+          crouched.last_ground_status);
+  CHECK(crouched.state == goldsrc::LiveReferencePredictionState::active);
+  CHECK(crouched.predicted_hull ==
+        hlclient::movement::PlayerMovementHull::ducked);
+  REQUIRE(crouched.predicted_old_buttons);
+  CHECK((*crouched.predicted_old_buttons &
+         goldsrc::kReferenceGoldSrcButtonDuck) != 0U);
+  CHECK(crouched.local_steps > during_jump.local_steps);
+  REQUIRE(crouched.predicted_origin);
+  const auto committed_origin = *crouched.predicted_origin;
+  const auto committed_steps = crouched.local_steps;
+  for (const auto frame_step : {std::chrono::microseconds{33'333},
+                                std::chrono::microseconds{16'667},
+                                std::chrono::microseconds{6'944},
+                                std::chrono::microseconds{11'000}}) {
+    for (auto sample_at = active_at + 100ms;
+         sample_at <= active_at + 140ms; sample_at += frame_step) {
+      const auto sample = stage.live_reference_prediction_snapshot(sample_at);
+      CHECK(sample.state == goldsrc::LiveReferencePredictionState::active);
+      CHECK(sample.local_steps == committed_steps);
+      REQUIRE(sample.predicted_origin);
+      CHECK(sample.predicted_origin->x == committed_origin.x);
+      CHECK(sample.predicted_origin->y == committed_origin.y);
+      CHECK(sample.predicted_origin->z == committed_origin.z);
+    }
+  }
+  stage.update(active_at + 180ms);
+  const auto released = stage.live_reference_prediction_snapshot(active_at + 180ms);
+  CHECK(released.state == goldsrc::LiveReferencePredictionState::active);
+  CHECK(released.predicted_hull ==
+        hlclient::movement::PlayerMovementHull::standing);
+  REQUIRE(released.predicted_old_buttons);
+  CHECK((*released.predicted_old_buttons &
+         goldsrc::kReferenceGoldSrcButtonDuck) == 0U);
+}
+
 TEST_CASE("Reference live stage activates from owning RX and replays a later committed command",
           "[goldsrc][live-runtime][integration][reference-positive]") {
   FakeTransport transport;
@@ -2333,16 +2551,189 @@ TEST_CASE("Reference live stage activates from owning RX and replays a later com
   CHECK(between.local_steps == advanced.local_steps);
   CHECK(between.presented_origin->z > advanced.predicted_origin->z);
   CHECK(between.presented_origin->z < initial.predicted_origin->z);
+  // A second record at the same render time corrects the first command
+  // boundary exactly. It must not turn the in-flight local interpolation into
+  // an immediate publication of the later predicted endpoint.
+  const auto before_rebase = stage.live_reference_prediction_snapshot(active_at + 50ms);
+  REQUIRE(before_rebase.presented_origin);
   transport.queue(remote, server_packet(resource_sequence + 6U, false,
       first_sent.header.sequence.sequence.value(), false,
       service_envelope(live_prediction_air_record(102.1F, 10U))));
-  stage.update(active_at + 60ms);
-  const auto corrected = stage.live_reference_prediction_snapshot(active_at + 60ms);
+  stage.update(active_at + 50ms);
+  const auto corrected = stage.live_reference_prediction_snapshot(active_at + 50ms);
   CAPTURE(corrected.reason, corrected.last_seed_status,
           corrected.last_ground_status, corrected.replayed_commands);
   REQUIRE_FALSE(stage.terminal());
   CHECK(corrected.accepted_corrections > 0U);
   CHECK(corrected.replayed_commands > 0U);
+  REQUIRE(corrected.presented_origin);
+  CHECK(corrected.last_raw_position_error.value_or(100.0) < 0.05);
+  REQUIRE(before_rebase.presentation_alpha);
+  REQUIRE(corrected.presentation_alpha);
+  CHECK(before_rebase.presentation_reason == "interpolated");
+  CHECK(corrected.presentation_reason == "interpolated");
+  CHECK(before_rebase.presentation_from_command ==
+        corrected.presentation_from_command);
+  CHECK(before_rebase.presentation_to_command ==
+        corrected.presentation_to_command);
+  CHECK(before_rebase.presentation_from_time_ns ==
+        corrected.presentation_from_time_ns);
+  CHECK(before_rebase.presentation_to_time_ns ==
+        corrected.presentation_to_time_ns);
+  CHECK(std::abs(*corrected.presentation_alpha - 0.5) < 0.000001);
+  const auto correction_jump = std::abs(corrected.presented_origin->z -
+                                        before_rebase.presented_origin->z);
+  CAPTURE(correction_jump);
+  CHECK(std::abs(corrected.presented_origin->z -
+                 before_rebase.presented_origin->z) < 0.05F);
+  REQUIRE(corrected.last_camera_correction_jump);
+  CHECK(*corrected.last_camera_correction_jump < 0.05);
+  const auto repeated = stage.live_reference_prediction_snapshot(active_at + 50ms);
+  CHECK(repeated.presented_origin->z == corrected.presented_origin->z);
+  CHECK(repeated.presentation_scratch_bytes ==
+        corrected.presentation_scratch_bytes);
+  CHECK(repeated.presentation_trace_queries_total ==
+        corrected.presentation_trace_queries_total);
+  const auto next_same_history =
+      stage.live_reference_prediction_snapshot(active_at + 51ms);
+  CHECK(next_same_history.presentation_trace_queries_total ==
+        corrected.presentation_trace_queries_total + 1U);
+  CHECK(next_same_history.presentation_scratch_growths_total ==
+        corrected.presentation_scratch_growths_total);
+  CHECK(next_same_history.presentation_scratch_bytes ==
+        corrected.presentation_scratch_bytes);
+  const auto steps_before_catchup = corrected.local_steps;
+  stage.update(active_at + 100ms);
+  const auto caught_up = stage.live_reference_prediction_snapshot(active_at + 90ms);
+  CHECK(caught_up.local_steps >= steps_before_catchup + 2U);
+  REQUIRE(caught_up.presentation_from_time_ns);
+  REQUIRE(caught_up.presentation_to_time_ns);
+  CHECK(*caught_up.presentation_to_time_ns -
+        *caught_up.presentation_from_time_ns == 20'000'000);
+  REQUIRE(caught_up.presentation_alpha);
+  CHECK(std::abs(*caught_up.presentation_alpha - 0.5) < 0.000001);
+  const auto next_render_sample =
+      stage.live_reference_prediction_snapshot(active_at + 91ms);
+  REQUIRE(next_render_sample.presentation_alpha);
+  CHECK(*next_render_sample.presentation_alpha >
+        *caught_up.presentation_alpha);
+  const auto committed_steps = caught_up.local_steps;
+  const auto committed_origin = caught_up.predicted_origin;
+  REQUIRE(committed_origin);
+  const auto canonical_revision = world.runtime_publication_revision();
+  const auto committed_commands = stage.live_usercmd_snapshot();
+  REQUIRE(committed_commands);
+  for (const auto spacing_us : std::array{33'333, 16'667, 6'944}) {
+    for (auto elapsed_us = 0; elapsed_us <= 50'000;
+         elapsed_us += spacing_us) {
+      const auto render = stage.live_reference_prediction_snapshot(
+          active_at + 50ms + std::chrono::microseconds{elapsed_us});
+      CHECK(render.local_steps == committed_steps);
+      REQUIRE(render.predicted_origin);
+      CHECK(render.predicted_origin->x == committed_origin->x);
+      CHECK(render.predicted_origin->y == committed_origin->y);
+      CHECK(render.predicted_origin->z == committed_origin->z);
+      if (render.presentation_alpha) {
+        CHECK(std::isfinite(*render.presentation_alpha));
+        CHECK(*render.presentation_alpha >= 0.0);
+        CHECK(*render.presentation_alpha <= 1.0);
+      }
+    }
+  }
+  for (const auto elapsed_us : std::array{1'000, 9'700, 22'400, 45'300}) {
+    const auto render = stage.live_reference_prediction_snapshot(
+        active_at + 50ms + std::chrono::microseconds{elapsed_us});
+    CHECK(render.local_steps == committed_steps);
+    REQUIRE(render.predicted_origin);
+    CHECK(render.predicted_origin->x == committed_origin->x);
+    CHECK(render.predicted_origin->y == committed_origin->y);
+    CHECK(render.predicted_origin->z == committed_origin->z);
+  }
+  CHECK(world.runtime_publication_revision() == canonical_revision);
+  const auto after_render_sampling = stage.live_usercmd_snapshot();
+  REQUIRE(after_render_sampling);
+  CHECK(after_render_sampling->generated_command_count ==
+        committed_commands->generated_command_count);
+  const auto before_repeated_anchor =
+      stage.live_reference_prediction_snapshot(active_at + 110ms);
+  REQUIRE(before_repeated_anchor.presented_origin);
+  transport.queue(remote, server_packet(resource_sequence + 7U, false,
+      first_sent.header.sequence.sequence.value(), false,
+      service_envelope(live_prediction_air_record(102.2F, 10U))));
+  stage.update(active_at + 110ms);
+  const auto repeated_anchor =
+      stage.live_reference_prediction_snapshot(active_at + 110ms);
+  CHECK(repeated_anchor.accepted_corrections ==
+        corrected.accepted_corrections + 1U);
+  REQUIRE(repeated_anchor.last_camera_correction_jump);
+  CHECK(*repeated_anchor.last_camera_correction_jump < 0.05);
+  CHECK(repeated_anchor.local_steps == committed_steps);
+  transport.queue(remote, server_packet(resource_sequence + 8U, false,
+      first_sent.header.sequence.sequence.value(), false,
+      service_envelope(live_prediction_air_record(102.3F, 10U, 1U))));
+  stage.update(active_at + 120ms);
+  const auto newest_sent = decode_sent(transport.sent.back());
+  const auto small_correction =
+      stage.live_reference_prediction_snapshot(active_at + 120ms);
+  CHECK(small_correction.accepted_corrections ==
+        repeated_anchor.accepted_corrections + 1U);
+  REQUIRE(small_correction.last_raw_position_error);
+  CHECK(*small_correction.last_raw_position_error > 0.1);
+  CHECK(*small_correction.last_raw_position_error < 0.2);
+  REQUIRE(small_correction.last_camera_correction_jump);
+  CHECK(*small_correction.last_camera_correction_jump < 0.25);
+  transport.queue(remote, server_packet(resource_sequence + 8U, false,
+      first_sent.header.sequence.sequence.value(), false,
+      service_envelope(live_prediction_air_record(102.3F, 10U, 1U))));
+  stage.update(active_at + 125ms);
+  CHECK(stage.live_reference_prediction_snapshot(active_at + 125ms)
+            .accepted_corrections == small_correction.accepted_corrections);
+  const auto before_latest_anchor =
+      stage.live_reference_prediction_snapshot(active_at + 130ms);
+  REQUIRE(before_latest_anchor.presented_origin);
+  REQUIRE(before_latest_anchor.predicted_origin);
+  const auto matched_z_eighths = static_cast<std::uint32_t>(std::lround(
+      before_latest_anchor.predicted_origin->z * 8.0F));
+  transport.queue(remote, server_packet(resource_sequence + 9U, false,
+      newest_sent.header.sequence.sequence.value(), false,
+      service_envelope(live_prediction_air_record(
+          102.4F, 10U, 1U, matched_z_eighths))));
+  stage.update(active_at + 130ms);
+  const auto latest_anchor =
+      stage.live_reference_prediction_snapshot(active_at + 130ms);
+  CHECK(latest_anchor.accepted_corrections ==
+        small_correction.accepted_corrections + 1U);
+  REQUIRE(latest_anchor.last_raw_position_error);
+  CHECK(*latest_anchor.last_raw_position_error < 0.1);
+  REQUIRE(latest_anchor.last_camera_correction_jump);
+  CAPTURE(*latest_anchor.last_camera_correction_jump);
+  CHECK(*latest_anchor.last_camera_correction_jump < 0.1);
+  CHECK(latest_anchor.presentation_reason == "visual_correction");
+  const auto before_visual_repeat =
+      stage.live_reference_prediction_snapshot(active_at + 135ms);
+  REQUIRE(before_visual_repeat.presented_origin);
+  transport.queue(remote, server_packet(resource_sequence + 10U, false,
+      newest_sent.header.sequence.sequence.value(), false,
+      service_envelope(live_prediction_air_record(
+          102.5F, 10U, 1U, matched_z_eighths))));
+  stage.update(active_at + 135ms);
+  const auto visual_repeat =
+      stage.live_reference_prediction_snapshot(active_at + 135ms);
+  CHECK(visual_repeat.accepted_corrections ==
+        latest_anchor.accepted_corrections + 1U);
+  REQUIRE(visual_repeat.last_camera_correction_jump);
+  CHECK(*visual_repeat.last_camera_correction_jump < 0.1);
+  const auto halfway_visual =
+      stage.live_reference_prediction_snapshot(active_at + 140ms);
+  const auto completed_visual =
+      stage.live_reference_prediction_snapshot(active_at + 151ms);
+  REQUIRE(halfway_visual.presented_origin);
+  REQUIRE(completed_visual.presented_origin);
+  REQUIRE(completed_visual.predicted_origin);
+  CHECK(halfway_visual.presented_origin->z !=
+        completed_visual.presented_origin->z);
+  CHECK(std::abs(completed_visual.presented_origin->z -
+                 completed_visual.predicted_origin->z) < 0.001F);
   CHECK(world.runtime_observation());
 }
 
@@ -2529,6 +2920,8 @@ TEST_CASE("Live runtime selector is explicit and leaves historical strict "
           "defaults unchanged",
           "[goldsrc][live-runtime][profile][regression]") {
   goldsrc::ResourceClientResponseStageConfig historical;
+  CHECK(historical.resource_list.transition.user_info.movement_environment.delta
+            .pre_resource.initial_signon.driver.idle_poll_interval == 0ms);
   CHECK(historical.post_response_payload_compression ==
         goldsrc::ServicePayloadCompressionPolicy::require_bzip2_envelope);
   CHECK(
@@ -2545,6 +2938,8 @@ TEST_CASE("Live runtime selector is explicit and leaves historical strict "
         goldsrc::ServicePayloadCompressionPolicy::require_bzip2_envelope);
 
   auto live = live_test_config();
+  CHECK(live.resource_response.resource_list.transition.user_info.movement_environment.delta
+            .pre_resource.initial_signon.driver.idle_poll_interval == 200ms);
   CHECK(live.resource_response.pre_transmit_payload_policy ==
         goldsrc::ResourceResponsePreTransmitPayloadPolicy::decode_nop_control);
   CHECK(live.resource_response.completion_policy ==
@@ -2597,6 +2992,8 @@ TEST_CASE("Both bounded live F scripts enter the scenario completion gate",
       LiveVisualControlInputSource::scripted_check));
   CHECK(goldsrc::bounded_live_visual_scenario(
       LiveVisualControlInputSource::scripted_side_check));
+  CHECK(goldsrc::bounded_live_visual_scenario(
+      LiveVisualControlInputSource::scripted_fire_reload_presentation_check));
   CHECK_FALSE(goldsrc::bounded_live_visual_scenario(
       LiveVisualControlInputSource::keyboard_mouse));
 }
@@ -2613,6 +3010,283 @@ TEST_CASE("Live keyboard diagnostic limits cover the full CLI session",
   config.live_visual_input_source =
       goldsrc::LiveVisualControlInputSource::keyboard_mouse;
   CHECK(goldsrc::valid_live_runtime_stage_configuration(config));
+  config.timeout = std::chrono::seconds{90};
+  CHECK_FALSE(goldsrc::valid_live_runtime_stage_configuration(config));
+  config.live_visual_input_source =
+      goldsrc::LiveVisualControlInputSource::scripted_fire_reload_presentation_check;
+  CHECK(goldsrc::valid_live_runtime_stage_configuration(config));
+  config.timeout = std::chrono::seconds{91};
+  CHECK_FALSE(goldsrc::valid_live_runtime_stage_configuration(config));
+}
+
+TEST_CASE("C fake peer keeps RX TX command identity and reseeds only after a fresh new-life carrier",
+          "[goldsrc][live-runtime][damage-respawn][integration][use][weapon-stall-time]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27851U);
+  const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 60s;
+  hlclient::client::ClientWorldState world;
+  auto config = live_test_config();
+  config.operation_mode = goldsrc::LiveRuntimeOperationMode::live_visual_control;
+  config.live_visual_input_source = goldsrc::LiveVisualControlInputSource::keyboard_mouse;
+  config.reference_prediction = true;
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+  const auto driven = drive_live_initial(stage,transport,remote,epoch,false,false,true,true);
+  const auto resource = driven.last_server_sequence + 1U;
+  transport.queue(remote,server_packet(resource,false,
+      driven.transition_request.header.sequence.sequence.value(),false,
+      service_envelope(resource_semantic_payload())));
+  transport.queue(remote,server_packet(resource+1U,false,
+      driven.transition_request.header.sequence.sequence.value(),false,{std::byte{1}}));
+  for (std::size_t step=1; step<=8; ++step) stage.update(driven.now+std::chrono::milliseconds{step});
+  constexpr std::array empty_response{std::byte{5},std::byte{0},std::byte{0}};
+  const auto response = require_latest_payload(transport,empty_response);
+  const auto first = driven.now+9ms;
+  transport.queue(remote,server_packet(resource+2U,false,response.header.sequence.sequence.value(),
+      response.header.sequence.flags.reliable));
+  stage.update(first);
+  const auto spawn = require_latest_payload(transport,goldsrc::StockSpawnRequestBuilder::build(
+      0x12345678U,goldsrc::decode_stock_server_world_map_crc(0xdeadbeefU,0U)).encoding->semantic_bytes());
+  transport.queue(remote,server_packet(resource+3U,true,spawn.header.sequence.sequence.value(),
+      false,live_baseline_and_runtime_payload(100.0F,100U,80U,true)));
+  stage.update(first+1ms); stage.update(first+2ms);
+  const auto sendents = require_latest_payload(transport,goldsrc::StockSendEntitiesRequestBuilder::build().semantic_bytes());
+  transport.queue(remote,server_packet(resource+4U,false,sendents.header.sequence.sequence.value(),
+      sendents.header.sequence.flags.reliable,service_envelope(live_prediction_air_record(101.0F,10U))));
+  stage.update(first+3ms); stage.update(first+2s+2ms);
+  REQUIRE(stage.live_visual_input_ready());
+  REQUIRE(stage.attach_reference_prediction_collision(hlclient::tests::collision_brush_fixture::package(false)));
+  auto now = first+2s+3ms;
+  goldsrc::LiveVisualControlInput input{1,1,0,0,0,0,true,true};
+  REQUIRE(stage.submit_live_visual_input(input,now));
+  REQUIRE(stage.activate_live_visual_control(now));
+  now += 20ms;
+  stage.update(now);
+  std::uint32_t server_sequence = resource+4U;
+  auto last_transport = decode_sent(transport.sent.back()).header.sequence.sequence.value();
+  const auto feed = [&](std::uint32_t hp,std::uint32_t flag,std::uint32_t x,
+                        std::uint32_t ack) {
+    transport.queue(remote,server_packet(++server_sequence,false,ack,false,
+        service_envelope(live_prediction_air_record(102.0F,x,0,512,hp,flag))));
+    now += 20ms;
+    stage.update(now);
+    REQUIRE_FALSE(stage.terminal());
+    const auto transmitted = decode_sent(transport.sent.back()).header.sequence.sequence.value();
+    CHECK(transmitted > last_transport);
+    last_transport = transmitted;
+  };
+  feed(100,0,10,last_transport);
+  REQUIRE(stage.live_reference_prediction_snapshot(now).state == goldsrc::LiveReferencePredictionState::active);
+  for (std::uint64_t cycle=1; cycle<=3; ++cycle) {
+    const auto use_action = hlclient::gameplay_input::gameplay_button_mask(hlclient::gameplay_input::GameplayButton::use);
+    ++input.input_revision; input.held_buttons=use_action; input.pressed_buttons=use_action;
+    REQUIRE(stage.submit_live_visual_input(input,now));
+    now += 20ms; stage.update(now);
+    const auto use_count = stage.live_usercmd_snapshot()->use_new_submission_count;
+    CHECK(use_count > 0U);
+    CHECK(stage.live_usercmd_snapshot()->command_interval == 20ms);
+    CHECK(stage.live_reference_prediction_snapshot(now).state == goldsrc::LiveReferencePredictionState::active);
+    const auto old_carrier = last_transport;
+    feed(0,2,10,last_transport);
+    CHECK(world.runtime_observation()->lifecycle.dead());
+    auto suspended = stage.live_reference_prediction_snapshot(now);
+    CHECK(suspended.reason == "local_player_dead");
+    CHECK(suspended.history_depth == 0);
+    CHECK_FALSE(suspended.presented_origin);
+    ++input.input_revision; input.pressed_buttons=0U; // stale held E after death
+    REQUIRE(stage.submit_live_visual_input(input,now));
+    const auto at_death = stage.live_usercmd_snapshot()->use_new_submission_count;
+    now += 20ms; stage.update(now);
+    CHECK(stage.live_usercmd_snapshot()->use_new_submission_count == at_death);
+    CHECK(stage.live_usercmd_snapshot()->use_clear_after_release_count > 0U);
+    // Release then normal LMB request uses unchanged production usercmd path.
+    ++input.input_revision; input.held_buttons = 0; input.pressed_buttons = 0;
+    REQUIRE(stage.submit_live_visual_input(input,now));
+    now += 20ms; stage.update(now);
+    const auto before_press = stage.live_usercmd_snapshot()->attack_new_submission_count;
+    ++input.input_revision;
+    input.held_buttons = hlclient::gameplay_input::gameplay_button_mask(
+        hlclient::gameplay_input::GameplayButton::attack_primary);
+    input.pressed_buttons = input.held_buttons;
+    REQUIRE(stage.submit_live_visual_input(input,now));
+    now += 20ms; stage.update(now);
+    CHECK(stage.live_usercmd_snapshot()->attack_new_submission_count > before_press);
+    feed(0,3,10,last_transport);
+    CHECK(world.runtime_observation()->lifecycle.state == hlclient::client::LocalPlayerLifeState::awaiting_respawn);
+    ++input.input_revision; input.held_buttons = 0; input.pressed_buttons = 0;
+    REQUIRE(stage.submit_live_visual_input(input,now));
+    // New alive location with old carrier cannot seed the new life.
+    feed(100,0,100,old_carrier);
+    CHECK(world.runtime_observation()->lifecycle.respawns == cycle);
+    CHECK(stage.live_reference_prediction_snapshot(now).state != goldsrc::LiveReferencePredictionState::active);
+    now += 20ms; stage.update(now); // strictly post-boundary neutral carrier
+    const auto new_carrier = decode_sent(transport.sent.back()).header.sequence.sequence.value();
+    feed(100,0,100,new_carrier);
+    const auto reseeded = stage.live_reference_prediction_snapshot(now);
+    CAPTURE(reseeded.reason, reseeded.last_seed_status);
+    REQUIRE(reseeded.state == goldsrc::LiveReferencePredictionState::active);
+    REQUIRE(reseeded.presented_origin);
+    CHECK(reseeded.presented_origin->x > 99.0F); // no corpse-to-spawn interpolation
+    CHECK(world.runtime_observation()->generation == 1);
+    CHECK(world.runtime_observation()->lifecycle.life_epoch == cycle+1);
+  }
+  const auto accounting = stage.live_usercmd_snapshot();
+  REQUIRE(accounting);
+  CHECK(accounting->server_samples.size() >= 13);
+  CHECK(accounting->driver_rx_total.owning_datagrams > accounting->driver_rx_at_input_activation.owning_datagrams);
+  // Same production owner/driver/history: a real long frame must not cause
+  // exit 2 or synthesize attacks/Use over the missing wall-clock samples.
+  while (stage.poll_weapon_command_submission()) {}
+  ++input.input_revision;
+  input.forward_axis = 1.0F;
+  input.held_buttons = input.pressed_buttons =
+      hlclient::gameplay_input::gameplay_button_mask(hlclient::gameplay_input::GameplayButton::move_forward) |
+      hlclient::gameplay_input::gameplay_button_mask(hlclient::gameplay_input::GameplayButton::attack_primary) |
+      hlclient::gameplay_input::gameplay_button_mask(hlclient::gameplay_input::GameplayButton::use);
+  now += 601ms;
+  REQUIRE(stage.submit_live_visual_input(input, now));
+  transport.queue(remote,server_packet(++server_sequence,false,last_transport,false,
+      service_envelope(live_prediction_air_record(103.0F,100,0,512,100,0))));
+  stage.update(now);
+  REQUIRE_FALSE(stage.terminal());
+  const auto recovered = stage.live_usercmd_snapshot();
+  REQUIRE(recovered);
+  CHECK(recovered->scheduler_stall_recoveries == 1U);
+  CHECK(recovered->scheduler_discarded_wall_time_samples == 29U);
+  CHECK(recovered->generated_command_count == accounting->generated_command_count + 1U);
+  CHECK(recovered->attack_new_submission_count == accounting->attack_new_submission_count);
+  CHECK(recovered->use_new_submission_count == accounting->use_new_submission_count);
+  CHECK(recovered->last_sampled_forward_axis == 0.0F);
+  CHECK(recovered->scheduler_maximum_commands_per_update == 8U);
+  CHECK(recovered->runtime_records_committed_total > accounting->runtime_records_committed_total);
+  // The existing presentation stream also carries neutral releases. Keep
+  // exactly that notification, never a retroactive shot/Use or duplicate.
+  const auto neutral_submission = stage.poll_weapon_command_submission();
+  REQUIRE(neutral_submission);
+  CHECK(neutral_submission->buttons == 0U);
+  CHECK(neutral_submission->command_sequence == recovered->transmit_ranges.back().last_new_command_sequence);
+  CHECK(neutral_submission->command_end_nanoseconds ==
+        recovered->scheduler_next_sample_time_nanoseconds - 20'000'000);
+  CHECK_FALSE(stage.poll_weapon_command_submission());
+  REQUIRE(recovered->transmit_ranges.back().last_new_command_sequence ==
+          accounting->transmit_ranges.back().last_new_command_sequence + 1U);
+  // Release attack/Use while W remains physically held; the numeric axis and
+  // directional button state must describe the same input snapshot.
+  ++input.input_revision;
+  input.held_buttons = hlclient::gameplay_input::gameplay_button_mask(
+      hlclient::gameplay_input::GameplayButton::move_forward);
+  input.pressed_buttons = 0U;
+  REQUIRE(stage.submit_live_visual_input(input,now));
+  now += 20ms; stage.update(now);
+  REQUIRE_FALSE(stage.terminal());
+  CHECK(stage.live_usercmd_snapshot()->last_sampled_forward_axis == 1.0F);
+  CHECK(stage.live_usercmd_snapshot()->scheduler_stall_recoveries == 1U);
+  CHECK(world.runtime_observation()->generation == 1U);
+  while (stage.poll_weapon_command_submission()) {}
+
+  // A freshly sampled attack after recovery keeps its real monotonic sample
+  // time. Contiguous command IDs deliberately do NOT include discarded wall
+  // samples. Reconstructing time from activation+ID*20ms ages every later
+  // local effect by 580ms, although its immutable wire command is fresh.
+  ++input.input_revision;
+  input.forward_axis = 0.0F; // release W in both the axis and button views
+  input.held_buttons = input.pressed_buttons =
+      hlclient::gameplay_input::gameplay_button_mask(
+          hlclient::gameplay_input::GameplayButton::attack_primary);
+  REQUIRE(stage.submit_live_visual_input(input,now));
+  now += 20ms; stage.update(now);
+  REQUIRE_FALSE(stage.terminal());
+  const auto shot = stage.poll_weapon_command_submission();
+  REQUIRE(shot);
+  CHECK_FALSE(stage.poll_weapon_command_submission());
+  CHECK(shot->buttons == goldsrc::kReferenceGoldSrcButtonAttack);
+  const auto after_shot = stage.live_usercmd_snapshot();
+  REQUIRE(after_shot);
+  CHECK(shot->command_end_nanoseconds ==
+        after_shot->scheduler_next_sample_time_nanoseconds - 20'000'000);
+  CHECK(shot->command_end_nanoseconds ==
+        after_shot->scheduler_activation_time_nanoseconds +
+            (std::int64_t{shot->command_sequence} + 29) * 20'000'000);
+  CHECK(after_shot->command_interval == 20ms);
+  CHECK(after_shot->attack_new_submission_count ==
+        recovered->attack_new_submission_count + 1U);
+
+  // Feed the actual production TX receipt through the normal game host and
+  // local mixer. An independent model/observation/PCM fixture needs no game
+  // installation or audio device. Keep all existing cue expiry guards active.
+  namespace api = hlclient::game_api;
+  api::GameClientHost effects{hlclient::games::halflife::make_half_life_client_module()};
+  effects.reset({1,1,{1}});
+  api::LocalWeaponModelMetadata model;
+  model.generation=1; model.model_index=59; model.resource_revision=1;
+  model.resource_name="models/v_9mmhandgun.mdl";
+  model.supported_bodies.fill(true); model.selectable_bodies.fill(true);
+  model.sequences.resize(10,{30,46,false,{}});
+  hlclient::assets::ModelSequenceEvent marker;
+  marker.frame=0; marker.event_number=5001;
+  marker.options={std::byte{'1'},std::byte{'1'}};
+  model.sequences[3].events.push_back(marker);
+  effects.bind_model(model);
+  hlclient::client::RuntimeClientObservationState observed;
+  observed.generation=1; observed.publication_revision=1;
+  observed.lifecycle.life_epoch=1;
+  observed.lifecycle.state=hlclient::client::LocalPlayerLifeState::alive;
+  observed.client_metadata.generation=1;
+  observed.client_metadata.freshness=
+      hlclient::client::RuntimeObservationFreshness::observed_in_record;
+  observed.client_metadata.source=hlclient::client::RuntimeObservationSource{
+      .record_identity=1,.record_ordinal=1};
+  observed.receiving_client.emplace();
+  observed.receiving_client->viewmodel_index=59;
+  observed.receiving_client->health=100;
+  observed.weapon_hud.active_weapon_id=2;
+  observed.weapon_slots.push_back({.wire_slot=2,.clip=8,.in_reload=false,
+      .next_primary_attack=0.0,.weapon_id=2});
+  const auto presentation_now=std::chrono::duration<double>{now-epoch}.count();
+  effects.observe(observed,presentation_now);
+  const auto sample_time=std::chrono::duration<double>{
+      std::chrono::nanoseconds{shot->command_end_nanoseconds}-
+      epoch.time_since_epoch()}.count();
+  api::LocalWeaponSubmittedCommand submitted{shot->generation,shot->command_sequence,
+      shot->buttons,sample_time,api::LocalWeaponSubmittedCommand::ShotContext{
+          {0,0,28},{1,0,0}}};
+  effects.submit(submitted,presentation_now);
+  const auto presentation=effects.sample(presentation_now);
+  CHECK(presentation.primary_fire_starts==1U);
+  const api::LocalVisualContext camera{{0,0,28},{1,0,0},{0,-1,0},{0,0,1},{},presentation_now};
+  const auto visual=effects.local_visuals(camera);
+  CHECK(visual.flash.has_value()); CHECK(visual.light.has_value());
+  CHECK(visual.shell.has_value()); CHECK(visual.world_impact.has_value());
+  CHECK(visual.statistics.late_cues_dropped==0U);
+  const auto cues=effects.drain_audio();
+  REQUIRE(cues.count==1U);
+  CHECK(cues.cues[0].kind==api::LocalSoundKind::fire);
+  struct ReadyAudio final : goldsrc::SoundAssets {
+    std::shared_ptr<const hlclient::assets::AudioAsset> pcm;
+    ReadyAudio() {
+      auto data=std::make_shared<hlclient::assets::AudioAsset>();
+      data->sample_rate=48000; data->channel_count=1;
+      data->interleaved_samples.assign(4800,0.125F); pcm=std::move(data);
+    }
+    goldsrc::SoundAssetResult request(std::uint16_t) noexcept override {return {goldsrc::SoundAssetStatus::ready,pcm};}
+    goldsrc::SoundAssetResult request_local(const api::LocalSoundReference&) noexcept override {return {goldsrc::SoundAssetStatus::ready,pcm};}
+  } sounds;
+  hlclient::audio::OfflineOutput output;
+  output.set_listener({{0,0,28},{0,1,0},1,false});
+  goldsrc::LocalAudio playback(output);
+  playback.update(cues,&sounds,presentation_now,true);
+  CHECK(playback.statistics().late==0U);
+  CHECK(output.mixer.statistics().presentation_started==1U);
+  std::array<float,256> mixed{};
+  output.mixer.render(mixed);
+  CHECK(std::any_of(mixed.begin(),mixed.end(),[](float v){return v!=0.0F;}));
+  effects.submit(submitted,presentation_now); // exact replay cannot emit again
+  (void)effects.sample(presentation_now);
+  CHECK_FALSE(effects.local_visuals(camera).shell);
+  CHECK_FALSE(effects.local_visuals(camera).world_impact);
+  CHECK(effects.drain_audio().count==0U);
+  playback.update(cues,&sounds,presentation_now,true); // repeated batch too
+  CHECK(output.mixer.statistics().presentation_started==1U);
+  stage.cancel(now+1ms);
 }
 
 TEST_CASE(
@@ -2706,3 +3380,103 @@ TEST_CASE(
 }
 
 } // namespace
+TEST_CASE("D2 real live owner clears Use on capture loss latches short tap and retains RX with contextual TX",
+          "[use][goldsrc][live-runtime][integration]") {
+  FakeTransport transport;
+  const auto remote = network::NetworkAddress::loopback(27851U);
+  const auto epoch = goldsrc::LiveRuntimeStageTimePoint{} + 60s;
+  hlclient::client::ClientWorldState world;
+  auto config = live_test_config();
+  config.operation_mode = goldsrc::LiveRuntimeOperationMode::live_visual_control;
+  config.live_visual_input_source = goldsrc::LiveVisualControlInputSource::keyboard_mouse;
+  config.reference_prediction = true;
+  goldsrc::LiveRuntimeStage stage{transport,remote,world,config};
+  const auto driven = drive_live_initial(stage,transport,remote,epoch,false,false,true,true);
+  const auto resource = driven.last_server_sequence + 1U;
+  transport.queue(remote,server_packet(resource,false,
+      driven.transition_request.header.sequence.sequence.value(),false,
+      service_envelope(resource_semantic_payload())));
+  transport.queue(remote,server_packet(resource+1U,false,
+      driven.transition_request.header.sequence.sequence.value(),false,{std::byte{1}}));
+  for (std::size_t step=1; step<=8; ++step) stage.update(driven.now+std::chrono::milliseconds{step});
+  constexpr std::array empty_response{std::byte{5},std::byte{0},std::byte{0}};
+  const auto response = require_latest_payload(transport,empty_response);
+  const auto first = driven.now+9ms;
+  transport.queue(remote,server_packet(resource+2U,false,response.header.sequence.sequence.value(),
+      response.header.sequence.flags.reliable));
+  stage.update(first);
+  const auto spawn = require_latest_payload(transport,goldsrc::StockSpawnRequestBuilder::build(
+      0x12345678U,goldsrc::decode_stock_server_world_map_crc(0xdeadbeefU,0U)).encoding->semantic_bytes());
+  transport.queue(remote,server_packet(resource+3U,true,spawn.header.sequence.sequence.value(),
+      false,live_baseline_and_runtime_payload(100.0F,100U,80U,true)));
+  stage.update(first+1ms); stage.update(first+2ms);
+  const auto sendents = require_latest_payload(transport,goldsrc::StockSendEntitiesRequestBuilder::build().semantic_bytes());
+  transport.queue(remote,server_packet(resource+4U,false,sendents.header.sequence.sequence.value(),
+      sendents.header.sequence.flags.reliable,service_envelope(live_prediction_air_record(101.0F,10U))));
+  stage.update(first+3ms); stage.update(first+2s+2ms);
+  REQUIRE(stage.live_visual_input_ready());
+  REQUIRE(stage.attach_reference_prediction_collision(hlclient::tests::collision_brush_fixture::package(false)));
+
+  auto now = first+2s+3ms;
+  goldsrc::LiveVisualControlInput input{1,1,0,0,0,0,true,true};
+  REQUIRE(stage.submit_live_visual_input(input,now));
+  REQUIRE(stage.activate_live_visual_control(now));
+  const auto use = hlclient::gameplay_input::gameplay_button_mask(hlclient::gameplay_input::GameplayButton::use);
+  auto sample = [&](bool capture, unsigned held, unsigned pressed, unsigned released = 0U) {
+    ++input.input_revision; input.captured=capture;
+    input.held_buttons=held; input.pressed_buttons=pressed; input.released_buttons=released;
+    REQUIRE(stage.submit_live_visual_input(input,now));
+    now += 20ms; stage.update(now);
+    REQUIRE_FALSE(stage.terminal());
+    return *stage.live_usercmd_snapshot();
+  };
+  const auto initial = sample(true,use,use);
+  CHECK(initial.use_generated_count == 1U);
+  const auto held = sample(true,use,0U);
+  CHECK(held.use_generated_count == 2U);
+  CHECK(held.use_command_press_count == 1U);
+  const auto loss = sample(false,use,0U);
+  CHECK(loss.use_generated_count == 2U);
+  CHECK(loss.use_command_release_count == 1U);
+  CHECK(loss.use_clear_after_release_count == 1U);
+  const auto stale = sample(true,use,0U);
+  CHECK(stale.use_generated_count == 2U);
+  sample(true,0U,0U,use);
+  const auto fresh = sample(true,use,use);
+  CHECK(fresh.use_generated_count == 3U);
+  CHECK(fresh.use_command_press_count == 2U);
+  sample(true,0U,0U,use);
+  // Short tap arrives between command samples, then another render input
+  // arrives before the command boundary. Pending is consumed by history only.
+  ++input.input_revision; input.held_buttons=0U; input.pressed_buttons=use; input.released_buttons=use;
+  REQUIRE(stage.submit_live_visual_input(input,now));
+  ++input.input_revision; input.pressed_buttons=0U; input.released_buttons=0U;
+  REQUIRE(stage.submit_live_visual_input(input,now+1ms));
+  now += 20ms; stage.update(now);
+  const auto tap = *stage.live_usercmd_snapshot();
+  CHECK(tap.use_generated_count == 4U);
+  CHECK(tap.use_command_press_count == 3U);
+  const auto clear = sample(true,0U,0U);
+  CHECK(clear.use_generated_count == 4U);
+  CHECK(clear.use_clear_after_release_count == 3U);
+  CHECK(clear.command_interval == 20ms);
+  CHECK(clear.generated_command_count == clear.new_command_submission_count);
+  // RX remains active in the update that transmits held Use.
+  const auto sent = decode_sent(transport.sent.back());
+  transport.queue(remote,server_packet(resource+5U,false,sent.header.sequence.sequence.value(),false,
+      service_envelope(live_prediction_air_record(102.0F,10U))));
+  const auto rx_before = clear.driver_rx_total.owning_datagrams;
+  const auto with_rx = sample(true,use,use);
+  CHECK(with_rx.driver_rx_total.owning_datagrams == rx_before+1U);
+  CHECK(with_rx.runtime_records_committed_total == clear.runtime_records_committed_total+1U);
+  const auto stable = *stage.live_usercmd_snapshot();
+  const auto canonical = hlclient::client::runtime_observation_canonical_hash(*world.runtime_observation());
+  for (unsigned frame=0; frame<20; ++frame) static_cast<void>(stage.live_reference_prediction_snapshot(now+std::chrono::microseconds{frame}));
+  CHECK(stage.live_usercmd_snapshot()->use_generated_count == stable.use_generated_count);
+  CHECK(stage.live_usercmd_snapshot()->use_new_submission_count == stable.use_new_submission_count);
+  CHECK(hlclient::client::runtime_observation_canonical_hash(*world.runtime_observation()) == canonical);
+  input.focused=false; input.captured=false; input.held_buttons=0U; input.pressed_buttons=0U;
+  ++input.input_revision; REQUIRE(stage.submit_live_visual_input(input,now));
+  now += 20ms; stage.update(now);
+  CHECK(stage.live_usercmd_snapshot()->use_generated_count == stable.use_generated_count);
+}

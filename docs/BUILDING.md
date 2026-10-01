@@ -44,6 +44,11 @@ GLAD generated source is committed, not recovered from an old build directory.
 
 ### Optional manual game prerequisites
 
+For user-provided third-party BSPs in the isolated research copy, see
+[external manual test maps](EXTERNAL_MANUAL_TEST_MAPS.md). The normal default
+map and command remain unchanged; external maps require an explicit installed
+BSP path and read-only preflight.
+
 Offline build and source-only launcher validation need no game installation:
 
 ```powershell

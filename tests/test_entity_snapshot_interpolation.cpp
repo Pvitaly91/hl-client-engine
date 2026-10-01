@@ -553,6 +553,96 @@ TEST_CASE("Entity interpolation steps mode model and sequence transitions",
           goldsrc::EntityInterpolationErrorCode::position_limit_exceeded);
 }
 
+hlclient::client::RuntimeClientObservationState runtime_player_sample(double time, double x, std::uint64_t revision)
+{
+    namespace c = hlclient::client;
+    c::RuntimeClientObservationState state;
+    state.generation = 1U; state.publication_revision = revision;
+    state.server_time_seconds = time;
+    const c::RuntimeSubstateMetadata metadata{1U, c::RuntimeObservationFreshness::observed_in_record,
+        c::RuntimeObservationCompleteness::complete_reconstruction,
+        c::RuntimeObservationSource{revision, static_cast<std::size_t>(revision), static_cast<std::uint32_t>(revision), 0U, 8U}};
+    state.server_time_metadata = metadata; state.entity_metadata = metadata;
+    state.client_metadata.generation = 1U;
+    c::RuntimePacketEntityObservation entity;
+    entity.entity_number = 2U; entity.ordinary_visual_schema = true; entity.player_movement_schema = true;
+    entity.model_index = 7U; entity.sequence = 3U; entity.body = 1U; entity.skin = 0;
+    entity.origin = {x, 0.0, 0.0}; entity.angles = {0.0, 350.0, 0.0};
+    entity.frame = 64.0; entity.animation_time_seconds = time; entity.frame_rate = 1.0; entity.gait_sequence = 2U;
+    entity.controllers.fill(0U); entity.blending.fill(0U); state.packet_entities.push_back(entity);
+    state.canonical_state_hash = c::runtime_observation_canonical_hash(state);
+    REQUIRE(c::valid_runtime_observation(state));
+    return state;
+}
+
+TEST_CASE("E10 runtime player interpolation owns bounded samples and preserves committed state",
+          "[e10][entity-interpolation][runtime-replay]")
+{
+    auto old = runtime_player_sample(1.0, 0.0, 1U);
+    auto now = runtime_player_sample(2.0, 100.0, 2U);
+    now.packet_entities[0].angles.y = 10.0;
+    now.packet_entities[0].controllers.fill(200U); now.packet_entities[0].blending.fill(255U);
+    now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
+    const auto committed = now;
+    goldsrc::RuntimeEntityInterpolationOptions options;
+    options.limits.maximum_snapshot_gap_seconds = 2.0;
+    for (const double alpha : {0.0, .25, .5, .75, 1.0}) {
+        const auto sampled = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.0 + alpha, options);
+        REQUIRE(sampled); const auto& player = sampled.state->packet_entities.front();
+        CHECK(sampled.alpha == Approx(alpha)); CHECK(*player.origin.x == Approx(100.0 * alpha));
+        CHECK(*player.angles.y == Approx(alpha == 1.0 ? 10.0 : 350.0 + 20.0 * alpha));
+        CHECK(*player.controllers[0] == static_cast<std::uint32_t>(std::lround(200.0 * alpha)));
+        CHECK(*player.blending[0] == static_cast<std::uint32_t>(std::lround(255.0 * alpha)));
+        CHECK(player.animation_time_seconds == (alpha == 1.0 ? 2.0 : 1.0));
+        CHECK(sampled.state->server_time_seconds == 2.0);
+        CHECK(hlclient::client::valid_runtime_observation(*sampled.state));
+    }
+    CHECK(now == committed);
+    CHECK(*goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 10.0, options).state->packet_entities.front().origin.x == 100.0);
+    now.packet_entities.clear(); now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
+    REQUIRE(goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options));
+    CHECK(goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options).state->packet_entities.empty());
+}
+
+TEST_CASE("E10 runtime player resets and failures never fabricate interpolation",
+          "[e10][entity-interpolation][runtime-replay]")
+{
+    auto old = runtime_player_sample(1.0, 0.0, 1U);
+    auto now = runtime_player_sample(2.0, 100.0, 2U);
+    goldsrc::RuntimeEntityInterpolationOptions options; options.limits.maximum_snapshot_gap_seconds = 2.0;
+    SECTION("explicit no interpolation") { options.no_interpolation = true; }
+    SECTION("teleport") { options.teleport_distance = 50.0; }
+    SECTION("model change") { now.packet_entities[0].model_index = 8U; }
+    SECTION("new entity") { now.packet_entities[0].entity_number = 3U; }
+    SECTION("excessive gap") { options.limits.maximum_snapshot_gap_seconds = .25; }
+    SECTION("effect flag") { now.packet_entities[0].effects = 32U; options.no_interpolation_effect_mask = 32U; }
+    now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
+    const auto result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+    REQUIRE(result); CHECK(result.reset_count == 1U); CHECK(*result.state->packet_entities[0].origin.x == 100.0);
+}
+
+TEST_CASE("E10 runtime interpolation retains missingness current visibility and non-player owners",
+          "[e10][entity-interpolation][runtime-replay]")
+{
+    auto old = runtime_player_sample(1.0, 0.0, 1U); auto now = runtime_player_sample(2.0, 100.0, 2U);
+    now.packet_entities[0].origin.y.reset(); now.packet_entities[0].frame_rate.reset(); now.packet_entities[0].effects = 128U;
+    now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
+    goldsrc::RuntimeEntityInterpolationOptions options; options.limits.maximum_snapshot_gap_seconds = 2.0;
+    auto result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+    REQUIRE(result); CHECK_FALSE(result.state->packet_entities[0].origin.y); CHECK_FALSE(result.state->packet_entities[0].frame_rate);
+    CHECK(result.state->packet_entities[0].effects == 128U);
+    now.packet_entities[0].player_movement_schema = false; now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
+    result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+    REQUIRE(result); CHECK(*result.state->packet_entities[0].origin.x == 100.0); CHECK(result.interpolated_count == 0U);
+    options.limits.maximum_result_bytes = 1U;
+    result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+    REQUIRE_FALSE(result); CHECK(result.error->code == goldsrc::EntityInterpolationErrorCode::result_byte_limit_exceeded);
+    options.limits.maximum_result_bytes = goldsrc::EntityInterpolationLimits{}.maximum_result_bytes;
+    now.server_time_seconds = .5; now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
+    result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+    REQUIRE_FALSE(result); CHECK(result.error->code == goldsrc::EntityInterpolationErrorCode::invalid_snapshot_time_order);
+}
+
 static_assert(!std::is_copy_assignable_v<goldsrc::InterpolatedEntityState>);
 static_assert(!std::is_copy_assignable_v<goldsrc::InterpolatedEntityFrame>);
 static_assert(!std::is_copy_assignable_v<

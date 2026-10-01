@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
+#include <hlclient/assets/wav_importer.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
 #include <hlclient/goldsrc/sprite/goldsrc_sprite_importer.hpp>
 #include <hlclient/goldsrc/studio/goldsrc_studio_model_importer.hpp>
@@ -12,12 +13,15 @@ namespace hlclient::goldsrc {
 
 assets::AssetImporterRegistrationResult register_builtin_asset_importers(
     assets::AssetImporterRegistries& registries,
-    bsp::GoldSrcBspImportLimits bsp_limits)
+    bsp::GoldSrcBspImportLimits bsp_limits,
+    bsp::GoldSrcBspParseOptions bsp_options)
 {
     try {
+        auto audio = registries.audio.register_importer(std::make_unique<assets::WavImporter>(),100);
+        if (!audio) return audio;
         auto world = registries.worlds.register_importer(
             std::make_unique<bsp::GoldSrcBspWorldImporter>(
-                std::move(bsp_limits)),
+                std::move(bsp_limits), bsp_options),
             bsp::kGoldSrcBspWorldImporterPriority);
         if (!world) {
             return world;

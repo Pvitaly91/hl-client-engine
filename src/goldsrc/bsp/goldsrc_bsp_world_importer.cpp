@@ -241,19 +241,20 @@ struct ProbeLumpRange {
 } // namespace
 
 GoldSrcBspCollisionImportAttachment::GoldSrcBspCollisionImportAttachment(
-    GoldSrcBspCollisionSource collision_source)
-    : collision_source_{std::move(collision_source)}
+    GoldSrcBspParsedDocument document)
+    : document_{std::move(document)}
 {
 }
 
 const GoldSrcBspCollisionSource&
 GoldSrcBspCollisionImportAttachment::collision_source() const noexcept
 {
-    return collision_source_;
+    return document_.collision_source;
 }
 
-GoldSrcBspWorldImporter::GoldSrcBspWorldImporter(GoldSrcBspImportLimits limits)
-    : limits_{std::move(limits)}
+GoldSrcBspWorldImporter::GoldSrcBspWorldImporter(
+    GoldSrcBspImportLimits limits, GoldSrcBspParseOptions options)
+    : limits_{std::move(limits)}, options_{options}
 {
 }
 
@@ -299,7 +300,7 @@ assets::WorldAssetResult GoldSrcBspWorldImporter::import(
     auto parsed = GoldSrcBspParser::parse(
         source.bytes(),
         limits_,
-        GoldSrcBspParseOptions{false});
+        options_);
     if (!parsed) {
         const auto& parser_error = *parsed.error;
         const auto asset_error_code =
@@ -347,10 +348,10 @@ assets::WorldAssetResult GoldSrcBspWorldImporter::import(
         });
     }
 
+    auto world = parsed.document->world_asset;
     auto collision_attachment =
         std::make_shared<const GoldSrcBspCollisionImportAttachment>(
-            std::move(parsed.document->collision_source));
-    auto world = std::move(parsed.document->world_asset);
+            std::move(*parsed.document));
     world.identity.source_name = path_as_utf8(source.virtual_path());
     return assets::WorldAssetResult::success(
         std::move(world), std::move(collision_attachment));

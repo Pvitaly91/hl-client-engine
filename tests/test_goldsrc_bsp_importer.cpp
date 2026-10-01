@@ -176,7 +176,7 @@ TEST_CASE("Import returns an owning WorldAsset with only approved virtual identi
     CHECK(retained.materials.size() == 1U);
 }
 
-TEST_CASE("Production registration installs the three real GoldSrc importers",
+TEST_CASE("Production registration installs GoldSrc visuals and PCM WAV",
     "[goldsrc-bsp][importer][registration]")
 {
     assets::AssetImporterRegistries registries;
@@ -188,7 +188,7 @@ TEST_CASE("Production registration installs the three real GoldSrc importers",
     CHECK(registries.models.size() == 1U);
     CHECK(registries.sprites.size() == 1U);
     CHECK(registries.images.size() == 0U);
-    CHECK(registries.audio.size() == 0U);
+    CHECK(registries.audio.size() == 1U);
 
     const auto source = make_source(
         "maps/registered.bsp", fixture::literal_minimal_goldsrc_bsp_v30());

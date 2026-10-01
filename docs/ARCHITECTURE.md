@@ -1,5 +1,122 @@
 # Architecture
 
+## Two-client weapon effects correction (2026-10-01)
+
+The committed scripted-event bridge now connects the bounded `svc_event` and
+`svc_event_reliable` observations to `game_api/remote_effects.hpp`. It publishes
+only after the complete runtime record commits. Packet references select the
+exact preceding packet snapshot ordinal, not an edict number, rendered entity
+index, or local-player guess. Explicit delta-field presence is retained as
+metadata; explicit zero coordinates are not confused with inherited vectors.
+
+`games/halflife/remote_effects.*` owns the exact advertised Glock/crowbar event
+bindings, sample choices, emitter identity, one-shot dedup and bounded outputs.
+The host never executes `.sc` text. `app/remote_effect_presentation.*` executes
+those neutral requests using the existing world-impact and shell simulation
+owners. OpenGL draws bounded world flash billboards before first-person depth
+reset. Local and remote presentation audio share the approved loader, mixer
+and device, with disjoint voice identities. Scripted event delivery is separate
+from movement replay and local weapon confirmation.
+
+Command IDs remain contiguous across scheduler stall recovery. Local weapon
+notifications retain their exact generated sample deadline through the TX
+receipt instead of deriving wall time from command number. This changes no
+wire bytes, physics cadence, history identity, or game authority.
+
+Remote effects currently cover Glock fire/shell/static-world impacts and
+crowbar swing. Server `svc_sound` continues to supply crowbar hit sounds.
+World muzzle position, missing velocity inheritance and inherited player pitch
+are a documented compatible presentation profile, not stock-binary parity.
+Unsupported events/delays are explicit skips; the renderer retains one point
+light (local shot priority, otherwise closest active remote light). See the
+additive correction record in `REMOTE_PLAYER_MOVEMENT_AUDIO_E9.md`.
+
+E9 verifies and hardens the existing E1 committed server-audio path, without
+remote movement heuristics or a second scheduler. One-shots keep server-event
+origin; looping sources may follow valid entity observations until a committed
+slot boundary invalidates attachment. Local E8 remains module-owned and uses
+its separate presentation voice namespace. Optional same-owned-host A/B manual
+composition enables background audio only for A and disables B output; default
+single-client focus policy is unchanged. See
+[E9 remote sound contract](REMOTE_PLAYER_MOVEMENT_AUDIO_E9.md).
+
+E8 extends the existing command-driven local movement audio path, not physics
+or rendering: exact support face/origin -> the same owning E7 materials table
+-> Half-Life step profile -> neutral approved spatial one-shot. Reversible
+cadence is separate from monotonic heard foot identity; movement pending cues
+have life ownership independent of weapon scope. See
+[E8 material footsteps](HALFLIFE_MATERIAL_FOOTSTEPS_E8.md).
+
+E7 carries an exact neutral BSP surface ID and canonical texture name from
+the shared impact tracer through GameClientAPI. A single session-owned
+Half-Life `materials.txt` classifier selects Glock/crowbar material samples;
+the existing generic audio and decal mechanisms execute them. See
+[E7 static surface impacts](HALFLIFE_SURFACE_MATERIAL_IMPACTS_E7.md).
+
+E6 extends the same boundary with local-compatible crowbar static-world
+impact presentation: [E6 contract](LOCAL_CROWBAR_WORLD_IMPACTS_E6.md).
+E5.1 corrects the existing E5 path without moving ownership: the Half-Life
+module selects the `{SHOT1` white-neutral decal and concrete-hit/shell-contact
+sound profiles; shared BSP point sweeps emit neutral contact observations,
+OpenGL executes a profile-selected blend mode, and the E3 approved loader/mixer
+plays distinct spatial one-shots. See
+[E5/E5.1 impacts and contact audio](LOCAL_GLOCK_WORLD_IMPACTS_E5.md).
+
+E4 local Glock flash/casing presentation: see
+[LOCAL_WEAPON_VISUALS_E4.md](LOCAL_WEAPON_VISUALS_E4.md). The G1 Half-Life
+module owns accepted-action and Studio marker meaning; the shared renderer
+only consumes neutral camera-local/world-space visual instances.
+
+E3 local dry movement sound boundary: see
+[LOCAL_MOVEMENT_AUDIO_E3.md](LOCAL_MOVEMENT_AUDIO_E3.md). The Half-Life module
+owns sound rules; the host supplies completed prediction commands and an
+identity-constrained presentation-only surface trace.
+
+R1 terrain/ladder/viewmodel corrective boundary: see
+[TERRAIN_LADDER_VIEWMODEL_R1.md](TERRAIN_LADDER_VIEWMODEL_R1.md). The concrete
+Half-Life module selects ladder parameters; shared collision, history and
+renderer mechanisms do not link the concrete game.
+
+## E1 shared server audio
+
+The normal application now composes a committed GoldSrc sound outbox, exact
+sparse approved sound-resource loader, neutral PCM WAV importer/mixer and SDL3
+playback. `hlclient_audio` and `hlclient_audio_sdl` know no GoldSrc or game rules;
+`hlclient_goldsrc_audio` translates committed protocol events and
+`hlclient_goldsrc_sound_assets` retains approved resource capabilities. Neither
+depends on HalfLifeClientModule. Sound is an event side channel after the
+existing atomic world commit, not a second scene or prediction side effect.
+Listener/brush source sampling uses the final D4 presentation boundary without
+visibility gating. Bounds, lifecycle, null/device policy and pinned references
+are in [E1 server audio](SERVER_AUDIO_E1.md). Existing module and scene graphs
+remain intact; future locally generated game sounds belong to the game module.
+
+## Live brush rendering (D3)
+
+The G1 game boundary is unchanged. `RuntimeReplayLocalAssets` now binds exact
+current-session `*N` model references through the canonical BSP import attachment
+to `GoldSrcBrushRenderLibraryBuilder`. Immutable world/brush resources are
+separate from owning `RuntimeBrushRenderFrame` instances published atomically
+with Studio/Sprite frames. `ClientWorldState -> RenderScene -> OpenGlRenderer`
+retains the existing world, viewmodel and HUD domains. No Half-Life classname
+or interaction rule enters this renderer path. See
+[D3 contract and verification](LIVE_BRUSH_ENTITIES_M473D3.md) for coordinates,
+texture states, visibility fallback, lifecycle and offline limits.
+
+## Optional owned test-server health condition
+
+The manual launcher's optional `-TestStartHealth 50` uses an isolated
+`test-server-assisted` Metamod-P profile, not client health authority. The
+project-owned helper in `test_server/start_health` is a standalone test-server
+build, outside all engine/client/core-only dependency graphs. It writes only
+public server entvars health once after the first completed, uniquely identified
+local player's spawn. The application has a read-only fresh-clientdata readiness
+gate, while HalfLifeClientModule/HUD continue using ordinary server observations.
+Runner-owned exact restoration removes the run-scoped profile and restores
+liblist; normal launches never enable it. It is not unmodified stock, damage
+proof or universal mod support. See [the bounded profile contract and offline
+handoff](OPTIONAL_50HP_TEST_START_D2.md).
+
 ## Purpose and constraints
 
 `hl-client-engine` is a standalone, independently authored client whose first
@@ -10,6 +127,64 @@ turning the renderer, simulation, or asset code into two separate engines.
 The reference ABI remains Windows x86. Platform size assumptions must be made
 explicit at serialization and ABI boundaries; wire data must never be decoded
 by casting packet bytes to host structs.
+
+## G1 current engine/game ownership
+
+D2 Use selects a narrow HL1 input/reference movement profile through the same
+module policy: physical E -> typed Use -> immutable usercmd/history -> Netchan.
+Shared input has a policy-selected capture/life action gate; the movement
+kernel accepts a simulation-local ground button speed cap before duck scaling.
+Neither mechanism selects interaction objects or changes HP/armor. Absolute
+Health/Battery and bounded observation-window semantics remain game-owned.
+See [D2 contract](HALFLIFE_USE_INTERACTION_M473D2.md) for profile bounds,
+diagnostics, offline verification and the separate pending manual test.
+
+The normal executable now composes one `GameClientHost` with a static
+`HalfLifeClientModule` through `IGameClientModule`. Actual existing game body
+interpretation, inventory/weapon rules, B1 presentation, HUD composition,
+camera eligibility/recoil, C life transitions and live input/movement policy
+selection reside under `include/hlclient/games/halflife/` and
+`src/games/halflife/`. The host retains its single pump, clock, driver,
+scheduler, RX/TX, scene and renderer; no second engine loop is introduced.
+
+`hlclient_game_halflife -> hlclient_game_api` and
+`hlclient_game_client_host -> hlclient_game_api` are separate dependency
+branches joined only by executable/test composition. Shared helpers used by
+the concrete module are pure lower mechanisms; lower engine targets cannot
+link or include the Half-Life module, even through aliases or intermediate
+targets. Configure checks the actual graph and source/include closure.
+`HLCLIENT_BUILD_GAME_HALFLIFE=OFF` excludes its target and object files while
+retaining `hlclient_engine_core` and `hlclient_core_api_tests`.
+
+Game-message views borrow the exact bounded decoded body only during staging.
+The module returns owning state; successful decoder/world validation precedes
+the existing single commit boundary. Malformed suffixes publish no partial
+game effects. Initial/reset staging uses no previous game state and resets
+the module only after validation succeeds. Repeated frames and movement replay
+do not resubmit weapon actions. Current network grammar and canonical hashes
+are unchanged.
+
+The asset provider materializes neutral model/sequence/body/frame requests;
+OpenGL draws module-composed bounded HUD primitives. Camera geometry and H3/H4
+physics/replay remain shared, with actual policy supplied by the module.
+The original `IClientSceneSource -> ClientWorldState -> RenderScene -> IRenderer`
+path remains the sole scene path. Later milestone sections below describe
+their original stage boundaries; the current ownership, precise limitations,
+transaction/lifetime contract, build commands and verification record are in
+[GameClientAPI and Half-Life module](GAME_CLIENT_MODULE_G1.md).
+
+## D1 server-authoritative pickups
+
+The Half-Life module now stages AmmoPickup/WeapPickup/ItemPickup as bounded
+owning presentation events, independently of absolute AmmoX/Health/Battery,
+CurWeapon and clientdata ownership. GameClientHost validates event bounds and
+exact decoded-message provenance before the existing single atomic commit.
+The module's fixed four-row, five-second presentation-clock history never
+writes counters, recreates actions or infers pickups from world visibility.
+Per-slot reserve/clip message sources are retained without changing the
+existing canonical/value hash profiles. Generic entity effects/full/delta
+reconstruction and imported/GPU asset reuse remain shared.
+See [D1 contracts and handoff](HALFLIFE_PICKUPS_INVENTORY_M473D1.md).
 
 ## Non-negotiable data flow
 
@@ -135,6 +310,10 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | Target | Responsibility | Must not own |
 | --- | --- | --- |
 | `hlclient_core` | logging, command-line parsing, fundamental utilities, version | SDL, sockets, protocol parsing |
+| `hlclient_game_api` | project-owned game/session contracts, borrowed record views, owning game/presentation values | concrete game/host headers, native handles, SDK ABI structures |
+| `hlclient_game_client_host` | session-owned module lifetime and typed dispatch | concrete Half-Life rules, transport, second application loop |
+| `hlclient_game_policy` | validation of explicit input/movement policy using shared mechanisms | choosing Half-Life defaults, server MoveVars fabrication |
+| `hlclient_game_halflife` | existing Half-Life messages, inventory, weapon/HUD/view/camera presentation, lifecycle and policy selection | sockets, SDL/GL handles, renderer calls, scene/asset host, new physics kernel |
 | `hlclient_input_api` | bounded physical keyboard/mouse events, immutable frame snapshots, state tracking, and null/scripted sources | SDL/native handles, filesystem, commands, network, renderer state |
 | `hlclient_platform_sdl_input` | private SDL3 scancode/button/window-event translation for the sole platform pump | gameplay actions, client/world state, renderer state |
 | `hlclient_platform` | SDL lifetime, the sole ordered platform event pump, windows, relative-mouse capture, GL context, and clocks | game protocol, gameplay bindings, or world state |
@@ -182,7 +361,7 @@ make renderer behavior depend on injected addresses or Valve private layouts.
 | `hlclient_goldsrc_lightmaps` | exact face-local GoldSrc lightmap extents, RGB/style-slot decode, deterministic padded multi-page atlases, and immutable per-surface bindings | filesystem, network, SDL, OpenGL, gamma/overbright, dynamic lighting |
 | `hlclient_goldsrc_world_render` | same-session texture/lightmap/package stage, bounded events and terminal publication, and exactly-once retained network/authentication cleanup | new semantic TX, SDL/OpenGL initialization, package drawing, gameplay continuation |
 | `hlclient_world_render_api` | renderer-neutral world vertices, materials, batches, coordinate metadata, and immutable package contract | GoldSrc/network types, SDL, OpenGL handles, filesystem |
-| `hlclient_world_render_package` | complete-texture/lightmap validation, checked UV/material/batch construction, package limits, and stable renderer resource identity/revision | parsers, native paths, SDL/OpenGL upload, network state |
+| `hlclient_world_render_package` | typed renderable-texture/lightmap validation, checked UV/material/batch construction, package limits, and stable renderer resource identity/revision | parsers, native paths, SDL/OpenGL upload, network state |
 | `hlclient_world_spatial` | immutable planes/nodes/leaves/PVS table, marksurface membership, and bounded point/AABB queries | BSP bytes, entity interpretation, renderer/GPU work, filesystem, network |
 | `hlclient_goldsrc_spatial` | canonical BSP-record adaptation, strict bounded GoldSrc PVS RLE decode/deduplication, leaf-zero and marksurface mapping | independent BSP wire parsing, renderer calls, paths, network |
 | `hlclient_world_visibility` | OpenGL-convention frustum extraction, explicit PVS/fallback resolution, exact surface/instance selection, and stable draw-list construction | BSP/PVS byte parsing, entity behavior, filesystem, network, GPU resources |
@@ -715,16 +894,33 @@ a native path, and `AssetManager` is not used. Earlier asset/geometry routes do
 not enter this path. See
 [world texture resolution](WORLD_TEXTURE_RESOLUTION.md).
 
+The external-map compatibility profile separates source completeness from
+renderability. The texture import API defaults to strict rejection; application
+composition explicitly selects `placeholder_for_absent_name` only after all
+required declared WADs were approved, opened and parsed successfully. One small
+bounded project-generated checker image can represent absent names through
+typed `substituted_missing_texture` bindings. It is never counted as a decoded
+source image or assigned archive provenance. Missing/malformed archives,
+dimension mismatch, unsafe paths and byte/count bounds remain strict. Source
+material dimensions determine UVs even when a shared placeholder is used.
+`WorldTextureSet::complete_for_world_materials()` still reports source
+completeness; `renderable_for_world_materials()` accepts explicitly typed
+placeholders. Package/stage/brush/renderer consumers use the latter without
+learning Half-Life semantics. Core-only fixture tests cover this same path.
+
 M4.3 consumes that owning state without introducing new filesystem authority:
 
 ```text
-retained approved BSP bytes + complete TexturedWorldAsset
+retained approved BSP bytes + renderable TexturedWorldAsset
     -> GoldSrcWorldLightmapImporter -> WorldLightmapSet
     -> WorldRenderPackageBuilder -> immutable WorldRenderPackage
     -> ClientWorldState -> RenderScene -> IRenderer
 ```
 
-The lighting importer receives a byte span, never a path. Package publication
+The lighting importer receives a byte span, never a path. BSP/lightmap validation
+accepts bounded zero-sample light cursors on faces whose first style is 255;
+the original cursor is retained, no atlas is allocated for that face, and
+active-style end/beyond-end or invalid negative cursors remain errors. Package publication
 transfers local ownership once and then the stage finalizes the retained
 driver/authentication lifetime. The offline viewer begins at a caller-supplied
 safe virtual map name and follows the same resolver/source/importer chain with
@@ -1134,3 +1330,90 @@ verified scene slice has 16 supported Studio instances; eight inline-brush and
 five material variants remain unsupported. Details, exact provenance and
 commands: [captured local-asset replay](STOCK_CAPTURE_LOCAL_ASSET_REPLAY.md).
 This is neither a new active capture nor live/universal stock compatibility.
+
+### Manual wall-clock stalls and optional test-server startup
+
+The scheduler defaults to strict bounded catch-up. Only the manual host opts
+into discarding unsampled wall-clock slots after a stall: one neutral command
+on the retained grid, unchanged duration and identities, no input replay.
+Scripted evidence remains strict. The standalone test-50 helper is never a
+core/client dependency; its loader/configuration and health confirmation are
+separate bounded stages of the existing restoration transaction. See
+[corrective contract and evidence](MANUAL_STALL_TEST50_CORRECTIVE_20260927.md).
+
+### D4 reference ground and committed brush collision
+
+The live host's immutable current-server-frame collision context binds decoded
+neutral solidity/movetype fields and sparse model slots to the existing BSP
+brush hull library. Seed, movement, duck clearance and camera collision use
+the same scene; rendering remains an independent consumer of committed state.
+The Half-Life module continues to select the unchanged movement/input policy.
+No carry or pusher extrapolation is inferred from render transforms. See
+[D4 scope, precision, lifecycle and verification](GROUND_BRUSH_PREDICTION_D4.md).
+
+The D4 vertical-lift continuation adds an explicit Half-Life module policy for
+bounded **derived** vertical support motion from two coherent server-time/brush
+observations, never from renderer matrices or receipt time. Shared
+`simulate_reference_movement` serves both append and replay; the existing kernel
+and collision library remain generic. A server seed includes prior pusher
+displacement, so only each command's future interval is carried. The sampled
+collision scene also supplies render-only D3 transforms at the player's
+presentation time; committed observations are untouched. See
+[vertical-lift time, ownership, bounds and tests](VERTICAL_LIFT_PREDICTION_D4_CONTINUATION.md).
+
+### E2 local weapon audio
+
+The Half-Life B1 controller emits owning GameClientAPI audio cues; imported
+Studio metadata reaches a generic bounded marker traversal and HL1 5004 policy.
+The host drains the selected module, then a neutral local presentation owner
+uses the E1 approved loader/cache/mixer/output. Rendering, transport and movement
+replay emit no local weapon sound. Local cancellation scopes never reset world
+voices. See [E2 ownership, references and verification](LOCAL_WEAPON_AUDIO_E2.md).
+
+### E5 local Glock static-world impact presentation
+
+The existing accepted B1 Glock identity and exact submitted command angles
+cross `GameClientAPI` with an owning local-compatible shot context. The
+Half-Life module alone selects Glock eligibility, `{SHOT1` from the approved
+same-root `decals.wad`, and `weapons/ric1.wav`. The shared application owner
+performs a bounded static BSP trace, refuses a nearer committed brush blocker,
+uniquely matches the visible world surface and clips the decal polygon to its
+triangles. `RenderScene` carries neutral masked world geometry; OpenGL draws it
+with depth test and offset. The existing E3 mixer receives one separate
+world-origin sound cue. No wire, ammo, damage, HUD or movement authority is
+added. See [E5 contract and limits](LOCAL_GLOCK_WORLD_IMPACTS_E5.md).
+
+### E9.1 neutral server event framing corrective
+
+The shared RuntimeControlDecoder accepts bounded Protocol48 svc_event and
+svc_event_reliable observations through the normal mixed dispatcher, using the
+advertised event_t delta schema and an explicit null/default arguments base.
+Owned immutable decoded values survive RX buffer release. Queued entries keep
+packet-list references distinct from entity IDs and delays as unscaled wire
+ticks. Entire queues align once; per-object and complete-payload budgets apply
+before publication. Unknown framing is never skipped or scanned past. The
+existing record transaction/duplicate fingerprints remain authoritative for
+publication; canonical world state and GameClientAPI semantics are unchanged.
+This corrective does not execute .sc callbacks or create remote weapon effects.
+Early managed A failure retains B's bounded redacted diagnostic/exit observation
+after exact owned cleanup. See [E9 corrective evidence](REMOTE_PLAYER_MOVEMENT_AUDIO_E9.md).
+
+### E10 remote player visual policy
+
+Normal application assets now sample committed player observations through the
+existing entity interpolator and the selected `GameClientAPI` module. Half-Life
+owns gait/pitch/torso/skeleton partition/transition rules; the shared Studio
+evaluator owns bounded numeric local-pose composition and skinned bounds. Existing
+world/render packages carry the result; there is no second player renderer.
+Public server seconds and exact source-record identities are kept separate from
+synthetic interpolation evidence. Only players interpolate here; D4 brush and
+E9/audio/RX ownership stay unchanged. The same host/API accepts a test-only
+alternate module; lower targets never link the concrete HL library. See
+[E10 fields, lifecycle, limits and verification](REMOTE_PLAYER_VISUAL_ANIMATION_E10.md).
+
+Remote gait clocks survive bounded gait switches, equal-time updates and skipped
+render records; genuine continuity boundaries still reset them. The API carries
+committed anchor clocks separately from held renderer metadata. Shared Studio
+rotation channels interpolate endpoint quaternions (with controllers applied
+to both), not Euler scalars; this remains a neutral pose mechanism without a
+Half-Life dependency in lower targets.

@@ -407,6 +407,7 @@ private:
 
 enum class EntityStateBaseReferenceKind {
     entity_baseline,
+    null_baseline,
     instanced_baseline,
     intra_message_entity,
     previous_snapshot_entity,
@@ -415,6 +416,8 @@ enum class EntityStateBaseReferenceKind {
 class EntityStateBaseReference final {
 public:
     [[nodiscard]] static EntityStateBaseReference entity_baseline(
+        std::uint32_t entity_number) noexcept;
+    [[nodiscard]] static EntityStateBaseReference null_baseline(
         std::uint32_t entity_number) noexcept;
     [[nodiscard]] static EntityStateBaseReference instanced_baseline(
         std::uint32_t slot) noexcept;

@@ -17,24 +17,31 @@ inline constexpr assets::AssetProbeConfidence kGoldSrcBspGeometryProbeConfidence
 inline constexpr assets::AssetProbeConfidence kGoldSrcBspExtensionHintBoost = 1U;
 
 // Type-erased by generic dispatch, then recovered only by the GoldSrc
-// collision CPU stage. This state is produced by the same canonical parser
-// invocation as WorldAsset and retains neither raw BSP bytes nor native paths.
+// collision/brush CPU stages. This owning canonical document comes from the
+// same parser invocation as WorldAsset; it retains no raw BSP file/native path.
 class GoldSrcBspCollisionImportAttachment final
     : public assets::AssetImportAttachment {
 public:
     explicit GoldSrcBspCollisionImportAttachment(
-        GoldSrcBspCollisionSource collision_source);
+        GoldSrcBspParsedDocument document);
 
     [[nodiscard]] const GoldSrcBspCollisionSource& collision_source()
         const noexcept;
+    [[nodiscard]] const GoldSrcBspParsedDocument& document() const noexcept {
+        return document_;
+    }
 
 private:
-    GoldSrcBspCollisionSource collision_source_;
+    GoldSrcBspParsedDocument document_;
 };
 
 class GoldSrcBspWorldImporter final : public assets::IWorldImporter {
 public:
-    explicit GoldSrcBspWorldImporter(GoldSrcBspImportLimits limits = {});
+    // World-only consumers retain their historical validation boundary.
+    // Live scene preparation requests brush materialization explicitly.
+    explicit GoldSrcBspWorldImporter(
+        GoldSrcBspImportLimits limits = {},
+        GoldSrcBspParseOptions options = {false});
 
     [[nodiscard]] std::string_view id() const noexcept override;
     [[nodiscard]] assets::AssetProbeConfidence probe(
@@ -44,6 +51,7 @@ public:
 
 private:
     GoldSrcBspImportLimits limits_;
+    GoldSrcBspParseOptions options_;
 };
 
 } // namespace hlclient::goldsrc::bsp

@@ -1,7 +1,12 @@
 #include <hlclient/goldsrc/live_runtime_stage.hpp>
+
+#include <hlclient/goldsrc/client_message.hpp>
 #include <hlclient/goldsrc/reference_prediction_command.hpp>
 #include <hlclient/goldsrc/reference_prediction_reconciliation.hpp>
+#include <hlclient/goldsrc/reference_brush_collision.hpp>
+#include <hlclient/goldsrc/surface_texture_query.hpp>
 #include <hlclient/prediction/local_prediction.hpp>
+#include <hlclient/prediction/prediction_visual_correction.hpp>
 
 #include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
@@ -9,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <new>
 #include <ranges>
@@ -116,7 +122,7 @@ opcode_at(const OwnedServicePayload &payload,
 }
 
 [[nodiscard]] bool
-valid_usercmd_scenario(const LiveUserCmdScenarioConfig &scenario) noexcept {
+valid_usercmd_scenario(const LiveUserCmdScenarioConfig &scenario, bool lifecycle = false) noexcept {
   if (scenario.command_interval.count() <= 0 ||
       scenario.command_interval > std::chrono::milliseconds{255} ||
       scenario.forward_amplitude <= 0 || scenario.forward_amplitude > 2'047 ||
@@ -135,12 +141,12 @@ valid_usercmd_scenario(const LiveUserCmdScenarioConfig &scenario) noexcept {
   for (const auto duration : scenario.durations) {
     if (duration.count() <= 0 ||
         duration.count() % scenario.command_interval.count() != 0 ||
-        duration > std::chrono::seconds{5}) {
+        duration > std::chrono::seconds{lifecycle ? 8 : 5}) {
       return false;
     }
     total += duration;
   }
-  return total <= std::chrono::seconds{15} &&
+  return total <= std::chrono::seconds{lifecycle ? 40 : 15} &&
          quantize_wire_angle(scenario.fixed_yaw_degrees).has_value() &&
          quantize_wire_angle(scenario.fixed_pitch_degrees).has_value();
 }
@@ -172,37 +178,62 @@ phase_from_index(const std::size_t index) noexcept {
   return static_cast<LiveUserCmdInputPhase>(index);
 }
 
+// The host synthesizes typed actions for deterministic scenarios using the
+// selected module's immutable physical bindings; it owns no game key defaults.
+void press_action(input::InputStateTracker& tracker,
+                  const game_api::GameMovementPolicy& policy,
+                  const gameplay_input::GameplayInputAction action) {
+  if (!policy.bindings) return;
+  for (const auto& binding : policy.bindings->bindings()) {
+    if (binding.action() != action) continue;
+    if (binding.physical_key())
+      tracker.apply_event(input::InputEvent::key_pressed(*binding.physical_key()));
+    else if (binding.physical_mouse_button())
+      tracker.apply_event(input::InputEvent::mouse_button_pressed(*binding.physical_mouse_button()));
+    return;
+  }
+}
+
 [[nodiscard]] std::optional<gameplay_input::GameplayInputIntent>
-make_scenario_intent(const LiveUserCmdInputPhase phase,
+make_scenario_intent(const game_api::GameMovementPolicy& policy,
+                     const LiveUserCmdInputPhase phase,
                      const bool side_check = false,
                      const bool jump_duck_check = false,
-                     const bool speed_check = false) noexcept {
+                     const bool speed_check = false,
+                     const bool predicted_actions = false) noexcept {
   try {
     input::InputStateTracker tracker;
     tracker.begin_frame();
     tracker.apply_event(input::InputEvent::focus_gained());
     tracker.apply_event(input::InputEvent::capture_acquired());
     if (phase == LiveUserCmdInputPhase::forward) {
-      tracker.apply_event(
-          input::InputEvent::key_pressed(
-              jump_duck_check ? input::PhysicalKey::space
-              : side_check ? input::PhysicalKey::a : input::PhysicalKey::w));
+      press_action(tracker, policy,
+          jump_duck_check ? gameplay_input::GameplayInputAction::jump
+          : side_check ? gameplay_input::GameplayInputAction::move_left
+                       : gameplay_input::GameplayInputAction::move_forward);
+      if (predicted_actions)
+        press_action(tracker, policy, gameplay_input::GameplayInputAction::move_forward);
     } else if (phase == LiveUserCmdInputPhase::backward) {
-      tracker.apply_event(
-          input::InputEvent::key_pressed(
-              jump_duck_check ? input::PhysicalKey::left_control
-              : speed_check ? input::PhysicalKey::w
-              : side_check ? input::PhysicalKey::d : input::PhysicalKey::s));
+      press_action(tracker, policy,
+          jump_duck_check ? gameplay_input::GameplayInputAction::duck
+          : speed_check ? gameplay_input::GameplayInputAction::move_forward
+          : side_check ? gameplay_input::GameplayInputAction::move_right
+                       : gameplay_input::GameplayInputAction::move_backward);
       if (speed_check)
-        tracker.apply_event(input::InputEvent::key_pressed(
-            input::PhysicalKey::left_shift));
+        press_action(tracker, policy, gameplay_input::GameplayInputAction::speed);
+      if (predicted_actions) {
+        press_action(tracker, policy, gameplay_input::GameplayInputAction::move_forward);
+        press_action(tracker, policy, gameplay_input::GameplayInputAction::move_right);
+      }
+    } else if (phase == LiveUserCmdInputPhase::neutral_tail &&
+               predicted_actions) {
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::move_forward);
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::speed);
     }
     const auto snapshot = tracker.publish_snapshot();
-    auto bindings = gameplay_input::GameplayInputBindings::project_default_v1();
-    if (!bindings || !bindings.bindings)
-      return std::nullopt;
+    if (!policy.bindings) return std::nullopt;
     auto intent = gameplay_input::GameplayInputIntentBuilder{}.build(
-        snapshot, *bindings.bindings, gameplay_input::MouseLookConfig{}, 0.02);
+        snapshot, *policy.bindings, policy.mouse_look, 0.02);
     if (!intent || !intent.intent)
       return std::nullopt;
     return std::move(*intent.intent);
@@ -211,12 +242,47 @@ make_scenario_intent(const LiveUserCmdInputPhase phase,
   }
 }
 
+// The bounded weapon check submits ordinary immutable commands through the
+// same scheduler. The server remains the sole source of weapon effects.
 [[nodiscard]] std::optional<gameplay_input::GameplayInputIntent>
-make_live_visual_intent(const LiveVisualControlInput &control) noexcept {
-  constexpr auto allowed_buttons =
-      gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::jump) |
-      gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::duck) |
-      gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::speed);
+make_weapon_check_intent(const game_api::GameMovementPolicy& policy,
+                         const bool attack, const bool reload,
+                         const bool move, const bool slow_walk) noexcept {
+  try {
+    input::InputStateTracker tracker;
+    tracker.begin_frame();
+    tracker.apply_event(input::InputEvent::focus_gained());
+    tracker.apply_event(input::InputEvent::capture_acquired());
+    if (move)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::move_forward);
+    if (slow_walk)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::speed);
+    if (attack)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::attack_primary);
+    if (reload)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::reload);
+    if (!policy.bindings) return std::nullopt;
+    auto built = gameplay_input::GameplayInputIntentBuilder{}.build(
+        tracker.publish_snapshot(), *policy.bindings,
+        policy.mouse_look, 0.02);
+    if (!built || !built.intent) return std::nullopt;
+    return std::move(*built.intent);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+[[nodiscard]] std::optional<gameplay_input::GameplayInputIntent>
+make_live_visual_intent(const game_api::GameMovementPolicy& policy,
+                        const LiveVisualControlInput &control) noexcept {
+  const auto allowed_buttons = policy.held_buttons;
+  const auto direction=[](const gameplay_input::GameplayButtonMask buttons,
+                          const gameplay_input::GameplayButton positive,
+                          const gameplay_input::GameplayButton negative) {
+    return static_cast<float>(
+        ((buttons & gameplay_input::gameplay_button_mask(positive)) != 0U ? 1 : 0) -
+        ((buttons & gameplay_input::gameplay_button_mask(negative)) != 0U ? 1 : 0));
+  };
   if (control.generation != kLiveRuntimeGeneration ||
       control.input_revision == 0U ||
       !std::isfinite(control.forward_axis) ||
@@ -224,8 +290,14 @@ make_live_visual_intent(const LiveVisualControlInput &control) noexcept {
       control.forward_axis > 1.0F || control.side_axis < -1.0F ||
       control.side_axis > 1.0F || !std::isfinite(control.yaw_degrees) ||
       !std::isfinite(control.pitch_degrees) ||
-      ((control.held_buttons | control.pressed_buttons) &
+      ((control.held_buttons | control.pressed_buttons | control.released_buttons) &
        ~allowed_buttons) != 0U ||
+      control.forward_axis != direction(control.held_buttons,
+          gameplay_input::GameplayButton::move_forward,
+          gameplay_input::GameplayButton::move_backward) ||
+      control.side_axis != direction(control.held_buttons,
+          gameplay_input::GameplayButton::move_right,
+          gameplay_input::GameplayButton::move_left) ||
       (!control.focused &&
        (control.held_buttons != 0U || control.pressed_buttons != 0U))) {
     return std::nullopt;
@@ -238,32 +310,45 @@ make_live_visual_intent(const LiveVisualControlInput &control) noexcept {
     if (control.focused && control.captured) {
       tracker.apply_event(input::InputEvent::capture_acquired());
     }
-    if (control.focused && control.forward_axis > 0.0F)
-      tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::w));
-    if (control.focused && control.forward_axis < 0.0F)
-      tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::s));
-    if (control.focused && control.side_axis < 0.0F)
-      tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::a));
-    if (control.focused && control.side_axis > 0.0F)
-      tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::d));
+    if (control.focused && (control.held_buttons & gameplay_input::gameplay_button_mask(
+            gameplay_input::GameplayButton::move_forward)) != 0U)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::move_forward);
+    if (control.focused && (control.held_buttons & gameplay_input::gameplay_button_mask(
+            gameplay_input::GameplayButton::move_backward)) != 0U)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::move_backward);
+    if (control.focused && (control.held_buttons & gameplay_input::gameplay_button_mask(
+            gameplay_input::GameplayButton::move_left)) != 0U)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::move_left);
+    if (control.focused && (control.held_buttons & gameplay_input::gameplay_button_mask(
+            gameplay_input::GameplayButton::move_right)) != 0U)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::move_right);
     if (control.focused &&
         (control.held_buttons & gameplay_input::gameplay_button_mask(
             gameplay_input::GameplayButton::jump)) != 0U)
-      tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::space));
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::jump);
     if (control.focused &&
         (control.held_buttons & gameplay_input::gameplay_button_mask(
             gameplay_input::GameplayButton::duck)) != 0U)
-      tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::left_control));
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::duck);
     if (control.focused &&
         (control.held_buttons & gameplay_input::gameplay_button_mask(
             gameplay_input::GameplayButton::speed)) != 0U)
-      tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::left_shift));
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::speed);
+    if (control.focused && control.captured &&
+        (control.held_buttons & gameplay_input::gameplay_button_mask(
+            gameplay_input::GameplayButton::attack_primary)) != 0U)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::attack_primary);
+    if (control.focused &&
+        (control.held_buttons & gameplay_input::gameplay_button_mask(
+            gameplay_input::GameplayButton::reload)) != 0U)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::reload);
+    if (control.focused && control.captured &&
+        (control.held_buttons & gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::use)) != 0U)
+      press_action(tracker, policy, gameplay_input::GameplayInputAction::use);
     const auto snapshot = tracker.publish_snapshot();
-    auto bindings = gameplay_input::GameplayInputBindings::project_default_v1();
-    if (!bindings || !bindings.bindings)
-      return std::nullopt;
+    if (!policy.bindings) return std::nullopt;
     auto intent = gameplay_input::GameplayInputIntentBuilder{}.build(
-        snapshot, *bindings.bindings, gameplay_input::MouseLookConfig{}, 0.02);
+        snapshot, *policy.bindings, policy.mouse_look, 0.02);
     if (!intent || !intent.intent)
       return std::nullopt;
     return std::move(*intent.intent);
@@ -291,9 +376,26 @@ void apply_live_runtime_resource_response_profile(
       .pre_resource.initial_signon.driver
       .maximum_unfragmented_reliable_payload =
       kOpcode5EmptyResourceResponseSemanticSize - 1U;
+  // Stock sign-on transmission can be gated by new client packets. Poll an
+  // otherwise idle channel, including after a non-reliable sendres ACK, without
+  // resubmitting a semantic command. Ordinary usercmd/ACK TX resets this clock.
+  config.resource_list.transition.user_info.movement_environment.delta
+      .pre_resource.initial_signon.driver.idle_poll_interval =
+      std::chrono::milliseconds{200};
 }
 
 } // namespace
+
+void LiveRuntimeStageError::retain_runtime_failure(RuntimeReplayError failure) noexcept {
+    if (code != LiveRuntimeStageErrorCode::runtime_record_failed || runtime_failure) return;
+    runtime_code = failure.code;
+    runtime_decoder_error = failure.decoder_error;
+    runtime_cursor = failure.decoder_cursor;
+    wire_opcode = failure.decoder_wire_opcode;
+    runtime_record_ordinal = failure.record_ordinal;
+    runtime_source_sequence = failure.source_sequence;
+    runtime_failure = std::move(failure);
+}
 
 GoldSrcUserCmdMovementSpeedConfig live_visual_movement_speeds(
     const bool keyboard_mouse, const float forward_axis, const float side_axis,
@@ -603,15 +705,20 @@ void apply_live_runtime_compatibility_profile(
 
 bool valid_live_runtime_stage_configuration(
     const LiveRuntimeStageConfig &config) noexcept {
-  return valid_resource_client_response_stage_configuration(
-             config.resource_response) &&
+  return config.game_client && config.game_client->active() &&
+         game_api::valid_game_movement_policy(config.game_client->movement_policy()) &&
+         valid_resource_client_response_stage_configuration(config.resource_response) &&
          valid_service_payload_envelope_limits(config.envelope) &&
          GoldSrcEntityBaselineDecoder{config.baselines}.valid_configuration() &&
          valid_runtime_replay_limits(config.runtime) &&
          config.stable_interval.count() > 0 &&
          config.stable_interval <= kMaximumLiveRuntimeStableInterval &&
          config.timeout >= config.stable_interval &&
-         config.timeout <= kMaximumLiveRuntimeTimeout &&
+         (config.timeout <= kMaximumLiveRuntimeTimeout ||
+          (config.operation_mode == LiveRuntimeOperationMode::live_visual_control &&
+           (config.live_visual_input_source == LiveVisualControlInputSource::scripted_fire_reload_presentation_check ||
+            config.live_visual_input_source == LiveVisualControlInputSource::scripted_damage_respawn_check) &&
+           config.timeout <= std::chrono::seconds{90})) &&
          config.maximum_driver_events_per_update > 0U &&
          config.maximum_driver_events_per_update <=
              kMaximumLiveRuntimeDriverEventsPerUpdate &&
@@ -624,7 +731,8 @@ bool valid_live_runtime_stage_configuration(
                 LiveRuntimeOperationMode::live_usercmd_check ||
             config.operation_mode ==
                 LiveRuntimeOperationMode::live_visual_control) &&
-           valid_usercmd_scenario(config.usercmd_scenario)));
+           valid_usercmd_scenario(config.usercmd_scenario,
+               config.live_visual_input_source == LiveVisualControlInputSource::scripted_damage_respawn_check)));
 }
 
 class LiveRuntimeStage::Implementation final {
@@ -661,6 +769,8 @@ public:
             std::move(response_trace_callback),
             ResourceClientResponseStage::RetainPostResourcePayloadAtBoundary{}},
         event_slots_(configuration_valid_ ? config_.maximum_events : 0U) {
+    if (configuration_valid_)
+      prediction_movement_config_ = config_.game_client->movement_policy().movement_config;
     if (config_.reference_prediction) {
       prediction_state_ = LiveReferencePredictionState::waiting_for_seed;
       prediction_reason_ = "collision_attachment_pending";
@@ -865,13 +975,19 @@ public:
         input.input_revision == 0U ||
         (live_visual_input_ &&
          input.input_revision <= live_visual_input_->input_revision) ||
-        !make_live_visual_intent(input) ||
+        (!config_.game_client || !make_live_visual_intent(config_.game_client->movement_policy(), input)) ||
         !quantize_wire_angle(input.yaw_degrees) ||
         !quantize_wire_angle(input.pitch_degrees) ||
         (last_update_ && now < *last_update_)) {
       return false;
     }
     live_visual_input_ = input;
+    const auto scoped = config_.game_client->movement_policy().capture_life_scoped_buttons;
+    const bool input_active = input.focused && input.captured &&
+        !(target_.runtime_observation() && target_.runtime_observation()->lifecycle.dead());
+    scoped_button_gate_.filter(scoped, input_active,
+        live_visual_input_->held_buttons, live_visual_input_->pressed_buttons, input.released_buttons);
+    if (!input_active) button_latch_.clear(scoped);
     if (!input.focused) {
       live_visual_input_->forward_axis = 0.0F;
       live_visual_input_->side_axis = 0.0F;
@@ -880,10 +996,27 @@ public:
       live_visual_input_->pressed_buttons = 0U;
       button_latch_.clear();
     } else if (state_ == LiveRuntimeStageState::running_live_visual_control) {
-      button_latch_.observe(input.pressed_buttons, true);
+      button_latch_.observe(live_visual_input_->pressed_buttons, true);
     }
     live_visual_input_at_ = now;
     return true;
+  }
+
+  [[nodiscard]] bool request_weapon_selection(const std::uint8_t weapon_id) {
+    if (config_.operation_mode != LiveRuntimeOperationMode::live_visual_control ||
+        state_ != LiveRuntimeStageState::running_live_visual_control ||
+        !target_.runtime_observation()) return false;
+    if (!config_.game_client) return false;
+    const auto request = config_.game_client->inventory_selection(
+        *target_.runtime_observation(), weapon_id);
+    if (!request) return false;
+    const auto built = encode_game_command(*request);
+    if (!built || !built.bytes) return false;
+    auto *driver = response_stage_.retained_driver();
+    if (!driver || driver->terminal()) return false;
+    // One application queue operation per physical input edge. Netchan owns
+    // retransmission of retained reliable bytes after would_block/packet loss.
+    return static_cast<bool>(driver->queue_reliable(*built.bytes));
   }
 
   [[nodiscard]] bool activate_live_visual_control(
@@ -920,19 +1053,208 @@ public:
       return false;
     const auto environment = movement::GoldSrcMovementEnvironmentBuilder::
         from_move_vars(response_stage_.result()->resource_list().transition()
-                           .user_info().movement_environment().move_vars());
+                           .user_info().movement_environment().move_vars(),
+            config_.game_client->movement_policy().environment_profile);
     if (!environment)
       return false;
     prediction_environment_.emplace(*environment.environment);
+    const auto library = collision::build_brush_collision_model_library(attached->package());
+    if (!library) return false;
+    prediction_brush_library_ = library.library;
+    for (const auto& entry : response_stage_.result()->resource_list().resource_list().entries()) {
+      if (entry.type() != ResourceType::model) continue;
+      prediction_model_names_.emplace(entry.index().value(), entry.name().bytes());
+      if (entry.name().bytes().starts_with('*')) prediction_has_brush_models_ = true;
+    }
+    prediction_camera_collision_query_ =
+        std::make_unique<hlclient::collision::CollisionWorldQuery>(attached->package());
     prediction_collision_ = std::move(attached);
     prediction_state_ = LiveReferencePredictionState::waiting_for_seed;
     prediction_reason_ = "waiting_for_server_seed";
+    if (const auto& observed = target_.runtime_observation(); observed)
+      refresh_prediction_collision(*observed);
     return true;
+  }
+
+  [[nodiscard]] bool attach_reference_prediction_surfaces(
+      std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> package) {
+    if (!config_.reference_prediction || !package || surface_texture_query_ ||
+        !prediction_camera_collision_query_)
+      return false;
+    try { surface_texture_query_=std::make_unique<SurfaceTextureQuery>(
+        std::move(package),prediction_camera_collision_query_->package()); }
+    catch (const std::bad_alloc&) { return false; }
+    return true;
+  }
+
+  void refresh_prediction_collision(const client::RuntimeClientObservationState& observation) {
+    if (!prediction_brush_library_ || !prediction_has_brush_models_) return;
+    // Retained entities retain the same immutable context. Select it before
+    // seed/replay, never midway through the suffix or from render interpolation.
+    if (prediction_brush_context_.scene && observation.entity_metadata.source &&
+        observation.entity_metadata.source->record_identity == prediction_brush_context_.record)
+      return;
+    auto context = build_reference_brush_collision(prediction_brush_library_,
+        prediction_model_names_, observation, kLiveRuntimeGeneration);
+    const auto same_vector=[](const auto& a,const auto& b) {
+      return a.x==b.x && a.y==b.y && a.z==b.z;
+    };
+    const bool repeated_scene=context.scene && prediction_brush_context_.scene &&
+        context.generation==prediction_brush_context_.generation &&
+        context.server_time==prediction_brush_context_.server_time && context.server_time &&
+        context.pushers==prediction_brush_context_.pushers &&
+        context.scene->model_library()==prediction_brush_context_.scene->model_library() &&
+        std::equal(context.scene->instances().begin(),context.scene->instances().end(),
+          prediction_brush_context_.scene->instances().begin(),prediction_brush_context_.scene->instances().end(),
+          [&](const auto& a,const auto& b) { return a.identity==b.identity && a.role==b.role &&
+              same_vector(a.transform.translation,b.transform.translation) &&
+              same_vector(a.transform.rotation_degrees,b.transform.rotation_degrees); });
+    if (config_.game_client->movement_policy().derived_vertical_support && !repeated_scene)
+      prediction_support_motion_.emplace(prediction_brush_context_, context);
+    prediction_presentation_cache_.reset();
+    if (!context.scene) {
+      prediction_collision_.reset();
+      suspend_reference_prediction(context.reason);
+    } else {
+      if (prediction_brush_context_.scene) for (const auto& current : context.scene->instances()) {
+        for (const auto& old : prediction_brush_context_.scene->instances()) {
+          if (current.identity != old.identity) continue;
+          const auto differs = [](const auto& a, const auto& b) {
+            return a.x != b.x || a.y != b.y || a.z != b.z;
+          };
+          if (differs(current.transform.translation, old.transform.translation) ||
+                differs(current.transform.rotation_degrees, old.transform.rotation_degrees)) {
+              ++prediction_brush_transform_changes_;
+              prediction_last_changed_brush_entity_=current.identity.source_entity_index;
+              prediction_last_changed_brush_model_=current.identity.source_model_index;
+            }
+        }
+      }
+      prediction_collision_ = std::make_unique<movement::BrushSceneMovementCollision>(context.scene);
+    }
+    prediction_brush_context_ = std::move(context);
+  }
+
+  bool prediction_eye_clear(const assets::AssetVector3& start,
+      const assets::AssetVector3& end,
+      std::shared_ptr<const collision::BrushCollisionScene> sampled = {}) const {
+    if (!sampled) sampled = prediction_brush_context_.scene;
+    if (!sampled) return true; // world checked by caller
+    collision::BrushCollisionSceneTraceRequest request;
+    request.start = start; request.end = end;
+    request.query_limits = prediction_movement_config_.collision_query.query_limits;
+    const auto trace = collision::BrushCollisionSceneQuery{sampled}.
+        trace_hull(request, prediction_presentation_scratch_);
+    ++prediction_presentation_trace_queries_;
+    return trace && trace.result && !trace.result->trace.start_solid &&
+        !trace.result->trace.all_solid && trace.result->trace.fraction >= 1.0;
   }
 
   [[nodiscard]] LiveReferencePredictionSnapshot
   live_reference_prediction_snapshot(const LiveRuntimeStageTimePoint now) const {
+    const auto world_revision = target_.runtime_publication_revision();
+    if (prediction_presentation_cache_ && prediction_presentation_cache_at_ == now &&
+        prediction_presentation_cache_history_ == prediction_history_.get() &&
+        prediction_presentation_cache_world_revision_ == world_revision &&
+        prediction_presentation_cache_epoch_ == prediction_epoch_ &&
+        prediction_presentation_cache_state_ == prediction_state_)
+      return *prediction_presentation_cache_;
+    const auto work_started = std::chrono::steady_clock::now();
+    std::shared_ptr<const collision::BrushCollisionScene> presentation_scene;
+    std::unique_ptr<movement::BrushSceneMovementCollision> presentation_collision;
+    const auto publish = [&](LiveReferencePredictionSnapshot snapshot) {
+      if (prediction_visual_correction_ &&
+          prediction_visual_correction_->active() &&
+          snapshot.presented_origin && snapshot.presented_view_offset &&
+          prediction_camera_collision_query_ && prediction_collision_ &&
+          prediction_history_) {
+        const auto base = *snapshot.presented_origin;
+        const auto offset = *snapshot.presented_view_offset;
+        gameplay_camera::GameplayCameraStateCreateInfo camera_info;
+        camera_info.position = {base.x + offset.x, base.y + offset.y,
+                                base.z + offset.z};
+        camera_info.mode = gameplay_camera::GameplayCameraMode::player_walk;
+        camera_info.revision = std::max<std::uint64_t>(1U, prediction_epoch_);
+        const auto camera = gameplay_camera::GameplayCameraState::create(camera_info);
+        const auto scratch_before = prediction_presentation_scratch_.retained_bytes();
+        if (camera && camera.state) {
+          const auto sample = prediction::sample_prediction_visual_correction(
+              *prediction_visual_correction_, *camera.state,
+              std::chrono::duration<double>{now.time_since_epoch()}.count(),
+              prediction_camera_collision_query_.get(),
+              prediction_presentation_scratch_,
+              prediction_movement_config_.collision_query.query_limits);
+          prediction_presentation_trace_queries_ += 2U;
+          if (sample && sample.camera && sample.correction) {
+            const auto& eye = sample.camera->position();
+            const assets::AssetVector3 candidate{eye.x - offset.x,
+                                                 eye.y - offset.y,
+                                                 eye.z - offset.z};
+            const auto checked = (presentation_collision ? presentation_collision.get() : prediction_collision_.get())->trace_hull(
+                base, candidate,
+                prediction_history_->current_predicted_state()->hull(),
+                prediction_presentation_scratch_,
+                prediction_movement_config_.collision_query);
+            ++prediction_presentation_trace_queries_;
+            if (checked && checked.result && !checked.result->start_solid &&
+                !checked.result->all_solid && checked.result->fraction >= 1.0 &&
+                prediction_eye_clear(camera_info.position, eye, presentation_scene)) {
+              snapshot.presented_origin = candidate;
+              snapshot.presentation_reason = "visual_correction";
+              prediction_visual_correction_.emplace(std::move(*sample.correction));
+            } else {
+              snapshot.presentation_reason = "visual_correction_blocked";
+              prediction_visual_correction_.reset();
+            }
+          } else {
+            snapshot.presentation_reason = "visual_correction_failed";
+            prediction_visual_correction_.reset();
+          }
+        } else {
+          prediction_visual_correction_.reset();
+        }
+        if (prediction_presentation_scratch_.retained_bytes() > scratch_before)
+          ++prediction_presentation_scratch_growths_;
+        snapshot.presentation_scratch_bytes =
+            prediction_presentation_scratch_.retained_bytes();
+      }
+      snapshot.presentation_trace_queries_total =
+          prediction_presentation_trace_queries_;
+      snapshot.presentation_scratch_growths_total =
+          prediction_presentation_scratch_growths_;
+      snapshot.presentation_cpu_ms = std::chrono::duration<double, std::milli>{
+          std::chrono::steady_clock::now() - work_started}.count();
+      prediction_presentation_cache_at_ = now;
+      prediction_presentation_cache_history_ = prediction_history_.get();
+      prediction_presentation_cache_world_revision_ = world_revision;
+      prediction_presentation_cache_epoch_ = prediction_epoch_;
+      prediction_presentation_cache_state_ = prediction_state_;
+      prediction_presentation_cache_ = snapshot;
+      return snapshot;
+    };
     LiveReferencePredictionSnapshot out;
+    if (prediction_support_motion_ && prediction_support_motion_->active())
+      out.support_policy = "derived_vertical_support_bounded_250ms_v1";
+    out.collision_context_revision = prediction_brush_context_.revision;
+    out.collision_brush_count = prediction_brush_context_.solid_count;
+    out.server_brush_transform_changes = prediction_brush_transform_changes_;
+    out.last_changed_brush_entity=prediction_last_changed_brush_entity_;
+    out.last_changed_brush_model=prediction_last_changed_brush_model_;
+    out.step_selections = prediction_step_selections_;
+    out.last_fallback_reason = prediction_last_fallback_reason_;
+    if (prediction_history_) {
+      const auto& ground = prediction_history_->current_predicted_state()->ground_state();
+      out.local_grounded = ground.grounded();
+      out.ground_hit = ground.hit();
+      if (ground.grounded()) out.ground_normal = ground.plane().normal;
+    }
+    if (const auto& observation = target_.runtime_observation(); observation) {
+      if (observation->receiving_client && observation->receiving_client->flags)
+        out.server_grounded = (*observation->receiving_client->flags & (1U << 9U)) != 0U;
+      for (const auto& entity : observation->packet_entities) if (entity.entity_number == client_slot_ + 1U && entity.base_velocity.complete()) {
+        out.base_velocity_status = *entity.base_velocity.x == 0.0 && *entity.base_velocity.y == 0.0 && *entity.base_velocity.z == 0.0 ? "observed_zero" : "nonzero_unsupported";
+      }
+    }
     out.state = prediction_state_;
     out.reason = prediction_reason_;
     out.generation = kLiveRuntimeGeneration;
@@ -944,6 +1266,9 @@ public:
     out.history_depth = prediction_history_ ? prediction_history_->size() : 0U;
     out.last_raw_position_error = prediction_last_error_;
     out.maximum_raw_position_error = prediction_maximum_error_;
+    out.last_camera_correction_jump = prediction_last_camera_correction_jump_;
+    out.maximum_camera_correction_jump =
+        prediction_maximum_camera_correction_jump_;
     out.last_record_identity = prediction_last_record_identity_;
     out.anchor_command = prediction_last_command_boundary_;
     out.last_seed_status = prediction_last_seed_status_;
@@ -960,43 +1285,214 @@ public:
     }
     if (prediction_state_ != LiveReferencePredictionState::active ||
         !prediction_history_)
-      return out;
+      return publish(out);
     const auto& latest = prediction_history_->current_predicted_state();
     out.predicted_origin = latest->origin();
+    out.predicted_velocity = latest->velocity();
+    out.predicted_view_offset = latest->view_offset();
+    out.predicted_hull = latest->hull();
+    out.predicted_mode = latest->mode();
+    out.predicted_old_buttons = latest->old_buttons();
+    out.predicted_duck_time_milliseconds =
+        latest->duck_time_milliseconds();
+    out.predicted_in_duck_transition = latest->in_duck_transition();
     out.presented_origin = latest->origin();
     out.presented_view_offset = latest->view_offset();
-    if (!prediction_previous_state_ || !prediction_previous_at_ ||
-        !prediction_latest_at_ || *prediction_latest_at_ <= *prediction_previous_at_ ||
-        prediction_previous_state_->hull() != latest->hull() ||
-        prediction_previous_state_->mode() != latest->mode() ||
-        !prediction_collision_)
-      return out;
-    const auto sample_at = now - config_.usercmd_scenario.command_interval;
-    const auto duration = std::chrono::duration<double>{
-        *prediction_latest_at_ - *prediction_previous_at_}.count();
-    const auto fraction = std::clamp(
-        std::chrono::duration<double>{sample_at - *prediction_previous_at_}
-            .count() / duration, 0.0, 1.0);
-    const auto& from = prediction_previous_state_->origin();
-    const auto& to = latest->origin();
-    const assets::AssetVector3 candidate{
-        static_cast<float>(from.x + (to.x - from.x) * fraction),
-        static_cast<float>(from.y + (to.y - from.y) * fraction),
-        static_cast<float>(from.z + (to.z - from.z) * fraction)};
-    hlclient::collision::CollisionQueryScratch scratch;
-    try {
-      const auto clear = prediction_collision_->trace_hull(
-          from, candidate, latest->hull(), scratch,
-          prediction_movement_config_.collision_query);
-      if (clear && clear.result && !clear.result->start_solid &&
-          !clear.result->all_solid && clear.result->fraction >= 1.0)
-        out.presented_origin = candidate;
-    } catch (const std::exception&) {
-      // Presentation retains the last verified simulation endpoint.
+    if (prediction_support_motion_ && prediction_support_motion_->active()) {
+      presentation_scene = prediction_support_motion_->sample(
+          static_cast<double>(latest->simulation_time_nanoseconds()) * 1e-9);
+      out.presented_brush_scene = presentation_scene;
+      presentation_collision = std::make_unique<movement::BrushSceneMovementCollision>(presentation_scene);
     }
-    return out;
+    out.presentation_reason = "latest_no_pair";
+    out.presentation_scratch_bytes = prediction_presentation_scratch_.retained_bytes();
+    if (!usercmd_scheduler_ || !prediction_collision_)
+      return publish(out);
+    const auto scheduler = usercmd_scheduler_->state();
+    const auto interval = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        config_.usercmd_scenario.command_interval);
+    if (!scheduler.initialized || scheduler.next_command_sequence <= 1U ||
+        interval.count() <= 0)
+      return publish(out);
+    const auto newest_sequence = scheduler.next_command_sequence - 1U;
+    const auto newest_time = LiveRuntimeStageTimePoint{
+        std::chrono::nanoseconds{scheduler.next_sample_time_nanoseconds} - interval};
+    const auto command_time = [&](const std::uint32_t sequence)
+        -> std::optional<LiveRuntimeStageTimePoint> {
+      if (sequence == 0U || sequence > newest_sequence ||
+          newest_sequence - sequence > 128U)
+        return std::nullopt;
+      return newest_time - interval *
+          static_cast<std::int64_t>(newest_sequence - sequence);
+    };
+    const auto sample_at = now - config_.usercmd_scenario.command_interval;
+    const auto& anchor = prediction_history_->anchor().movement_state();
+    auto from_state = anchor;
+    auto from_sequence = anchor->source_command_sequence();
+    auto from_at = command_time(from_sequence);
+    if (!from_at)
+      return publish(out);
+    if (sample_at < *from_at) {
+      if (prediction_pre_anchor_ && prediction_pre_anchor_->source_command_sequence()+1U == from_sequence) {
+        from_state = prediction_pre_anchor_;
+        from_sequence = from_state->source_command_sequence();
+        from_at = command_time(from_sequence);
+      } else {
+        out.presented_origin = anchor->origin();
+        out.presentation_reason = "anchor_before_history";
+        return publish(out);
+      }
+    }
+    // Include the retained predecessor -> corrected anchor pair when rebase
+    // consumed the newest command. It is presentation-only, never replayed.
+    if (!from_at) return publish(out);
+    const std::size_t include_anchor=from_sequence < anchor->source_command_sequence() ? 1U : 0U;
+    const auto entries=prediction_history_->entries();
+    for (std::size_t i=0; i<entries.size()+include_anchor; ++i) {
+      const auto& to_state=include_anchor && i==0 ? anchor : entries[i-include_anchor].post_command_state();
+      const auto to_sequence = to_state->source_command_sequence();
+      const auto to_at = command_time(to_sequence);
+      if (!to_at || *to_at <= *from_at || *to_at - *from_at != interval) {
+        out.presentation_reason = "invalid_command_timeline";
+        return publish(out);
+      }
+      if (sample_at > *to_at) {
+        from_state = to_state;
+        from_sequence = to_sequence;
+        from_at = to_at;
+        continue;
+      }
+      const bool hull_transition = from_state->hull() != to_state->hull();
+      const auto duration = std::chrono::duration<double>{*to_at - *from_at}.count();
+      const auto fraction = std::clamp(
+          std::chrono::duration<double>{sample_at - *from_at}.count() /
+              duration, 0.0, 1.0);
+      if (!std::isfinite(fraction)) {
+        out.presentation_reason = "invalid_alpha";
+        return publish(out);
+      }
+      out.presentation_from_command = from_sequence;
+      out.presentation_to_command = to_sequence;
+      out.presentation_from_time_ns = std::chrono::duration_cast<
+          std::chrono::nanoseconds>(from_at->time_since_epoch()).count();
+      out.presentation_to_time_ns = std::chrono::duration_cast<
+          std::chrono::nanoseconds>(to_at->time_since_epoch()).count();
+      out.presentation_alpha = fraction;
+      const auto& from = from_state->origin();
+      const auto& to = to_state->origin();
+      const auto& from_offset = from_state->view_offset();
+      const auto& to_offset = to_state->view_offset();
+      const auto support_sample = sample_reference_support_presentation(*from_state,*to_state,fraction,
+          prediction_support_motion_ ? &*prediction_support_motion_ : nullptr,
+          prediction_presentation_scratch_,prediction_movement_config_.collision_query);
+      if (support_sample.scene) {
+        presentation_scene = support_sample.scene;
+        out.presented_brush_scene = presentation_scene;
+        presentation_collision = std::make_unique<movement::BrushSceneMovementCollision>(presentation_scene);
+      }
+      if (hull_transition) {
+        if (fraction >= 1.0) {
+          out.presented_origin = to;
+          out.presented_view_offset = to_offset;
+          out.presentation_reason = "hull_transition_endpoint";
+          return publish(out);
+        }
+        // Valve's completed ground duck changes origin and hull together.
+        // Before that boundary retain the verified old hull/origin and sample
+        // only its eye path. Unduck is a discrete clearance event.
+        out.presented_origin = support_sample.trace_start;
+        out.presented_view_offset = from_offset;
+        out.presentation_reason = "hull_transition_discrete";
+        if (from_state->hull() == hlclient::movement::PlayerMovementHull::standing &&
+            to_state->hull() == hlclient::movement::PlayerMovementHull::ducked &&
+            from_state->ground_state().grounded() &&
+            prediction_camera_collision_query_) {
+          const assets::AssetVector3 old_eye{
+              from.x + from_offset.x, from.y + from_offset.y,
+              from.z + from_offset.z};
+          const assets::AssetVector3 new_eye{
+              to.x + to_offset.x, to.y + to_offset.y,
+              to.z + to_offset.z};
+          const assets::AssetVector3 eye{
+              static_cast<float>(old_eye.x + (new_eye.x - old_eye.x) * fraction),
+              static_cast<float>(old_eye.y + (new_eye.y - old_eye.y) * fraction),
+              static_cast<float>(old_eye.z + (new_eye.z - old_eye.z) * fraction)};
+          hlclient::collision::CollisionTraceRequest request;
+          request.start = old_eye;
+          request.end = eye;
+          request.limits = prediction_movement_config_.collision_query.query_limits;
+          ++prediction_presentation_trace_queries_;
+          const auto clear = prediction_camera_collision_query_->trace_line(
+              request, prediction_presentation_scratch_);
+          if (clear && clear.result && !clear.result->start_solid &&
+              !clear.result->all_solid && clear.result->fraction >= 1.0 &&
+              prediction_eye_clear(old_eye, eye, presentation_scene)) {
+            out.presented_view_offset = assets::AssetVector3{
+                eye.x - from.x, eye.y - from.y, eye.z - from.z};
+            out.presentation_reason = "duck_eye_transition";
+          } else {
+            out.presentation_reason = "duck_eye_transition_blocked";
+          }
+        }
+        return publish(out);
+      }
+    const auto candidate = support_sample.origin;
+      if (fraction == 0.0 || fraction == 1.0) {
+        out.presented_origin = candidate;
+        out.presented_view_offset = fraction == 0.0 ? from_offset : to_offset;
+        out.presentation_reason = "pair_endpoint";
+        return publish(out);
+      }
+    try {
+      const auto scratch_before = prediction_presentation_scratch_.retained_bytes();
+      ++prediction_presentation_trace_queries_;
+      const auto clear = (presentation_collision ? presentation_collision.get() : prediction_collision_.get())->trace_hull(
+          support_sample.trace_start, candidate, to_state->hull(), prediction_presentation_scratch_,
+          prediction_movement_config_.collision_query);
+      if (prediction_presentation_scratch_.retained_bytes() > scratch_before)
+        ++prediction_presentation_scratch_growths_;
+      if (clear && clear.result && !clear.result->start_solid &&
+          !clear.result->all_solid && clear.result->fraction >= 1.0) {
+        out.presented_origin = candidate;
+        out.presented_view_offset = assets::AssetVector3{
+            static_cast<float>(from_offset.x +
+                (to_offset.x - from_offset.x) * fraction),
+            static_cast<float>(from_offset.y +
+                (to_offset.y - from_offset.y) * fraction),
+            static_cast<float>(from_offset.z +
+                (to_offset.z - from_offset.z) * fraction)};
+        out.presentation_reason = "interpolated";
+      } else {
+        const auto recovered = clear && clear.result
+            ? recover_reference_ground_presentation(*from_state,*to_state,fraction,
+                *clear.result,*(presentation_collision ? presentation_collision.get() : prediction_collision_.get()),prediction_presentation_scratch_,
+                prediction_movement_config_)
+            : std::nullopt;
+        if (recovered) {
+          out.presented_origin = *recovered;
+          out.presented_view_offset = assets::AssetVector3{
+              static_cast<float>(from_offset.x + (to_offset.x-from_offset.x)*fraction),
+              static_cast<float>(from_offset.y + (to_offset.y-from_offset.y)*fraction),
+              static_cast<float>(from_offset.z + (to_offset.z-from_offset.z)*fraction)};
+          out.presentation_reason = "ground_seam";
+        } else {
+          out.presented_origin = from;
+          out.presented_view_offset = from_offset;
+          out.presentation_reason = "collision_blocked";
+        }
+      }
+    } catch (const std::exception&) {
+      out.presented_origin = from;
+      out.presented_view_offset = from_offset;
+      out.presentation_reason = "collision_query_failed";
+    }
+      out.presentation_scratch_bytes = prediction_presentation_scratch_.retained_bytes();
+      return publish(out);
+    }
+    return publish(out);
   }
 
+  [[nodiscard]] std::size_t use_new_submission_count() const noexcept { return use_new_submission_count_; }
   [[nodiscard]] std::optional<LiveRuntimeStageEvent> poll_event() {
     if (event_size_ == 0U) {
       return std::nullopt;
@@ -1006,6 +1502,14 @@ public:
     event_head_ = (event_head_ + 1U) % event_slots_.size();
     --event_size_;
     return event;
+  }
+
+  [[nodiscard]] std::optional<LiveWeaponCommandSubmission>
+  poll_weapon_command_submission() {
+    if (weapon_command_submissions_.empty()) return std::nullopt;
+    auto result = weapon_command_submissions_.front();
+    weapon_command_submissions_.pop_front();
+    return result;
   }
 
   void synchronize_from_response(const LiveRuntimeStageTimePoint now) {
@@ -1443,7 +1947,10 @@ public:
           cursor = baseline.end_cursor;
           RuntimeReplayInitialization initialization;
           initialization.generation = kLiveRuntimeGeneration;
+          initialization.game_client = config_.game_client;
+          initialization.sound_events = config_.sound_events;
           initialization.max_clients = max_clients_;
+          initialization.receiving_player_entity = static_cast<std::uint32_t>(client_slot_) + 1U;
           initialization.schemas = schemas_;
           initialization.user_message_definitions = user_messages_;
           initialization.limits = config_.runtime;
@@ -1472,6 +1979,29 @@ public:
             return;
           }
           runtime_session_ = std::move(initialized.session);
+          for (auto &pending : pending_hud_messages_) {
+            runtime_record_ordinal_ = std::max(
+                runtime_record_ordinal_ + 1U, pending.source_ordinal);
+            ++runtime_records_attempted_;
+            auto retained_record = RuntimeReplayRecord{kLiveRuntimeGeneration,
+                    static_cast<std::uint64_t>(runtime_record_ordinal_),
+                    runtime_record_ordinal_, std::move(pending.payload),
+                    pending.cursor};
+            retained_record.received_at=pending.received_at;
+            auto applied = runtime_session_->apply_record(retained_record);
+            if (!applied) {
+              fail(LiveRuntimeStageErrorCode::runtime_record_failed,
+                   LiveRuntimeStageState::protocol_error,
+                   "Retained pre-baseline HUD message failed replay", now);
+              if (error_ && applied.error)
+                error_->retain_runtime_failure(std::move(*applied.error));
+              return;
+            }
+            ++applied_runtime_record_count_;
+          }
+          pending_hud_messages_.clear();
+          pending_hud_bytes_ = 0U;
+          pending_audio_count_ = pending_audio_bytes_ = 0U;
           state_ = LiveRuntimeStageState::receiving_runtime;
           const auto baseline_event = LiveRuntimeStageEvent{
               .type = LiveRuntimeStageEventType::baseline_registry_ready,
@@ -1487,7 +2017,7 @@ public:
 
         const auto control = RuntimeControlDecoder{}.decode_one(
             RuntimeControlDecodeInput{payload, cursor, kLiveRuntimeGeneration,
-                                      payload_ordinal_, user_messages_},
+                                      payload_ordinal_, user_messages_, schemas_.get()},
             control_ordinal++);
         if (!control || !control.event) {
           fail(LiveRuntimeStageErrorCode::unsupported_initialization_message,
@@ -1500,6 +2030,34 @@ public:
                              : std::nullopt,
                std::nullopt, std::nullopt, std::nullopt, std::nullopt, *opcode);
           return;
+        }
+        const bool audio_control = control.event->opcode == RuntimeControlOpcode::svc_sound ||
+            control.event->opcode == RuntimeControlOpcode::svc_stopsound ||
+            control.event->opcode == RuntimeControlOpcode::svc_spawnstaticsound;
+        if (control.event->kind == RuntimeControlMessageKind::user_message ||
+            control.event->opcode == RuntimeControlOpcode::svc_weaponanim ||
+            (audio_control && config_.sound_events)) {
+          const auto end = control.event->provenance.end_cursor.byte_offset();
+          const auto start = control.event->provenance.start_cursor;
+          if (audio_control && (pending_audio_count_>=64U || pending_audio_bytes_+end>(1U<<20U))) {
+            config_.sound_events->reject_pending();
+            cursor=control.event->provenance.end_cursor;
+            continue;
+          }
+          if ((!audio_control && pending_hud_messages_.size()-pending_audio_count_ >= 64U) || end > payload.bytes.size() ||
+              (!audio_control &&
+              pending_hud_bytes_ + end > (1U << 20U))) {
+            fail(LiveRuntimeStageErrorCode::unsupported_initialization_message,
+                 LiveRuntimeStageState::protocol_error,
+                 "Pre-baseline HUD handoff exceeds its bounded capacity", now);
+            return;
+          }
+          auto retained = payload;
+          retained.bytes.resize(end);
+          if(audio_control) {++pending_audio_count_; pending_audio_bytes_+=end;}
+          else pending_hud_bytes_ += end;
+          pending_hud_messages_.push_back(
+              {payload_ordinal_, std::move(retained), start, now});
         }
         cursor = control.event->provenance.end_cursor;
       }
@@ -1522,11 +2080,15 @@ public:
            "Runtime record arrived without an initialized session", now);
       return;
     }
-    const auto identity = static_cast<std::uint64_t>(payload_ordinal_);
+    runtime_record_ordinal_ = std::max(
+        runtime_record_ordinal_ + 1U, payload_ordinal_);
+    const auto identity = static_cast<std::uint64_t>(runtime_record_ordinal_);
     ++runtime_records_attempted_;
-    const auto applied = runtime_session_->apply_record(
-        RuntimeReplayRecord{kLiveRuntimeGeneration, identity, payload_ordinal_,
-                            std::move(payload), cursor});
+    auto sound_timed_record=RuntimeReplayRecord{kLiveRuntimeGeneration, identity,
+                            runtime_record_ordinal_,
+                            std::move(payload), cursor};
+    sound_timed_record.received_at=now;
+    auto applied = runtime_session_->apply_record(sound_timed_record);
     if (!applied || !applied.event) {
       fail(LiveRuntimeStageErrorCode::runtime_record_failed,
            LiveRuntimeStageState::protocol_error,
@@ -1537,6 +2099,8 @@ public:
            applied.error ? std::optional{applied.error->code} : std::nullopt,
            std::nullopt,
            applied.error ? applied.error->decoder_wire_opcode : std::nullopt);
+      if (error_ && applied.error)
+        error_->retain_runtime_failure(std::move(*applied.error));
       return;
     }
     ++applied_runtime_record_count_;
@@ -1591,6 +2155,30 @@ public:
     server_time_observed_ =
         server_time_observed_ || applied.event->server_time_observed;
     const auto &observation = target_.runtime_observation();
+    if (observation && (prediction_life_epoch_ != observation->lifecycle.life_epoch ||
+                        prediction_life_deaths_ != observation->lifecycle.deaths)) {
+      prediction_life_epoch_ = observation->lifecycle.life_epoch;
+      prediction_life_deaths_ = observation->lifecycle.deaths;
+      prediction_brush_context_ = {};
+      prediction_support_motion_.reset();
+      suspend_reference_prediction(observation->lifecycle.dead()
+          ? "local_player_dead" : "new_life_waiting_for_fresh_carrier");
+      prediction_presentation_cache_.reset();
+      prediction_last_anchor_at_.reset();
+      prediction_last_record_identity_.reset();
+      prediction_life_command_floor_ = generated_usercmd_count_;
+      button_latch_.clear();
+      const auto scoped = config_.game_client->movement_policy().capture_life_scoped_buttons;
+      scoped_button_gate_.invalidate(scoped);
+      if (live_visual_input_) {
+        live_visual_input_->held_buttons &= ~scoped;
+        live_visual_input_->pressed_buttons &= ~scoped;
+      }
+      // Discard only undelivered visual notifications across a life boundary,
+      // never immutable wire history or prepared/transmitted commands.
+      weapon_command_submissions_.clear();
+    }
+    if (observation) refresh_prediction_collision(*observation);
     if ((state_ == LiveRuntimeStageState::running_usercmd_scenario ||
          state_ == LiveRuntimeStageState::running_live_visual_control) &&
         applied.event->clientdata_observed && observation) {
@@ -1664,13 +2252,18 @@ public:
       scenario_intents_.reserve(kLiveUserCmdPhaseCount);
       for (std::size_t index = 0U; index < kLiveUserCmdPhaseCount; ++index) {
         auto intent = make_scenario_intent(
-            phase_from_index(index),
+            config_.game_client->movement_policy(), phase_from_index(index),
             config_.live_visual_input_source ==
                 LiveVisualControlInputSource::scripted_side_check,
             config_.live_visual_input_source ==
                 LiveVisualControlInputSource::scripted_jump_duck_check,
-            config_.live_visual_input_source ==
-                LiveVisualControlInputSource::scripted_speed_check);
+            (config_.live_visual_input_source ==
+                 LiveVisualControlInputSource::scripted_speed_check ||
+             config_.live_visual_input_source ==
+                 LiveVisualControlInputSource::scripted_weapon_check),
+            config_.reference_prediction &&
+                config_.live_visual_input_source ==
+                    LiveVisualControlInputSource::scripted_jump_duck_check);
         if (!intent) {
           fail(LiveRuntimeStageErrorCode::usercmd_adapter_failed,
                LiveRuntimeStageState::protocol_error,
@@ -1716,6 +2309,8 @@ public:
     scheduler_config.maximum_commands_per_update = 8U;
     scheduler_config.profile =
         GoldSrcUserCmdSamplingProfile::stock_protocol_48_live_usercmd_check_v1;
+    if (keyboard)
+      scheduler_config.lag_policy = GoldSrcUserCmdLagPolicy::discard_unsampled_wall_time;
     usercmd_scheduler_ =
         std::make_unique<GoldSrcUserCmdScheduler>(scheduler_config);
 
@@ -1758,7 +2353,7 @@ public:
     }
     const auto initial_intent =
         keyboard && live_visual_input_
-            ? make_live_visual_intent(*live_visual_input_)
+            ? make_live_visual_intent(config_.game_client->movement_policy(), *live_visual_input_)
             : std::optional<gameplay_input::GameplayInputIntent>{
                   scenario_intents_.front()};
     if (!initial_intent) {
@@ -1844,7 +2439,7 @@ public:
         control.held_buttons = 0U;
         button_latch_.clear();
       }
-      auto built_intent = make_live_visual_intent(control);
+      auto built_intent = make_live_visual_intent(config_.game_client->movement_policy(), control);
       gameplay_camera::GameplayCameraStateCreateInfo camera_info;
       camera_info.yaw_degrees = control.yaw_degrees;
       camera_info.pitch_degrees = control.pitch_degrees;
@@ -1864,6 +2459,25 @@ public:
         keyboard ? *live_camera : *scenario_camera_;
     const auto scheduled = usercmd_scheduler_->update(
         *time_ns, scheduler_intent, scheduler_camera);
+    if (scheduled && scheduled.discarded_wall_time_samples != 0U) {
+      ++scheduler_stall_recoveries_;
+      scheduler_discarded_wall_time_samples_ += scheduled.discarded_wall_time_samples;
+      // Never apply current input retroactively across an unsampled stall.
+      button_latch_.clear();
+      auto neutral = *live_visual_input_;
+      neutral.forward_axis = 0.0F;
+      neutral.side_axis = 0.0F;
+      neutral.held_buttons = 0U;
+      neutral.pressed_buttons = 0U;
+      neutral.released_buttons = 0U;
+      auto neutral_intent = make_live_visual_intent(config_.game_client->movement_policy(), neutral);
+      if (!neutral_intent) {
+        fail(LiveRuntimeStageErrorCode::usercmd_adapter_failed,
+             LiveRuntimeStageState::protocol_error, "Stall neutral input failed validation", now);
+        return;
+      }
+      live_intent.emplace(std::move(*neutral_intent));
+    }
     last_scheduler_due_command_count_ = scheduled.requests.size();
     if (!scheduled && scheduled.error &&
         scheduled.error->code ==
@@ -1906,6 +2520,66 @@ public:
                                    ? 0U
                                    : phase_index_for_offset(
                                          config_.usercmd_scenario, offset);
+      const bool fire_reload_check =
+          config_.live_visual_input_source ==
+          LiveVisualControlInputSource::scripted_fire_reload_check ||
+          config_.live_visual_input_source ==
+          LiveVisualControlInputSource::scripted_fire_reload_presentation_check;
+      const bool life_check = config_.live_visual_input_source ==
+          LiveVisualControlInputSource::scripted_damage_respawn_check;
+      std::optional<gameplay_input::GameplayInputIntent> weapon_intent;
+      if (life_check) {
+        const auto directive = config_.game_client->scenario_command(
+            game_api::GameScenario::damage_respawn, target_.runtime_observation().get(),
+            phase_index, std::chrono::duration<double>{offset}.count());
+        if (directive.request_self_kill) {
+          const auto built_kill = encode_game_command(config_.game_client->self_kill_request());
+          auto* driver = response_stage_.retained_driver();
+          if (!built_kill || !driver || !driver->queue_reliable(*built_kill.bytes)) {
+            fail(LiveRuntimeStageErrorCode::usercmd_transmission_failed,
+                LiveRuntimeStageState::protocol_error, "Typed self-kill request could not be queued", now);
+            return;
+          }
+        }
+        if (directive.select_weapon && !request_weapon_selection(*directive.select_weapon)) {
+          fail(LiveRuntimeStageErrorCode::usercmd_transmission_failed,
+              LiveRuntimeStageState::protocol_error, "C weapon binding request could not be queued", now);
+          return;
+        }
+        auto intent = make_weapon_check_intent(config_.game_client->movement_policy(),
+            directive.buttons != 0U, false, directive.forward, directive.slow_walk);
+        if (!intent) {
+          fail(LiveRuntimeStageErrorCode::usercmd_adapter_failed,
+              LiveRuntimeStageState::protocol_error, "C typed input rejected", now);
+          return;
+        }
+        weapon_intent.emplace(std::move(*intent));
+      } else if (fire_reload_check) {
+        auto phase_start = std::chrono::nanoseconds{0};
+        for (std::size_t i = 0U; i < phase_index; ++i)
+          phase_start += config_.usercmd_scenario.durations[i];
+        const auto phase_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(offset - phase_start).count();
+        const auto directive = config_.game_client->scenario_command(
+            config_.live_visual_input_source ==
+                LiveVisualControlInputSource::scripted_fire_reload_presentation_check
+                ? game_api::GameScenario::weapon_presentation
+                : game_api::GameScenario::weapon_fire_reload,
+            target_.runtime_observation().get(), phase_index,
+            std::chrono::duration<double>{offset}.count(),
+            static_cast<double>(phase_ms) / 1000.0);
+        auto built_weapon_intent = make_weapon_check_intent(
+            config_.game_client->movement_policy(),
+            (directive.buttons & 1U) != 0U, (directive.buttons & (1U << 13U)) != 0U,
+            directive.forward, directive.slow_walk);
+        if (!built_weapon_intent) {
+          fail(LiveRuntimeStageErrorCode::usercmd_adapter_failed,
+               LiveRuntimeStageState::protocol_error,
+               "Bounded weapon-check intent could not be created", now);
+          return;
+        }
+        weapon_intent.emplace(std::move(*built_weapon_intent));
+      }
       GoldSrcUserCmdBuildContext context;
       context.command_sequence = request.command_sequence;
       context.command_msec = request.command_msec;
@@ -1913,13 +2587,17 @@ public:
           request.sample_duration_nanoseconds;
       context.command_sample_time_nanoseconds = request.sample_time_nanoseconds;
       const auto &command_intent =
-          keyboard ? *live_intent : scenario_intents_[phase_index];
+          keyboard ? *live_intent : fire_reload_check || life_check
+              ? *weapon_intent : scenario_intents_[phase_index];
       const auto &command_camera = keyboard ? *live_camera : *scenario_camera_;
       const bool reference_speed = keyboard ||
+          fire_reload_check || life_check ||
           config_.live_visual_input_source ==
-              LiveVisualControlInputSource::scripted_speed_check;
+              LiveVisualControlInputSource::scripted_speed_check ||
+          config_.live_visual_input_source ==
+              LiveVisualControlInputSource::scripted_weapon_check;
       context.movement_speeds = reference_speed
-          ? kLiveReferenceManualSpeeds
+          ? config_.game_client->movement_policy().movement_speeds
           : live_visual_movement_speeds(
                 config_.live_visual_input_source ==
                     LiveVisualControlInputSource::scripted_side_check,
@@ -1927,11 +2605,11 @@ public:
                 static_cast<float>(config_.usercmd_scenario.forward_amplitude));
       if (reference_speed)
         context.reference_movement.speed_key_multiplier =
-            kLiveReferenceSpeedKeyMultiplier;
-      if (keyboard) {
+            config_.game_client->movement_policy().speed_key_multiplier;
+      if (keyboard || fire_reload_check || life_check) {
         context.reference_button_policy =
-            GoldSrcReferenceButtonPolicy::jump_duck;
-        context.one_shot_buttons = button_latch_.pending();
+            config_.game_client->movement_policy().button_policy;
+        if (keyboard) context.one_shot_buttons = button_latch_.pending();
       } else if (config_.operation_mode ==
                      LiveRuntimeOperationMode::live_visual_control &&
                  config_.live_visual_input_source ==
@@ -1939,7 +2617,9 @@ public:
         context.reference_button_policy =
             GoldSrcReferenceButtonPolicy::jump_duck;
       } else if (config_.live_visual_input_source ==
-                 LiveVisualControlInputSource::scripted_speed_check) {
+                     LiveVisualControlInputSource::scripted_speed_check ||
+                 config_.live_visual_input_source ==
+                     LiveVisualControlInputSource::scripted_weapon_check) {
         context.reference_button_policy =
             GoldSrcReferenceButtonPolicy::jump_duck;
       }
@@ -1970,6 +2650,13 @@ public:
              now);
         return;
       }
+      // Command identity counts generated physics steps, not wall-clock
+      // slots. A bounded scheduler recovery skips unsampled wall time while
+      // retaining contiguous IDs. Preserve the actual sample deadline until
+      // the exact TX receipt instead of reconstructing activation+ID*dt.
+      command_sample_times_[request.command_sequence.value() %
+          command_sample_times_.size()] = {
+              request.command_sequence.value(),request.sample_time_nanoseconds};
       if (!requested_forward_by_phase_[phase_index]) {
         requested_forward_by_phase_[phase_index] = built.requested_forward;
         encoded_forward_by_phase_[phase_index] = built.command->forward;
@@ -2003,6 +2690,12 @@ public:
                    jump_command_press_count_, jump_command_release_count_);
       count_button(kReferenceGoldSrcButtonDuck, duck_generated_count_,
                    duck_command_press_count_, duck_command_release_count_);
+      count_button(kReferenceGoldSrcButtonAttack, attack_generated_count_,
+                   attack_command_press_count_, attack_command_release_count_);
+      count_button(kReferenceGoldSrcButtonReload, reload_generated_count_,
+                   reload_command_press_count_, reload_command_release_count_);
+      count_button(kReferenceGoldSrcButtonUse, use_generated_count_,
+                   use_command_press_count_, use_command_release_count_);
       previous_generated_buttons_ = buttons;
       ++generated_usercmd_count_;
       ++generated_by_phase_[phase_index];
@@ -2095,6 +2788,38 @@ public:
               first_duck_sent_sequence_ = sequence;
             last_duck_sent_sequence_ = sequence;
           }
+          attack_new_submission_count_ +=
+              (submitted_command->reference_command->buttons &
+               kReferenceGoldSrcButtonAttack) != 0U;
+          reload_new_submission_count_ +=
+              (submitted_command->reference_command->buttons &
+               kReferenceGoldSrcButtonReload) != 0U;
+          const bool use = (submitted_command->reference_command->buttons & kReferenceGoldSrcButtonUse) != 0U;
+          use_new_submission_count_ += use;
+          use_clear_after_release_count_ += !use && last_submitted_use_;
+          last_submitted_use_ = use;
+          if (((submitted_command->reference_command->buttons &
+               (kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload)) !=
+                  0U || prediction_life_deaths_ != 0U) &&
+              usercmd_activation_time_ns_) {
+            const auto& sampled = command_sample_times_[
+                sequence % command_sample_times_.size()];
+            if (sampled.sequence != sequence) {
+              fail(LiveRuntimeStageErrorCode::usercmd_transmission_failed,
+                   LiveRuntimeStageState::protocol_error,
+                   "Submitted command lost its exact scheduler sample time", now);
+              return;
+            }
+            if (weapon_command_submissions_.size() == 128U) {
+              weapon_command_submissions_.pop_front();
+              ++weapon_command_submission_drops_;
+            }
+            weapon_command_submissions_.push_back(LiveWeaponCommandSubmission{
+                kLiveRuntimeGeneration, sequence,
+                submitted_command->reference_command->buttons,
+                sampled.end_nanoseconds,
+                submitted_command->reference_command->angle_turns});
+          }
         }
         const auto offset = config_.usercmd_scenario.command_interval *
                             static_cast<std::int64_t>(sequence - 1U);
@@ -2128,35 +2853,106 @@ public:
     if (prediction_state_ == LiveReferencePredictionState::active)
       ++prediction_fallback_count_;
     prediction_state_ = LiveReferencePredictionState::suspended;
+    prediction_last_fallback_reason_ = reason;
     prediction_reason_ = reason;
     prediction_history_.reset();
-    prediction_previous_state_.reset();
-    prediction_previous_at_.reset();
-    prediction_latest_at_.reset();
+    prediction_pre_anchor_.reset();
+    prediction_visual_correction_.reset();
+  }
+
+  void publish_movement_audio(
+      const hlclient::movement::LocalPlayerMovementState& before,
+      const hlclient::movement::LocalPlayerMovementState& after,
+      const GoldSrcUserCmdState& command,
+      const LiveRuntimeStageTimePoint sampled_at, bool replay) noexcept {
+    if (!config_.game_client || !response_stage_.result()) return;
+    game_api::MovementAudioObservation event;
+    const auto mode=[](const hlclient::movement::PlayerMovementMode value) {
+      using M=hlclient::movement::PlayerMovementMode;
+      using A=game_api::MovementAudioMode;
+      switch (value) {
+      case M::walking: return A::ground;
+      case M::airborne: return A::airborne;
+      case M::ladder: return A::ladder;
+      default: return A::unsupported;
+      }
+    };
+    event.generation=kLiveRuntimeGeneration;
+    event.life_epoch=prediction_life_epoch_;
+    event.command_sequence=command.command_sequence().value();
+    event.command_milliseconds=command.msec();
+    event.scheduled_seconds=std::chrono::duration<double>{sampled_at.time_since_epoch()}.count();
+    event.before_mode=mode(before.mode()); event.after_mode=mode(after.mode());
+    event.before_grounded=before.ground_state().grounded();
+    event.after_grounded=after.ground_state().grounded();
+    event.before_vertical_velocity=before.velocity().z;
+    event.horizontal_speed=std::hypot(after.velocity().x,after.velocity().y);
+    event.total_speed=std::hypot(event.horizontal_speed,after.velocity().z);
+    event.ducked=after.hull()==hlclient::movement::PlayerMovementHull::ducked;
+    event.jump_edge=(command.buttons() & kSyntheticGoldSrcButtonJump)!=0U &&
+        (before.old_buttons() & kSyntheticGoldSrcButtonJump)==0U;
+    event.world_origin=after.origin(); // Also a sensible spatial origin on a validated ladder.
+    event.dry_context=before.last_valid_contents()==hlclient::movement::PlayerMovementContents::empty &&
+        after.last_valid_contents()==hlclient::movement::PlayerMovementContents::empty;
+    event.movevars_footsteps=response_stage_.result()->resource_list().transition()
+        .user_info().movement_environment().move_vars().footsteps();
+    if (surface_texture_query_ && after.ground_state().grounded()) {
+      auto scene=prediction_brush_context_.scene;
+      if (prediction_support_motion_ && prediction_support_motion_->active())
+        scene=prediction_support_motion_->sample(
+            static_cast<double>(after.simulation_time_nanoseconds())*1e-9);
+      const auto surface=surface_texture_query_->at_support(after,scene.get());
+      switch (surface.status) {
+      case SurfaceTextureResult::Status::found:
+        event.surface_status=game_api::MovementSurfaceStatus::found; break;
+      case SurfaceTextureResult::Status::unmapped_face:
+        event.surface_status=game_api::MovementSurfaceStatus::unmapped_face; break;
+      case SurfaceTextureResult::Status::invalid_support:
+        event.surface_status=game_api::MovementSurfaceStatus::invalid_support; break;
+      case SurfaceTextureResult::Status::geometry_unavailable:
+        event.surface_status=game_api::MovementSurfaceStatus::geometry_unavailable; break;
+      case SurfaceTextureResult::Status::ambiguous_support:
+        event.surface_status=game_api::MovementSurfaceStatus::ambiguous_support; break;
+      case SurfaceTextureResult::Status::source_texture_unavailable:
+        event.surface_status=game_api::MovementSurfaceStatus::source_texture_unavailable; break;
+      }
+      event.texture_name=surface.texture_name;
+      event.source_surface_index=surface.source_surface_index;
+      event.source_material_index=surface.source_material_index;
+      event.source_texture_index=surface.source_texture_index;
+      event.source_model_index=surface.source_model_index;
+      if(surface.world_origin) event.world_origin=surface.world_origin;
+      config_.game_client->observe_movement_audio(event,replay);
+    } else config_.game_client->observe_movement_audio(event,replay);
   }
 
   [[nodiscard]] bool append_reference_prediction_command(
       std::shared_ptr<const prediction::LocalPredictionHistoryState>& candidate,
       const GoldSrcUserCmdSequence sequence,
       const GoldSrcWireUserCmd& wire,
-      std::string_view& reason) {
+      std::string_view& reason,
+      const LiveRuntimeStageTimePoint sampled_at, bool replay) {
     if (!candidate || !prediction_environment_ || !prediction_collision_) {
       reason = "prediction_context_missing";
       return false;
     }
-    const auto adapted = reference_dry_walk_movement_command(sequence, wire);
+    const auto adapted = config_.game_client->movement_policy().button_policy == GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use
+        ? reference_jump_duck_weapon_use_movement_command(sequence, wire)
+        : reference_jump_duck_weapon_movement_command(sequence, wire);
     if (!adapted) {
       reason = "unsupported_reference_command";
       return false;
     }
     try {
       const auto before = candidate->current_predicted_state();
-      const auto simulated = movement::GoldSrcLocalMovementKernel::simulate(
+      const auto simulated = simulate_reference_movement(
           *before, *adapted.state, *prediction_environment_,
           *prediction_collision_, prediction_scratch_,
-          prediction_movement_config_);
+          prediction_movement_config_, prediction_support_motion_ ? &*prediction_support_motion_ : nullptr,
+          config_.game_client->movement_policy().reference_ladder ? &prediction_brush_context_ : nullptr,
+          config_.game_client->movement_policy().reference_ladder ? &*config_.game_client->movement_policy().reference_ladder : nullptr);
       if (!simulated) {
-        reason = "reference_movement_or_collision_failed";
+        reason = simulated.error ? movement::to_string(simulated.error->code) : "reference_movement_or_collision_failed";
         return false;
       }
       auto after = std::make_shared<const hlclient::movement::
@@ -2174,6 +2970,8 @@ public:
         return false;
       }
       candidate = appended.history;
+      prediction_step_selections_ += simulated.statistics.step_success_count;
+      publish_movement_audio(*before,*after,*command,sampled_at,replay);
       return true;
     } catch (const std::bad_alloc&) {
       reason = "prediction_allocation_failed";
@@ -2196,15 +2994,11 @@ public:
     }
     auto candidate = prediction_history_;
     std::string_view reason;
-    if (!append_reference_prediction_command(candidate, sequence, wire, reason)) {
+    if (!append_reference_prediction_command(candidate, sequence, wire, reason,
+            sampled_at,false)) {
       suspend_reference_prediction(reason);
       return;
     }
-    prediction_previous_state_ =
-        prediction_history_->current_predicted_state();
-    prediction_previous_at_ = prediction_latest_at_.value_or(sampled_at -
-        config_.usercmd_scenario.command_interval);
-    prediction_latest_at_ = sampled_at;
     prediction_history_ = std::move(candidate);
     ++prediction_local_steps_;
   }
@@ -2225,18 +3019,39 @@ public:
     }
     const auto derived = derive_reference_prediction_ground(
         seed, *anchor.last_new_value, *prediction_collision_,
-        prediction_scratch_, prediction_movement_config_);
+        prediction_scratch_, prediction_movement_config_,
+        hlclient::movement::GoldSrcMovementCommandProfile::
+            reference_wire_jump_duck_v2,
+        config_.game_client->movement_policy().reference_ladder ? &prediction_brush_context_ : nullptr);
     prediction_last_ground_status_ = derived.status;
     if (!derived.state) {
       suspend_reference_prediction(to_string(derived.status));
       return;
     }
-    const auto& corrected = *derived.state;
+    // The seed contains server pusher displacement through this source time.
+    // Anchor command duration here, not to packet receipt time or render time.
+    auto corrected_info = hlclient::movement::local_player_movement_state_create_info(*derived.state);
+    if (prediction_brush_context_.server_time && prediction_brush_context_.record == seed.record_identity &&
+        *prediction_brush_context_.server_time < 1e9)
+      corrected_info.simulation_time_nanoseconds = static_cast<std::uint64_t>(
+          std::llround(*prediction_brush_context_.server_time * 1e9));
+    else prediction_support_motion_.reset();
+    const auto timed_correction = hlclient::movement::LocalPlayerMovementState::create(corrected_info);
+    if (!timed_correction) { suspend_reference_prediction("support_time_invalid"); return; }
+    const auto& corrected = *timed_correction.state;
     if (prediction_history_) {
+      const auto before_presentation = live_reference_prediction_snapshot(now);
+      const auto before_camera = before_presentation.presented_origin;
+      const auto before_camera_offset =
+          before_presentation.presented_view_offset;
+      const auto old_latest_state = prediction_history_->current_predicted_state();
+      const auto old_epoch = prediction_epoch_;
       const auto rebased = rebase_reference_prediction(
           *prediction_history_, corrected, *prediction_environment_,
           *prediction_collision_, prediction_scratch_,
-          prediction_movement_config_);
+          prediction_movement_config_, prediction_support_motion_ ? &*prediction_support_motion_ : nullptr,
+          config_.game_client->movement_policy().reference_ladder ? &prediction_brush_context_ : nullptr,
+          config_.game_client->movement_policy().reference_ladder ? &*config_.game_client->movement_policy().reference_ladder : nullptr);
       if (!rebased.history) {
         suspend_reference_prediction("reference_rebase_or_suffix_failed");
         return;
@@ -2244,6 +3059,11 @@ public:
       // Explicit visual scope policy fixed before live evaluation. A larger
       // discrepancy may be a discontinuity or unsupported collision scene.
       constexpr double kMaximumCorrectionForSmoothView = 16.0;
+      if (rebased.raw_position_error) {
+        prediction_last_error_ = rebased.raw_position_error;
+        prediction_maximum_error_ = std::max(prediction_maximum_error_.value_or(0.0),
+            *rebased.raw_position_error);
+      }
       if (!rebased.raw_position_error ||
           *rebased.raw_position_error > kMaximumCorrectionForSmoothView) {
         prediction_last_error_ = rebased.raw_position_error;
@@ -2255,16 +3075,101 @@ public:
           prediction_maximum_error_.value_or(0.0),
           *rebased.raw_position_error);
       prediction_replayed_commands_ += rebased.replayed_commands;
+      const auto retained_pre_anchor=prediction_pre_anchor_;
+      prediction_pre_anchor_.reset();
+      if (prediction_support_motion_ && prediction_support_motion_->active() &&
+          *rebased.raw_position_error <= .25) {
+        if (const auto* entry = prediction_history_->find_exact(*GoldSrcUserCmdSequence::create(corrected.source_command_sequence())))
+          prediction_pre_anchor_ = entry->pre_command_state();
+        else if (retained_pre_anchor && retained_pre_anchor->source_command_sequence()+1U==corrected.source_command_sequence())
+          prediction_pre_anchor_=retained_pre_anchor;
+      }
       prediction_history_ = rebased.history;
+      config_.game_client->rewind_movement_audio(corrected.source_command_sequence());
+      for (const auto& entry:prediction_history_->entries())
+        publish_movement_audio(*entry.pre_command_state(),
+            *entry.post_command_state(),*entry.command(),now,true);
       ++prediction_accepted_corrections_;
       prediction_epoch_ = prediction_history_->session().prediction_generation;
-      prediction_previous_state_.reset();
-      prediction_previous_at_.reset();
-      prediction_latest_at_ = now;
       prediction_last_record_identity_ = seed.record_identity;
       prediction_last_anchor_at_ = now;
       prediction_state_ = LiveReferencePredictionState::active;
       prediction_reason_ = "active";
+      const auto after_physical = live_reference_prediction_snapshot(now);
+      auto after_camera = after_physical.presented_origin;
+      auto after_camera_offset = after_physical.presented_view_offset;
+      if (before_camera && after_camera &&
+          after_physical.presentation_reason == "anchor_before_history" &&
+          *rebased.raw_position_error <= 0.25 &&
+          (!prediction_visual_correction_ ||
+           !prediction_visual_correction_->active()) &&
+          prediction_camera_collision_query_ &&
+          old_latest_state->hull() ==
+              prediction_history_->current_predicted_state()->hull() &&
+          old_latest_state->mode() ==
+              prediction_history_->current_predicted_state()->mode()) {
+        const auto& old_offset = old_latest_state->view_offset();
+        const auto& new_offset =
+            prediction_history_->current_predicted_state()->view_offset();
+        const auto dx = static_cast<double>(before_camera->x) - after_camera->x;
+        const auto dy = static_cast<double>(before_camera->y) - after_camera->y;
+        const auto dz = static_cast<double>(before_camera->z) - after_camera->z;
+        const auto distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (old_offset.x == new_offset.x && old_offset.y == new_offset.y &&
+            old_offset.z == new_offset.z && distance > 0.25 &&
+            distance <= 4.0) {
+          prediction::PredictionVisualCorrectionConfig visual_config;
+          visual_config.duration_seconds = 0.020;
+          visual_config.maximum_duration_seconds = 0.020;
+          visual_config.maximum_offset_magnitude = 4.0;
+          const assets::AssetVector3 old_eye{
+              before_camera->x + new_offset.x,
+              before_camera->y + new_offset.y,
+              before_camera->z + new_offset.z};
+          const assets::AssetVector3 new_eye{
+              after_camera->x + new_offset.x,
+              after_camera->y + new_offset.y,
+              after_camera->z + new_offset.z};
+          const auto visual = prediction::begin_prediction_visual_correction(
+              std::nullopt, old_eye, new_eye,
+              prediction::PredictionCorrectionClass::small_visual_correction,
+              std::chrono::duration<double>{now.time_since_epoch()}.count(),
+              prediction_accepted_corrections_, old_epoch, prediction_epoch_,
+              visual_config);
+          if (visual && visual.correction) {
+            prediction_visual_correction_.emplace(std::move(*visual.correction));
+            prediction_presentation_cache_.reset();
+            const auto corrected_presentation =
+                live_reference_prediction_snapshot(now);
+            after_camera = corrected_presentation.presented_origin;
+            after_camera_offset =
+                corrected_presentation.presented_view_offset;
+          }
+        }
+      }
+      if (before_camera && before_camera_offset && after_camera &&
+          after_camera_offset) {
+        const auto dx = static_cast<double>(before_camera->x +
+            before_camera_offset->x) -
+            static_cast<double>(after_camera->x + after_camera_offset->x);
+        const auto dy = static_cast<double>(before_camera->y +
+            before_camera_offset->y) -
+            static_cast<double>(after_camera->y + after_camera_offset->y);
+        const auto dz = static_cast<double>(before_camera->z +
+            before_camera_offset->z) -
+            static_cast<double>(after_camera->z + after_camera_offset->z);
+        prediction_last_camera_correction_jump_ =
+            std::sqrt(dx * dx + dy * dy + dz * dz);
+        prediction_maximum_camera_correction_jump_ = std::max(
+            prediction_maximum_camera_correction_jump_.value_or(0.0),
+            *prediction_last_camera_correction_jump_);
+        if (prediction_presentation_cache_) {
+          prediction_presentation_cache_->last_camera_correction_jump =
+              prediction_last_camera_correction_jump_;
+          prediction_presentation_cache_->maximum_camera_correction_jump =
+              prediction_maximum_camera_correction_jump_;
+        }
+      }
       return;
     }
     const auto next_epoch = prediction_epoch_ == UINT64_MAX
@@ -2272,8 +3177,9 @@ public:
     const auto session = prediction::create_prediction_session_identity(
         seed.generation, next_epoch, *prediction_collision_,
         *prediction_environment_, prediction_movement_config_, corrected,
-        prediction::PredictionCompatibilityProfile::
-            reference_carrier_dry_walk_v1,
+        config_.game_client->movement_policy().button_policy == GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use
+            ? prediction::PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4
+            : prediction::PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_v3,
         prediction::PredictionAcknowledgementProfile::
             reference_sent_carrier_boundary_v1);
     if (!session) {
@@ -2287,6 +3193,7 @@ public:
       return;
     }
     auto candidate = initial.history;
+    config_.game_client->rewind_movement_audio(seed.command_boundary.value());
     std::size_t appended = 0U;
     const auto history = usercmd_stage_->history();
     std::string_view reason;
@@ -2295,7 +3202,7 @@ public:
         continue;
       if (!entry.reference_command || appended >= 64U ||
           !append_reference_prediction_command(
-              candidate, entry.sequence(), *entry.reference_command, reason)) {
+              candidate, entry.sequence(), *entry.reference_command, reason,now,true)) {
         suspend_reference_prediction(reason.empty()
             ? "initial_suffix_unavailable" : reason);
         return;
@@ -2305,9 +3212,6 @@ public:
     prediction_history_ = std::move(candidate);
     prediction_epoch_ = next_epoch;
     prediction_local_steps_ += appended;
-    prediction_previous_state_.reset();
-    prediction_previous_at_.reset();
-    prediction_latest_at_ = now;
     prediction_last_record_identity_ = seed.record_identity;
     prediction_last_anchor_at_ = now;
     prediction_state_ = LiveReferencePredictionState::active;
@@ -2329,7 +3233,9 @@ public:
         usercmd_server_samples_.back().source == source) {
       return;
     }
-    if (config_.operation_mode ==
+    if (observation.lifecycle.dead()) {
+      suspend_reference_prediction("local_player_dead");
+    } else if (config_.operation_mode ==
         LiveRuntimeOperationMode::live_visual_control) {
       const auto anchor = prediction_carriers_.bind_clientdata(
           ReferenceClientdataCarrier{
@@ -2343,12 +3249,14 @@ public:
           prediction_last_anchor_at_ &&
           now - *prediction_last_anchor_at_ > std::chrono::milliseconds{250})
         suspend_reference_prediction("reference_anchor_timeout");
-      if (anchor.bound()) {
+      if (anchor.bound() && anchor.last_new_command &&
+          anchor.last_new_command->value() > prediction_life_command_floor_) {
         ++prediction_anchor_bindings_;
         prediction_last_command_boundary_ =
             anchor.last_new_command->value();
-        const auto movement_command = reference_dry_walk_movement_command(
-            *anchor.last_new_command, *anchor.last_new_value);
+        const auto movement_command = config_.game_client->movement_policy().button_policy == GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use
+            ? reference_jump_duck_weapon_use_movement_command(*anchor.last_new_command, *anchor.last_new_value)
+            : reference_jump_duck_weapon_movement_command(*anchor.last_new_command, *anchor.last_new_value);
         if (movement_command) {
           ++prediction_command_candidates_;
           prediction_last_command_error_.reset();
@@ -2360,7 +3268,10 @@ public:
         prediction_last_seed_status_ = seed.status;
         prediction_last_seed_field_ = seed.field;
         if (seed.seed) ++prediction_seed_candidates_;
-        if (config_.reference_prediction && prediction_collision_) {
+        if (config_.reference_prediction && prediction_collision_ &&
+            (prediction_history_ || observation.lifecycle.respawns == 0U ||
+             (anchor.last_new_value->buttons &
+                 (kReferenceGoldSrcButtonJump | kReferenceGoldSrcButtonDuck)) == 0U)) {
           std::optional<ReferenceRetainedPredictionButtons> retained;
           if (prediction_history_) {
             const auto boundary = anchor.last_new_command;
@@ -2375,7 +3286,9 @@ public:
                 matched = entry->post_command_state().get();
               if (matched)
                 retained = ReferenceRetainedPredictionButtons{
-                    *boundary, matched->old_buttons()};
+                    *boundary, matched->old_buttons(),
+                    matched->duck_time_milliseconds(),
+                    matched->in_duck_transition()};
             }
           }
           const auto active_seed = inspect_reference_prediction_seed(
@@ -2474,6 +3387,7 @@ public:
     result.terminal_rejection_observed = false;
     result.command_interval = config_.usercmd_scenario.command_interval;
     result.durations = config_.usercmd_scenario.durations;
+    result.damage_respawn = config_.game_client->damage_respawn_snapshot();
     result.forward_amplitude = config_.usercmd_scenario.forward_amplitude;
     result.fixed_yaw_degrees =
         live_visual_input_ ? live_visual_input_->yaw_degrees
@@ -2535,6 +3449,21 @@ public:
     result.duck_generated_count = duck_generated_count_;
     result.jump_new_submission_count = jump_new_submission_count_;
     result.duck_new_submission_count = duck_new_submission_count_;
+    result.attack_generated_count = attack_generated_count_;
+    result.reload_generated_count = reload_generated_count_;
+    result.attack_command_press_count = attack_command_press_count_;
+    result.attack_command_release_count = attack_command_release_count_;
+    result.reload_command_press_count = reload_command_press_count_;
+    result.reload_command_release_count = reload_command_release_count_;
+    result.attack_new_submission_count = attack_new_submission_count_;
+    result.reload_new_submission_count = reload_new_submission_count_;
+    result.use_generated_count = use_generated_count_;
+    result.use_command_press_count = use_command_press_count_;
+    result.use_command_release_count = use_command_release_count_;
+    result.use_new_submission_count = use_new_submission_count_;
+    result.use_clear_after_release_count = use_clear_after_release_count_;
+    result.weapon_command_submission_drops =
+        weapon_command_submission_drops_;
     result.first_jump_sent_sequence = first_jump_sent_sequence_;
     result.last_jump_sent_sequence = last_jump_sent_sequence_;
     result.first_duck_sent_sequence = first_duck_sent_sequence_;
@@ -2558,6 +3487,8 @@ public:
         last_scheduler_due_command_count_;
     result.scheduler_maximum_commands_per_update =
         usercmd_scheduler_->config().maximum_commands_per_update;
+    result.scheduler_stall_recoveries = scheduler_stall_recoveries_;
+    result.scheduler_discarded_wall_time_samples = scheduler_discarded_wall_time_samples_;
     result.generated_by_phase = generated_by_phase_;
     result.sent_by_phase = sent_by_phase_;
     result.fresh_samples_by_phase = fresh_samples_by_phase_;
@@ -2578,7 +3509,9 @@ public:
       result.jump_duck = evaluate_live_jump_duck(
           result.server_samples, result.sent_by_phase);
     if (config_.live_visual_input_source ==
-        LiveVisualControlInputSource::scripted_speed_check)
+            LiveVisualControlInputSource::scripted_speed_check ||
+        config_.live_visual_input_source ==
+            LiveVisualControlInputSource::scripted_weapon_check)
       result.speed_outcome = evaluate_live_speed_check(
           result.server_samples, result.sent_by_phase,
           config_.usercmd_scenario.fixed_yaw_degrees,
@@ -2588,6 +3521,20 @@ public:
   }
 
   void complete_usercmd_scenario_if_ready(const LiveRuntimeStageTimePoint now) {
+    const bool life_check = config_.live_visual_input_source ==
+        LiveVisualControlInputSource::scripted_damage_respawn_check;
+    if (life_check && usercmd_stage_) {
+      const auto phase = config_.game_client->damage_respawn_snapshot().phase;
+      if (phase == game_api::DamageRespawnPhase::blocked || phase == game_api::DamageRespawnPhase::complete) {
+        if (!usercmd_stage_->history().unsent_sequences().empty()) return;
+        usercmd_result_ = usercmd_snapshot();
+        if (usercmd_result_) {
+          usercmd_result_->movement_verified = phase == game_api::DamageRespawnPhase::complete;
+          publish_success(now); // app separates feature partial from runtime error
+        }
+        return;
+      }
+    }
     if (!usercmd_activated_at_ || !usercmd_stage_ ||
         now < *usercmd_activated_at_ +
                   scenario_duration(config_.usercmd_scenario)) {
@@ -2608,8 +3555,14 @@ public:
         config_.live_visual_input_source ==
         LiveVisualControlInputSource::scripted_jump_duck_check;
     const bool speed_check = config_.live_visual_input_source ==
-        LiveVisualControlInputSource::scripted_speed_check;
-    const auto outcome = jump_duck_check || speed_check
+            LiveVisualControlInputSource::scripted_speed_check ||
+        config_.live_visual_input_source ==
+            LiveVisualControlInputSource::scripted_weapon_check;
+    const bool weapon_actions = config_.live_visual_input_source ==
+        LiveVisualControlInputSource::scripted_fire_reload_check ||
+        config_.live_visual_input_source ==
+        LiveVisualControlInputSource::scripted_fire_reload_presentation_check;
+    const auto outcome = jump_duck_check || speed_check || weapon_actions
                              ? LiveUserCmdMotionOutcome::not_evaluated
                              : evaluate_usercmd_motion();
     auto result = usercmd_snapshot();
@@ -2621,7 +3574,7 @@ public:
     }
     result->motion_outcome = outcome;
     result->movement_verified =
-        jump_duck_check
+        weapon_actions ? true : jump_duck_check
             ? result->jump_duck.outcome == LiveJumpDuckOutcome::verified
             : speed_check
                 ? result->speed_outcome == LiveUserCmdMotionOutcome::verified
@@ -2945,6 +3898,9 @@ public:
     }
     cleanup_done_ = true;
     ++cleanup_count_;
+    pending_hud_messages_.clear();
+    pending_hud_bytes_ = 0U;
+    pending_audio_count_ = pending_audio_bytes_ = 0U;
     if (runtime_session_ &&
         runtime_session_->status() == RuntimeReplaySessionStatus::active) {
       runtime_session_->finish();
@@ -2993,6 +3949,12 @@ public:
     trace_callback_active_ = false;
   }
 
+  struct PendingHudMessage final {
+    std::size_t source_ordinal{};
+    OwnedServicePayload payload;
+    StockRuntimeSourceCursor cursor{};
+    SoundTime received_at{};
+  };
   client::ClientWorldState &target_;
   LiveRuntimeStageConfig config_;
   LiveRuntimeStageTraceCallback trace_callback_;
@@ -3021,6 +3983,10 @@ public:
   std::string game_directory_;
   std::string map_file_path_;
   std::size_t payload_ordinal_{0U};
+  std::size_t runtime_record_ordinal_{0U};
+  std::vector<PendingHudMessage> pending_hud_messages_;
+  std::size_t pending_hud_bytes_{0U};
+  std::size_t pending_audio_count_{},pending_audio_bytes_{};
   std::size_t baseline_entity_count_{0U};
   std::size_t baseline_instanced_count_{0U};
   std::size_t received_service_payload_count_{0U};
@@ -3067,18 +4033,45 @@ public:
   std::optional<std::chrono::milliseconds> d_handoff_interval_;
   std::unique_ptr<GoldSrcUserCmdScheduler> usercmd_scheduler_;
   std::size_t last_scheduler_due_command_count_{0U};
+  std::uint64_t scheduler_stall_recoveries_{0U};
+  std::uint64_t scheduler_discarded_wall_time_samples_{0U};
   std::unique_ptr<GoldSrcUserCmdTransmissionStage> usercmd_stage_;
   ReferencePredictionCarrierLedger prediction_carriers_{128U};
-  std::unique_ptr<movement::WorldOnlyMovementCollision> prediction_collision_;
+
+  std::uint64_t prediction_life_epoch_{}, prediction_life_deaths_{};
+  std::size_t prediction_life_command_floor_{};
+  std::unique_ptr<movement::ILocalMovementCollision> prediction_collision_;
+  std::shared_ptr<const collision::BrushCollisionModelLibrary> prediction_brush_library_;
+  std::unique_ptr<SurfaceTextureQuery> surface_texture_query_;
+  std::map<std::uint32_t, std::string> prediction_model_names_;
+  bool prediction_has_brush_models_{false};
+  ReferenceBrushCollisionContext prediction_brush_context_;
+  std::optional<ReferenceVerticalSupportMotion> prediction_support_motion_;
+  std::shared_ptr<const hlclient::movement::LocalPlayerMovementState> prediction_pre_anchor_;
+  std::size_t prediction_brush_transform_changes_{};
+  std::optional<std::uint32_t> prediction_last_changed_brush_entity_, prediction_last_changed_brush_model_;
+  std::uint64_t prediction_step_selections_{};
+  std::string_view prediction_last_fallback_reason_{"none"};
   std::optional<movement::GoldSrcMovementEnvironment> prediction_environment_;
   movement::GoldSrcLocalMovementConfig prediction_movement_config_{};
   movement::GoldSrcLocalMovementScratch prediction_scratch_{};
   std::shared_ptr<const prediction::LocalPredictionHistoryState>
       prediction_history_;
-  std::shared_ptr<const hlclient::movement::LocalPlayerMovementState>
-      prediction_previous_state_;
-  std::optional<LiveRuntimeStageTimePoint> prediction_previous_at_;
-  std::optional<LiveRuntimeStageTimePoint> prediction_latest_at_;
+  mutable hlclient::collision::CollisionQueryScratch prediction_presentation_scratch_;
+  std::unique_ptr<hlclient::collision::CollisionWorldQuery>
+      prediction_camera_collision_query_;
+  mutable std::optional<prediction::PredictionVisualCorrectionState>
+      prediction_visual_correction_;
+  mutable std::optional<LiveReferencePredictionSnapshot> prediction_presentation_cache_;
+  mutable std::optional<LiveRuntimeStageTimePoint> prediction_presentation_cache_at_;
+  mutable const prediction::LocalPredictionHistoryState*
+      prediction_presentation_cache_history_{nullptr};
+  mutable std::uint64_t prediction_presentation_cache_world_revision_{0U};
+  mutable std::uint64_t prediction_presentation_cache_epoch_{0U};
+  mutable std::size_t prediction_presentation_trace_queries_{0U};
+  mutable std::size_t prediction_presentation_scratch_growths_{0U};
+  mutable LiveReferencePredictionState prediction_presentation_cache_state_{
+      LiveReferencePredictionState::off};
   LiveReferencePredictionState prediction_state_{
       LiveReferencePredictionState::off};
   std::string_view prediction_reason_{"off"};
@@ -3089,6 +4082,8 @@ public:
   std::size_t prediction_fallback_count_{0U};
   std::optional<double> prediction_last_error_;
   std::optional<double> prediction_maximum_error_;
+  std::optional<double> prediction_last_camera_correction_jump_;
+  std::optional<double> prediction_maximum_camera_correction_jump_;
   std::optional<std::uint64_t> prediction_last_record_identity_;
   std::optional<ReferencePredictionGroundStatus> prediction_last_ground_status_;
   std::optional<LiveRuntimeStageTimePoint> prediction_last_anchor_at_;
@@ -3106,6 +4101,10 @@ public:
   std::optional<gameplay_camera::GameplayCameraState> scenario_camera_;
   std::optional<LiveVisualControlInput> live_visual_input_;
   LiveVisualButtonLatch button_latch_;
+  game_api::ScopedGameplayButtonGate scoped_button_gate_;
+  std::size_t use_generated_count_{}, use_command_press_count_{}, use_command_release_count_{};
+  std::size_t use_new_submission_count_{}, use_clear_after_release_count_{};
+  bool last_submitted_use_{};
   std::optional<LiveRuntimeStageTimePoint> live_visual_input_at_;
   std::optional<LiveRuntimeStageTimePoint> usercmd_activated_at_;
   std::optional<std::int64_t> usercmd_activation_time_ns_;
@@ -3118,6 +4117,25 @@ public:
   std::size_t duck_generated_count_{0U};
   std::size_t jump_new_submission_count_{0U};
   std::size_t duck_new_submission_count_{0U};
+  std::size_t attack_generated_count_{0U};
+  std::size_t reload_generated_count_{0U};
+  std::size_t attack_command_press_count_{0U};
+  std::size_t attack_command_release_count_{0U};
+  std::size_t reload_command_press_count_{0U};
+  std::size_t reload_command_release_count_{0U};
+  std::size_t attack_new_submission_count_{0U};
+  std::size_t reload_new_submission_count_{0U};
+  struct CommandSampleTime {
+    std::uint32_t sequence{};
+    std::int64_t end_nanoseconds{};
+  };
+  // Same bounded retention horizon as the immutable wire history. An unsent
+  // history entry cannot be evicted, so its slot cannot be reused before its
+  // receipt. Backup/replay sends do not publish another presentation event.
+  std::array<CommandSampleTime,kMaximumGoldSrcUserCmdHistoryEntries>
+      command_sample_times_{};
+  std::deque<LiveWeaponCommandSubmission> weapon_command_submissions_;
+  std::size_t weapon_command_submission_drops_{0U};
   std::optional<std::uint32_t> first_jump_sent_sequence_;
   std::optional<std::uint32_t> last_jump_sent_sequence_;
   std::optional<std::uint32_t> first_duck_sent_sequence_;
@@ -3128,6 +4146,7 @@ public:
   std::size_t duck_command_release_count_{0U};
   std::uint16_t previous_generated_buttons_{0U};
   std::array<std::size_t, kLiveUserCmdPhaseCount> generated_by_phase_{};
+
   std::array<std::size_t, kLiveUserCmdPhaseCount> sent_by_phase_{};
   std::array<std::size_t, kLiveUserCmdPhaseCount> fresh_samples_by_phase_{};
   std::array<std::optional<float>, kLiveUserCmdPhaseCount> requested_forward_by_phase_{};
@@ -3189,6 +4208,10 @@ bool LiveRuntimeStage::submit_live_visual_input(
   return implementation_->submit_live_visual_input(input, now);
 }
 
+bool LiveRuntimeStage::request_weapon_selection(const std::uint8_t weapon_id) {
+  return implementation_->request_weapon_selection(weapon_id);
+}
+
 bool LiveRuntimeStage::activate_live_visual_control(
     const LiveRuntimeStageTimePoint now) noexcept {
   return implementation_->activate_live_visual_control(now);
@@ -3198,6 +4221,11 @@ bool LiveRuntimeStage::attach_reference_prediction_collision(
     std::shared_ptr<const hlclient::collision::CollisionWorldPackage> package) {
   return implementation_->attach_reference_prediction_collision(
       std::move(package));
+}
+
+bool LiveRuntimeStage::attach_reference_prediction_surfaces(
+    std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> package) {
+  return implementation_->attach_reference_prediction_surfaces(std::move(package));
 }
 
 LiveReferencePredictionSnapshot
@@ -3281,6 +4309,14 @@ const ServerInfoState *LiveRuntimeStage::live_server_info() const noexcept {
 std::optional<LiveUserCmdCheckState>
 LiveRuntimeStage::live_usercmd_snapshot() const {
   return implementation_->usercmd_snapshot();
+}
+std::size_t LiveRuntimeStage::live_use_new_submission_count() const noexcept {
+  return implementation_->use_new_submission_count();
+}
+
+std::optional<LiveWeaponCommandSubmission>
+LiveRuntimeStage::poll_weapon_command_submission() {
+  return implementation_->poll_weapon_command_submission();
 }
 
 } // namespace hlclient::goldsrc

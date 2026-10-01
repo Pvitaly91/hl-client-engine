@@ -140,6 +140,8 @@ GoldSrcUserCmdButtonMapping::synthetic_explicit_v1(
     map(GameplayButton::attack_secondary, kSyntheticGoldSrcButtonAttack2);
     map(GameplayButton::speed, kSyntheticGoldSrcButtonRun);
     map(GameplayButton::reload, kSyntheticGoldSrcButtonReload);
+    // The synthetic profile retains its historical axis-only wire bytes.
+    // Direction bits are a reference/HL1 input contract below.
 
     constexpr GameplayButton ignored[]{
         GameplayButton::walk,
@@ -211,8 +213,9 @@ GoldSrcUserCmdBuildResult GoldSrcUserCmdInputAdapter::build(
     GoldSrcUserCmdCreateInfo info;
     info.lerp_msec = context.lerp_msec;
     info.msec = context.command_msec;
-    // Canonical semantic order is pitch, yaw, roll. The accepted schema later
-    // binds yaw before pitch; the codec owns that wire reordering.
+    // This explicitly synthetic profile retains project geometric angles.
+    // Production GoldSrc conversion belongs to build_reference_wire below;
+    // the codec only owns field ordering/packing, not camera conventions.
     info.view_angles = {
         static_cast<float>(camera.pitch_degrees()),
         static_cast<float>(camera.yaw_degrees()),
@@ -306,14 +309,41 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
         gameplay_input::GameplayButton::duck);
     constexpr auto speed = gameplay_input::gameplay_button_mask(
         gameplay_input::GameplayButton::speed);
-    constexpr auto permitted_actions = jump | duck | speed;
+    constexpr auto attack = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::attack_primary);
+    constexpr auto reload = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::reload);
+    constexpr auto forward_button = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::move_forward);
+    constexpr auto back_button = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::move_backward);
+    constexpr auto left_button = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::move_left);
+    constexpr auto right_button = gameplay_input::gameplay_button_mask(
+        gameplay_input::GameplayButton::move_right);
+    constexpr auto permitted_actions = jump | duck | speed |
+        forward_button | back_button | left_button | right_button;
+    constexpr auto weapon_actions = permitted_actions | attack | reload;
+    constexpr auto use = gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::use);
+    const bool use_policy = context.reference_button_policy ==
+        GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use;
+    const bool weapons = use_policy || context.reference_button_policy ==
+        GoldSrcReferenceButtonPolicy::jump_duck_primary_reload;
     const auto observed_actions = intent.held_buttons() |
         intent.pressed_buttons() | intent.released_buttons() |
         context.one_shot_buttons;
-    if ((context.reference_button_policy == GoldSrcReferenceButtonPolicy::none &&
-         observed_actions != 0U) ||
+    if ((use_policy && (observed_actions & ~(weapon_actions | use)) != 0U) ||
+        (!use_policy && !weapons &&
+         context.reference_button_policy != GoldSrcReferenceButtonPolicy::none &&
+         context.reference_button_policy != GoldSrcReferenceButtonPolicy::jump_duck) ||
+        (context.reference_button_policy == GoldSrcReferenceButtonPolicy::none &&
+         (observed_actions & ~(forward_button | back_button |
+             left_button | right_button)) != 0U) ||
         (context.reference_button_policy == GoldSrcReferenceButtonPolicy::jump_duck &&
          (observed_actions & ~permitted_actions) != 0U) ||
+        (context.reference_button_policy == GoldSrcReferenceButtonPolicy::
+             jump_duck_primary_reload &&
+         (observed_actions & ~weapon_actions) != 0U) ||
         context.impulse.value_or(0U) != 0U ||
         context.weapon_selection.value_or(0U) != 0U ||
         context.impact_index != 0 ||
@@ -325,7 +355,10 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
             "Controlled reference movement rejects actions outside its selected jump/duck policy");
     }
 
-    const auto pitch = quantize_wire_angle(camera.pitch_degrees());
+    // The geometric camera is upward-positive; GoldSrc AngleVectors is
+    // downward-positive. Convert once before quantization/history. Codecs,
+    // backups and prediction replay consume these already wire-native angles.
+    const auto pitch = quantize_wire_angle(-camera.pitch_degrees());
     const auto yaw = quantize_wire_angle(camera.yaw_degrees());
     const auto roll = quantize_wire_angle(0.0);
     float requested_forward = intent.focused()
@@ -371,12 +404,22 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
     command.forward = *forward;
     command.side = *side;
     command.up = 0;
-    if (context.reference_button_policy == GoldSrcReferenceButtonPolicy::jump_duck &&
-        intent.focused()) {
+    if (intent.focused()) {
         const auto actions = intent.held_buttons() | context.one_shot_buttons;
         command.buttons = static_cast<std::uint16_t>(
-            ((actions & jump) != 0U ? kReferenceGoldSrcButtonJump : 0U) |
-            ((actions & duck) != 0U ? kReferenceGoldSrcButtonDuck : 0U));
+            (context.reference_button_policy != GoldSrcReferenceButtonPolicy::none &&
+                (actions & jump) != 0U ? kReferenceGoldSrcButtonJump : 0U) |
+            (context.reference_button_policy != GoldSrcReferenceButtonPolicy::none &&
+                (actions & duck) != 0U ? kReferenceGoldSrcButtonDuck : 0U) |
+            ((actions & forward_button) != 0U ? kReferenceGoldSrcButtonForward : 0U) |
+            ((actions & back_button) != 0U ? kReferenceGoldSrcButtonBack : 0U) |
+            ((actions & left_button) != 0U ? kReferenceGoldSrcButtonMoveLeft : 0U) |
+            ((actions & right_button) != 0U ? kReferenceGoldSrcButtonMoveRight : 0U) |
+            (weapons && (actions & attack) != 0U
+                 ? kReferenceGoldSrcButtonAttack : 0U) |
+            (weapons && (actions & reload) != 0U
+                 ? kReferenceGoldSrcButtonReload : 0U) |
+            (use_policy && (actions & use) != 0U ? kReferenceGoldSrcButtonUse : 0U));
     } else {
         command.buttons = 0U;
     }

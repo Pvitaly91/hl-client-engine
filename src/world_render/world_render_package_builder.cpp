@@ -358,7 +358,7 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 std::nullopt,
                 "World geometry exceeds configured render-package limits");
         }
-        if (!textures.complete_for_world_materials()) {
+        if (!textures.renderable_for_world_materials()) {
             return fail(WorldRenderPackageErrorCode::texture_set_incomplete,
                 std::nullopt,
                 "World texture set is incomplete");
@@ -442,7 +442,7 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
             material_covered[surface.material_index] = true;
             const auto* texture_binding =
                 textures.binding_for_material(surface.material_index);
-            if (texture_binding == nullptr || !assets::is_resolved(texture_binding->status) ||
+            if (texture_binding == nullptr || !assets::is_renderable(texture_binding->status) ||
                 !texture_binding->texture_asset_index ||
                 *texture_binding->texture_asset_index >= textures.textures().size()) {
                 return fail(WorldRenderPackageErrorCode::invalid_material_binding,
@@ -463,29 +463,35 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 texture_binding->status == assets::
                     WorldMaterialTextureBindingStatus::resolved_wad3 &&
                 texture.source_kind == assets::WorldTextureSourceKind::external_wad3;
+            const bool placeholder = source_material.texture_storage ==
+                    assets::WorldTextureStorage::external_reference &&
+                texture_binding->status == assets::WorldMaterialTextureBindingStatus::substituted_missing_texture &&
+                texture.source_kind == assets::WorldTextureSourceKind::generated_missing_texture;
+            const bool profile_valid = placeholder
+                ? texture_binding->compatibility_profile == assets::WorldTextureCompatibilityProfile::missing_texture_checker_v1 &&
+                  texture_binding->evidence_profile == assets::WorldTextureEvidenceProfile::project_generated_placeholder
+                : texture_binding->compatibility_profile == assets::WorldTextureCompatibilityProfile::goldsrc_indexed_miptex_v1 &&
+                  texture_binding->evidence_profile == assets::WorldTextureEvidenceProfile::valve_public_tools_and_synthetic_fixtures;
             const bool archive_identity_valid =
-                (embedded && !texture_binding->source_archive_ordinal &&
+                ((embedded || placeholder) && !texture_binding->source_archive_ordinal &&
                     !texture.source_archive_ordinal) ||
                 (external && texture_binding->source_archive_ordinal &&
                     texture.source_archive_ordinal ==
                         texture_binding->source_archive_ordinal);
-            if ((!embedded && !external) || !archive_identity_valid ||
+            if ((!embedded && !external && !placeholder) || !archive_identity_valid || !profile_valid ||
                 !source_material.texture_name ||
                 source_material.texture_name->empty() ||
-                source_material.width != std::optional{texture.width} ||
-                source_material.height != std::optional{texture.height} ||
+                !source_material.width || !source_material.height ||
+                *source_material.width == 0U || *source_material.height == 0U ||
+                (!placeholder && (source_material.width != std::optional{texture.width} ||
+                                   source_material.height != std::optional{texture.height})) ||
                 !source_material.source_texture_index ||
                 texture_binding->source_bsp_texture_index !=
                     source_material.source_texture_index ||
                 source_material.compatibility_profile != assets::
                     WorldMaterialCompatibilityProfile::source_texture_reference_v1 ||
                 source_material.evidence_profile != assets::
-                    WorldMaterialEvidenceProfile::validated_source_metadata ||
-                texture_binding->compatibility_profile != assets::
-                    WorldTextureCompatibilityProfile::goldsrc_indexed_miptex_v1 ||
-                texture_binding->evidence_profile != assets::
-                    WorldTextureEvidenceProfile::
-                        valve_public_tools_and_synthetic_fixtures) {
+                    WorldMaterialEvidenceProfile::validated_source_metadata) {
                 return fail(WorldRenderPackageErrorCode::invalid_material_binding,
                     surface_index,
                     "World material and resolved texture metadata do not match exactly");
@@ -552,9 +558,9 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                     source_vertex.position,
                     source_vertex.normal,
                     {source_vertex.texture_coordinate.x /
-                            static_cast<float>(texture.width),
+                            static_cast<float>(*source_material.width),
                         source_vertex.texture_coordinate.y /
-                            static_cast<float>(texture.height)},
+                            static_cast<float>(*source_material.height)},
                     {0.5F, 0.5F},
                 };
                 if (lightmap_mode == WorldRenderLightmapMode::atlas) {

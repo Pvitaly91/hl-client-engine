@@ -3,6 +3,7 @@
 #include <hlclient/goldsrc/bit_reader.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <new>
@@ -321,7 +322,11 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
     }
     if (!valid_packet_entity_decode_limits(limits_) || !state.valid() ||
         !same_snapshot_limits(state.limits_, limits_.snapshots) ||
-        state.client_data_state_.limits() != limits_.client_data) {
+        state.client_data_state_.limits() != limits_.client_data ||
+        (input.receiving_player_entity &&
+         (*input.receiving_player_entity == 0U ||
+          *input.receiving_player_entity > state.max_clients_ ||
+          input.client_receiver_mode != ClientDataReceiverMode::ordinary_game_client))) {
         return failure(PacketEntityDecodeErrorCode::invalid_configuration,
                        "packet-entity decoder or state limits are invalid");
     }
@@ -391,6 +396,7 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
     const auto bytes = std::span<const std::byte>{input.payload.bytes};
     const auto hash = payload_hash(bytes);
     RuntimeControlDecoder control_decoder{limits_.controls};
+    std::size_t scripted_event_count = 0U;
 
     while (current.byte_offset() < bytes.size()) {
         if (events.size() >= limits_.maximum_messages_per_payload) {
@@ -451,11 +457,12 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
                 RuntimeControlDecodeInput{input.payload, current,
                                           input.source_generation,
                                           input.payload_ordinal,
-                                          input.user_message_definitions},
+                                          input.user_message_definitions,
+                                          next.schemas_.get(), staged_server_time},
                 events.size());
             if (!decoded) {
                 const auto error = decoded.error;
-                return failure(
+                auto rejected = failure(
                     error && error->code == RuntimeControlDecodeErrorCode::unsupported_opcode
                         ? PacketEntityDecodeErrorCode::unsupported_opcode
                         : PacketEntityDecodeErrorCode::runtime_control_failed,
@@ -463,10 +470,26 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
                     PacketEntityRecoveryStatus::none,
                     error ? error->cursor : std::optional{current},
                     error ? error->wire_opcode : std::optional<std::uint8_t>{opcode});
+                if (error) rejected.error->control_error = *error;
+                return rejected;
             }
             if (decoded.event->kind == RuntimeControlMessageKind::server_time) {
                 staged_server_time =
                     std::get<RuntimeControlServerTime>(decoded.event->body).seconds;
+            }
+            if (const auto* observed = std::get_if<RuntimeControlScriptedEvents>(&decoded.event->body)) {
+                if (observed->entries.size() > limits_.controls.maximum_scripted_events_per_payload -
+                        scripted_event_count) {
+                    auto rejected = failure(PacketEntityDecodeErrorCode::runtime_control_failed,
+                        "scripted events exceed the complete mixed-payload bound",
+                        PacketEntityRecoveryStatus::none, current, opcode);
+                    rejected.error->control_error = RuntimeControlDecodeError{
+                        RuntimeControlDecodeErrorCode::scripted_event_limit_exceeded,
+                        current, opcode, rejected.error->context};
+                    rejected.error->control_error->failure_cursor = decoded.event->provenance.end_cursor;
+                    return rejected;
+                }
+                scripted_event_count += observed->entries.size();
             }
             try {
                 control_events.push_back(*decoded.event);
@@ -827,6 +850,7 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
                 base_snapshot ? base_snapshot->find_exact(*number) : nullptr;
             const EntityBaselineState* baseline = nullptr;
             const DeltaObjectState* delta_base = nullptr;
+            std::optional<DeltaObjectState> null_baseline;
             std::optional<EntityBaselineKey> baseline_key;
             std::optional<EntityStateBaseReference> state_base;
 
@@ -890,8 +914,29 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
             } else {
                 baseline_key.emplace(EntityBaselineKey::for_entity(*number));
                 baseline = next.baselines_->find_exact(*baseline_key);
-                state_base.emplace(
-                    EntityStateBaseReference::entity_baseline(*number));
+                if (baseline != nullptr) {
+                    state_base.emplace(
+                        EntityStateBaseReference::entity_baseline(*number));
+                } else {
+                    // Stock clients retain a zero-initialized baseline for
+                    // every entity slot, including entities created after
+                    // svc_spawnbaseline. Do not fabricate a registry entry:
+                    // this base is local protocol state, not signon evidence.
+                    auto built = DeltaObjectBuilder{{}, kDeltaProfile}
+                                     .build_default(*selected_schema);
+                    if (!built) {
+                        return failure(
+                            PacketEntityDecodeErrorCode::unable_to_retain_output,
+                            "unable to construct protocol null entity baseline",
+                            PacketEntityRecoveryStatus::none,
+                            cursor_at(record_start, bytes.size()), opcode,
+                            *number);
+                    }
+                    null_baseline.emplace(std::move(*built.state));
+                    delta_base = &*null_baseline;
+                    state_base.emplace(
+                        EntityStateBaseReference::null_baseline(*number));
+                }
             }
             if (baseline != nullptr) {
                 if (baseline->source_geometry().source_generation !=
@@ -916,7 +961,7 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
                                *number);
             }
 
-            const auto decoded = delta_decoder.decode_delta(
+            auto decoded = delta_decoder.decode_delta(
                 *selected_schema,
                 delta_base,
                 DeltaValueDecodeContext{bytes, bit_cursor,
@@ -938,6 +983,59 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
                                    : std::nullopt);
             }
             bit_cursor = decoded.next_bit_offset;
+            // Player_Encode omits the receiver's origin; the ordinary GoldSrc
+            // client restores it from clientdata (SDK HUD_TxferLocalOverrides).
+            // Do this BEFORE publishing this record to decoded_updates: another
+            // full-packet entity may inherit equal coordinates from this base.
+            // Presentation-time correction is too late for that wire dependency.
+            const auto& client_frame = next.client_data_state_.current_frame();
+            if (category == EntitySchemaCategory::player_entity &&
+                input.receiving_player_entity == *number && client_frame &&
+                client_frame->provenance().source_generation == input.source_generation &&
+                client_frame->provenance().source_transport_sequence == input.payload.source_sequence &&
+                client_frame->provenance().payload_ordinal == input.payload_ordinal) {
+                constexpr std::array names{"origin[0]", "origin[1]", "origin[2]"};
+                std::array<const DeltaFieldValue*, 3U> source_fields{}, target_fields{};
+                const auto* client_schema = next.schemas_->find_exact(input.client_schema_name);
+                bool complete = client_schema != nullptr;
+                for (std::size_t axis = 0U; axis < names.size(); ++axis) {
+                    source_fields[axis] = client_frame->client_data().find_exact(names[axis]);
+                    target_fields[axis] = decoded.state->find_exact(names[axis]);
+                    const auto* from = source_fields[axis];
+                    const auto* to = target_fields[axis];
+                    complete = complete && from && to &&
+                        from->base_type() == DeltaFieldBaseType::float_value &&
+                        to->base_type() == DeltaFieldBaseType::float_value &&
+                        client_schema->fields()[from->wire_index()].type_flags().signed_value() &&
+                        selected_schema->fields()[to->wire_index()].type_flags().signed_value() &&
+                        std::holds_alternative<double>(from->value()) &&
+                        std::isfinite(std::get<double>(from->value()));
+                }
+                if (complete) {
+                    try {
+                        std::vector<DeltaScalarValue> values;
+                        values.reserve(decoded.state->field_count());
+                        for (const auto& field : decoded.state->fields()) values.push_back(field.value());
+                        for (std::size_t axis = 0U; axis < names.size(); ++axis)
+                            values[target_fields[axis]->wire_index()] = source_fields[axis]->value();
+                        auto restored = DeltaObjectBuilder{{}, kDeltaProfile}.build(*selected_schema, values);
+                        if (!restored) {
+                            return failure(PacketEntityDecodeErrorCode::delta_decode_failed,
+                                "same-payload local origin does not fit the player state schema",
+                                PacketEntityRecoveryStatus::none, cursor_at(record_start, bytes.size()),
+                                opcode, *number);
+                        }
+                        decoded.state.emplace(std::move(*restored.state));
+                    } catch (const std::bad_alloc&) {
+                        return failure(PacketEntityDecodeErrorCode::unable_to_retain_output,
+                            "unable to retain same-payload local origin",
+                            PacketEntityRecoveryStatus::none, cursor_at(record_start, bytes.size()),
+                            opcode, *number);
+                    }
+                }
+                // Missing/late clientdata or incomplete origin has no transfer;
+                // never use a predicted camera, retained older frame or guessed Z.
+            }
             const bool changed = !values_equal(*decoded.state, *delta_base);
             std::shared_ptr<const DeltaObjectState> object;
             try {
@@ -1161,11 +1259,13 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
 
     if (const auto control_error = control_decoder.apply_events(
             control_events, next.control_state_, !control_events.empty())) {
-        return failure(PacketEntityDecodeErrorCode::runtime_control_failed,
+        auto rejected = failure(PacketEntityDecodeErrorCode::runtime_control_failed,
                        control_error->context,
                        PacketEntityRecoveryStatus::none,
                        control_error->cursor,
                        control_error->wire_opcode);
+        rejected.error->control_error = *control_error;
+        return rejected;
     }
     const auto consumed_bytes =
         current.byte_offset() - input.initial_cursor.byte_offset();

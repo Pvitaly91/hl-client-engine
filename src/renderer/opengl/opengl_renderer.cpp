@@ -1,4 +1,6 @@
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
+#include <hlclient/world_visibility/world_view_frustum.hpp>
+#include <hlclient/world_spatial/world_spatial_query.hpp>
 
 #include "opengl_entity_renderer.hpp"
 
@@ -301,27 +303,35 @@ layout(location = 2) in vec2 in_base_uv;
 layout(location = 3) in vec2 in_lightmap_uv;
 
 uniform mat4 u_model_view_projection;
+uniform mat4 u_model_transform;
 
 out vec2 fragment_base_uv;
 out vec2 fragment_lightmap_uv;
+out vec3 fragment_world_position;
 
 void main()
 {
     gl_Position = u_model_view_projection * vec4(in_position, 1.0);
     fragment_base_uv = in_base_uv;
     fragment_lightmap_uv = in_lightmap_uv;
+    fragment_world_position = (u_model_transform * vec4(in_position, 1.0)).xyz;
 }
 )GLSL";
 
 inline constexpr char kWorldFragmentShader[] = R"GLSL(#version 330 core
 in vec2 fragment_base_uv;
 in vec2 fragment_lightmap_uv;
+in vec3 fragment_world_position;
 
 uniform sampler2D u_base_texture;
 uniform sampler2DArray u_lightmap_texture;
 uniform int u_lightmap_enabled;
 uniform int u_masked_alpha;
 uniform int u_lightmap_layer;
+uniform vec3 u_point_light_center;
+uniform vec3 u_point_light_color;
+uniform float u_point_light_radius;
+uniform float u_point_light_intensity;
 
 out vec4 output_color;
 
@@ -336,6 +346,12 @@ void main()
         light_factor = texture(
             u_lightmap_texture,
             vec3(fragment_lightmap_uv, float(u_lightmap_layer))).rgb;
+    }
+    if (u_point_light_radius > 0.0) {
+        float falloff = max(0.0, 1.0 - length(fragment_world_position -
+            u_point_light_center) / u_point_light_radius);
+        light_factor += u_point_light_color *
+            (u_point_light_intensity * falloff * falloff);
     }
     output_color = vec4(base_sample.rgb * light_factor, base_sample.a);
 }
@@ -378,11 +394,16 @@ void main()
 struct ProgramState {
     GlObject program;
     GLint model_view_projection{-1};
+    GLint model_transform{-1};
     GLint base_texture{-1};
     GLint lightmap_texture{-1};
     GLint lightmap_enabled{-1};
     GLint masked_alpha{-1};
     GLint lightmap_layer{-1};
+    GLint point_light_center{-1};
+    GLint point_light_color{-1};
+    GLint point_light_radius{-1};
+    GLint point_light_intensity{-1};
 };
 
 [[nodiscard]] ProgramState create_world_program()
@@ -428,15 +449,23 @@ struct ProgramState {
     result.program = std::move(program);
     result.model_view_projection =
         glGetUniformLocation(name, "u_model_view_projection");
+    result.model_transform = glGetUniformLocation(name, "u_model_transform");
     result.base_texture = glGetUniformLocation(name, "u_base_texture");
     result.lightmap_texture = glGetUniformLocation(name, "u_lightmap_texture");
     result.lightmap_enabled = glGetUniformLocation(name, "u_lightmap_enabled");
     result.masked_alpha = glGetUniformLocation(name, "u_masked_alpha");
     result.lightmap_layer = glGetUniformLocation(name, "u_lightmap_layer");
+    result.point_light_center = glGetUniformLocation(name, "u_point_light_center");
+    result.point_light_color = glGetUniformLocation(name, "u_point_light_color");
+    result.point_light_radius = glGetUniformLocation(name, "u_point_light_radius");
+    result.point_light_intensity = glGetUniformLocation(name, "u_point_light_intensity");
     require_no_gl_error(
         OpenGlRendererErrorCode::program_link_failed,
         "OpenGL uniform lookup");
-    if (result.model_view_projection < 0 || result.base_texture < 0 ||
+    if (result.model_view_projection < 0 || result.model_transform < 0 ||
+        result.point_light_center < 0 || result.point_light_color < 0 ||
+        result.point_light_radius < 0 || result.point_light_intensity < 0 ||
+        result.base_texture < 0 ||
         result.lightmap_texture < 0 || result.lightmap_enabled < 0 ||
         result.masked_alpha < 0 || result.lightmap_layer < 0) {
         fail(OpenGlRendererErrorCode::program_link_failed,
@@ -557,7 +586,7 @@ void validate_package(
 
     if (vertices.empty() || indices.empty() || indices.size() % 3U != 0U ||
         materials.empty() || batches.empty() || textures.empty() ||
-        !package.textured_world().textures.complete_for_world_materials() ||
+        !package.textured_world().textures.renderable_for_world_materials() ||
         !package.lightmaps().complete_for_world_surfaces()) {
         fail(OpenGlRendererErrorCode::invalid_world_package,
             "Static-world package is incomplete or has empty render data");
@@ -902,6 +931,7 @@ struct GpuSceneResources {
     world_scene_render::WorldSceneRendererResourceIdentity identity{};
     GpuWorldResources world;
     std::optional<GpuWorldResources> brushes;
+    std::vector<GlObject> brush_alternate_textures;
 };
 
 [[nodiscard]] GpuWorldResources build_gpu_resources(
@@ -962,8 +992,11 @@ void draw_package_range(
     const std::uint32_t index_count,
     const std::size_t material_index,
     const RenderMatrix4& model_view_projection,
+    const RenderMatrix4& model_transform,
+    const std::optional<RenderPointLight>& light,
     const bool brush,
-    FrameDrawCounters& counters)
+    FrameDrawCounters& counters,
+    const GLuint alternate_texture = 0U)
 {
     const auto materials = package.materials();
     const auto indices = package.indices();
@@ -972,7 +1005,7 @@ void draw_package_range(
     if (index_count == 0U || index_count % 3U != 0U ||
         first > indices.size() || count > indices.size() - first ||
         material_index >= materials.size() ||
-        !renderer::is_finite(model_view_projection)) {
+        !renderer::is_finite(model_view_projection) || !renderer::is_finite(model_transform)) {
         fail(OpenGlRendererErrorCode::draw_range_invalid,
             "Visible draw command has an invalid package range");
     }
@@ -985,12 +1018,25 @@ void draw_package_range(
         1,
         GL_FALSE,
         model_view_projection.values.data());
+    glUniformMatrix4fv(resources.program.model_transform,1,GL_FALSE,
+        model_transform.values.data());
+    if (light && valid_render_point_light(*light) && light->intensity>0.0F) {
+        glUniform3f(resources.program.point_light_center,
+            light->center.x,light->center.y,light->center.z);
+        glUniform3f(resources.program.point_light_color,
+            light->color[0],light->color[1],light->color[2]);
+        glUniform1f(resources.program.point_light_radius,light->radius_units);
+        glUniform1f(resources.program.point_light_intensity,light->intensity);
+    } else {
+        glUniform1f(resources.program.point_light_radius,0.0F);
+        glUniform1f(resources.program.point_light_intensity,0.0F);
+    }
     glUniform1i(resources.program.lightmap_layer, 0);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(
         GL_TEXTURE_2D,
-        resources.base_textures[material.base_texture_asset_index].name());
+        alternate_texture ? alternate_texture : resources.base_textures[material.base_texture_asset_index].name());
     ++counters.base_texture_binds;
 
     glActiveTexture(GL_TEXTURE1);
@@ -1084,6 +1130,441 @@ OpenGlRendererErrorCode OpenGlRendererError::code() const noexcept
 
 class OpenGlRenderer::Implementation final {
 public:
+    void render_decals(const RenderWorldDecals& decals,
+        const RenderMatrix4& view_projection, FrameDrawCounters& frame)
+    {
+        if (!decals.texture || !decals.vertices ||
+            decals.texture->alpha_mode!=assets::WorldTextureAlphaMode::masked_index_255 ||
+            decals.texture->mip_levels[0].width==0 ||
+            decals.texture->mip_levels[0].height==0 ||
+            decals.vertices->empty() || decals.vertices->size()>64U*96U ||
+            decals.vertices->size()%3U!=0U) return;
+        const auto& pixels=decals.texture->mip_levels[0];
+        if (pixels.width>256U || pixels.height>256U ||
+            pixels.rgba_pixels.size()!=std::size_t(pixels.width)*pixels.height*4U) return;
+        if (std::any_of(decals.vertices->begin(),decals.vertices->end(),[](const auto& v) {
+            return !std::isfinite(v.position.x)||!std::isfinite(v.position.y)||
+                !std::isfinite(v.position.z)||!std::isfinite(v.uv.x)||
+                !std::isfinite(v.uv.y)||v.uv.x< -0.001F||v.uv.x>1.001F||
+                v.uv.y< -0.001F||v.uv.y>1.001F;
+        })) return;
+        if (!decal_program_.name()) create_decal_program();
+        if (decal_asset_!=decals.texture) {
+            auto candidate=create_texture(OpenGlRendererErrorCode::texture_upload_failed,
+                "World decal texture creation");
+            glBindTexture(GL_TEXTURE_2D,candidate.name());
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,0);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,0);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,pixels.width,pixels.height,0,
+                GL_RGBA,GL_UNSIGNED_BYTE,pixels.rgba_pixels.data());
+            require_no_gl_error(OpenGlRendererErrorCode::texture_upload_failed,
+                "Masked world decal upload");
+            decal_texture_=std::move(candidate);
+            decal_asset_=decals.texture;
+        }
+        if (decal_vertices_!=decals.vertices || decal_revision_!=decals.revision) {
+            std::vector<float> buffer;
+            buffer.reserve(decals.vertices->size()*5U);
+            for(const auto& v:*decals.vertices) {
+                buffer.insert(buffer.end(),{v.position.x,v.position.y,v.position.z,v.uv.x,v.uv.y});
+            }
+            glBindBuffer(GL_ARRAY_BUFFER,decal_buffer_.name());
+            glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(buffer.size()*sizeof(float)),
+                buffer.data(),GL_DYNAMIC_DRAW);
+            require_no_gl_error(OpenGlRendererErrorCode::buffer_upload_failed,
+                "Clipped world decal geometry upload");
+            decal_vertices_=decals.vertices;
+            decal_revision_=decals.revision;
+        }
+        const auto cull=glIsEnabled(GL_CULL_FACE),blend=glIsEnabled(GL_BLEND),
+            offset=glIsEnabled(GL_POLYGON_OFFSET_FILL),depth=glIsEnabled(GL_DEPTH_TEST);
+        GLboolean depth_write=GL_TRUE;
+        GLfloat old_factor{},old_units{};
+        GLint blend_src_rgb=GL_ONE,blend_dst_rgb=GL_ZERO,
+            blend_src_alpha=GL_ONE,blend_dst_alpha=GL_ZERO,
+            old_cull_mode=GL_BACK,old_front_face=GL_CCW;
+        glGetBooleanv(GL_DEPTH_WRITEMASK,&depth_write);
+        glGetIntegerv(GL_CULL_FACE_MODE,&old_cull_mode);
+        glGetIntegerv(GL_FRONT_FACE,&old_front_face);
+        glGetFloatv(GL_POLYGON_OFFSET_FACTOR,&old_factor);
+        glGetFloatv(GL_POLYGON_OFFSET_UNITS,&old_units);
+        glGetIntegerv(GL_BLEND_SRC_RGB,&blend_src_rgb);
+        glGetIntegerv(GL_BLEND_DST_RGB,&blend_dst_rgb);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA,&blend_src_alpha);
+        glGetIntegerv(GL_BLEND_DST_ALPHA,&blend_dst_alpha);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0F,-1.0F);
+        glEnable(GL_CULL_FACE);glCullFace(GL_BACK);glFrontFace(GL_CCW);
+        const bool modulate=decals.material_mode==
+            game_api::LocalDecalMaterialMode::white_neutral_modulate;
+        glEnable(GL_BLEND);
+        // Preserve framebuffer alpha for later sprite/HUD passes while the
+        // color blend changes only the already-lit world material.
+        if(modulate) glBlendFuncSeparate(GL_DST_COLOR,GL_ZERO,GL_ZERO,GL_ONE);
+        else glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ZERO,GL_ONE);
+        glUseProgram(decal_program_.name());
+        glUniformMatrix4fv(decal_matrix_,1,GL_FALSE,view_projection.values.data());
+        glUniform1i(decal_material_mode_,modulate ? 1 : 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,decal_texture_.name());
+        glUniform1i(decal_sampler_,0);
+        glBindVertexArray(decal_array_.name());
+        glDrawArrays(GL_TRIANGLES,0,static_cast<GLsizei>(decals.vertices->size()));
+        glBindVertexArray(0);glBindTexture(GL_TEXTURE_2D,0);glUseProgram(0);
+        glBlendFuncSeparate(blend_src_rgb,blend_dst_rgb,blend_src_alpha,blend_dst_alpha);
+        if(!blend) glDisable(GL_BLEND);
+        glCullFace(old_cull_mode);glFrontFace(old_front_face);
+        if(!cull) glDisable(GL_CULL_FACE);
+        glPolygonOffset(old_factor,old_units);
+        if(!offset) glDisable(GL_POLYGON_OFFSET_FILL);
+        glDepthMask(depth_write);
+        if(!depth) glDisable(GL_DEPTH_TEST);
+        ++frame.draw_calls;
+        frame.triangles+=decals.vertices->size()/3U;
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+            "Clipped world decal draw");
+    }
+    void create_decal_program()
+    {
+        constexpr char vertex_source[]=R"GLSL(#version 330 core
+layout(location=0) in vec3 p;
+layout(location=1) in vec2 uv;
+uniform mat4 view_projection;
+out vec2 texcoord;
+void main(){gl_Position=view_projection*vec4(p,1.0);texcoord=uv;}
+)GLSL";
+        constexpr char fragment_source[]=R"GLSL(#version 330 core
+in vec2 texcoord;
+uniform sampler2D decal_texture;
+uniform int material_mode;
+out vec4 output_color;
+void main(){
+  vec4 c=texture(decal_texture,texcoord);
+  if(material_mode==1) output_color=vec4(mix(vec3(1.0),c.rgb,c.a),1.0);
+  else output_color=c;
+}
+)GLSL";
+        auto vertex=compile_shader(GL_VERTEX_SHADER,vertex_source,"World decal vertex");
+        auto fragment=compile_shader(GL_FRAGMENT_SHADER,fragment_source,"World decal fragment");
+        const auto name=glCreateProgram();
+        if(name==0U) fail(OpenGlRendererErrorCode::program_link_failed,"World decal program creation");
+        decal_program_=GlObject::adopt(GlObjectKind::program,name);
+        glAttachShader(name,vertex.name());glAttachShader(name,fragment.name());glLinkProgram(name);
+        GLint linked=GL_FALSE;glGetProgramiv(name,GL_LINK_STATUS,&linked);
+        if(linked!=GL_TRUE) fail(OpenGlRendererErrorCode::program_link_failed,"World decal link");
+        decal_matrix_=glGetUniformLocation(name,"view_projection");
+        decal_sampler_=glGetUniformLocation(name,"decal_texture");
+        decal_material_mode_=glGetUniformLocation(name,"material_mode");
+        decal_array_=create_vertex_array();decal_buffer_=create_buffer();
+        glBindVertexArray(decal_array_.name());
+        glBindBuffer(GL_ARRAY_BUFFER,decal_buffer_.name());
+        glEnableVertexAttribArray(0U);
+        glVertexAttribPointer(0U,3,GL_FLOAT,GL_FALSE,5*sizeof(float),nullptr);
+        glEnableVertexAttribArray(1U);
+        glVertexAttribPointer(1U,2,GL_FLOAT,GL_FALSE,5*sizeof(float),
+            reinterpret_cast<const void*>(3*sizeof(float)));
+        glBindVertexArray(0U);
+    }
+    void render_flash(const RenderMuzzleFlash& flash, const RenderMatrix4& view_projection,
+                      assets::AssetVector3 right={0,1,0}, assets::AssetVector3 up={0,0,1})
+    {
+        const auto& p=flash.center;
+        if (!std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z)||
+            !std::isfinite(flash.radius_units)||flash.radius_units<=0.0F||
+            flash.radius_units>16.0F ||
+            std::any_of(flash.color.begin(),flash.color.end(),[](float c){
+                return !std::isfinite(c)||c<0.0F||c>1.0F;
+            })) return;
+        if (!flash_program_.name()) create_flash_program();
+        const float r=flash.radius_units;
+        // Camera-local +X forward: billboard in YZ at the evaluated Studio
+        // attachment, not a screen-space crosshair overlay.
+        std::array<float,30> vertices{};
+        constexpr std::array<std::array<float,2>,6> corners{{
+            {-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}}};
+        for(std::size_t i=0;i<corners.size();++i) {
+            const auto x=corners[i][0], y=corners[i][1];
+            vertices[i*5]=p.x+r*(right.x*x+up.x*y);
+            vertices[i*5+1]=p.y+r*(right.y*x+up.y*y);
+            vertices[i*5+2]=p.z+r*(right.z*x+up.z*y);
+            vertices[i*5+3]=x;vertices[i*5+4]=y;
+        }
+        glBindBuffer(GL_ARRAY_BUFFER,flash_buffer_.name());
+        glBufferData(GL_ARRAY_BUFFER,sizeof(vertices),vertices.data(),GL_DYNAMIC_DRAW);
+        const auto cull=glIsEnabled(GL_CULL_FACE);
+        const auto blend=glIsEnabled(GL_BLEND);
+        GLboolean depth_write=GL_TRUE;
+        GLint blend_src_rgb=GL_ONE, blend_dst_rgb=GL_ZERO;
+        GLint blend_src_alpha=GL_ONE, blend_dst_alpha=GL_ZERO;
+        glGetBooleanv(GL_DEPTH_WRITEMASK,&depth_write);
+        glGetIntegerv(GL_BLEND_SRC_RGB,&blend_src_rgb);
+        glGetIntegerv(GL_BLEND_DST_RGB,&blend_dst_rgb);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA,&blend_src_alpha);
+        glGetIntegerv(GL_BLEND_DST_ALPHA,&blend_dst_alpha);
+        glDisable(GL_CULL_FACE);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+        glUseProgram(flash_program_.name());
+        glUniformMatrix4fv(flash_matrix_,1,GL_FALSE,view_projection.values.data());
+        glUniform4fv(flash_color_,1,flash.color.data());
+        glBindVertexArray(flash_array_.name());
+        glDrawArrays(GL_TRIANGLES,0,6);
+        glBindVertexArray(0);
+        glUseProgram(0);
+        glBlendFuncSeparate(blend_src_rgb,blend_dst_rgb,blend_src_alpha,blend_dst_alpha);
+        if(!blend) glDisable(GL_BLEND);
+        glDepthMask(depth_write);
+        if(cull) glEnable(GL_CULL_FACE);
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Transient flash draw");
+    }
+
+    void render_world_flashes(const RenderScene& scene, const RenderMatrix4& matrix) {
+        auto f=assets::AssetVector3{scene.camera.target.x-scene.camera.position.x,
+            scene.camera.target.y-scene.camera.position.y,scene.camera.target.z-scene.camera.position.z};
+        const auto length=std::sqrt(f.x*f.x+f.y*f.y+f.z*f.z);
+        if(!std::isfinite(length)||length<0.0001F) return;
+        f={f.x/length,f.y/length,f.z/length};
+        const auto a=scene.camera.up;
+        auto r=assets::AssetVector3{f.y*a.z-f.z*a.y,f.z*a.x-f.x*a.z,f.x*a.y-f.y*a.x};
+        const auto rl=std::sqrt(r.x*r.x+r.y*r.y+r.z*r.z);
+        if(!std::isfinite(rl)||rl<0.0001F) return;
+        r={r.x/rl,r.y/rl,r.z/rl};
+        const auto u=assets::AssetVector3{r.y*f.z-r.z*f.y,r.z*f.x-r.x*f.z,r.x*f.y-r.y*f.x};
+        for(std::size_t i=0;i<std::min(scene.world_flash_count,scene.world_flashes.size());++i)
+            render_flash(scene.world_flashes[i],matrix,r,u);
+    }
+
+    void create_flash_program()
+    {
+        constexpr char vertex_source[]=R"GLSL(#version 330 core
+layout(location=0) in vec3 p;
+layout(location=1) in vec2 uv;
+uniform mat4 view_projection;
+out vec2 offset;
+void main(){gl_Position=view_projection*vec4(p,1.0);offset=uv;}
+)GLSL";
+        constexpr char fragment_source[]=R"GLSL(#version 330 core
+in vec2 offset;
+uniform vec4 tint;
+out vec4 output_color;
+void main(){
+  float core=max(0.0,1.0-length(offset));
+  float rays=max(max(0.0,1.0-abs(offset.x)*5.0),max(0.0,1.0-abs(offset.y)*5.0));
+  float alpha=clamp(core*core+rays*0.35,0.0,1.0)*tint.a;
+  output_color=vec4(tint.rgb,alpha);
+}
+)GLSL";
+        auto vertex=compile_shader(GL_VERTEX_SHADER,vertex_source,"Flash vertex");
+        auto fragment=compile_shader(GL_FRAGMENT_SHADER,fragment_source,"Flash fragment");
+        const GLuint name=glCreateProgram();
+        if(name==0U) fail(OpenGlRendererErrorCode::program_link_failed,"Flash program creation failed");
+        flash_program_=GlObject::adopt(GlObjectKind::program,name);
+        glAttachShader(name,vertex.name());glAttachShader(name,fragment.name());glLinkProgram(name);
+        GLint linked=GL_FALSE;glGetProgramiv(name,GL_LINK_STATUS,&linked);
+        if(linked!=GL_TRUE) fail(OpenGlRendererErrorCode::program_link_failed,"Flash program link failed");
+        flash_matrix_=glGetUniformLocation(name,"view_projection");
+        flash_color_=glGetUniformLocation(name,"tint");
+        flash_array_=create_vertex_array();flash_buffer_=create_buffer();
+        glBindVertexArray(flash_array_.name());glBindBuffer(GL_ARRAY_BUFFER,flash_buffer_.name());
+        glEnableVertexAttribArray(0U);
+        glVertexAttribPointer(0U,3,GL_FLOAT,GL_FALSE,5*sizeof(float),nullptr);
+        glEnableVertexAttribArray(1U);
+        glVertexAttribPointer(1U,2,GL_FLOAT,GL_FALSE,5*sizeof(float),
+            reinterpret_cast<const void*>(3*sizeof(float)));
+        glBindVertexArray(0U);
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,"Flash GPU initialization");
+    }
+
+    void render_hud(const RenderBasicHud& hud, const RenderExtent extent)
+    {
+        if (hud.rectangles.size() > 8U || hud.texts.size() > 8U ||
+            std::any_of(hud.texts.begin(),hud.texts.end(),
+                [](const auto& item) { return item.text.size() > 160U; })) return;
+        if (!hud_commands_ || *hud_commands_ != hud || extent != hud_extent_) {
+            hud_commands_ = hud;
+            hud_extent_ = extent;
+            build_hud_vertices(hud, extent);
+            if (!hud_program_.name()) create_hud_program();
+            glBindBuffer(GL_ARRAY_BUFFER, hud_buffer_.name());
+            glBufferData(GL_ARRAY_BUFFER,
+                static_cast<GLsizeiptr>(hud_vertices_.size() * sizeof(float)),
+                hud_vertices_.data(), GL_DYNAMIC_DRAW);
+            require_no_gl_error(OpenGlRendererErrorCode::buffer_upload_failed,
+                "HUD geometry upload");
+        }
+        if (hud_vertices_.empty()) return;
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(hud_program_.name());
+        glBindVertexArray(hud_array_.name());
+        glDrawArrays(GL_TRIANGLES, 0,
+            static_cast<GLsizei>(hud_vertices_.size() / 6U));
+        glBindVertexArray(0U);
+        glUseProgram(0U);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+            "HUD draw");
+    }
+
+private:
+    [[nodiscard]] static std::array<std::uint8_t, 7U> glyph(char character) noexcept
+    {
+        if (character >= 'a' && character <= 'z')
+            character = static_cast<char>(character - 'a' + 'A');
+        switch (character) {
+        case 'A': return {14,17,17,31,17,17,17};
+        case 'B': return {30,17,17,30,17,17,30};
+        case 'C': return {15,16,16,16,16,16,15};
+        case 'D': return {30,17,17,17,17,17,30};
+        case 'E': return {31,16,16,30,16,16,31};
+        case 'F': return {31,16,16,30,16,16,16};
+        case 'G': return {15,16,16,23,17,17,15};
+        case 'H': return {17,17,17,31,17,17,17};
+        case 'I': return {31,4,4,4,4,4,31};
+        case 'J': return {7,2,2,2,18,18,12};
+        case 'K': return {17,18,20,24,20,18,17};
+        case 'L': return {16,16,16,16,16,16,31};
+        case 'M': return {17,27,21,21,17,17,17};
+        case 'N': return {17,25,21,19,17,17,17};
+        case 'O': return {14,17,17,17,17,17,14};
+        case 'P': return {30,17,17,30,16,16,16};
+        case 'Q': return {14,17,17,17,21,18,13};
+        case 'R': return {30,17,17,30,20,18,17};
+        case 'S': return {15,16,16,14,1,1,30};
+        case 'T': return {31,4,4,4,4,4,4};
+        case 'U': return {17,17,17,17,17,17,14};
+        case 'V': return {17,17,17,17,17,10,4};
+        case 'W': return {17,17,17,21,21,21,10};
+        case 'X': return {17,17,10,4,10,17,17};
+        case 'Y': return {17,17,10,4,4,4,4};
+        case 'Z': return {31,1,2,4,8,16,31};
+        case '0': return {14,17,19,21,25,17,14};
+        case '1': return {4,12,4,4,4,4,14};
+        case '2': return {14,17,1,2,4,8,31};
+        case '3': return {30,1,1,14,1,1,30};
+        case '4': return {2,6,10,18,31,2,2};
+        case '5': return {31,16,16,30,1,1,30};
+        case '6': return {14,16,16,30,17,17,14};
+        case '7': return {31,1,2,4,8,8,8};
+        case '8': return {14,17,17,14,17,17,14};
+        case '9': return {14,17,17,15,1,1,14};
+        case '_': return {0,0,0,0,0,0,31};
+        case '-': return {0,0,0,31,0,0,0};
+        case '/': return {1,1,2,4,8,16,16};
+        case ' ': return {};
+        default: return {14,17,1,2,4,0,4};
+        }
+    }
+
+    void build_hud_vertices(const RenderBasicHud& hud, const RenderExtent extent)
+    {
+        hud_vertices_.clear();
+        if (extent.width <= 0 || extent.height <= 0) return;
+        const auto rectangle = [&](const float x, const float y,
+                                   const float width, const float height,
+                                   const std::array<float, 4U> color) {
+            const float x0 = 2.0F * x / extent.width - 1.0F;
+            const float x1 = 2.0F * (x + width) / extent.width - 1.0F;
+            const float y0 = 1.0F - 2.0F * y / extent.height;
+            const float y1 = 1.0F - 2.0F * (y + height) / extent.height;
+            const auto vertex = [&](const float px, const float py) {
+                hud_vertices_.insert(hud_vertices_.end(),
+                    {px, py, color[0], color[1], color[2], color[3]});
+            };
+            vertex(x0,y0); vertex(x0,y1); vertex(x1,y1);
+            vertex(x0,y0); vertex(x1,y1); vertex(x1,y0);
+        };
+        const auto finite_color = [](const std::array<float, 4U>& value) {
+            return std::all_of(value.begin(), value.end(),
+                [](float c) { return std::isfinite(c) && c >= 0.0F && c <= 1.0F; });
+        };
+        // Bounded neutral geometry. Layout, labels, visibility and colors belong
+        // to the producer; this pass only rasterizes rectangles and glyphs.
+        if (hud.rectangles.size() > 8U || hud.texts.size() > 8U) return;
+        for (const auto& item : hud.rectangles) {
+            if (!std::isfinite(item.x) || !std::isfinite(item.y) ||
+                !std::isfinite(item.width) || !std::isfinite(item.height) ||
+                item.width < 0.0F || item.height < 0.0F || !finite_color(item.color)) continue;
+            rectangle(item.x,item.y,item.width,item.height,item.color);
+        }
+        for (const auto& item : hud.texts) {
+            if (item.text.size() > 160U || !std::isfinite(item.x) || !std::isfinite(item.y) ||
+                !std::isfinite(item.pixel_size) || !std::isfinite(item.advance) ||
+                !std::isfinite(item.line_height) || item.pixel_size <= 0.0F ||
+                item.advance < 0.0F || item.line_height < 0.0F || !finite_color(item.color)) continue;
+            float x = item.x;
+            float y = item.y;
+            for (const char character : item.text) {
+                if (character == '\n') { x = item.x; y += item.line_height; continue; }
+                const auto rows = glyph(character);
+                for (std::size_t row = 0U; row < rows.size(); ++row)
+                    for (std::size_t column = 0U; column < 5U; ++column)
+                        if ((rows[row] & (1U << (4U - column))) != 0U)
+                            rectangle(x + static_cast<float>(column) * item.pixel_size,
+                                y + static_cast<float>(row) * item.pixel_size,
+                                item.pixel_size,item.pixel_size,item.color);
+                x += item.advance;
+            }
+        }
+    }
+
+
+    void create_hud_program()
+    {
+        constexpr char vertex_source[] = R"GLSL(#version 330 core
+layout(location=0) in vec2 p;
+layout(location=1) in vec4 c;
+out vec4 color;
+void main(){gl_Position=vec4(p,0,1);color=c;}
+)GLSL";
+        constexpr char fragment_source[] = R"GLSL(#version 330 core
+in vec4 color;
+out vec4 output_color;
+void main(){output_color=color;}
+)GLSL";
+        auto vertex = compile_shader(GL_VERTEX_SHADER, vertex_source, "HUD vertex");
+        auto fragment = compile_shader(GL_FRAGMENT_SHADER, fragment_source,
+            "HUD fragment");
+        const GLuint name = glCreateProgram();
+        if (name == 0U) fail(OpenGlRendererErrorCode::program_link_failed,
+            "HUD program creation failed");
+        hud_program_ = GlObject::adopt(GlObjectKind::program, name);
+        glAttachShader(name, vertex.name());
+        glAttachShader(name, fragment.name());
+        glLinkProgram(name);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(name, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) fail(OpenGlRendererErrorCode::program_link_failed,
+            "HUD shader link failed");
+        hud_array_ = create_vertex_array();
+        hud_buffer_ = create_buffer();
+        glBindVertexArray(hud_array_.name());
+        glBindBuffer(GL_ARRAY_BUFFER, hud_buffer_.name());
+        glEnableVertexAttribArray(0U);
+        glVertexAttribPointer(0U, 2, GL_FLOAT, GL_FALSE,
+            6 * sizeof(float), nullptr);
+        glEnableVertexAttribArray(1U);
+        glVertexAttribPointer(1U, 4, GL_FLOAT, GL_FALSE,
+            6 * sizeof(float), reinterpret_cast<const void*>(2 * sizeof(float)));
+        glBindVertexArray(0U);
+        require_no_gl_error(OpenGlRendererErrorCode::gl_operation_failed,
+            "HUD GPU initialization");
+    }
+
+public:
     void release_entity_resources() noexcept
     {
         entity_renderer_.release_resources();
@@ -1092,9 +1573,10 @@ public:
     void render_entities(
         const RenderDynamicEntities& entities,
         const RenderCamera& camera,
-        const RenderMatrix4& view_projection)
+        const RenderMatrix4& view_projection,
+        const std::optional<RenderPointLight>& light = std::nullopt)
     {
-        entity_renderer_.render(entities, camera, view_projection);
+        entity_renderer_.render(entities, camera, view_projection, light);
     }
 
     [[nodiscard]] const OpenGlEntityRendererStatistics& entity_statistics()
@@ -1132,6 +1614,8 @@ public:
 
     void release_world_resources() noexcept
     {
+        decal_texture_.reset();decal_asset_.reset();decal_vertices_.reset();
+        decal_revision_=0;
         if (resources_ || scene_resources_) {
             resources_.reset();
             scene_resources_.reset();
@@ -1240,6 +1724,9 @@ public:
                 candidate.brushes.emplace(
                     build_gpu_resources(*brush_package));
                 candidate.brushes->package_instance = brush_package;
+                if (const auto& bank = scene->brush_library().alternate_textures())
+                    for (const auto& texture : bank->textures())
+                        candidate.brush_alternate_textures.push_back(upload_base_texture(texture));
             }
 
             scene_resources_.emplace(std::move(candidate));
@@ -1272,6 +1759,8 @@ public:
             if (scene_resources_->brushes) {
                 accumulate(*scene_resources_->brushes);
             }
+            statistics_.uploaded_base_texture_count += scene_resources_->brush_alternate_textures.size();
+            statistics_.uploaded_base_mip_level_count += scene_resources_->brush_alternate_textures.size() * assets::kWorldTextureMipLevelCount;
             statistics_.active_world_resources = true;
             return *scene_resources_;
         } catch (const OpenGlRendererError&) {
@@ -1302,6 +1791,21 @@ public:
     }
 
 private:
+    GlObject decal_program_,decal_array_,decal_buffer_,decal_texture_;
+    GLint decal_matrix_{-1},decal_sampler_{-1},decal_material_mode_{-1};
+    std::shared_ptr<const assets::WorldTextureAsset> decal_asset_;
+    std::shared_ptr<const std::vector<RenderDecalVertex>> decal_vertices_;
+    std::uint64_t decal_revision_{};
+    GlObject flash_program_;
+    GlObject flash_array_;
+    GlObject flash_buffer_;
+    GLint flash_matrix_{-1}, flash_color_{-1};
+    GlObject hud_program_;
+    GlObject hud_array_;
+    GlObject hud_buffer_;
+    std::vector<float> hud_vertices_;
+    std::optional<RenderBasicHud> hud_commands_;
+    RenderExtent hud_extent_{};
     detail::OpenGlEntityRendererBackend entity_renderer_;
     std::optional<GpuWorldResources> resources_;
     std::optional<GpuSceneResources> scene_resources_;
@@ -1403,6 +1907,26 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
         fail(OpenGlRendererErrorCode::invalid_entity_scene,
             "Dynamic entity frame does not belong to its scene package");
     }
+    if (scene.first_person_entities &&
+        (!scene.first_person_entities->package ||
+         !scene.first_person_entities->frame ||
+         scene.first_person_entities->frame->scene_package_identity() !=
+             entity_render::EntityRenderResourceIdentity{
+                 scene.first_person_entities->package->resource_id(),
+                 scene.first_person_entities->package->resource_revision()})) {
+        fail(OpenGlRendererErrorCode::invalid_entity_scene,
+            "First-person Studio frame does not match its asset package");
+    }
+    if (scene.transient_world_entities &&
+        (!scene.transient_world_entities->package ||
+         !scene.transient_world_entities->frame ||
+         scene.transient_world_entities->frame->scene_package_identity() !=
+             entity_render::EntityRenderResourceIdentity{
+                 scene.transient_world_entities->package->resource_id(),
+                 scene.transient_world_entities->package->resource_revision()})) {
+        fail(OpenGlRendererErrorCode::invalid_entity_scene,
+            "Transient world entity package/frame identity is invalid");
+    }
     if (scene.dynamic_entities &&
         scene.dynamic_entities->package->world_scene_association()) {
         const auto association =
@@ -1443,10 +1967,40 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     "Dynamic-entity camera is invalid");
             }
             implementation_->render_entities(
-                *scene.dynamic_entities, scene.camera, *matrix.matrix);
-        } else {
+                *scene.dynamic_entities, scene.camera, *matrix.matrix,
+                scene.transient_world_light);
+        } else if (!scene.first_person_entities && !scene.transient_world_entities) {
             implementation_->release_entity_resources();
         }
+        if (scene.transient_world_entities) {
+            const auto matrix=camera_view_projection(scene.camera,RenderExtent{width,height});
+            if (!matrix || !matrix.matrix) fail(OpenGlRendererErrorCode::camera_invalid,
+                "Transient entity camera is invalid");
+            implementation_->render_entities(*scene.transient_world_entities,
+                scene.camera,*matrix.matrix,scene.transient_world_light);
+        }
+        if (scene.world_flash_count) {
+            const auto matrix=camera_view_projection(scene.camera,RenderExtent{width,height});
+            if(matrix && matrix.matrix) implementation_->render_world_flashes(scene,*matrix.matrix);
+        }
+        if (scene.first_person_entities) {
+            const auto first_person_camera =
+                camera_local_first_person_camera(scene.camera);
+            const auto matrix = camera_view_projection(
+                first_person_camera, RenderExtent{width, height});
+            if (!matrix || !matrix.matrix)
+                fail(OpenGlRendererErrorCode::camera_invalid,
+                    "First-person camera is invalid");
+            glClear(GL_DEPTH_BUFFER_BIT);
+            implementation_->render_entities(*scene.first_person_entities,
+                first_person_camera, *matrix.matrix,scene.transient_first_person_light);
+            if (scene.first_person_flash)
+                implementation_->render_flash(*scene.first_person_flash,*matrix.matrix);
+            glDepthFunc(GL_LEQUAL);
+            glDepthMask(GL_TRUE);
+        }
+        if (scene.basic_hud)
+            implementation_->render_hud(*scene.basic_hud, {width, height});
         ++statistics.rendered_frame_count;
         return;
     }
@@ -1609,6 +2163,8 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     command.index_count,
                     command.render_material_index,
                     mvp,
+                    command.model_transform,
+                    scene.transient_world_light,
                     brush,
                     frame);
             }
@@ -1623,8 +2179,64 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                     batch.index_count,
                     batch.render_material_index,
                     *matrix.matrix,
+                    RenderMatrix4{},
+                    scene.transient_world_light,
                     false,
                     frame);
+            }
+        }
+        if (scene.static_world->runtime_brushes) {
+            const auto& runtime = *scene.static_world->runtime_brushes;
+            const auto& map = *scene.static_world->scene_package;
+            if (!world_scene_render::valid_runtime_brush_frame(runtime, map))
+                fail(OpenGlRendererErrorCode::draw_range_invalid,
+                    "Runtime brush frame does not belong to this map");
+            const auto& library = map.brush_library();
+            const auto frustum = world_visibility::WorldViewFrustum::from_view_projection(*matrix.matrix);
+            const auto camera_leaf = world_spatial::WorldSpatialQuery::locate_point(
+                map.spatial_package(), scene.camera.position);
+            for (const auto& instance : runtime.instances) {
+                if (frustum) {
+                    const auto classified = frustum.frustum->classify(instance.transformed_bounds);
+                    if (classified && *classified.classification ==
+                            world_visibility::WorldBoundsClassification::outside) {
+                        ++statistics.runtime_brush_culled_count;
+                        continue;
+                    }
+                }
+                if (camera_leaf && camera_leaf.result->pvs_available && !camera_leaf.result->solid_or_special &&
+                    !instance.touched_leaf_indices.empty()) {
+                    bool visible = false;
+                    for (const auto leaf : instance.touched_leaf_indices) {
+                        if (leaf == 0U || leaf >= map.spatial_package().leaves().size() ||
+                            !map.spatial_package().leaves()[leaf].pvs_bit_addressable) {
+                            visible = true; break;
+                        }
+                        const auto result = map.spatial_package().pvs_table().leaf_is_visible_from(
+                            camera_leaf.result->leaf_index, leaf);
+                        // Missing/special membership cannot safely reject geometry.
+                        if (!result || *result) { visible = true; break; }
+                    }
+                    if (!visible) { ++statistics.runtime_brush_culled_count; continue; }
+                }
+                if (!resources.brushes || !library.render_package())
+                    fail(OpenGlRendererErrorCode::draw_range_invalid, "Runtime brush library absent");
+                const auto models = library.models();
+                const auto model = std::ranges::find_if(models, [&](const auto& value) {
+                    return value.source_model_index() == instance.source_model_index;
+                });
+                const auto mvp = renderer::multiply(*matrix.matrix, instance.model_transform);
+                for (const auto& surface : model->surfaces()) {
+                    GLuint alternate = 0U;
+                    const auto mapping = library.alternate_by_material();
+                    if (instance.alternate_texture && !mapping.empty() && mapping[surface.render_material_index])
+                        alternate = resources.brush_alternate_textures[*mapping[surface.render_material_index]].name();
+                    draw_package_range(*resources.brushes, *library.render_package(),
+                        surface.first_index, surface.index_count, surface.render_material_index,
+                        mvp, instance.model_transform, scene.transient_world_light,
+                        true, frame, alternate);
+                }
+                ++statistics.runtime_brush_submitted_count;
             }
         }
     } else {
@@ -1639,6 +2251,8 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 batch.index_count,
                 batch.render_material_index,
                 *matrix.matrix,
+                RenderMatrix4{},
+                scene.transient_world_light,
                 false,
                 frame);
         }
@@ -1650,11 +2264,52 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
     glBindVertexArray(0U);
     glUseProgram(0U);
 
+    if (scene.world_decals)
+        implementation_->render_decals(*scene.world_decals,*matrix.matrix,frame);
+    if (scene.secondary_world_decals)
+        implementation_->render_decals(*scene.secondary_world_decals,*matrix.matrix,frame);
+
     if (scene.dynamic_entities) {
         implementation_->render_entities(
-            *scene.dynamic_entities, scene.camera, *matrix.matrix);
-    } else {
+            *scene.dynamic_entities, scene.camera, *matrix.matrix,
+            scene.transient_world_light);
+    } else if (!scene.first_person_entities && !scene.transient_world_entities) {
         implementation_->release_entity_resources();
+    }
+    if (scene.transient_world_entities)
+        implementation_->render_entities(*scene.transient_world_entities,
+            scene.camera,*matrix.matrix,scene.transient_world_light);
+
+    implementation_->render_world_flashes(scene,*matrix.matrix);
+
+    if (scene.first_person_entities) {
+        // The world retains its color; this pass receives independent depth
+        // so near walls cannot erase the first-person Studio model. The
+        // model and its view are camera-local; the world view/projection is
+        // never applied to the weapon. Internal model depth remains active.
+        const auto first_person_camera =
+            camera_local_first_person_camera(scene.camera);
+        const auto first_person_matrix = camera_view_projection(
+            first_person_camera, RenderExtent{width, height});
+        if (!first_person_matrix || !first_person_matrix.matrix)
+            fail(OpenGlRendererErrorCode::camera_invalid,
+                "First-person camera is invalid");
+        glClear(GL_DEPTH_BUFFER_BIT);
+        implementation_->render_entities(*scene.first_person_entities,
+            first_person_camera, *first_person_matrix.matrix,
+            scene.transient_first_person_light);
+        if (scene.first_person_flash)
+            implementation_->render_flash(*scene.first_person_flash,*first_person_matrix.matrix);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_TRUE);
+    }
+    if (scene.basic_hud) {
+        implementation_->render_hud(*scene.basic_hud, {width, height});
+        if (scene.static_world->cull_mode == RenderCullMode::back) {
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            glFrontFace(GL_CCW);
+        }
     }
 
     ++statistics.rendered_frame_count;

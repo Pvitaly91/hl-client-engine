@@ -170,6 +170,7 @@ struct ModelSequenceEvent {
     std::int32_t event_number{0};
     std::int32_t source_type{0};
     std::vector<std::byte> options;
+    bool operator==(const ModelSequenceEvent&) const = default;
 };
 
 struct ModelSequencePivot {

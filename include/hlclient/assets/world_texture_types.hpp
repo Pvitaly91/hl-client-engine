@@ -23,6 +23,7 @@ enum class WorldTexturePixelFormat {
 enum class WorldTextureSourceKind {
     embedded_bsp,
     external_wad3,
+    generated_missing_texture,
 };
 
 enum class WorldTextureAlphaMode {
@@ -32,10 +33,12 @@ enum class WorldTextureAlphaMode {
 
 enum class WorldTextureCompatibilityProfile {
     goldsrc_indexed_miptex_v1,
+    missing_texture_checker_v1,
 };
 
 enum class WorldTextureEvidenceProfile {
     valve_public_tools_and_synthetic_fixtures,
+    project_generated_placeholder,
 };
 
 struct WorldTextureMipLevel {
@@ -71,6 +74,7 @@ enum class WorldMaterialTextureBindingStatus {
     malformed_embedded_texture,
     malformed_wad_texture,
     unsupported_texture_profile,
+    substituted_missing_texture,
 };
 
 struct WorldMaterialTextureBinding {
@@ -123,6 +127,8 @@ struct WorldTextureSetStatistics {
     std::size_t unresolved_material_count{0U};
     std::size_t missing_bsp_reference_count{0U};
     std::size_t dimension_mismatch_count{0U};
+    std::size_t generated_placeholder_texture_count{0U};
+    std::size_t placeholder_material_count{0U};
 };
 
 struct WorldTextureSetLimits {
@@ -180,6 +186,9 @@ public:
     [[nodiscard]] const WorldMaterialTextureBinding* binding_for_material(
         std::size_t material_index) const noexcept;
     [[nodiscard]] bool complete_for_world_materials() const noexcept;
+    // Renderability may include explicitly generated missing-texture bindings;
+    // completeness continues to mean every source texture was resolved.
+    [[nodiscard]] bool renderable_for_world_materials() const noexcept;
     [[nodiscard]] const WorldTextureSetStatistics& statistics() const noexcept;
 
 private:
@@ -217,6 +226,13 @@ struct TexturedWorldAsset {
 {
     return status == WorldMaterialTextureBindingStatus::resolved_embedded ||
         status == WorldMaterialTextureBindingStatus::resolved_wad3;
+}
+
+[[nodiscard]] constexpr bool is_renderable(
+    const WorldMaterialTextureBindingStatus status) noexcept
+{
+    return is_resolved(status) ||
+        status == WorldMaterialTextureBindingStatus::substituted_missing_texture;
 }
 
 } // namespace hlclient::assets

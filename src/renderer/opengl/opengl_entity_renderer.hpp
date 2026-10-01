@@ -23,7 +23,8 @@ public:
     void render(
         const RenderDynamicEntities& entities,
         const RenderCamera& camera,
-        const RenderMatrix4& view_projection);
+        const RenderMatrix4& view_projection,
+        const std::optional<RenderPointLight>& light = std::nullopt);
     void release_resources() noexcept;
     [[nodiscard]] const OpenGlEntityRendererStatistics& statistics()
         const noexcept;

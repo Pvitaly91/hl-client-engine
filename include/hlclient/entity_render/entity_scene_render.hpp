@@ -68,6 +68,9 @@ struct StudioEntityRenderInstance {
     assets::WorldBounds interpolated_bounds{};
     RuntimeEntityVisibilityStatus visibility_status{
         RuntimeEntityVisibilityStatus::visible};
+    // Neutral linear light multiplier sampled upstream from approved world
+    // data. Absence preserves the established 0.85 Studio fallback.
+    std::optional<std::array<float, 3U>> static_light_rgb;
 };
 
 struct SpriteEntityRenderInstance {
@@ -246,6 +249,9 @@ enum class EntityRenderInterpolationProfile {
     synthetic_seconds_v1,
     decoded_discrete_runtime_replay_v1,
     stock_server_time_evidence_pending,
+    // Public runtime svc_time observations selected upstream, without claiming
+    // synthetic fixture provenance or stock-binary interpolation parity.
+    public_runtime_server_seconds_v1,
 };
 
 struct EntityRenderInterpolationMetadata {

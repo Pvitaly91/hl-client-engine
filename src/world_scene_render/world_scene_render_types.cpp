@@ -204,6 +204,30 @@ void include_bounds(
 
 } // namespace
 
+bool valid_runtime_brush_frame(const RuntimeBrushRenderFrame& frame,
+    const WorldSceneRenderPackage& scene) noexcept
+{
+    if (frame.scene_identity != scene.resource_identity() || !frame.generation ||
+        !frame.revision || frame.instances.size() > 4096U ||
+        !scene.brush_instances().empty()) return false;
+    const auto models = scene.brush_library().models();
+    std::uint32_t previous = 0U;
+    for (const auto& instance : frame.instances) {
+        if (instance.entity_number <= previous || !instance.model_slot ||
+            !instance.source_model_index || !valid_bounds(instance.transformed_bounds) ||
+            !renderer::is_finite(instance.model_transform) ||
+            !std::ranges::any_of(models, [&](const auto& model) {
+                return model.source_model_index() == instance.source_model_index;
+            })) return false;
+        previous = instance.entity_number;
+        if (instance.touched_leaf_indices.size() > 256U ||
+            std::ranges::any_of(instance.touched_leaf_indices, [&](const auto leaf) {
+                return leaf >= scene.spatial_package().leaves().size();
+            })) return false;
+    }
+    return true;
+}
+
 std::string_view to_string(const WorldSceneRenderErrorCode code) noexcept
 {
     switch (code) {
@@ -271,9 +295,12 @@ BrushSubmodelRenderModel::surfaces() const noexcept
 
 BrushSubmodelRenderLibrary::BrushSubmodelRenderLibrary(
     std::shared_ptr<const world_render::WorldRenderPackage> render_package,
-    std::vector<BrushSubmodelRenderModel> models) noexcept
+    std::vector<BrushSubmodelRenderModel> models,
+    std::shared_ptr<const assets::WorldTextureSet> alternate_textures,
+    std::vector<std::optional<std::size_t>> alternate_by_material) noexcept
     : render_package_{std::move(render_package)},
-      models_{std::move(models)}
+      models_{std::move(models)}, alternate_textures_{std::move(alternate_textures)},
+      alternate_by_material_{std::move(alternate_by_material)}
 {
 }
 
@@ -626,6 +653,31 @@ WorldSceneRenderPackageBuildResult WorldSceneRenderPackageBuilder::build(
                 ? brush_library.render_package_->resource_id()
                 : 0U);
         StableHasher revision_hash;
+        if (brush_library.alternate_textures_) {
+            if (!brush_library.render_package_ ||
+                brush_library.alternate_by_material_.size() != brush_library.render_package_->materials().size())
+                return fail(WorldSceneRenderErrorCode::invalid_brush_library, {}, "Invalid alternate texture table");
+            const auto textures = brush_library.alternate_textures_->textures();
+            for (std::size_t i = 0; i < brush_library.alternate_by_material_.size(); ++i) {
+                const auto index = brush_library.alternate_by_material_[i];
+                revision_hash.add(index.has_value());
+                if (!index) continue;
+                if (*index >= textures.size())
+                    return fail(WorldSceneRenderErrorCode::invalid_brush_library, {}, "Alternate texture outside bank");
+                const auto& base = brush_library.render_package_->textured_world().textures.textures()[
+                    brush_library.render_package_->materials()[i].base_texture_asset_index];
+                if (textures[*index].width != base.width || textures[*index].height != base.height ||
+                    textures[*index].alpha_mode != base.alpha_mode)
+                    return fail(WorldSceneRenderErrorCode::invalid_brush_library, {}, "Alternate texture profile mismatch");
+                revision_hash.add(*index);
+            }
+            for (const auto& texture : textures) {
+                revision_hash.add(texture.width); revision_hash.add(texture.height);
+                for (const auto& mip : texture.mip_levels)
+                    for (const auto pixel : mip.rgba_pixels) revision_hash.add(std::to_integer<std::uint8_t>(pixel));
+            }
+        } else if (!brush_library.alternate_by_material_.empty())
+            return fail(WorldSceneRenderErrorCode::invalid_brush_library, {}, "Alternate texture bank absent");
         revision_hash.add(world_package->resource_revision());
         revision_hash.add(brush_library.render_package_
                 ? brush_library.render_package_->resource_revision()

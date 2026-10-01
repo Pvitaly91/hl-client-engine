@@ -50,6 +50,7 @@ foreach ($required in @(
         "'live-visual-control'",
         '$projectClientUserCmdMode',
         '$projectClientVisualMode',
+        '$projectClientStockSignonMode -and -not $fastManualMode -and $TestStartHealth -ne 50 -and -not $RemoteAudioPeer -and -not $manualSessionTiming',
         'fresh_project_client_live_visual_control_integrated',
         'fresh_project_client_usercmd_server_motion_verified',
         'usercmd_server_motion_verified')) {
@@ -61,7 +62,10 @@ foreach ($required in @(
         'HLCLIENT_LOCAL_RESEARCH_COPY_SMOKE_V1',
         'functional-smoke.staged.json',
         '\"evidence_eligible\": ',
-        '(project_mode ? "true" : "false")',
+        # Fast/manual, test-server-assisted, A/B and windowed timing runs cannot become strict
+        # evidence. Match the current stronger producer/consumer contract.
+        '(project_mode && !options.test_start_health && !options.fast_manual && !options.remote_audio_peer && !manual_timing ? "true" : "false")',
+        'diagnostic_windows_usable',
         'direct_loopback',
         'L"-steam", L"-game"',
         'L"+log", L"on"',

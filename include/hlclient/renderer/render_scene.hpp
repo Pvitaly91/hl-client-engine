@@ -1,11 +1,17 @@
 #pragma once
 
 #include <hlclient/assets/asset_types.hpp>
+#include <hlclient/assets/world_texture_types.hpp>
+#include <hlclient/game_api/presentation.hpp>
+#include <hlclient/game_api/local_visuals.hpp>
 
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace hlclient::world_render {
 class WorldRenderPackage;
@@ -13,6 +19,7 @@ class WorldRenderPackage;
 
 namespace hlclient::world_scene_render {
 class WorldSceneRenderPackage;
+struct RuntimeBrushRenderFrame;
 }
 
 namespace hlclient::world_visibility {
@@ -93,6 +100,7 @@ struct RenderStaticWorld {
     std::shared_ptr<const world_visibility::WorldVisibleDrawList>
         visible_draw_list;
     std::optional<RenderStaticWorldVisibilitySummary> visibility_summary;
+    std::shared_ptr<const world_scene_render::RuntimeBrushRenderFrame> runtime_brushes;
 };
 
 struct RenderDynamicEntityVisibilitySummary {
@@ -109,11 +117,69 @@ struct RenderDynamicEntities {
     RenderDynamicEntityVisibilitySummary visibility_summary{};
 };
 
+// Viewmodel-local, pose-attached short-lived neutral effect. No game rule or
+// action is interpreted by the renderer. Drawn after first-person geometry,
+// before HUD, with first-person depth still enabled.
+struct RenderMuzzleFlash {
+    assets::AssetVector3 center{};
+    float radius_units{};
+    std::array<float, 4> color{};
+};
+
+// One bounded, renderer-neutral transient point light. World and first-person
+// passes use separate centers because their projection spaces are distinct.
+struct RenderPointLight {
+    assets::AssetVector3 center{};
+    float radius_units{};
+    float intensity{};
+    std::array<float, 3> color{};
+};
+
+struct RenderDecalVertex {
+    assets::AssetVector3 position{};
+    assets::AssetVector2 uv{};
+};
+struct RenderWorldDecals {
+    // Immutable map-scoped texture and revisioned clipped world triangles.
+    std::shared_ptr<const assets::WorldTextureAsset> texture;
+    std::shared_ptr<const std::vector<RenderDecalVertex>> vertices;
+    std::uint64_t revision{};
+    game_api::LocalDecalMaterialMode material_mode{game_api::LocalDecalMaterialMode::straight_alpha};
+};
+
+[[nodiscard]] inline bool valid_render_point_light(const RenderPointLight& light) noexcept {
+    if (!std::isfinite(light.center.x) || !std::isfinite(light.center.y) ||
+        !std::isfinite(light.center.z) || !std::isfinite(light.radius_units) ||
+        !std::isfinite(light.intensity) || light.radius_units<=0.0F ||
+        light.radius_units>4096.0F || light.intensity<0.0F ||
+        light.intensity>4.0F) return false;
+    for (const auto channel:light.color)
+        if (!std::isfinite(channel) || channel<0.0F || channel>4.0F) return false;
+    return true;
+}
+
+using RenderBasicHud = game_api::HudDrawCommands;
+
 struct RenderScene {
     ClearColor clear_color{};
     RenderCamera camera{};
     std::optional<RenderStaticWorld> static_world;
     std::optional<RenderDynamicEntities> dynamic_entities;
+    // Camera-bound Studio frame. Drawn after the world with its own depth
+    // buffer contents; it never enters world entity visibility/PVS.
+    std::optional<RenderDynamicEntities> first_person_entities;
+    std::optional<RenderDynamicEntities> transient_world_entities;
+    std::optional<RenderMuzzleFlash> first_person_flash;
+    // World-space billboards share the flash mechanism, before first-person
+    // depth reset. Fixed capacity is independent of the number of players.
+    std::array<RenderMuzzleFlash,32> world_flashes{};
+    std::size_t world_flash_count{};
+    std::optional<RenderPointLight> transient_world_light;
+    std::optional<RenderPointLight> transient_first_person_light;
+    std::optional<RenderWorldDecals> world_decals;
+    // Second bounded neutral material batch; game semantics stay upstream.
+    std::optional<RenderWorldDecals> secondary_world_decals;
+    std::optional<RenderBasicHud> basic_hud;
 };
 
 struct RenderExtent {

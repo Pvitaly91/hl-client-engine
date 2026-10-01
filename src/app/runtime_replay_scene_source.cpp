@@ -88,8 +88,10 @@ RuntimeReplaySceneSourceCreateResult RuntimeReplaySceneSource::create(
     goldsrc::RuntimeReplayFixture fixture,
     const RuntimeReplaySchedulingLimits limits,
     const bool diagnostic_visuals,
-    const RuntimeReplayVisualProjectionLimits visual_limits)
+    const RuntimeReplayVisualProjectionLimits visual_limits,
+    std::shared_ptr<game_api::GameClientHost> game_client)
 {
+    if (game_client) fixture.initialization.game_client = std::move(game_client);
     if (!valid_fixture(fixture) ||
         !valid_runtime_replay_scheduling_limits(limits)) {
         return {{}, error(RuntimeReplaySourceErrorCode::invalid_configuration,
@@ -125,7 +127,8 @@ RuntimeReplaySceneSourceCreateResult RuntimeReplaySceneSource::create_capture(
     const std::filesystem::path& exact_functional_run_directory,
     const RuntimeReplaySchedulingLimits limits,
     std::optional<std::filesystem::path> local_basedir,
-    const std::string_view game, const bool paced)
+    const std::string_view game, const bool paced,
+    std::shared_ptr<game_api::GameClientHost> game_client)
 {
     const auto loaded = goldsrc::RuntimeReplayCaptureLoader{}.load(
         exact_functional_run_directory);
@@ -154,7 +157,7 @@ RuntimeReplaySceneSourceCreateResult RuntimeReplaySceneSource::create_capture(
             std::nullopt, std::nullopt, 0U, {}, source_error.context};
         return {{}, std::move(source_error)};
     }
-    auto created = create(std::move(replay), limits, false);
+    auto created = create(std::move(replay), limits, false, {}, std::move(game_client));
     if (!created || !created.source) {
         return created;
     }
@@ -234,6 +237,8 @@ RuntimeReplaySourceOperationResult RuntimeReplaySceneSource::restart(
             RuntimeReplaySourceErrorCode::restart_generation_not_newer,
             "restart requires a strictly newer generation")};
     }
+    if (!fixture.initialization.game_client)
+        fixture.initialization.game_client = fixture_.initialization.game_client;
 
     finish_session_once();
     session_.reset();

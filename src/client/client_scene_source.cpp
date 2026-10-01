@@ -41,6 +41,7 @@ renderer::RenderScene build_render_scene(const ClientWorldState& world_state) no
             renderer::RenderBaselineLightStylePolicy::source_slot_zero,
         };
         static_world.scene_package = world_state.world_scene();
+        static_world.runtime_brushes = world_state.runtime_brushes();
         static_world.visible_draw_list = world_state.visible_draw_list();
         if (world_state.world_visibility() && static_world.visible_draw_list) {
             const auto scene_identity =

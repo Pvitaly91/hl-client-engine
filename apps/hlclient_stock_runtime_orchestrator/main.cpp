@@ -1,4 +1,6 @@
 #include <hlclient/goldsrc/stock_runtime_capture.hpp>
+#include <hlclient/core/remote_audio_peer_plan.hpp>
+#include <hlclient/core/manual_session_timing.hpp>
 #include <hlclient/goldsrc/stock_runtime_reconnect_lifecycle.hpp>
 #include <hlclient/platform/windows/binary_identity.hpp>
 #include <hlclient/platform/windows/network_isolation.hpp>
@@ -9,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <chrono>
 #include <cctype>
 #include <cstddef>
@@ -97,7 +100,142 @@ enum class ProjectClientLiveInput : std::uint8_t {
     scripted_side_check,
     scripted_jump_duck_check,
     scripted_speed_check,
+    scripted_weapon_check,
+    scripted_fire_reload_check,
+    scripted_fire_reload_presentation_check,
+    scripted_damage_respawn_check,
     keyboard_mouse,
+};
+
+constexpr std::array<std::string_view, 7U> kWeaponPredictionFlags{
+    "server_fire_verified", "server_reload_verified", "glock_fire_animation_presented",
+    "glock_reload_animation_presented", "glock_recoil_presented",
+    "crowbar_swing_presented", "hud_server_state_updated"};
+constexpr std::array<std::string_view, 131U> kApplicationMetrics{
+    "result", "primary_error", "runtime_error", "parser_error", "opcode",
+    "cursor", "record", "source_sequence", "scripted_coverage",
+    "prediction_coverage", "inventory_notifications", "feedback_rows",
+    "error_domain",
+    "failure_stage",
+    "replay_error",
+    "control_error",
+    "clientdata_error",
+    "delta_error",
+    "module_error",
+    "generation",
+    "life_epoch",
+    "life_state",
+    "record_identity",
+    "carrier_ack",
+    "reliable",
+    "reassembled",
+    "encoding",
+    "payload_size",
+    "record_start_byte",
+    "record_start_bit",
+    "message_start_byte",
+    "message_start_bit",
+    "failure_byte",
+    "failure_bit",
+    "user_message_name",
+    "user_message_id",
+    "expected_body",
+    "actual_body",
+    "last_publication",
+    "attempted_records",
+    "committed_records", "use_press", "use_release", "use_generated", "use_transmitted",
+    "use_clear_transmitted", "use_sent", "use_health_before", "use_health_after",
+    "use_armor_before", "use_armor_after", "use_server_effect", "use_reason",
+    "use_prediction_state", "use_prediction_reason",
+    "brush_candidates", "brush_resolved", "brush_prepared", "brush_hidden",
+    "brush_material_unsupported", "brush_submitted", "brush_culled", "brush_uploads",
+    "texture_uploads", "brush_reject_entity", "brush_reject_slot", "brush_reject_submodel",
+    "brush_reject_reason", "brush_reject_revision",
+    "collision_revision", "collision_brushes", "ground_entity", "ground_model",
+    "ground_normal_x", "ground_normal_y", "ground_normal_z", "grounded_server", "grounded_local",
+    "movement_steps", "brush_server_changes", "brush_render_changes", "base_velocity", "support_policy",
+    "prediction_fallbacks", "prediction_raw_error", "prediction_camera_jump", "prediction_ground_status", "prediction_reason", "prediction_last_fallback",
+    "brush_server_last_entity", "brush_server_last_model", "brush_render_last_entity", "brush_render_last_model",
+    "audio_backend", "audio_error", "audio_start_messages", "audio_stop_messages", "audio_static_messages", "audio_change_messages",
+    "audio_started", "audio_stopped", "audio_updated", "audio_duplicates", "audio_unsupported", "audio_missing",
+    "audio_expired", "audio_limits", "audio_loads", "audio_queue_drops", "audio_output_frames", "audio_queued_frames", "audio_underruns", "audio_sentences", "audio_formats",
+    "weapon_audio_actions", "weapon_audio_fire", "weapon_audio_reload", "weapon_audio_deploy", "weapon_audio_swing",
+    "weapon_audio_markers", "weapon_audio_duplicates", "weapon_audio_late", "weapon_audio_cancelled", "weapon_audio_missing",
+    "weapon_audio_submitted", "weapon_audio_started", "weapon_audio_invalid", "weapon_audio_muted",
+    "weapon_audio_marker_duplicates", "weapon_audio_delivery_duplicates", "weapon_audio_timeline_corrections"};
+using ApplicationEvidence = std::array<std::optional<std::string>, kApplicationMetrics.size()>;
+bool valid_application_metric(std::string_view name, std::string_view value) {
+    if (value.empty() || value.size()>64U) return false;
+    const bool decimal=name=="ground_normal_x" || name=="ground_normal_y" ||
+        name=="ground_normal_z" || name=="prediction_raw_error" || name=="prediction_camera_jump";
+    if (decimal && value!="unavailable") {
+        std::size_t i=value.front()=='-' ? 1U : 0U;
+        const auto begin=i;
+        while (i<value.size() && value[i]>='0' && value[i]<='9') ++i;
+        if (i==begin) return false;
+        if (i==value.size()) return true;
+        if (value[i++]!='.') return false;
+        const auto fraction=i;
+        while (i<value.size() && value[i]>='0' && value[i]<='9') ++i;
+        return i>fraction && i==value.size();
+    }
+    return std::all_of(value.begin(),value.end(),[](unsigned char c) {
+        return (c>='a' && c<='z') || (c>='A' && c<='Z') ||
+            (c>='0' && c<='9') || c=='_' || c=='-';
+    });
+}
+// Values passed the bounded inert-token parser; no network text is emitted.
+void write_application_evidence(std::ostream& out, const ApplicationEvidence& values) {
+    out << "{";
+    for (std::size_t i = 0U; i < kApplicationMetrics.size(); ++i) {
+        out << (i == 0U ? "\n    " : ",\n    ") << "\"" << kApplicationMetrics[i] << "\": ";
+        if (values[i]) out << "\"" << *values[i] << "\"";
+        else out << "null";
+    }
+    out << "\n  }";
+}
+struct WeaponPredictionEvidence final {
+    std::optional<std::string> result;
+    std::array<std::optional<bool>, 7U> flags{};
+    std::optional<std::string> hit_status;
+    [[nodiscard]] bool verified() const noexcept {
+        return result == "live_client_predicted_weapon_presentation_verified" &&
+            hit_status == "unavailable" &&
+            std::all_of(flags.begin(), flags.end(), [](const auto& value) { return value == true; });
+    }
+};
+constexpr std::array<std::string_view, 6U> kLifeFlags{
+    "respawn_input_submitted", "server_alive", "same_session",
+    "glock_bound", "crowbar_bound", "feature_verified"};
+constexpr std::array<std::string_view, 41U> kLifeMetrics{
+    "application_runtime_result", "phase", "blocker", "generation", "life_epoch",
+    "damage_events", "damage_live", "health_before", "health_after",
+    "armor_before", "armor_after", "local_deaths", "dead_flag",
+    "post_respawn_commands", "post_respawn_samples", "pre_model", "post_model",
+    "prediction_reason", "prediction_anchor", "prediction_history_depth",
+    "manual_validation", "post_respawn_frames", "damage_source", "death_source",
+    "health_before_source", "health_after_source", "armor_before_source", "armor_after_source",
+    "pre_weapon", "post_weapon", "hud_health", "hud_armor", "hud_weapon",
+    "prediction_state", "prediction_history_end", "prediction_replayed_commands", "prediction_reseed",
+    "pre_hud_health", "pre_hud_armor", "pre_hud_health_source", "pre_hud_armor_source"};
+struct LifeEvidence final {
+    std::optional<std::string> result;
+    std::array<std::optional<bool>, kLifeFlags.size()> flags{};
+    std::array<std::optional<std::string>, kLifeMetrics.size()> metrics{};
+    [[nodiscard]] bool verified() const noexcept {
+        const auto positive = [&](std::size_t index, std::size_t minimum) {
+            if (!metrics[index]) return false;
+            std::size_t value{};
+            const auto& text = *metrics[index];
+            const auto parsed = std::from_chars(text.data(), text.data()+text.size(), value);
+            return parsed.ec == std::errc{} && parsed.ptr == text.data()+text.size() && value >= minimum;
+        };
+        return result == "live_death_respawn_verified_damage_pending" &&
+            metrics[0] == "completed" &&
+            metrics[1] == "complete" && positive(3,1) && positive(4,2) &&
+            positive(11,1) && positive(13,1) && positive(14,2) && positive(21,1) &&
+            std::all_of(flags.begin(), flags.end(), [](const auto& v) { return v == true; });
+    }
 };
 
 [[nodiscard]] constexpr bool emits_jump_duck_native_status(
@@ -123,8 +261,15 @@ enum class ProjectClientLiveInput : std::uint8_t {
 }
 
 struct Options final {
+    bool validate_test_start_health_contract{false};
+    bool validate_remote_audio_peer_contract{false};
+    bool remote_audio_peer{false};
+    std::optional<std::uint32_t> manual_duration_seconds;
+    bool manual_no_time_limit{false};
     bool validate_config{false};
     bool validate_functional_log_observation{false};
+    std::optional<std::filesystem::path> runtime_failure_fixture;
+    bool runtime_failure_status_fixture{false};
     bool validate_functional_lifecycle{false};
     bool validate_functional_lifecycle_limit{false};
     bool validate_functional_lifecycle_writer_failure{false};
@@ -139,10 +284,14 @@ struct Options final {
     ProjectClientLiveInput project_client_live_input{
         ProjectClientLiveInput::scripted_check};
     bool project_client_reference_prediction{false};
+    bool project_client_mute_glock_fire_sound{false};
+    bool test_start_health{false};
     bool validate_wrapper_startup{false};
     windows::HldsRuntimeProfile::Id server_profile_id{
         windows::HldsRuntimeProfile::Id::legacy_stdio_hlds_banner_v1};
     std::optional<goldsrc::StockRuntimeCaptureOutputRole> output_role;
+    bool fast_manual{false};
+    bool manual_validation{false};
     bool confirmation_seen{false};
     bool private_confirmation_seen{false};
     bool functional_confirmation_seen{false};
@@ -172,6 +321,74 @@ struct Options final {
     goldsrc::StockRuntimeCaptureLimits limits{};
     goldsrc::StockRuntimeCapturePerturbation perturbation{};
 };
+
+void manual_phase(const Options& options, const std::string_view phase) {
+    if (!options.manual_validation) return;
+    static const auto start = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    std::cout << "[stock-runtime-orchestrator] phase-" << phase << "-ms=" << elapsed << std::endl;
+}
+
+struct TestStartHealthLaunch final {
+    std::wstring player_name;
+    std::vector<std::wstring> server_arguments;
+};
+[[nodiscard]] bool test_start_health_server_ready(std::string_view log) {
+    return log.find("[hlclient-test-health-stage] stage=attached") != std::string_view::npos &&
+        log.find("[hlclient-test-health-stage] stage=server_activated configured=true") != std::string_view::npos;
+}
+[[nodiscard]] std::optional<std::string_view> test_start_health_configuration_reason(std::string_view log) {
+    constexpr std::string_view prefix="[hlclient-test-health-config] reason=";
+    const auto at=log.rfind(prefix);
+    if (at==std::string_view::npos || (at!=0U && log[at-1U]!='\n')) return std::nullopt;
+    const auto begin=at+prefix.size();
+    const auto end=log.find_first_of("\r\n",begin);
+    const auto value=log.substr(begin,end==std::string_view::npos ? end : end-begin);
+    for (const auto reason:{std::string_view{"ready"},std::string_view{"run_missing"},
+            std::string_view{"run_invalid"},std::string_view{"profile_missing"},
+            std::string_view{"profile_mismatch"},std::string_view{"globals_unavailable"},
+            std::string_view{"deathmatch_unavailable"},std::string_view{"client_limit_invalid"},
+            std::string_view{"map_mismatch"}})
+        if (value==reason) return reason;
+    return std::nullopt;
+}
+[[nodiscard]] std::optional<TestStartHealthLaunch> test_start_health_launch(const fs::path& run_root,
+    const bool fast_manual = false) {
+    const auto id=run_root.filename().wstring();
+    if (id.size()!=32U || !std::all_of(id.begin(),id.end(),[](wchar_t c) {
+        return (c>=L'0' && c<=L'9') || (c>=L'a' && c<=L'f'); })) return std::nullopt;
+    if (fast_manual) {
+        // The wrapper's scoped liblist.gam selects the verified prepared DLL.
+        // Do not repeat its absolute path in -dll: stock HLDS CheckParm uses
+        // substring matching, so HLC-steamcfg in a path activates -steam and
+        // GUI/AdminServer even when -console is present. Quoting cannot help.
+        return TestStartHealthLaunch{L"HLC50_"+id.substr(0U,24U),
+            {L"+localinfo",L"hlc_test_run",id,L"+localinfo",L"hlc_test_profile",L"test_server_assisted"}};
+    }
+    return TestStartHealthLaunch{L"HLC50_"+id.substr(0U,24U),
+        {L"-dll",L"addons/hlclient_test50/"+id+L"/metamod.dll",
+         L"+localinfo",L"mm_configfile",L"addons/hlclient_test50/"+id+L"/config.ini",
+         // Stock stuffcmds splits on +/- characters inside values as well.
+         // Keep this internal sentinel distinct from the human profile label.
+         L"+localinfo",L"hlc_test_run",id,L"+localinfo",L"hlc_test_profile",L"test_server_assisted"}};
+}
+[[nodiscard]] bool test_start_health_server_arguments(std::vector<std::wstring>& args,
+    const TestStartHealthLaunch& launch) {
+    if (std::find(args.begin(), args.end(), L"+map") == args.end() ||
+        std::find(args.begin(), args.end(), L"+status") == args.end()) return false;
+    args.insert(std::find(args.begin(), args.end(), L"+map"),
+                launch.server_arguments.begin(), launch.server_arguments.end());
+    // Fixed owned command, not arbitrary user-supplied console execution.
+    args.insert(std::find(args.begin(), args.end(), L"+status"), {L"+meta", L"require", L"HLC50"});
+    return true;
+}
+[[nodiscard]] bool test_start_health_client_arguments(std::vector<std::wstring>& args,
+    const std::wstring& name) {
+    const auto at=std::find(args.begin(),args.end(),L"--name");
+    if(at==args.end() || at+1==args.end()) return false;
+    *(at+1)=name; args.insert(args.end(),{L"--test-start-health",L"50"}); return true;
+}
 
 template<typename Integer>
 [[nodiscard]] bool parse_wide_decimal(
@@ -215,9 +432,23 @@ template<typename Integer>
     const int argc,
     wchar_t** argv)
 {
+    if (argc == 2 && std::wstring_view{argv[1]} == L"--validate-test-start-health-contract") {
+        Options options; options.validate_test_start_health_contract=true; return options;
+    }
+    if (argc == 2 && std::wstring_view{argv[1]} == L"--validate-remote-audio-peer-contract") {
+        Options options; options.validate_remote_audio_peer_contract=true; return options;
+    }
     if (argc == 2 && std::wstring_view{argv[1]} == L"--validate-config") {
         Options options;
         options.validate_config = true;
+        return options;
+    }
+    if ((argc == 3 || (argc == 4 && std::wstring_view{argv[3]} == L"--status")) &&
+        std::wstring_view{argv[1]} == L"--validate-runtime-failure-roundtrip") {
+        Options options;
+        options.validate_functional_log_observation = true;
+        options.runtime_failure_fixture = std::filesystem::path{argv[2]};
+        options.runtime_failure_status_fixture = argc == 4;
         return options;
     }
     if (argc == 2 && std::wstring_view{argv[1]} ==
@@ -227,7 +458,7 @@ template<typename Integer>
         return options;
     }
     Options options;
-    std::array<bool, 52U> seen{};
+    std::array<bool, 58U> seen{};
     const auto mark = [&seen](const std::size_t index) {
         if (seen[index]) return false;
         seen[index] = true;
@@ -256,9 +487,24 @@ template<typename Integer>
             options.functional_smoke = true;
             continue;
         }
+        if (name == L"--remote-audio-peer") {
+            if (!mark(55U)) return std::nullopt;
+            options.remote_audio_peer=true;
+            continue;
+        }
+        if (name == L"--manual-no-time-limit") {
+            if (!mark(56U)) return std::nullopt;
+            options.manual_no_time_limit = true;
+            continue;
+        }
         if (name == L"--project-client-stock-signon") {
             if (!mark(47U)) return std::nullopt;
             options.project_client_stock_signon = true;
+            continue;
+        }
+        if (name == L"--project-client-mute-glock-fire-sound") {
+            if (!mark(54U)) return std::nullopt;
+            options.project_client_mute_glock_fire_sound = true;
             continue;
         }
         if (name == L"--validate-wrapper-startup") {
@@ -299,6 +545,7 @@ template<typename Integer>
         else if (name == L"--relay-port") option = 13U;
         else if (name == L"--server-port") option = 14U;
         else if (name == L"--max-duration-seconds") option = 15U;
+        else if (name == L"--manual-duration-seconds") option = 57U;
         else if (name == L"--max-datagrams") option = 16U;
         else if (name == L"--max-total-raw-bytes") option = 17U;
         else if (name == L"--max-payload-bytes") option = 18U;
@@ -329,6 +576,8 @@ template<typename Integer>
         else if (name == L"--project-client-stop") option = 49U;
         else if (name == L"--project-client-live-input") option = 50U;
         else if (name == L"--project-client-prediction") option = 51U;
+        else if (name == L"--test-start-health") option = 52U;
+        else if (name == L"--validation-mode") option = 53U;
         else return std::nullopt;
         if (!mark(option)) return std::nullopt;
 
@@ -412,6 +661,18 @@ template<typename Integer>
             } else if (value == L"scripted-speed-check") {
                 options.project_client_live_input =
                     ProjectClientLiveInput::scripted_speed_check;
+            } else if (value == L"scripted-weapon-check") {
+                options.project_client_live_input =
+                    ProjectClientLiveInput::scripted_weapon_check;
+            } else if (value == L"scripted-fire-reload-check") {
+                options.project_client_live_input =
+                    ProjectClientLiveInput::scripted_fire_reload_check;
+            } else if (value == L"scripted-fire-reload-presentation-check") {
+                options.project_client_live_input =
+                    ProjectClientLiveInput::scripted_fire_reload_presentation_check;
+            } else if (value == L"scripted-damage-respawn-check") {
+                options.project_client_live_input =
+                    ProjectClientLiveInput::scripted_damage_respawn_check;
             } else if (value == L"keyboard-mouse") {
                 options.project_client_live_input =
                     ProjectClientLiveInput::keyboard_mouse;
@@ -514,6 +775,22 @@ template<typename Integer>
             }
             break;
         }
+        case 52U:
+            if (value != L"50") return std::nullopt;
+            options.test_start_health = true;
+            break;
+        case 57U: {
+            std::uint32_t seconds{};
+            if (!parse_wide_decimal(value, seconds) || seconds == 0U ||
+                seconds > hlclient::core::kMaximumManualSessionSeconds) return std::nullopt;
+            options.manual_duration_seconds = seconds;
+            break;
+        }
+        case 53U:
+            if (value != L"fast" && value != L"strict") return std::nullopt;
+            options.manual_validation = true;
+            options.fast_manual = value == L"fast";
+            break;
         case 17U:
             if (!parse_wide_decimal(value, options.limits.maximum_total_raw_bytes))
                 return std::nullopt;
@@ -535,6 +812,29 @@ template<typename Integer>
         }
         }
     }
+    if (options.manual_validation && (!options.functional_smoke || !options.project_client_stock_signon ||
+        options.project_client_stop != ProjectClientStop::live_visual_control ||
+        (options.fast_manual && options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse &&
+         options.project_client_live_input != ProjectClientLiveInput::scripted_damage_respawn_check))) return std::nullopt;
+    if ((options.manual_no_time_limit || options.manual_duration_seconds) &&
+        (!options.manual_validation || !options.functional_smoke || !options.project_client_stock_signon ||
+         options.project_client_stop != ProjectClientStop::live_visual_control ||
+         options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse ||
+         (options.manual_no_time_limit && options.manual_duration_seconds))) return std::nullopt;
+    if (options.project_client_mute_glock_fire_sound &&
+        (!options.manual_validation || !options.project_client_stock_signon ||
+         options.project_client_stop != ProjectClientStop::live_visual_control ||
+         options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse))
+        return std::nullopt;
+    if (options.remote_audio_peer && (!options.manual_validation || !options.functional_smoke ||
+        !options.project_client_stock_signon || options.project_client_stop!=ProjectClientStop::live_visual_control ||
+        options.project_client_live_input!=ProjectClientLiveInput::keyboard_mouse || options.map!="crossfire" || options.test_start_health)) return std::nullopt;
+    if (options.test_start_health &&
+        (!options.functional_smoke || !options.project_client_stock_signon ||
+         options.project_client_stop != ProjectClientStop::live_visual_control ||
+         options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse ||
+         !options.project_client_reference_prediction || options.map != "crossfire"))
+        return std::nullopt;
     if (options.validate_functional_lifecycle) {
         if (options.run_root.empty() || options.client.empty() ||
             options.server.empty() || options.relay.empty() ||
@@ -548,6 +848,7 @@ template<typename Integer>
              options.functional_confirmation_seen ||
             options.project_client_stock_signon ||
             seen[49U] || seen[50U] || seen[51U] ||
+            seen[54U] ||
             !options.steam_api_runtime.empty() ||
             options.validate_environment || options.diagnose_server_profile ||
             options.functional_smoke || options.validate_wrapper_startup ||
@@ -1270,7 +1571,8 @@ struct EnvironmentResult final {
            << "  \"line_length_truncated\": "
            << (log.line_length_truncated ? "true" : "false") << ",\n"
            << "  \"capture_failed\": "
-           << (log.capture_failed ? "true" : "false") << "\n}\n";
+           << (log.capture_failed ? "true" : "false") << ",\n"
+           << "  \"retained_window\": " << (log.retained_window ? "true" : "false") << "\n}\n";
     return output.str();
 }
 
@@ -1539,6 +1841,38 @@ struct ActiveSummary final {
     std::optional<std::string> project_jump_duck_result;
     std::optional<std::string> project_speed_result;
     std::optional<std::string> project_prediction_result;
+    ApplicationEvidence project_application;
+    std::optional<std::string> project_h4_result;
+    std::optional<std::string> project_weapon_result;
+    std::optional<std::string> project_fire_reload_result;
+    WeaponPredictionEvidence project_weapon_prediction;
+    LifeEvidence project_life;
+    std::optional<std::size_t> project_server_confirmed_shots;
+    std::optional<std::size_t> project_reload_completions;
+    std::optional<std::size_t> project_weapon_selection_queued;
+    std::optional<std::size_t> project_weapon_selection_confirmed;
+    std::optional<bool> project_viewmodel_pixels_distinct;
+    std::optional<bool> project_hud_pixels_distinct;
+    std::optional<std::string> project_viewmodel_camera_result;
+    std::optional<bool> project_viewmodel_camera_pixels_valid;
+    std::optional<std::size_t> project_viewmodel_camera_pixel_count;
+    std::array<std::optional<std::size_t>, 5U> project_h4_active_frames{};
+    std::array<std::optional<std::size_t>, 5U> project_h4_fallback_frames{};
+    std::array<std::optional<std::size_t>, 5U> project_h4_local_steps{};
+    std::array<std::optional<std::size_t>, 5U> project_h4_corrections{};
+    std::optional<std::size_t> project_prediction_interpolated_frames;
+    std::optional<std::size_t> project_prediction_endpoint_frames;
+    std::optional<std::size_t> project_prediction_collision_blocked_frames;
+    std::optional<std::size_t> project_prediction_visual_correction_frames;
+    std::optional<std::size_t> project_prediction_trace_queries;
+    std::optional<std::size_t> project_prediction_scratch_growths;
+    std::optional<std::size_t> project_prediction_long_stall_frames;
+    std::optional<double> project_prediction_active_time_ms;
+    std::optional<double> project_prediction_fallback_time_ms;
+    std::optional<double> project_prediction_cpu_total_ms;
+    std::optional<double> project_prediction_cpu_max_ms;
+    std::optional<double> project_prediction_maximum_camera_jump;
+    std::optional<std::string> project_prediction_correction_pair_window;
     std::optional<bool> project_jump_observed;
     std::optional<bool> project_descent_observed;
     std::optional<bool> project_duck_observed;
@@ -1560,6 +1894,9 @@ struct ActiveSummary final {
     std::optional<std::size_t> project_rx_samples_delivered_post_input;
     std::uint32_t functional_server_process_id{0U};
     std::uint32_t functional_client_process_id{0U};
+    std::uint32_t remote_audio_peer_process_id{};
+    std::optional<std::uint32_t> remote_audio_peer_exit;
+    bool remote_audio_peer_entered{};
     bool bounded_transport_complete{false};
     bool cleanup_exact{false};
     bool writer_trace_prelaunch_ready{false};
@@ -1756,6 +2093,38 @@ struct ProjectClientSignonObservation final {
     std::optional<std::string> jump_duck_result;
     std::optional<std::string> speed_result;
     std::optional<std::string> prediction_result;
+    ApplicationEvidence application;
+    std::optional<std::string> h4_result;
+    std::optional<std::string> weapon_result;
+    std::optional<std::string> fire_reload_result;
+    WeaponPredictionEvidence weapon_prediction;
+    LifeEvidence life;
+    std::optional<std::size_t> server_confirmed_shots;
+    std::optional<std::size_t> reload_completions;
+    std::optional<std::size_t> weapon_selection_queued;
+    std::optional<std::size_t> weapon_selection_confirmed;
+    std::optional<bool> viewmodel_pixels_distinct;
+    std::optional<bool> hud_pixels_distinct;
+    std::optional<std::string> viewmodel_camera_result;
+    std::optional<bool> viewmodel_camera_pixels_valid;
+    std::optional<std::size_t> viewmodel_camera_pixel_count;
+    std::array<std::optional<std::size_t>, 5U> h4_active_frames{};
+    std::array<std::optional<std::size_t>, 5U> h4_fallback_frames{};
+    std::array<std::optional<std::size_t>, 5U> h4_local_steps{};
+    std::array<std::optional<std::size_t>, 5U> h4_corrections{};
+    std::optional<std::size_t> prediction_interpolated_frames;
+    std::optional<std::size_t> prediction_endpoint_frames;
+    std::optional<std::size_t> prediction_collision_blocked_frames;
+    std::optional<std::size_t> prediction_visual_correction_frames;
+    std::optional<std::size_t> prediction_trace_queries;
+    std::optional<std::size_t> prediction_scratch_growths;
+    std::optional<std::size_t> prediction_long_stall_frames;
+    std::optional<double> prediction_active_time_ms;
+    std::optional<double> prediction_fallback_time_ms;
+    std::optional<double> prediction_cpu_total_ms;
+    std::optional<double> prediction_cpu_max_ms;
+    std::optional<double> prediction_maximum_camera_jump;
+    std::optional<std::string> prediction_correction_pair_window;
     std::optional<bool> jump_observed;
     std::optional<bool> descent_observed;
     std::optional<bool> duck_observed;
@@ -1820,10 +2189,17 @@ struct ProjectClientSignonObservation final {
                 usercmd_zero_observed && !usercmd_transmitted;
         }
         if (stop == ProjectClientStop::live_visual_control) {
+            if (selected_visual_input == ProjectClientLiveInput::scripted_damage_respawn_check)
+                return live_network_handoff && live_visual_input == selected_visual_input &&
+                    live_visual_verified && usercmd_transmitted && life.verified();
             const bool jump_duck_selected = selected_visual_input ==
                 ProjectClientLiveInput::scripted_jump_duck_check;
             const bool speed_selected = selected_visual_input ==
                 ProjectClientLiveInput::scripted_speed_check;
+            const bool weapon_selected = selected_visual_input ==
+                ProjectClientLiveInput::scripted_weapon_check;
+            const bool fire_selected = selected_visual_input ==
+                ProjectClientLiveInput::scripted_fire_reload_check;
             return live_network_handoff &&
                 live_visual_input == selected_visual_input &&
                 (selected_visual_input == ProjectClientLiveInput::keyboard_mouse ||
@@ -1836,8 +2212,31 @@ struct ProjectClientSignonObservation final {
                   duck_new_submitted.value_or(0U) > 0U)) &&
                 (!speed_selected || reference_prediction ||
                  speed_result == "verified") &&
-                (!reference_prediction || prediction_result ==
+                (!weapon_selected ||
+                 ((weapon_result ==
+                       "live_viewmodel_weapon_selection_and_basic_hud_verified" ||
+                   weapon_result ==
+                       "live_viewmodel_hud_verified_selection_pending") &&
+                  viewmodel_pixels_distinct == true &&
+                  hud_pixels_distinct == true &&
+                  weapon_selection_confirmed.value_or(0U) <=
+                      weapon_selection_queued.value_or(0U) &&
+                  (weapon_result !=
+                       "live_viewmodel_weapon_selection_and_basic_hud_verified" ||
+                   weapon_selection_confirmed.value_or(0U) > 0U))) &&
+                (!fire_selected ||
+                 (fire_reload_result ==
+                      "live_primary_fire_reload_and_weapon_animation_verified" &&
+                  server_confirmed_shots.value_or(0U) > 0U &&
+                  reload_completions.value_or(0U) > 0U)) &&
+                (selected_visual_input != ProjectClientLiveInput::scripted_fire_reload_presentation_check ||
+                 (weapon_prediction.verified() && server_confirmed_shots.value_or(0U) >= 2U &&
+                  reload_completions.value_or(0U) > 0U)) &&
+                (!reference_prediction || selected_visual_input == ProjectClientLiveInput::keyboard_mouse ||
+                 prediction_result ==
                     "live_local_prediction_and_reconciliation_verified") &&
+                (!(jump_duck_selected && reference_prediction) ||
+                 h4_result == "live_jump_duck_crouchwalk_prediction_verified") &&
                 live_visual_verified && usercmd_transmitted &&
                 !usercmd_zero_observed && new_usercmd_count.value_or(0U) > 0U &&
                 transmitted_usercmd_packet_count.value_or(0U) > 0U &&
@@ -2212,6 +2611,24 @@ observe_project_client_signon_log(const std::string_view bytes)
         observation.new_usercmd_count.value_or(0U) > 0U &&
         observation.transmitted_usercmd_packet_count.value_or(0U) > 0U;
     constexpr std::string_view visual_marker{"live_visual_control result="};
+    // Inert typed diagnostics only. No free-form message body/path/auth text
+    // enters the retained JSON. Optional for historical/other client modes.
+    if (const auto at = bytes.find("live_application_outcome result=");
+        at != std::string_view::npos) {
+        const auto end = bytes.find_first_of("\r\n", at);
+        const auto line = bytes.substr(at, (end == std::string_view::npos ? bytes.size() : end) - at);
+        for (std::size_t i = 0U; i < kApplicationMetrics.size(); ++i) {
+            const auto key = std::string{" "} + std::string{kApplicationMetrics[i]} + "=";
+            const auto field = line.find(key);
+            if (field == std::string_view::npos) continue;
+            const auto begin = field + key.size();
+            const auto stop = line.find(' ', begin);
+            const auto value = line.substr(begin,
+                (stop == std::string_view::npos ? line.size() : stop) - begin);
+            if (valid_application_metric(kApplicationMetrics[i],value))
+                observation.application[i] = std::string{value};
+        }
+    }
     const auto visual_begin = bytes.rfind(visual_marker);
     const auto visual_end = visual_begin == std::string_view::npos
         ? std::string_view::npos
@@ -2258,6 +2675,20 @@ observe_project_client_signon_log(const std::string_view bytes)
                    std::string_view::npos) {
             observation.live_visual_input =
                 ProjectClientLiveInput::scripted_speed_check;
+        } else if (visual_line.find(" input=scripted-weapon-check ") !=
+                   std::string_view::npos) {
+            observation.live_visual_input =
+                ProjectClientLiveInput::scripted_weapon_check;
+        } else if (visual_line.find(" input=scripted-damage-respawn-check ") != std::string_view::npos) {
+            observation.live_visual_input = ProjectClientLiveInput::scripted_damage_respawn_check;
+        } else if (visual_line.find(" input=scripted-fire-reload-presentation-check ") !=
+                   std::string_view::npos) {
+            observation.live_visual_input =
+                ProjectClientLiveInput::scripted_fire_reload_presentation_check;
+        } else if (visual_line.find(" input=scripted-fire-reload-check ") !=
+                   std::string_view::npos) {
+            observation.live_visual_input =
+                ProjectClientLiveInput::scripted_fire_reload_check;
         } else if (visual_line.find(" input=scripted-check ") !=
                    std::string_view::npos) {
             observation.live_visual_input = ProjectClientLiveInput::scripted_check;
@@ -2304,6 +2735,172 @@ observe_project_client_signon_log(const std::string_view bytes)
         observation.usercmd_transmitted =
             observation.new_usercmd_count.value_or(0U) > 0U &&
             observation.transmitted_usercmd_packet_count.value_or(0U) > 0U;
+    }
+    constexpr std::string_view weapon_marker{"live_weapon_presentation result="};
+    if (const auto at = bytes.rfind(weapon_marker);
+        at != std::string_view::npos) {
+        const auto end = bytes.find_first_of("\r\n", at);
+        const auto line = bytes.substr(at,
+            (end == std::string_view::npos ? bytes.size() : end) - at);
+        const auto value = [line](const std::string_view key)
+            -> std::optional<std::string_view> {
+            const auto found = line.find(key);
+            if (found == std::string_view::npos) return std::nullopt;
+            const auto begin = found + key.size();
+            const auto end = line.find(' ', begin);
+            return line.substr(begin, end - begin);
+        };
+        if (const auto result = value(" result="); result &&
+            (*result == "live_viewmodel_weapon_selection_and_basic_hud_verified" ||
+             *result == "live_viewmodel_hud_verified_selection_pending" ||
+             *result == "viewmodel_hud_implemented_live_pending"))
+            observation.weapon_result = std::string{*result};
+        const auto count = [&](const std::string_view key)
+            -> std::optional<std::size_t> {
+            const auto token = value(key);
+            if (!token) return std::nullopt;
+            std::size_t parsed_value = 0U;
+            const auto parsed = std::from_chars(token->data(),
+                token->data() + token->size(), parsed_value, 10);
+            return parsed.ec == std::errc{} &&
+                parsed.ptr == token->data() + token->size()
+                ? std::optional<std::size_t>{parsed_value} : std::nullopt;
+        };
+        const auto boolean = [&](const std::string_view key)
+            -> std::optional<bool> {
+            const auto token = value(key);
+            if (token == "1" || token == "true") return true;
+            if (token == "0" || token == "false") return false;
+            return std::nullopt;
+        };
+        observation.weapon_selection_queued = count(" selection_queued=");
+        observation.weapon_selection_confirmed = count(" selection_confirmed=");
+        observation.viewmodel_pixels_distinct =
+            boolean(" viewmodel_pixels_distinct=");
+        observation.hud_pixels_distinct = boolean(" hud_pixels_distinct=");
+    }
+    constexpr std::string_view fire_marker{"live_fire_reload result="};
+    if (const auto at = bytes.rfind(fire_marker);
+        at != std::string_view::npos) {
+        const auto end = bytes.find_first_of("\r\n", at);
+        const auto line = bytes.substr(at,
+            (end == std::string_view::npos ? bytes.size() : end) - at);
+        const auto token = [line](const std::string_view key)
+            -> std::optional<std::string_view> {
+            const auto found = line.find(key);
+            if (found == std::string_view::npos) return std::nullopt;
+            const auto begin = found + key.size();
+            return line.substr(begin, line.find(' ', begin) - begin);
+        };
+        if (const auto result = token(" result="); result &&
+            (*result == "live_primary_fire_reload_and_weapon_animation_verified" ||
+             *result == "primary_fire_verified_reload_pending" ||
+             *result == "primary_fire_reload_implemented_live_pending"))
+            observation.fire_reload_result = std::string{*result};
+        const auto count = [&](const std::string_view key)
+            -> std::optional<std::size_t> {
+            const auto value = token(key);
+            if (!value) return std::nullopt;
+            std::size_t parsed_value = 0U;
+            const auto parsed = std::from_chars(value->data(),
+                value->data() + value->size(), parsed_value, 10);
+            return parsed.ec == std::errc{} &&
+                parsed.ptr == value->data() + value->size()
+                ? std::optional<std::size_t>{parsed_value} : std::nullopt;
+        };
+        observation.server_confirmed_shots = count(" server_confirmed_shots=");
+        observation.reload_completions = count(" reload_completions=");
+    }
+    constexpr std::string_view prediction_weapon_marker{"live_weapon_prediction result="};
+    if (const auto at = bytes.rfind(prediction_weapon_marker);
+        at != std::string_view::npos && observation.live_visual_input ==
+            ProjectClientLiveInput::scripted_fire_reload_presentation_check) {
+        const auto end = bytes.find_first_of("\r\n", at);
+        const auto line = bytes.substr(at, (end == std::string_view::npos ? bytes.size() : end) - at);
+        const auto token = [line](std::string_view key) -> std::optional<std::string_view> {
+            const auto at = line.find(key);
+            if (at == std::string_view::npos) return {};
+            const auto begin = at + key.size();
+            return line.substr(begin, line.find(' ', begin) - begin);
+        };
+        if (const auto value = token(" result="); value &&
+            (*value == "live_client_predicted_weapon_presentation_verified" ||
+             *value == "client_weapon_presentation_implemented_live_pending"))
+            observation.weapon_prediction.result = std::string{*value};
+        for (std::size_t i = 0U; i < kWeaponPredictionFlags.size(); ++i) {
+            const auto key = std::string{" "} + std::string{kWeaponPredictionFlags[i]} + "=";
+            if (const auto value = token(key)) {
+                if (*value == "1" || *value == "true") observation.weapon_prediction.flags[i] = true;
+                else if (*value == "0" || *value == "false") observation.weapon_prediction.flags[i] = false;
+            }
+        }
+        if (token(" crowbar_hit_status=") == "unavailable")
+            observation.weapon_prediction.hit_status = "unavailable";
+    }
+    constexpr std::string_view life_marker{"live_damage_respawn result="};
+    if (const auto at = bytes.rfind(life_marker); at != std::string_view::npos &&
+        observation.live_visual_input == ProjectClientLiveInput::scripted_damage_respawn_check) {
+        const auto end = bytes.find_first_of("\r\n", at);
+        const auto line = bytes.substr(at, (end == std::string_view::npos ? bytes.size() : end) - at);
+        const auto token = [line](std::string_view field) -> std::optional<std::string_view> {
+            const auto key = std::string{" "} + std::string{field} + "=";
+            const auto at = line.find(key);
+            if (at == std::string_view::npos) return {};
+            const auto begin = at + key.size();
+            const auto value = line.substr(begin, line.find(' ', begin) - begin);
+            if (value.empty() || value.size() > 128U ||
+                !std::all_of(value.begin(), value.end(), [](char c) {
+                    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+                })) return {};
+            return value;
+        };
+        if (const auto v = token("result"); v &&
+            (*v == "live_death_respawn_verified_damage_pending" ||
+             *v == "damage_death_respawn_implemented_live_pending"))
+            observation.life.result = std::string{*v};
+        for (std::size_t i = 0; i < kLifeFlags.size(); ++i) {
+            if (const auto v = token(kLifeFlags[i])) {
+                if (*v == "1" || *v == "true") observation.life.flags[i] = true;
+                else if (*v == "0" || *v == "false") observation.life.flags[i] = false;
+            }
+        }
+        for (std::size_t i = 0; i < kLifeMetrics.size(); ++i)
+            if (const auto v = token(kLifeMetrics[i]))
+                observation.life.metrics[i] = std::string{*v};
+    }
+    constexpr std::string_view camera_marker{"live_viewmodel_camera result="};
+    if (const auto at = bytes.rfind(camera_marker);
+        at != std::string_view::npos) {
+        const auto end = bytes.find_first_of("\r\n", at);
+        const auto line = bytes.substr(at,
+            (end == std::string_view::npos ? bytes.size() : end) - at);
+        const auto value = [line](const std::string_view key)
+            -> std::optional<std::string_view> {
+            const auto found = line.find(key);
+            if (found == std::string_view::npos) return std::nullopt;
+            const auto begin = found + key.size();
+            const auto end = line.find(' ', begin);
+            return line.substr(begin, end - begin);
+        };
+        if (const auto result = value(" result="); result &&
+            (*result == "live_viewmodel_camera_space_verified" ||
+             *result == "viewmodel_camera_space_implemented_live_pending"))
+            observation.viewmodel_camera_result = std::string{*result};
+        if (const auto valid = value(" pixel_observation_valid="); valid) {
+            if (*valid == "1" || *valid == "true")
+                observation.viewmodel_camera_pixels_valid = true;
+            else if (*valid == "0" || *valid == "false")
+                observation.viewmodel_camera_pixels_valid = false;
+        }
+        if (const auto count = value(" pixel_count="); count) {
+            std::size_t parsed_value = 0U;
+            const auto parsed = std::from_chars(count->data(),
+                count->data() + count->size(), parsed_value, 10);
+            if (parsed.ec == std::errc{} &&
+                parsed.ptr == count->data() + count->size())
+                observation.viewmodel_camera_pixel_count = parsed_value;
+        }
     }
     constexpr std::string_view jump_marker{"live_jump_duck input="};
     const auto jump_begin = bytes.rfind(jump_marker);
@@ -2367,6 +2964,48 @@ observe_project_client_signon_log(const std::string_view bytes)
             observation.speed_result = std::string{value};
     }
     constexpr std::string_view prediction_marker{"live_prediction mode=reference result="};
+    constexpr std::string_view h4_marker{"live_h4_prediction result="};
+    if (const auto found = bytes.rfind(h4_marker);
+        found != std::string_view::npos) {
+        const auto begin = found + h4_marker.size();
+        const auto end = bytes.find_first_of(" \r\n", begin);
+        const auto value = bytes.substr(begin, end - begin);
+        if (value == "live_jump_duck_crouchwalk_prediction_verified" ||
+            value == "jump_prediction_verified_duck_pending" ||
+            value == "jump_duck_prediction_implemented_live_pending" ||
+            value == "crouch_walk_prediction_context_blocked")
+            observation.h4_result = std::string{value};
+    }
+    constexpr std::array<std::string_view, 5U> h4_phase_names{
+        "settle", "jump_hold", "landing", "duck_crouch_walk",
+        "unduck_standing_shift"};
+    for (std::size_t index = 0U; index < h4_phase_names.size(); ++index) {
+        const auto marker = std::string{"live_h4_phase phase="} +
+            std::string{h4_phase_names[index]};
+        const auto found = bytes.rfind(marker);
+        if (found == std::string_view::npos) continue;
+        const auto end = bytes.find_first_of("\r\n", found);
+        const auto line = bytes.substr(found,
+            (end == std::string_view::npos ? bytes.size() : end) - found);
+        const auto count = [line](const std::string_view key)
+            -> std::optional<std::size_t> {
+            const auto at = line.find(key);
+            if (at == std::string_view::npos) return std::nullopt;
+            const auto begin = at + key.size();
+            const auto end = line.find(' ', begin);
+            const auto token = line.substr(begin, end - begin);
+            std::size_t value = 0U;
+            const auto parsed = std::from_chars(
+                token.data(), token.data() + token.size(), value, 10);
+            return parsed.ec == std::errc{} &&
+                    parsed.ptr == token.data() + token.size()
+                ? std::optional<std::size_t>{value} : std::nullopt;
+        };
+        observation.h4_active_frames[index] = count(" active_frames=");
+        observation.h4_fallback_frames[index] = count(" fallback_frames=");
+        observation.h4_local_steps[index] = count(" local_steps=");
+        observation.h4_corrections[index] = count(" corrections=");
+    }
     constexpr std::string_view rx_marker{"live_rx mode=reference "};
     if (const auto found = bytes.rfind(rx_marker);
         found != std::string_view::npos) {
@@ -2398,6 +3037,9 @@ observe_project_client_signon_log(const std::string_view bytes)
     }
     if (const auto found = bytes.rfind(prediction_marker);
         found != std::string_view::npos) {
+        const auto line_end = bytes.find_first_of("\r\n", found);
+        const auto line = bytes.substr(found,
+            (line_end == std::string_view::npos ? bytes.size() : line_end) - found);
         const auto begin = found + prediction_marker.size();
         const auto end = bytes.find_first_of(" \r\n", begin);
         const auto value = bytes.substr(begin, end - begin);
@@ -2406,8 +3048,74 @@ observe_project_client_signon_log(const std::string_view bytes)
             value == "live_prediction_integrated_live_pending" ||
             value == "prediction_seed_or_anchor_contract_partial")
             observation.prediction_result = std::string{value};
+        const auto token = [line](const std::string_view key)
+            -> std::optional<std::string_view> {
+            const auto at = line.find(key);
+            if (at == std::string_view::npos) return std::nullopt;
+            const auto start = at + key.size();
+            const auto end = line.find(' ', start);
+            return line.substr(start, end - start);
+        };
+        const auto count = [&](const std::string_view key)
+            -> std::optional<std::size_t> {
+            const auto raw = token(key);
+            if (!raw) return std::nullopt;
+            std::size_t parsed_value = 0U;
+            const auto parsed = std::from_chars(raw->data(),
+                raw->data() + raw->size(), parsed_value, 10);
+            return parsed.ec == std::errc{} &&
+                    parsed.ptr == raw->data() + raw->size()
+                ? std::optional<std::size_t>{parsed_value} : std::nullopt;
+        };
+        observation.prediction_interpolated_frames = count(" interpolated_frames=");
+        observation.prediction_endpoint_frames = count(" endpoint_frames=");
+        observation.prediction_collision_blocked_frames = count(" collision_blocked_frames=");
+        observation.prediction_visual_correction_frames = count(" visual_correction_frames=");
+        observation.prediction_trace_queries = count(" presentation_trace_queries=");
+        observation.prediction_scratch_growths = count(" presentation_scratch_growths=");
+        observation.prediction_long_stall_frames = count(" long_stall_frames=");
+        const auto nonnegative_real = [&](const std::string_view key)
+            -> std::optional<double> {
+            const auto raw = token(key);
+            if (!raw) return std::nullopt;
+            double parsed_value = 0.0;
+            const auto parsed = std::from_chars(raw->data(),
+                raw->data() + raw->size(), parsed_value);
+            if (parsed.ec == std::errc{} &&
+                parsed.ptr == raw->data() + raw->size() &&
+                std::isfinite(parsed_value) && parsed_value >= 0.0)
+                return parsed_value;
+            return std::nullopt;
+        };
+        observation.prediction_active_time_ms =
+            nonnegative_real(" active_time_ms=");
+        observation.prediction_fallback_time_ms =
+            nonnegative_real(" fallback_time_ms=");
+        observation.prediction_cpu_total_ms =
+            nonnegative_real(" presentation_cpu_total_ms=");
+        observation.prediction_cpu_max_ms =
+            nonnegative_real(" presentation_cpu_max_ms=");
+        observation.prediction_maximum_camera_jump =
+            nonnegative_real(" maximum_camera_correction_jump=");
+        if (const auto raw = token(" correction_pair_window="); raw &&
+            raw->size() <= 1024U && *raw != "unavailable" &&
+            raw->find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyz_:.,-") ==
+                std::string_view::npos)
+            observation.prediction_correction_pair_window = std::string{*raw};
     }
     return observation;
+}
+
+// Peer evidence is independent of the listener's outcome. In particular an
+// early listener failure must not turn a missing peer observation into a
+// claimed peer startup failure, or replace the listener's primary error.
+void apply_remote_audio_peer_observation(
+    ActiveSummary& summary,
+    const windows::BoundedProcessLogSnapshot& peer_log)
+{
+    const auto observed = observe_project_client_signon_log(peer_log.bytes);
+    summary.remote_audio_peer_entered = summary.remote_audio_peer_entered ||
+        (observed.connection_accepted && observed.client_world_state_published);
 }
 
 void apply_project_client_observation(
@@ -2449,6 +3157,44 @@ void apply_project_client_observation(
     summary.project_jump_duck_result = observation.jump_duck_result;
     summary.project_speed_result = observation.speed_result;
     summary.project_prediction_result = observation.prediction_result;
+    summary.project_application = observation.application;
+    summary.project_h4_result = observation.h4_result;
+    summary.project_weapon_result = observation.weapon_result;
+    summary.project_fire_reload_result = observation.fire_reload_result;
+    summary.project_weapon_prediction = observation.weapon_prediction;
+    summary.project_life = observation.life;
+    summary.project_server_confirmed_shots = observation.server_confirmed_shots;
+    summary.project_reload_completions = observation.reload_completions;
+    summary.project_weapon_selection_queued =
+        observation.weapon_selection_queued;
+    summary.project_weapon_selection_confirmed =
+        observation.weapon_selection_confirmed;
+    summary.project_viewmodel_pixels_distinct =
+        observation.viewmodel_pixels_distinct;
+    summary.project_hud_pixels_distinct = observation.hud_pixels_distinct;
+    summary.project_viewmodel_camera_result =
+        observation.viewmodel_camera_result;
+    summary.project_viewmodel_camera_pixels_valid =
+        observation.viewmodel_camera_pixels_valid;
+    summary.project_viewmodel_camera_pixel_count =
+        observation.viewmodel_camera_pixel_count;
+    summary.project_h4_active_frames = observation.h4_active_frames;
+    summary.project_h4_fallback_frames = observation.h4_fallback_frames;
+    summary.project_h4_local_steps = observation.h4_local_steps;
+    summary.project_h4_corrections = observation.h4_corrections;
+    summary.project_prediction_interpolated_frames = observation.prediction_interpolated_frames;
+    summary.project_prediction_endpoint_frames = observation.prediction_endpoint_frames;
+    summary.project_prediction_collision_blocked_frames = observation.prediction_collision_blocked_frames;
+    summary.project_prediction_visual_correction_frames = observation.prediction_visual_correction_frames;
+    summary.project_prediction_trace_queries = observation.prediction_trace_queries;
+    summary.project_prediction_scratch_growths = observation.prediction_scratch_growths;
+    summary.project_prediction_long_stall_frames = observation.prediction_long_stall_frames;
+    summary.project_prediction_active_time_ms = observation.prediction_active_time_ms;
+    summary.project_prediction_fallback_time_ms = observation.prediction_fallback_time_ms;
+    summary.project_prediction_cpu_total_ms = observation.prediction_cpu_total_ms;
+    summary.project_prediction_cpu_max_ms = observation.prediction_cpu_max_ms;
+    summary.project_prediction_maximum_camera_jump = observation.prediction_maximum_camera_jump;
+    summary.project_prediction_correction_pair_window = observation.prediction_correction_pair_window;
     summary.project_jump_observed = observation.jump_observed;
     summary.project_descent_observed = observation.descent_observed;
     summary.project_duck_observed = observation.duck_observed;
@@ -2647,6 +3393,191 @@ observe_functional_client_log(const std::string_view bytes)
     });
 }
 
+// This is a fixed, numeric-only application diagnostic grammar, not a raw-log
+// allowlist. Keep its validation independent of the game module and producer.
+// A bounded row cannot contain names, paths, tokens or borrowed resource data.
+template <std::size_t Count>
+[[nodiscard]] std::optional<std::array<std::string_view, Count>>
+fixed_visibility_fields(const std::string_view line,
+    const std::string_view marker,
+    const std::array<std::string_view, Count>& keys,
+    const std::size_t maximum_bytes) noexcept
+{
+    if (line.size() > maximum_bytes || !line.starts_with(marker)) return {};
+    auto remaining = line.substr(marker.size());
+    std::array<std::string_view, Count> values{};
+    for (std::size_t index = 0U; index < Count; ++index) {
+        const auto key = keys[index];
+        if (!remaining.starts_with(key) || remaining.size() <= key.size() ||
+            remaining[key.size()] != '=') return {};
+        remaining.remove_prefix(key.size() + 1U);
+        const auto separator = remaining.find(' ');
+        values[index] = remaining.substr(0U, separator);
+        if (values[index].empty()) return {};
+        if (index + 1U == Count) {
+            if (separator != std::string_view::npos) return {};
+        } else {
+            if (separator == std::string_view::npos) return {};
+            remaining.remove_prefix(separator + 1U);
+        }
+    }
+    return values;
+}
+
+[[nodiscard]] std::optional<std::uint64_t> visibility_unsigned(
+    const std::string_view value, const std::uint64_t minimum,
+    const std::uint64_t maximum) noexcept
+{
+    if (value.empty() || value.size() > 20U ||
+        !std::ranges::all_of(value, [](const char character) {
+            return character >= '0' && character <= '9';
+        })) return {};
+    std::uint64_t number{};
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), number);
+    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+        number < minimum || number > maximum) return {};
+    return number;
+}
+
+[[nodiscard]] std::optional<double> visibility_number(
+    const std::string_view value, const double minimum,
+    const double maximum) noexcept
+{
+    if (value.empty() || value.size() > 48U ||
+        !std::ranges::all_of(value, [](const char character) {
+            return (character >= '0' && character <= '9') ||
+                character == '-' || character == '+' || character == '.' ||
+                character == 'e' || character == 'E';
+        })) return {};
+    double number{};
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), number);
+    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+        !std::isfinite(number) || number < minimum || number > maximum) return {};
+    return number;
+}
+
+[[nodiscard]] std::optional<std::array<double, 3U>> visibility_vector(
+    std::string_view value, const double minimum, const double maximum) noexcept
+{
+    std::array<double, 3U> result{};
+    for (std::size_t index = 0U; index < result.size(); ++index) {
+        const auto separator = value.find(',');
+        const auto number = visibility_number(value.substr(0U, separator), minimum, maximum);
+        if (!number) return {};
+        result[index] = *number;
+        if (index + 1U == result.size()) {
+            if (separator != std::string_view::npos) return {};
+        } else {
+            if (separator == std::string_view::npos) return {};
+            value.remove_prefix(separator + 1U);
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] bool valid_visibility_row(const std::string_view line) noexcept
+{
+    constexpr std::array keys{
+        std::string_view{"generation"}, std::string_view{"source"},
+        std::string_view{"ordinal"}, std::string_view{"publication"},
+        std::string_view{"entity"}, std::string_view{"model"},
+        std::string_view{"stage"}, std::string_view{"game"},
+        std::string_view{"server-seconds"}, std::string_view{"distance"},
+        std::string_view{"effects"}, std::string_view{"render-mode"},
+        std::string_view{"camera"}, std::string_view{"target"},
+        std::string_view{"near"}, std::string_view{"bounds"},
+        std::string_view{"static-light"}};
+    // 16 * 768 plus the summary leaves room for primary-error evidence in the
+    // unchanged 16KiB excerpt. Oversized rows fail closed, never truncate.
+    const auto fields = fixed_visibility_fields(
+        line, "[remote-player-visibility] ", keys, 768U);
+    if (!fields) return false;
+    const auto& values = *fields;
+    constexpr auto u64_max = (std::numeric_limits<std::uint64_t>::max)();
+    constexpr auto u32_max = (std::numeric_limits<std::uint32_t>::max)();
+    constexpr double coordinate_max = (std::numeric_limits<float>::max)();
+    constexpr double number_max = (std::numeric_limits<double>::max)();
+    constexpr std::array stages{
+        std::string_view{"source_absent"}, std::string_view{"not_visual"},
+        std::string_view{"model_not_advertised"}, std::string_view{"server_hidden128"},
+        std::string_view{"unsupported_render_mode"}, std::string_view{"game_not_ready"},
+        std::string_view{"pose_unavailable"}, std::string_view{"frame_unavailable"},
+        std::string_view{"pvs_culled"}, std::string_view{"frustum_culled"},
+        std::string_view{"queued_visible"}, std::string_view{"queued_unlit"},
+        std::string_view{"queued_dim"}};
+    if (!visibility_unsigned(values[0U], 1U, u64_max) ||
+        !visibility_unsigned(values[1U], 0U, u64_max) ||
+        !visibility_unsigned(values[2U], 0U, (std::numeric_limits<std::size_t>::max)()) ||
+        !visibility_unsigned(values[3U], 0U, u64_max) ||
+        !visibility_unsigned(values[4U], 1U, 32U) ||
+        !visibility_unsigned(values[5U], 0U, 65'535U) ||
+        std::ranges::find(stages, values[6U]) == stages.end() ||
+        !visibility_unsigned(values[7U], 0U, 8U) ||
+        !visibility_unsigned(values[10U], 0U, u32_max) ||
+        !visibility_unsigned(values[11U], 0U, u32_max) ||
+        !visibility_vector(values[12U], -coordinate_max, coordinate_max) ||
+        !visibility_vector(values[13U], -coordinate_max, coordinate_max)) return false;
+    for (const auto index : {8U, 9U}) {
+        const auto number = visibility_number(values[index], -1.0, number_max);
+        if (!number || (*number < 0.0 && *number != -1.0)) return false;
+    }
+    const auto near_plane = visibility_number(values[14U], 0.0, coordinate_max);
+    if (!near_plane || *near_plane <= 0.0) return false;
+    if (values[15U] != "unavailable") {
+        const auto separator = values[15U].find(';');
+        if (separator == std::string_view::npos) return false;
+        const auto minimum = visibility_vector(values[15U].substr(0U, separator),
+            -coordinate_max, coordinate_max);
+        const auto maximum = visibility_vector(values[15U].substr(separator + 1U),
+            -coordinate_max, coordinate_max);
+        if (!minimum || !maximum) return false;
+        for (std::size_t index = 0U; index < minimum->size(); ++index)
+            if ((*minimum)[index] > (*maximum)[index]) return false;
+    }
+    return values[16U] == "fallback" || visibility_vector(values[16U], 0.0, 1.0).has_value();
+}
+
+[[nodiscard]] bool valid_visibility_summary(const std::string_view line) noexcept
+{
+    constexpr std::array keys{
+        std::string_view{"changes"}, std::string_view{"retained"},
+        std::string_view{"dropped"}, std::string_view{"evidence"}};
+    const auto fields = fixed_visibility_fields(
+        line, "[remote-player-visibility-summary] ", keys, 160U);
+    if (!fields) return false;
+    constexpr auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    const auto changes = visibility_unsigned((*fields)[0U], 0U, maximum);
+    const auto retained = visibility_unsigned((*fields)[1U], 0U, 16U);
+    const auto dropped = visibility_unsigned((*fields)[2U], 0U, maximum);
+    return changes && retained && dropped && *retained <= *changes &&
+        *dropped == *changes - *retained && (*fields)[3U] == "cpu-frame-only";
+}
+
+[[nodiscard]] bool valid_remote_effects_summary(const std::string_view line) noexcept
+{
+    constexpr std::array keys{
+        std::string_view{"received"}, std::string_view{"accepted"},
+        std::string_view{"unresolved"}, std::string_view{"unsupported"},
+        std::string_view{"local_echo"}, std::string_view{"late"},
+        std::string_view{"invalid"}, std::string_view{"fire"},
+        std::string_view{"swing"}, std::string_view{"audio_submitted"},
+        std::string_view{"audio_late"}, std::string_view{"audio_missing"},
+        std::string_view{"audio_rejected"}, std::string_view{"shells"},
+        std::string_view{"impact_hits"}, std::string_view{"flash_submissions"}};
+    const auto fields = fixed_visibility_fields(
+        line, "[remote-effects-summary] ", keys, 511U);
+    return fields && std::ranges::all_of(*fields, [](const auto value) {
+        return visibility_unsigned(value, 0U,
+            (std::numeric_limits<std::uint64_t>::max)()).has_value();
+    });
+}
+
+[[nodiscard]] bool contains_fixed_numeric_marker(const std::string_view line) noexcept
+{
+    return line.find("[remote-player-visibility") != std::string_view::npos ||
+        line.find("[remote-effects-summary") != std::string_view::npos;
+}
+
 [[nodiscard]] std::string functional_diagnostic_excerpt(
     const std::string_view bytes)
 {
@@ -2660,6 +3591,7 @@ observe_functional_client_log(const std::string_view bytes)
         if (line.starts_with(logger_prefix)) {
             line.remove_prefix(logger_prefix.size());
         }
+        if (line.ends_with('\r')) line.remove_suffix(1U);
         return line;
     };
     const auto high_priority_summary = [](const std::string_view line) {
@@ -2680,6 +3612,14 @@ observe_functional_client_log(const std::string_view bytes)
             line.starts_with("live_speed input=") ||
             line.starts_with("live_rx mode=") ||
             line.starts_with("live_prediction mode=") ||
+            line.starts_with("live_h4_phase ") ||
+            line.starts_with("live_h4_prediction ") ||
+            line.starts_with("live_weapon_presentation result=") ||
+            line.starts_with("live_viewmodel_camera result=") ||
+            line.starts_with("live_fire_reload result=") ||
+            line.starts_with("live_damage_respawn result=") ||
+            line.starts_with("live_weapon_prediction result=") ||
+            line.starts_with("live_application_outcome result=") ||
             line.starts_with("live_visual_control result=");
     };
     const auto append_summary = [&](const std::string_view line) {
@@ -2687,22 +3627,144 @@ observe_functional_client_log(const std::string_view bytes)
             0U, (std::min)(line.size(), maximum_line_bytes));
         if (emitted_lines >= maximum_lines ||
             output.size() + bounded.size() + 1U > maximum_output_bytes) {
-            return;
+            return false;
         }
         output.append(bounded);
         output.push_back('\n');
         ++emitted_lines;
+        return true;
     };
+    // Retain the newest bounded numeric journal BEFORE verbose terminal
+    // summaries. This applies equally to both client roles; it does not widen
+    // resource/native-log access or let malformed marker lookalikes through.
+    std::array<std::string_view, 16U> visibility_rows{};
+    std::size_t visibility_count = 0U;
+    std::string_view visibility_summary;
+    std::string_view remote_effects_summary;
+    std::size_t visibility_offset = 0U;
+    while (visibility_offset < bytes.size()) {
+        const auto newline = bytes.find('\n', visibility_offset);
+        const auto end = newline == std::string_view::npos ? bytes.size() : newline;
+        const auto line = summary_view(bytes.substr(visibility_offset, end - visibility_offset));
+        if (valid_remote_effects_summary(line)) remote_effects_summary = line;
+        else if (valid_visibility_summary(line)) visibility_summary = line;
+        else if (valid_visibility_row(line) &&
+            std::ranges::find(visibility_rows, line) == visibility_rows.end()) {
+            visibility_rows[visibility_count % visibility_rows.size()] = line;
+            ++visibility_count;
+        }
+        if (newline == std::string_view::npos) break;
+        visibility_offset = newline + 1U;
+    }
+    if (!remote_effects_summary.empty()) append_summary(remote_effects_summary);
+    if (!visibility_summary.empty()) append_summary(visibility_summary);
+    const auto first_visibility = visibility_count > visibility_rows.size()
+        ? visibility_count - visibility_rows.size() : 0U;
+    for (std::size_t index = first_visibility; index < visibility_count; ++index)
+        append_summary(visibility_rows[index % visibility_rows.size()]);
+    const auto safe_terminal_summary = [&](const std::string_view prefix,
+                                            const bool newest) {
+        std::string_view selected;
+        std::size_t offset = 0U;
+        while (offset < bytes.size()) {
+            const auto newline = bytes.find('\n', offset);
+            const auto end = newline == std::string_view::npos ? bytes.size() : newline;
+            const auto line = summary_view(bytes.substr(offset, end - offset));
+            if (line.starts_with(prefix) && !contains_fixed_numeric_marker(line)) {
+                selected = line;
+                if (!newest) break;
+            }
+            if (newline == std::string_view::npos) break;
+            offset = newline + 1U;
+        }
+        return selected;
+    };
+    // Primary application evidence precedes competing health/weapon/timing
+    // summaries. Preserve its bounded prefix even when the reserved journal
+    // leaves slightly less than 4KiB. Structured outcome JSON is independent.
+    bool application_summary_retained = false;
+    const auto retained_application_line = safe_terminal_summary(
+        "live_application_outcome result=", false);
+    if (!retained_application_line.empty()) {
+        const auto remaining = maximum_output_bytes - output.size();
+        if (remaining > 1U)
+            application_summary_retained = append_summary(retained_application_line.substr(
+                0U, (std::min)(retained_application_line.size(), remaining - 1U)));
+    }
+    // Only the fixed test-helper evidence grammar survives redaction. The run
+    // ID is wrapper-owned public metadata, not credentials/player data.
+    constexpr std::string_view health_marker{"[hlclient-test-health] run="};
+    constexpr std::array health_suffixes{
+        std::string_view{" requested_start_health=50 server_setup_applied=true max_health=100 max_health_source=server_entvars"},
+        std::string_view{" requested_start_health=50 server_setup_applied=identity_rejected max_health=unavailable max_health_source=unavailable"},
+        std::string_view{" requested_start_health=50 server_setup_applied=slot_rejected max_health=unavailable max_health_source=unavailable"},
+        std::string_view{" requested_start_health=50 server_setup_applied=ambiguous_identity max_health=unavailable max_health_source=unavailable"},
+        std::string_view{" requested_start_health=50 server_setup_applied=spawn_validation_failed max_health=unavailable max_health_source=unavailable"},
+        std::string_view{" requested_start_health=50 server_setup_applied=target_not_matched max_health=unavailable max_health_source=unavailable"},
+        std::string_view{" requested_start_health=50 server_setup_applied=connection_binding_missing max_health=unavailable max_health_source=unavailable"}};
+    for (std::size_t at = bytes.find(health_marker); at != std::string_view::npos;
+         at = bytes.find(health_marker, at + health_marker.size())) {
+        const auto id_at = at + health_marker.size();
+        if (id_at + 32U <= bytes.size()) {
+            const auto id = bytes.substr(id_at, 32U);
+            if (std::all_of(id.begin(), id.end(), [](char c) {
+                    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }) &&
+                id.size() == 32U) {
+                for (const auto suffix : health_suffixes) {
+                    const auto end = id_at + 32U + suffix.size();
+                    if (bytes.substr(id_at + 32U, suffix.size()) == suffix &&
+                        (end == bytes.size() || bytes[end] == '\r' || bytes[end] == '\n'))
+                        append_summary(bytes.substr(at, end-at));
+                }
+            }
+        }
+    }
+    constexpr std::string_view health_ready{"[test-start-health] requested_start_health=50 client_observed_health=50 source=fresh_clientdata result=ready"};
+    if (bytes.find(health_ready) != std::string_view::npos) append_summary(health_ready);
+    if (const auto reason=test_start_health_configuration_reason(bytes))
+        append_summary(std::string{"[hlclient-test-health-config] reason="}+std::string{*reason});
+    for (const auto marker : {
+            std::string_view{"[hlclient-test-health-stage] stage=attached"},
+            std::string_view{"[hlclient-test-health-stage] stage=server_activated configured=true"},
+            std::string_view{"[hlclient-test-health-stage] stage=server_activated configured=false"},
+            std::string_view{"[test-start-health] result=failed reason=fresh_server_50_not_observed client_observed_health=100"},
+            std::string_view{"[test-start-health] requested_start_health=50 client_observed_health=100 source=fresh_clientdata result=pending"},
+            std::string_view{"[test-start-health] result=failed reason=fresh_server_50_not_observed client_observed_health=unavailable"}}) {
+        if (bytes.find(marker) != std::string_view::npos) append_summary(marker);
+    }
+
+    // Only fixed numeric/status fields are emitted by this app marker. Keep
+    // the latest bounded observations so a server-confirmed switch can be
+    // inspected after exact restoration without retaining private raw logs.
+    std::array<std::string_view, 6U> recent_weapon_lines{};
+    std::size_t weapon_line_count = 0U;
+    std::size_t weapon_offset = 0U;
+    while (weapon_offset < bytes.size()) {
+        const auto newline = bytes.find('\n', weapon_offset);
+        const auto end = newline == std::string_view::npos
+            ? bytes.size() : newline;
+        const auto line = summary_view(bytes.substr(weapon_offset,
+            end - weapon_offset));
+        if (line.starts_with("live_weapon_observation generation=") &&
+            !contains_fixed_numeric_marker(line)) {
+            recent_weapon_lines[weapon_line_count % recent_weapon_lines.size()] = line;
+            ++weapon_line_count;
+        }
+        if (newline == std::string_view::npos) break;
+        weapon_offset = newline + 1U;
+    }
+    const auto first_weapon = weapon_line_count > recent_weapon_lines.size()
+        ? weapon_line_count - recent_weapon_lines.size() : 0U;
+    for (std::size_t index = first_weapon; index < weapon_line_count; ++index)
+        append_summary(recent_weapon_lines[index % recent_weapon_lines.size()]);
 
     // Terminal F timing/phase/framebuffer summaries must survive a large
     // number of earlier camera/TX observations. Select those bounded lines
     // first, independent of the logger's optional "[info] " prefix.
-    if (const auto prediction_at = bytes.rfind("live_prediction mode=");
-        prediction_at != std::string_view::npos) {
-        const auto end = bytes.find_first_of("\r\n", prediction_at);
-        append_summary(bytes.substr(prediction_at,
-            (end == std::string_view::npos ? bytes.size() : end) -
-                prediction_at));
+    for (const auto prefix : {"live_prediction mode=", "live_weapon_prediction result=",
+             "live_fire_reload result=", "live_damage_respawn result="}) {
+        const auto line = safe_terminal_summary(prefix, true);
+        if (!line.empty()) append_summary(line);
     }
     std::size_t priority_offset = 0U;
     while (priority_offset < bytes.size()) {
@@ -2712,7 +3774,13 @@ observe_functional_client_log(const std::string_view bytes)
         const auto line = bytes.substr(priority_offset, end - priority_offset);
         const auto summary_line = summary_view(line);
         if (high_priority_summary(summary_line) &&
-            !summary_line.starts_with("live_prediction mode=")) {
+            !contains_fixed_numeric_marker(summary_line) &&
+            !summary_line.starts_with("live_prediction mode=") &&
+            !summary_line.starts_with("live_damage_respawn result=") &&
+            !summary_line.starts_with("live_weapon_prediction result=") &&
+            !summary_line.starts_with("live_fire_reload result=") &&
+            !(application_summary_retained &&
+                summary_line == retained_application_line)) {
             append_summary(summary_line);
         }
         if (newline == std::string_view::npos) break;
@@ -2727,8 +3795,9 @@ observe_functional_client_log(const std::string_view bytes)
         const auto newline = bytes.find('\n', offset);
         const auto end = newline == std::string_view::npos
             ? bytes.size() : newline;
-        const auto line = bytes.substr(
-            offset, (std::min)(end - offset, maximum_line_bytes));
+        const auto original_line = bytes.substr(offset, end - offset);
+        const auto line = original_line.substr(
+            0U, (std::min)(original_line.size(), maximum_line_bytes));
         const auto summary_line = summary_view(line);
         const auto lower = ascii_lower(line);
         const bool camera_line =
@@ -2738,7 +3807,10 @@ observe_functional_client_log(const std::string_view bytes)
             !high_priority_summary(summary_line) &&
             ((camera_line && retained_camera_lines < 4U) ||
              (tx_line && retained_tx_lines < 4U));
-        if (safe_live_usercmd_summary) {
+        if (contains_fixed_numeric_marker(original_line)) {
+            // Valid rows were selected above; invalid/duplicate/oversized
+            // rows must not survive the broad error/connect redaction path.
+        } else if (safe_live_usercmd_summary) {
             append_summary(summary_line);
             if (camera_line) ++retained_camera_lines;
             if (tx_line) ++retained_tx_lines;
@@ -2746,7 +3818,7 @@ observe_functional_client_log(const std::string_view bytes)
                    contains_any(lower, {
                 "error", "failed", "unable", "reject", "disconnect",
                 "dropped", "kicked", "timeout", "connect", "entered the game",
-                "steam", "map", "server logging"})) {
+                "steam", "map", "server logging", "metamod", "plugin"})) {
             if (lower.find("auth") != std::string::npos ||
                 lower.find("ticket") != std::string::npos) {
                 output += "[authentication-related diagnostic redacted]\n";
@@ -2794,6 +3866,22 @@ observe_functional_client_log(const std::string_view bytes)
     const ActiveSummary& summary) noexcept
 {
     if (summary.project_live_visual_verified) {
+        if (summary.project_life.verified())
+            return "live_death_respawn_verified_damage_pending";
+        if (summary.project_weapon_prediction.verified())
+            return "live_client_predicted_weapon_presentation_verified";
+        if (summary.project_fire_reload_result ==
+            "live_primary_fire_reload_and_weapon_animation_verified")
+            return "live_primary_fire_reload_and_weapon_animation_verified";
+        if (summary.project_weapon_result ==
+            "live_viewmodel_weapon_selection_and_basic_hud_verified")
+            return "live_viewmodel_weapon_selection_and_basic_hud_verified";
+        if (summary.project_weapon_result ==
+            "live_viewmodel_hud_verified_selection_pending")
+            return "live_viewmodel_hud_verified_selection_pending";
+        if (summary.project_h4_result ==
+            "live_jump_duck_crouchwalk_prediction_verified")
+            return "live_jump_duck_crouchwalk_prediction_verified";
         if (summary.project_prediction_result ==
             "live_local_prediction_and_reconciliation_verified")
             return "live_local_prediction_and_reconciliation_verified";
@@ -2845,7 +3933,8 @@ observe_functional_client_log(const std::string_view bytes)
     const ActiveSummary& summary,
     const windows::BoundedProcessLogSnapshot& server_log,
     const windows::BoundedProcessLogSnapshot& client_log,
-    const windows::BoundedProcessLogSnapshot& guard_log)
+    const windows::BoundedProcessLogSnapshot& guard_log,
+    const std::optional<windows::BoundedProcessLogSnapshot>& peer_log)
 {
     std::error_code error;
     if (!fs::is_directory(options.run_root, error) || error) return false;
@@ -2864,7 +3953,16 @@ observe_functional_client_log(const std::string_view bytes)
     const bool logs_complete =
         windows::bounded_process_log_snapshot_complete(server_log) &&
         windows::bounded_process_log_snapshot_complete(client_log) &&
-        windows::bounded_process_log_snapshot_complete(guard_log);
+        windows::bounded_process_log_snapshot_complete(guard_log) &&
+        (!peer_log || windows::bounded_process_log_snapshot_complete(*peer_log));
+    const bool manual_timing = options.manual_no_time_limit || options.manual_duration_seconds;
+    const auto diagnostic_usable = [&](const windows::BoundedProcessLogSnapshot& log) {
+        return windows::bounded_process_log_snapshot_complete(log) ||
+            (manual_timing && windows::bounded_process_log_diagnostic_window_usable(log));
+    };
+    const bool diagnostic_windows_usable = diagnostic_usable(server_log) &&
+        diagnostic_usable(client_log) && diagnostic_usable(guard_log) &&
+        (!peer_log || diagnostic_usable(*peer_log));
     bool supporting_files_written = true;
     const auto write_supporting = [&](const std::wstring_view leaf,
                                       const std::string& bytes) {
@@ -2881,6 +3979,11 @@ observe_functional_client_log(const std::string_view bytes)
     write_supporting(L"server-metadata.json", log_metadata_json(server_log));
     write_supporting(L"client-metadata.json", log_metadata_json(client_log));
     write_supporting(L"guard-metadata.json", log_metadata_json(guard_log));
+    if (peer_log) {
+        write_supporting(L"peer-diagnostic-redacted.log",
+                         functional_diagnostic_excerpt(peer_log->bytes));
+        write_supporting(L"peer-metadata.json", log_metadata_json(*peer_log));
+    }
 
     const auto stage = [](const bool observed) {
         return observed ? "observed" : "unknown";
@@ -2908,6 +4011,11 @@ observe_functional_client_log(const std::string_view bytes)
         if (value) functional << *value;
         else functional << "null";
     };
+    const auto write_optional_bool = [&functional](
+        const std::optional<bool>& value) {
+        if (value) functional << (*value ? "true" : "false");
+        else functional << "null";
+    };
     functional
         << "{\n"
         << "  \"schema\": \"hlclient.local-research-copy-smoke.v2\",\n"
@@ -2926,7 +4034,11 @@ observe_functional_client_log(const std::string_view bytes)
             : project_mode ? "fresh_project_client_stock_signon"
                          : "functional_smoke") << "\",\n"
         << "  \"evidence_eligible\": "
-        << (project_mode ? "true" : "false") << ",\n"
+        << (project_mode && !options.test_start_health && !options.fast_manual && !options.remote_audio_peer && !manual_timing ? "true" : "false") << ",\n"
+        << "  \"validation_mode\": \"" << (options.fast_manual ? "fast" : "strict") << "\",\n"
+        << (options.test_start_health
+                ? "  \"server_environment_profile\": \"test-server-assisted\",\n"
+                : "")
         << "  \"route\": \"direct_loopback\",\n"
         << "  \"game\": \"valve\",\n"
         << "  \"map\": \"" << options.map << "\",\n"
@@ -2959,6 +4071,18 @@ observe_functional_client_log(const std::string_view bytes)
                                 ProjectClientLiveInput::scripted_speed_check
                             ? "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=scripted-speed-check;basedir=research-root;game=valve"
                       : options.project_client_live_input ==
+                                ProjectClientLiveInput::scripted_weapon_check
+                            ? "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=scripted-weapon-check;basedir=research-root;game=valve"
+                      : options.project_client_live_input ==
+                                ProjectClientLiveInput::scripted_damage_respawn_check
+                            ? "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=scripted-damage-respawn-check;basedir=research-root;game=valve"
+                      : options.project_client_live_input ==
+                                ProjectClientLiveInput::scripted_fire_reload_presentation_check
+                            ? "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=scripted-fire-reload-presentation-check;basedir=research-root;game=valve"
+                      : options.project_client_live_input ==
+                                ProjectClientLiveInput::scripted_fire_reload_check
+                            ? "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=scripted-fire-reload-check;basedir=research-root;game=valve"
+                      : options.project_client_live_input ==
                                 ProjectClientLiveInput::scripted_side_check
                             ? "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=scripted-side-check;basedir=research-root;game=valve"
                             : "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=scripted-check;basedir=research-root;game=valve"
@@ -2970,7 +4094,9 @@ observe_functional_client_log(const std::string_view bytes)
                 ? "renderer=null;auth-provider=steam;stop-after=delta-schemas"
                 : "stock-steam-windowed-connect")
         << (options.project_client_reference_prediction
-                ? ";prediction=reference" : "") << "\",\n"
+                ? ";prediction=reference" : "")
+        << (options.project_client_mute_glock_fire_sound
+                ? ";glock-fire-sound=muted" : "") << "\",\n"
         << "  \"server_process_created\": \""
         << stage(summary.functional_server_process_id != 0U) << "\",\n"
         << "  \"server_process_id\": "
@@ -2981,6 +4107,10 @@ observe_functional_client_log(const std::string_view bytes)
         << stage(summary.functional_client_process_created) << "\",\n"
         << "  \"client_process_id\": "
         << summary.functional_client_process_id << ",\n"
+        << "  \"remote_audio_peer_enabled\": " << (options.remote_audio_peer ? "true" : "false") << ",\n"
+        << "  \"remote_audio_peer_process_id\": " << summary.remote_audio_peer_process_id << ",\n"
+        << "  \"remote_audio_peer_runtime_published\": " << (summary.remote_audio_peer_entered ? "true" : "false") << ",\n"
+        << "  \"remote_audio_peer_exit_code\": " << (summary.remote_audio_peer_exit ? std::to_string(*summary.remote_audio_peer_exit) : "null") << ",\n"
         << "  \"image_identity_verified\": \""
         << result_stage(summary.functional_client_image_identity_verified,
                         summary.functional_client_process_created) << "\",\n"
@@ -3075,6 +4205,117 @@ observe_functional_client_log(const std::string_view bytes)
         << (summary.project_prediction_result
                 ? "\"" + *summary.project_prediction_result + "\""
                 : "null")
+        << ",\n  \"h4_result\": "
+        << (summary.project_h4_result
+                ? "\"" + *summary.project_h4_result + "\"" : "null")
+        << ",\n  \"weapon_result\": "
+        << (summary.project_weapon_result
+                ? "\"" + *summary.project_weapon_result + "\"" : "null")
+        << ",\n  \"fire_reload_result\": "
+        << (summary.project_fire_reload_result
+                ? "\"" + *summary.project_fire_reload_result + "\"" : "null")
+        << ",\n  \"server_confirmed_shots\": ";
+    write_optional_number(summary.project_server_confirmed_shots);
+    functional << ",\n  \"reload_completions\": ";
+    write_optional_number(summary.project_reload_completions);
+    functional << ",\n  \"application_outcome\": ";
+    write_application_evidence(functional, summary.project_application);
+    if (options.project_client_live_input == ProjectClientLiveInput::scripted_damage_respawn_check) {
+        functional << ",\n  \"damage_respawn\": {\n    \"result\": "
+            << (summary.project_life.result ? "\"" + *summary.project_life.result + "\""
+                : "\"damage_death_respawn_implemented_live_pending\"");
+        for (std::size_t i = 0; i < kLifeFlags.size(); ++i) {
+            functional << ",\n    \"" << kLifeFlags[i] << "\": ";
+            write_optional_bool(summary.project_life.flags[i]);
+        }
+        for (std::size_t i = 0; i < kLifeMetrics.size(); ++i)
+            functional << ",\n    \"" << kLifeMetrics[i] << "\": "
+                << (summary.project_life.metrics[i] ? "\"" + *summary.project_life.metrics[i] + "\"" : "null");
+        functional << "\n  }";
+    }
+    if (options.project_client_live_input == ProjectClientLiveInput::scripted_fire_reload_presentation_check) {
+        functional << ",\n  \"weapon_prediction\": {\n    \"result\": "
+            << (summary.project_weapon_prediction.result ? "\"" + *summary.project_weapon_prediction.result + "\"" : "null");
+        for (std::size_t i = 0U; i < kWeaponPredictionFlags.size(); ++i) {
+            functional << ",\n    \"" << kWeaponPredictionFlags[i] << "\": ";
+            write_optional_bool(summary.project_weapon_prediction.flags[i]);
+        }
+        functional << ",\n    \"crowbar_hit_status\": "
+            << (summary.project_weapon_prediction.hit_status ? "\"unavailable\"" : "null") << "\n  }";
+    }
+    functional << ",\n  \"weapon_selection_queued\": ";
+    write_optional_number(summary.project_weapon_selection_queued);
+    functional << ",\n  \"weapon_selection_confirmed\": ";
+    write_optional_number(summary.project_weapon_selection_confirmed);
+    functional << ",\n  \"viewmodel_pixels_distinct\": ";
+    write_optional_bool(summary.project_viewmodel_pixels_distinct);
+    functional << ",\n  \"hud_pixels_distinct\": ";
+    write_optional_bool(summary.project_hud_pixels_distinct);
+    functional << ",\n  \"viewmodel_camera_result\": "
+        << (summary.project_viewmodel_camera_result
+                ? "\"" + *summary.project_viewmodel_camera_result + "\""
+                : "null");
+    functional << ",\n  \"viewmodel_camera_pixels_valid\": ";
+    write_optional_bool(summary.project_viewmodel_camera_pixels_valid);
+    functional << ",\n  \"viewmodel_camera_pixel_count\": ";
+    write_optional_number(summary.project_viewmodel_camera_pixel_count);
+    functional
+        << ",\n  \"h4_phases\": [";
+    for (std::size_t index = 0U; index < 5U; ++index) {
+        if (index != 0U) functional << ',';
+        functional << "{\"active_frames\":";
+        write_optional_number(summary.project_h4_active_frames[index]);
+        functional << ",\"fallback_frames\":";
+        write_optional_number(summary.project_h4_fallback_frames[index]);
+        functional << ",\"local_steps\":";
+        write_optional_number(summary.project_h4_local_steps[index]);
+        functional << ",\"corrections\":";
+        write_optional_number(summary.project_h4_corrections[index]);
+        functional << '}';
+    }
+    functional << ']'
+        << ",\n  \"prediction_presentation\": {\n"
+        << "    \"interpolated_frames\": "
+        << (summary.project_prediction_interpolated_frames
+                ? std::to_string(*summary.project_prediction_interpolated_frames) : "null")
+        << ",\n    \"endpoint_frames\": "
+        << (summary.project_prediction_endpoint_frames
+                ? std::to_string(*summary.project_prediction_endpoint_frames) : "null")
+        << ",\n    \"collision_blocked_frames\": "
+        << (summary.project_prediction_collision_blocked_frames
+                ? std::to_string(*summary.project_prediction_collision_blocked_frames) : "null")
+        << ",\n    \"visual_correction_frames\": "
+        << (summary.project_prediction_visual_correction_frames
+                ? std::to_string(*summary.project_prediction_visual_correction_frames) : "null")
+        << ",\n    \"trace_queries\": "
+        << (summary.project_prediction_trace_queries
+                ? std::to_string(*summary.project_prediction_trace_queries) : "null")
+        << ",\n    \"scratch_growths\": "
+        << (summary.project_prediction_scratch_growths
+                ? std::to_string(*summary.project_prediction_scratch_growths) : "null")
+        << ",\n    \"long_stall_frames\": "
+        << (summary.project_prediction_long_stall_frames
+                ? std::to_string(*summary.project_prediction_long_stall_frames) : "null")
+        << ",\n    \"active_time_ms\": "
+        << (summary.project_prediction_active_time_ms
+                ? std::to_string(*summary.project_prediction_active_time_ms) : "null")
+        << ",\n    \"fallback_time_ms\": "
+        << (summary.project_prediction_fallback_time_ms
+                ? std::to_string(*summary.project_prediction_fallback_time_ms) : "null")
+        << ",\n    \"cpu_total_ms\": "
+        << (summary.project_prediction_cpu_total_ms
+                ? std::to_string(*summary.project_prediction_cpu_total_ms) : "null")
+        << ",\n    \"cpu_max_ms\": "
+        << (summary.project_prediction_cpu_max_ms
+                ? std::to_string(*summary.project_prediction_cpu_max_ms) : "null")
+        << ",\n    \"maximum_camera_correction_jump\": "
+        << (summary.project_prediction_maximum_camera_jump
+                ? std::to_string(*summary.project_prediction_maximum_camera_jump) : "null")
+        << ",\n    \"correction_pair_window\": "
+        << (summary.project_prediction_correction_pair_window
+                ? "\"" + *summary.project_prediction_correction_pair_window + "\""
+                : "null")
+        << "\n  }"
         << ",\n  \"jump_observed\": "
         << (summary.project_jump_observed
                 ? (*summary.project_jump_observed ? "true" : "false")
@@ -3381,6 +4622,9 @@ observe_functional_client_log(const std::string_view bytes)
         << (summary.cleanup_exact ? "exact" : "incomplete") << "\",\n"
         << "  \"bounded_log_capture\": \""
         << (logs_complete ? "complete" : "incomplete") << "\",\n"
+        << "  \"diagnostic_window_status\": \"" << (diagnostic_windows_usable ? "ready" : "incomplete") << "\",\n"
+        << "  \"game_time_limit_mode\": \"" << (options.manual_no_time_limit ? "unlimited" : options.manual_duration_seconds ? "timed" : "legacy") << "\",\n"
+        << "  \"game_duration_seconds\": " << (options.manual_duration_seconds ? std::to_string(*options.manual_duration_seconds) : "null") << ",\n"
         << "  \"supporting_diagnostics\": \""
         << (supporting_files_written ? "complete" : "incomplete") << "\",\n"
         << "  \"restoration_status\": \"wrapper_pending\",\n"
@@ -3389,7 +4633,7 @@ observe_functional_client_log(const std::string_view bytes)
     const bool summary_written = write_bounded_file(
         *run_output.directory, L"functional-smoke.staged.json",
         functional.str(), 128U * 1'024U);
-    return summary_written && supporting_files_written && logs_complete;
+    return summary_written && supporting_files_written && diagnostic_windows_usable;
 }
 
 class OwnedJobExitBarrier final {
@@ -3533,12 +4777,28 @@ private:
     std::optional<windows::OwnedJobCleanupResult> guard_exit_barrier_result;
     auto guard_log = windows::BoundedProcessLogCapture::create(
         {64U * 1'024U, 1'024U, 1'024U});
+    windows::BoundedProcessLogLimits manual_log_limits;
+    if (options.manual_no_time_limit || options.manual_duration_seconds) {
+        manual_log_limits.retained_prefix_bytes = 64U * 1'024U;
+        manual_log_limits.maximum_line_length = 16U * 1'024U;
+    }
     auto functional_server_log = options.functional_smoke
-        ? windows::BoundedProcessLogCapture::create({})
+        ? windows::BoundedProcessLogCapture::create(manual_log_limits)
         : std::optional<windows::BoundedProcessLogCapture>{};
     auto functional_client_log = options.functional_smoke
-        ? windows::BoundedProcessLogCapture::create({})
+        ? windows::BoundedProcessLogCapture::create(manual_log_limits)
         : std::optional<windows::BoundedProcessLogCapture>{};
+    auto peer_log=options.remote_audio_peer ? windows::BoundedProcessLogCapture::create(manual_log_limits) : std::optional<windows::BoundedProcessLogCapture>{};
+    // Retain the exact launched peer handle through every execute_owned early
+    // return. Final diagnostics sample it only after owned Job cleanup.
+    windows::OwnedProcess peer;
+    bool cleanup_phase_reported = false;
+    const auto begin_manual_cleanup = [&]() {
+        if (!cleanup_phase_reported) {
+            manual_phase(options, "owned-cleanup-started");
+            cleanup_phase_reported = true;
+        }
+    };
     // This outer-scope owner outlives every lambda-local exit barrier and the
     // final retry boundary below. It cannot be destroyed by an early return
     // while either owned Job still lacks exact zero-process accounting.
@@ -3765,6 +5025,19 @@ private:
             std::to_wstring(options.server_port), L"+ip", L"127.0.0.1",
             L"+log", L"on", L"+map", to_wide_ascii(options.map),
             L"+maxplayers", L"8", L"+sv_lan", L"1", L"+status"};
+        std::wstring test_player_name;
+        if (options.test_start_health) {
+            const auto launch = test_start_health_launch(options.run_root, options.fast_manual);
+            if (!launch) {
+                summary.failure = "test-start-health-run-identity-invalid";
+                finalize_duration(); return summary;
+            }
+            if (!test_start_health_server_arguments(server_spec.arguments, *launch)) {
+                summary.failure = "test-start-health-server-arguments-invalid";
+                finalize_duration(); return summary;
+            }
+            test_player_name = launch->player_name;
+        }
         if (!exact_process_snapshot_matches(
                 environment.client, std::span<const std::uint32_t>{},
                 summary.failure) ||
@@ -3774,6 +5047,7 @@ private:
             finalize_duration();
             return summary;
         }
+        manual_phase(options, "server-startup");
         auto [server, server_result] = campaign_job.launch(server_spec);
         if (!server_result) {
             summary.failure = "server-" +
@@ -3837,8 +5111,26 @@ private:
             return summary;
         }
 
+        manual_phase(options, "server-ready");
         const auto server_log_offset_before_client_launch =
             server_log->snapshot().bytes.size();
+        if (options.test_start_health) {
+            // Readiness can race the pipe reader by a few milliseconds.
+            const auto helper_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+            while (std::chrono::steady_clock::now() < helper_deadline &&
+                   server.running() && guard.running() &&
+                   !test_start_health_server_ready(server_log->snapshot().bytes))
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            if (!test_start_health_server_ready(server_log->snapshot().bytes)) {
+                summary.failure = "test-start-health-helper-startup-not-confirmed";
+                if (const auto reason=test_start_health_configuration_reason(server_log->snapshot().bytes);
+                    reason && *reason!="ready") summary.failure+="-"+std::string{*reason};
+                campaign_job.terminate(120U);
+                finalize_duration();
+                return summary;
+            }
+        }
+        manual_phase(options, "client-startup");
         windows::OwnedProcessLaunchSpec client_spec;
         client_spec.executable = environment.client.canonical_path;
         client_spec.working_directory = options.project_client_stock_signon
@@ -3869,7 +5161,10 @@ private:
                 options.steam_api_runtime.wstring(), L"--net-trace", L"--name",
                  options.project_client_stop ==
                          ProjectClientStop::live_visual_control
-                     ? options.project_client_reference_prediction
+                     ? options.project_client_live_input ==
+                               ProjectClientLiveInput::scripted_weapon_check
+                           ? L"HLC_M473A"
+                     : options.project_client_reference_prediction
                            ? L"HLC_M472H2"
                        : options.project_client_live_input ==
                                ProjectClientLiveInput::scripted_jump_duck_check
@@ -3887,6 +5182,8 @@ private:
                 if (options.project_client_reference_prediction)
                     client_spec.arguments.insert(client_spec.arguments.end(),
                         {L"--prediction", L"reference"});
+                if (options.project_client_mute_glock_fire_sound)
+                    client_spec.arguments.push_back(L"--mute-glock-fire-sound");
                 client_spec.arguments.insert(
                     client_spec.arguments.end(),
                     {L"--live-input",
@@ -3899,6 +5196,18 @@ private:
                          : options.project_client_live_input ==
                                    ProjectClientLiveInput::scripted_speed_check
                                ? L"scripted-speed-check"
+                         : options.project_client_live_input ==
+                                   ProjectClientLiveInput::scripted_weapon_check
+                               ? L"scripted-weapon-check"
+                         : options.project_client_live_input ==
+                                   ProjectClientLiveInput::scripted_damage_respawn_check
+                               ? L"scripted-damage-respawn-check"
+                         : options.project_client_live_input ==
+                                   ProjectClientLiveInput::scripted_fire_reload_presentation_check
+                               ? L"scripted-fire-reload-presentation-check"
+                         : options.project_client_live_input ==
+                                   ProjectClientLiveInput::scripted_fire_reload_check
+                               ? L"scripted-fire-reload-check"
                          : options.project_client_live_input ==
                                    ProjectClientLiveInput::scripted_side_check
                                ? L"scripted-side-check"
@@ -3913,10 +5222,14 @@ private:
                                 ? options.maximum_duration_seconds - 10U
                                 : 1U,
                             45U);
-                    client_spec.arguments.insert(
-                        client_spec.arguments.end(),
-                        {L"--live-session-seconds",
-                         std::to_wstring(client_duration)});
+                    if (options.manual_no_time_limit) {
+                        client_spec.arguments.push_back(L"--live-session-unlimited");
+                    } else {
+                        client_spec.arguments.insert(
+                            client_spec.arguments.end(),
+                            {L"--live-session-seconds",
+                             std::to_wstring(options.manual_duration_seconds.value_or(client_duration))});
+                    }
                 }
             }
         } else {
@@ -3924,6 +5237,18 @@ private:
                 L"-steam", L"-game", L"valve", L"-windowed", L"-w", L"800",
                 L"-h", L"600", L"+name", L"HLC_SMOKE", L"+connect",
                 L"127.0.0.1:" + std::to_wstring(options.server_port), L"-nojoy"};
+        }
+        if (options.test_start_health) {
+            if (!test_start_health_client_arguments(client_spec.arguments, test_player_name)) {
+                summary.failure = "test-start-health-client-name-missing";
+                finalize_duration(); return summary;
+            }
+        }
+        std::optional<hlclient::core::RemoteAudioPeerPlan> peer_plan;
+        if(options.remote_audio_peer) {
+            peer_plan=hlclient::core::remote_audio_peer_plan(client_spec.arguments);
+            if(!peer_plan || !peer_log) {summary.failure="remote-audio-peer-plan-or-log-failed"; finalize_duration(); return summary;}
+            client_spec.arguments=peer_plan->listener;
         }
         auto [client, client_result] = campaign_job.launch(client_spec);
         summary.functional_client_process_created =
@@ -3942,6 +5267,20 @@ private:
             return summary;
         }
         ++summary.processes_started;
+        if(peer_plan) {
+            auto peer_spec=client_spec;
+            peer_spec.arguments=peer_plan->mover;
+            peer_spec.stdout_handle=peer_log->inherited_write_handle();
+            peer_spec.stderr_handle=peer_log->inherited_write_handle();
+            auto launched=campaign_job.launch(peer_spec);
+            peer=std::move(launched.first);
+            summary.remote_audio_peer_process_id=launched.second.process_id;
+            peer_log->close_parent_write_handle();
+            if(!launched.second) {summary.failure="remote-audio-peer-launch-failed"; campaign_job.terminate(120U); finalize_duration(); return summary;}
+            ++summary.processes_started;
+            const std::array<std::uint32_t,2> expected{client.process_id(),peer.process_id()};
+            if(!exact_process_snapshot_matches(environment.client,expected,summary.failure)) {campaign_job.terminate(120U); finalize_duration(); return summary;}
+        }
         summary.functional_connect_requested =
             !options.project_client_stock_signon;
         const std::array<std::uint32_t, 1U> expected_client{
@@ -3956,9 +5295,19 @@ private:
             return summary;
         }
 
-        const auto client_deadline = std::chrono::steady_clock::now() +
+        bool runtime_phase_reported = false;
+        const auto client_wait_started = std::chrono::steady_clock::now();
+        const auto client_deadline = client_wait_started +
             std::chrono::seconds{options.project_client_stock_signon ? 60 : 30};
-        while (std::chrono::steady_clock::now() < client_deadline &&
+        const bool manual_timing = options.manual_no_time_limit || options.manual_duration_seconds;
+        const auto client_wait_allowed = [&]() {
+            if (!manual_timing) return std::chrono::steady_clock::now() < client_deadline;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - client_wait_started).count();
+            return !hlclient::core::manual_client_wait_expired(
+                static_cast<std::uint64_t>(elapsed), runtime_phase_reported, options.manual_duration_seconds);
+        };
+        while (client_wait_allowed() &&
                client.running() && server.running() && guard.running()) {
             const auto server_snapshot = server_log->snapshot();
             const auto client_snapshot = client_log->snapshot();
@@ -3992,6 +5341,10 @@ private:
                 : ProjectClientSignonObservation{};
             if (options.project_client_stock_signon) {
                 apply_project_client_observation(summary, project_client);
+                if (summary.project_live_service_payloads_received && !runtime_phase_reported) {
+                    manual_phase(options, "runtime-observed");
+                    runtime_phase_reported = true;
+                }
             }
             if ((options.project_client_stock_signon &&
                  project_client.complete(options.project_client_stop,
@@ -4006,6 +5359,7 @@ private:
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{50});
         }
+        begin_manual_cleanup();
         if (options.project_client_stock_signon) {
             std::optional<std::uint32_t> observed_exit;
             if (!client.running()) {
@@ -4161,6 +5515,13 @@ private:
         if (!options.project_client_stock_signon) {
             client.terminate(0U);
             summary.client_exit_code = client.wait(std::chrono::seconds{5});
+        }
+        if(options.remote_audio_peer) {
+            if(peer.running()) peer.terminate(0U);
+            summary.remote_audio_peer_exit=peer.wait(std::chrono::seconds{5});
+            if(!summary.remote_audio_peer_exit || *summary.remote_audio_peer_exit!=0U) {
+                summary.failure="remote-audio-peer-finalization-failed"; finalize_duration(); return summary;
+            }
         }
         server.terminate(0U);
         summary.server_exit_code = server.wait(std::chrono::seconds{5});
@@ -5453,6 +6814,7 @@ private:
         summary.failure = "orchestrator-exception";
         finalize_duration();
     }
+    begin_manual_cleanup();
     if (options.writer_trace_stock_stopped_handle != INVALID_HANDLE_VALUE &&
         ::WaitForSingleObject(
             options.writer_trace_stock_stopped_handle, 0U) == WAIT_OBJECT_0) {
@@ -5516,6 +6878,29 @@ private:
                 : windows::OwnedJobCleanupErrorCode::timeout)};
     }
     if (options.functional_smoke) {
+        std::optional<windows::BoundedProcessLogSnapshot> peer_snapshot;
+        if (options.remote_audio_peer &&
+            summary.remote_audio_peer_process_id != 0U) {
+            if (summary.cleanup_exact && !summary.remote_audio_peer_exit &&
+                peer.valid()) {
+                // The Job already proved zero children; this is observation,
+                // not another termination or a different outcome decision.
+                summary.remote_audio_peer_exit =
+                    peer.wait(std::chrono::milliseconds{100});
+            }
+            if (peer_log) {
+                peer_snapshot = peer_log->finish();
+                apply_remote_audio_peer_observation(summary, *peer_snapshot);
+            } else {
+                peer_snapshot.emplace();
+                peer_snapshot->capture_failed = true;
+                peer_snapshot->native_error = ERROR_NOT_ENOUGH_MEMORY;
+            }
+        } else if (peer_log) {
+            // No peer inherited the writer; close it without publishing an
+            // empty log as evidence of a launched client.
+            (void)peer_log->finish();
+        }
         windows::BoundedProcessLogSnapshot server_snapshot;
         windows::BoundedProcessLogSnapshot client_snapshot;
         windows::BoundedProcessLogSnapshot guard_snapshot;
@@ -5538,7 +6923,8 @@ private:
             guard_snapshot.native_error = ERROR_NOT_ENOUGH_MEMORY;
         }
         summary.functional_diagnostic_published = write_functional_diagnostics(
-            options, summary, server_snapshot, client_snapshot, guard_snapshot);
+            options, summary, server_snapshot, client_snapshot, guard_snapshot,
+            peer_snapshot);
         if (!summary.functional_diagnostic_published && summary.success) {
             summary.success = false;
             summary.failure = "functional-diagnostic-publication-incomplete";
@@ -6071,6 +7457,15 @@ void print_key_value(const std::string_view key, const std::string_view value)
     std::cout << kPrefix << key << '=' << value << '\n';
 }
 
+void print_application_evidence(const ApplicationEvidence& values) {
+    for (std::size_t i = 0U; i < values.size(); ++i) {
+        std::string key{"application-"};
+        key += kApplicationMetrics[i];
+        std::replace(key.begin(), key.end(), '_', '-');
+        print_key_value(key, values[i].value_or("unavailable"));
+    }
+}
+
 } // namespace
 
 int wmain(const int argc, wchar_t** argv)
@@ -6094,6 +7489,244 @@ int wmain(const int argc, wchar_t** argv)
                       "server-profile-diagnostic|server-profile-private-diagnostic> "
                       "<active options>\n";
         return 2;
+    }
+    if (options->validate_remote_audio_peer_contract) {
+        const std::vector<std::wstring> args{L"--renderer",L"opengl",L"--connect",L"127.0.0.1:27243",
+            L"--stop-after",L"live-visual-control",L"--live-input",L"keyboard-mouse",L"--game",L"valve",
+            L"--name",L"fixture",L"--auth-provider",L"steam",L"--steam-api-runtime",L"D:/fixture/steam_api.dll",
+            L"--basedir",L"D:/fixture",L"--live-session-seconds",L"45"};
+        const auto plan=hlclient::core::remote_audio_peer_plan(args);
+        bool ok=plan.has_value();
+        if (plan) for (const auto& client : {plan->listener, plan->mover}) {
+            ok = ok && client.size() == args.size() &&
+                std::find(client.begin(), client.end(), L"--audio-on-focus-loss") == client.end() &&
+                std::find(client.begin(), client.end(), L"--audio-volume") == client.end();
+        }
+        auto unlimited_args = args;
+        unlimited_args.resize(unlimited_args.size() - 2U);
+        unlimited_args.push_back(L"--live-session-unlimited");
+        ok = ok && hlclient::core::remote_audio_peer_plan(unlimited_args).has_value();
+        std::vector<std::wstring> timing_fixture{L"fixture", L"--functional-smoke", L"--project-client-stock-signon",
+            L"--functional-confirmation-token", std::wstring{kFunctionalSmokeToken},
+            L"--research-root",L"D:/fixture/research",L"--client",L"D:/fixture/hlclient.exe",
+            L"--server",L"D:/fixture/hlds.exe",L"--relay",L"D:/fixture/relay.exe",
+            L"--isolation-guard",L"D:/fixture/guard.exe",L"--app-manifest",L"D:/fixture/appmanifest_70.acf",
+            L"--steam-api-runtime",L"D:/fixture/api.dll",L"--game",L"valve",L"--map",L"crossfire",
+            L"--run-root",L"D:/fixture/run",L"--relay-port",L"27242",L"--server-port",L"27243",
+            L"--server-profile-id",L"steam-hlds-10210-no-mode-banner-v1",
+            L"--project-client-stop",L"live-visual-control",L"--project-client-live-input",L"keyboard-mouse",
+            L"--validation-mode",L"fast", L"--manual-duration-seconds", L"300"};
+        const auto parse_timing = [&]() {
+            std::vector<wchar_t*> pointers;
+            for (auto& part : timing_fixture) pointers.push_back(part.data());
+            return parse_options(static_cast<int>(pointers.size()), pointers.data());
+        };
+        for (const auto seconds : {L"1", L"45", L"300", L"86400"}) {
+            timing_fixture.back() = seconds;
+            const auto timing = parse_timing();
+            ok = ok && timing && timing->manual_duration_seconds && !timing->manual_no_time_limit;
+        }
+        for (const auto seconds : {L"0", L"-1", L"86401", L"999999999999999999999", L"1.5"}) {
+            timing_fixture.back() = seconds; ok = ok && !parse_timing();
+        }
+        timing_fixture.back() = L"300";
+        timing_fixture.push_back(L"--manual-no-time-limit"); ok = ok && !parse_timing();
+        timing_fixture.erase(timing_fixture.end() - 3, timing_fixture.end() - 1);
+        auto unlimited_timing = parse_timing();
+        ok = ok && unlimited_timing && unlimited_timing->manual_no_time_limit && !unlimited_timing->manual_duration_seconds;
+        const auto input_at = std::find(timing_fixture.begin(), timing_fixture.end(), L"--project-client-live-input");
+        *std::next(input_at) = L"scripted-damage-respawn-check"; ok = ok && !parse_timing();
+        *std::next(input_at) = L"keyboard-mouse";
+        const auto validation_at = std::find(timing_fixture.begin(), timing_fixture.end(), L"--validation-mode");
+        timing_fixture.erase(validation_at, std::next(validation_at, 2)); ok = ok && !parse_timing();
+        ActiveSummary failed_listener;
+        failed_listener.failure = "project-client-nonzero-exit";
+        failed_listener.client_exit_code = 2U;
+        windows::BoundedProcessLogSnapshot peer_fixture;
+        peer_fixture.bytes =
+            "connection_accepted=true client_world_state_published=true\n"
+            "live_application_outcome result=error primary_error=runtime_record_failed "
+            "runtime_error=decoder_failed parser_error=unsupported_opcode opcode=3\n"
+            "L fixture: \"private-player\" connected, address \"private-address\"\n";
+        apply_remote_audio_peer_observation(failed_listener, peer_fixture);
+        const auto peer_excerpt = functional_diagnostic_excerpt(peer_fixture.bytes);
+        ok = ok && failed_listener.remote_audio_peer_entered &&
+            failed_listener.failure == "project-client-nonzero-exit" &&
+            failed_listener.client_exit_code == 2U &&
+            peer_excerpt.find("primary_error=runtime_record_failed") != std::string::npos &&
+            peer_excerpt.find("private-player") == std::string::npos &&
+            peer_excerpt.find("private-address") == std::string::npos;
+        windows::BoundedProcessLogSnapshot no_peer_evidence;
+        ActiveSummary unobserved_peer;
+        apply_remote_audio_peer_observation(unobserved_peer, no_peer_evidence);
+        ok = ok && !unobserved_peer.remote_audio_peer_entered;
+        print_key_value("remote-audio-peer-contract",ok ? "passed" : "failed");
+        print_key_value("process-launches","0");
+        return ok ? 0 : 2;
+    }
+    if (options->validate_test_start_health_contract) {
+        std::vector<std::wstring> fixture{L"fixture", L"--functional-smoke", L"--project-client-stock-signon",
+            L"--functional-confirmation-token", std::wstring{kFunctionalSmokeToken},
+            L"--research-root",L"D:/fixture/research",L"--client",L"D:/fixture/hlclient.exe",
+            L"--server",L"D:/fixture/hlds.exe",L"--relay",L"D:/fixture/relay.exe",
+            L"--isolation-guard",L"D:/fixture/guard.exe",L"--app-manifest",L"D:/fixture/appmanifest_70.acf",
+            L"--steam-api-runtime",L"D:/fixture/steam_api.dll",L"--game",L"valve",L"--map",L"crossfire",
+            L"--run-root",L"D:/fixture/0123456789abcdef0123456789abcdef",L"--relay-port",L"27242",
+            L"--server-port",L"27243",L"--server-profile-id",L"steam-hlds-10210-no-mode-banner-v1",
+            L"--project-client-stop",L"live-visual-control",L"--project-client-live-input",L"keyboard-mouse",
+            L"--project-client-prediction",L"reference",L"--test-start-health",L"50"};
+        const auto parse_fixture=[&]() {
+            std::vector<wchar_t*> pointers; for(auto& part:fixture) pointers.push_back(part.data());
+            return parse_options(static_cast<int>(pointers.size()),pointers.data());
+        };
+        const auto parsed_fixture=parse_fixture();
+        bool parser_good=parsed_fixture && parsed_fixture->test_start_health;
+        const auto change=[&](std::wstring_view flag,std::wstring replacement) {
+            const auto at=std::find(fixture.begin(),fixture.end(),flag); *(at+1)=std::move(replacement);
+        };
+        change(L"--test-start-health",L"100"); parser_good=parser_good && !parse_fixture();
+        change(L"--test-start-health",L"50"); change(L"--map",L"boot_camp"); parser_good=parser_good && !parse_fixture();
+        change(L"--map",L"crossfire"); change(L"--project-client-prediction",L"off"); parser_good=parser_good && !parse_fixture();
+        change(L"--project-client-prediction",L"reference"); change(L"--project-client-live-input",L"scripted-damage-respawn-check"); parser_good=parser_good && !parse_fixture();
+        const auto launch=test_start_health_launch(fs::path{L"D:/fixture/0123456789abcdef0123456789abcdef"});
+        change(L"--project-client-live-input",L"keyboard-mouse");
+        fixture.insert(fixture.end(), {L"--validation-mode", L"fast"});
+        const auto fast_options = parse_fixture();
+        parser_good = parser_good && fast_options && fast_options->fast_manual;
+        fixture.push_back(L"--project-client-mute-glock-fire-sound");
+        const auto muted_options = parse_fixture();
+        parser_good = parser_good && muted_options &&
+            muted_options->project_client_mute_glock_fire_sound;
+        fixture.push_back(L"--project-client-mute-glock-fire-sound");
+        parser_good = parser_good && !parse_fixture();
+        fixture.pop_back();
+        change(L"--project-client-live-input",L"scripted-fire-reload-check");
+        parser_good = parser_good && !parse_fixture();
+        change(L"--project-client-live-input",L"keyboard-mouse");
+        fixture.pop_back();
+        change(L"--validation-mode",L"strict");
+        const auto strict_options = parse_fixture();
+        parser_good = parser_good && strict_options && !strict_options->fast_manual;
+        change(L"--validation-mode",L"unknown");
+        parser_good = parser_good && !parse_fixture();
+        const fs::path prepared_metamod_fixture{
+            L"D:/DEV/CPP/HLC-steamcfg-5e48b7c1/build/test-start-health-deps/addons/metamod/dlls/metamod.dll"};
+        const auto prepared_launch=test_start_health_launch(
+            fs::path{L"D:/fixture/0123456789abcdef0123456789abcdef"},true);
+        parser_good = parser_good && prepared_launch && prepared_launch->player_name==launch->player_name &&
+            prepared_launch->server_arguments==std::vector<std::wstring>{
+                L"+localinfo",L"hlc_test_run",L"0123456789abcdef0123456789abcdef",
+                L"+localinfo",L"hlc_test_profile",L"test_server_assisted"} &&
+            !test_start_health_launch(fs::path{L"D:/fixture/../bad"},true);
+        bool good=parser_good && launch && launch->player_name==L"HLC50_0123456789abcdef01234567" &&
+            launch->server_arguments.size()==11U &&
+            launch->server_arguments[0]==L"-dll" &&
+            launch->server_arguments[1]==L"addons/hlclient_test50/0123456789abcdef0123456789abcdef/metamod.dll" &&
+            launch->server_arguments[4]==L"addons/hlclient_test50/0123456789abcdef0123456789abcdef/config.ini" &&
+            !test_start_health_launch(fs::path{L"D:/fixture/../bad"});
+        std::vector<std::wstring> args{L"--name",L"old",L"--prediction",L"reference"};
+        good=good && test_start_health_client_arguments(args,launch->player_name) &&
+            args[1]==launch->player_name && args[4]==L"--test-start-health" && args[5]==L"50";
+        std::vector<std::wstring> missing{L"--name"};
+        good=good && !test_start_health_client_arguments(missing,L"test");
+        std::vector<std::wstring> server_args{L"-console",L"-game",L"valve",L"+map",L"crossfire",L"+status"};
+        good=good && test_start_health_server_arguments(server_args,*launch) &&
+            server_args==std::vector<std::wstring>{L"-console",L"-game",L"valve",
+                L"-dll",L"addons/hlclient_test50/0123456789abcdef0123456789abcdef/metamod.dll",
+                L"+localinfo",L"mm_configfile",L"addons/hlclient_test50/0123456789abcdef0123456789abcdef/config.ini",
+                L"+localinfo",L"hlc_test_run",L"0123456789abcdef0123456789abcdef",
+                L"+localinfo",L"hlc_test_profile",L"test_server_assisted",
+                L"+map",L"crossfire",L"+meta",L"require",L"HLC50",L"+status"};
+        std::vector<std::wstring> bad_server{L"+map",L"crossfire"};
+        good=good && !test_start_health_server_arguments(bad_server,*launch) && bad_server.size()==2U;
+        // Independent compatibility model of the installed stock stuffcmds:
+        // delimiters are characters, even inside an argument. Do not use a
+        // modern token-based engine parser to validate this launch contract.
+        const auto stock_startup_commands=[](const std::vector<std::wstring>& arguments) {
+            std::wstring text;
+            for (const auto& argument:arguments) { text+=argument; text+=L' '; }
+            std::vector<std::wstring> commands;
+            for (auto at=text.find(L'+'); at!=std::wstring::npos;) {
+                const auto end=text.find_first_of(L"+-",at+1U);
+                auto command=text.substr(at+1U,end==std::wstring::npos ? end : end-at-1U);
+                while (!command.empty() && command.back()==L' ') command.pop_back();
+                commands.push_back(std::move(command));
+                at=end==std::wstring::npos ? end : text.find(L'+',end);
+            }
+            return commands;
+        };
+        good=good && stock_startup_commands({L"+localinfo",L"hlc_test_profile",L"test-server-assisted",
+                L"+map",L"crossfire"})==std::vector<std::wstring>{L"localinfo hlc_test_profile test",L"map crossfire"};
+        const auto commands=stock_startup_commands(server_args);
+        good=good && commands==std::vector<std::wstring>{
+            L"localinfo mm_configfile addons/hlclient_test50/0123456789abcdef0123456789abcdef/config.ini",
+            L"localinfo hlc_test_run 0123456789abcdef0123456789abcdef",
+            L"localinfo hlc_test_profile test_server_assisted",L"map crossfire",L"meta require HLC50",L"status"};
+        std::vector<std::wstring> complete_server_args{L"-console",L"-game",L"valve",L"-port",L"27243",
+            L"+ip",L"127.0.0.1",L"+log",L"on",L"+map",L"crossfire",L"+maxplayers",L"8",L"+sv_lan",L"1",L"+status"};
+        auto fast_server_args=complete_server_args;
+        // The installed stock launcher's CheckParm uses strstr: even a quoted
+        // path containing "-steam" forces GUI/AdminServer before -console is
+        // checked. Model that independently of our argv-aware options parser.
+        const auto stock_selects_admin_server=[](const std::wstring& command_line) {
+            return command_line.find(L"-steam")!=std::wstring::npos ||
+                command_line.find(L"-console")==std::wstring::npos;
+        };
+        good=good && stock_selects_admin_server(L"hlds.exe -console -dll \""+
+            prepared_metamod_fixture.generic_wstring()+L"\"") &&
+            !stock_selects_admin_server(L"hlds.exe -console -game valve") &&
+            stock_selects_admin_server(L"hlds.exe -console -steam");
+        if (prepared_launch) {
+            good=test_start_health_server_arguments(fast_server_args,*prepared_launch) && good;
+            const auto command_line=windows::build_windows_command_line(
+                fs::path{L"D:/DEV/HLCLIENT-RESEARCH/Half-Life/hlds.exe"},fast_server_args);
+            const bool fast_console_safe=!stock_selects_admin_server(command_line) &&
+                command_line.find(prepared_metamod_fixture.generic_wstring())==std::wstring::npos &&
+                std::find(fast_server_args.begin(),fast_server_args.end(),L"-dll")==fast_server_args.end();
+            std::cout << "[stock-runtime-orchestrator] fast-stock-console-regression="
+                      << (fast_console_safe ? "passed" : "failed") << '\n';
+            good=fast_console_safe && good;
+            good=good && stock_startup_commands(fast_server_args)==std::vector<std::wstring>{
+                L"ip 127.0.0.1",L"log on",L"localinfo hlc_test_run 0123456789abcdef0123456789abcdef",
+                L"localinfo hlc_test_profile test_server_assisted",L"map crossfire",L"maxplayers 8",L"sv_lan 1",
+                L"meta require HLC50",L"status"};
+        } else { good=false; }
+        good=good && test_start_health_server_arguments(complete_server_args,*launch) &&
+            stock_startup_commands(complete_server_args)==std::vector<std::wstring>{L"ip 127.0.0.1",L"log on",
+                L"localinfo mm_configfile addons/hlclient_test50/0123456789abcdef0123456789abcdef/config.ini",
+                L"localinfo hlc_test_run 0123456789abcdef0123456789abcdef",
+                L"localinfo hlc_test_profile test_server_assisted",L"map crossfire",L"maxplayers 8",L"sv_lan 1",
+                L"meta require HLC50",L"status"};
+        constexpr std::string_view server_evidence="L fixture: [hlclient-test-health] run=0123456789abcdef0123456789abcdef requested_start_health=50 server_setup_applied=true max_health=100 max_health_source=server_entvars\n";
+        const auto retained=functional_diagnostic_excerpt(server_evidence);
+        good=good && retained.find("run=0123456789abcdef0123456789abcdef requested_start_health=50 server_setup_applied=true")!=std::string::npos;
+        constexpr std::string_view client_evidence="[test-start-health] requested_start_health=50 client_observed_health=50 source=fresh_clientdata result=ready\n";
+        good=good && functional_diagnostic_excerpt(client_evidence).find(client_evidence)!=std::string::npos;
+        constexpr std::string_view failure_evidence="[hlclient-test-health] run=0123456789abcdef0123456789abcdef requested_start_health=50 server_setup_applied=spawn_validation_failed max_health=unavailable max_health_source=unavailable\n";
+        good=good && functional_diagnostic_excerpt(failure_evidence).find(failure_evidence)!=std::string::npos;
+        constexpr std::string_view stage_evidence="[hlclient-test-health-stage] stage=attached\n[hlclient-test-health-stage] stage=server_activated configured=false\n";
+        const auto stage_retained=functional_diagnostic_excerpt(stage_evidence);
+        good=good && stage_retained.find("stage=attached")!=std::string::npos &&
+            stage_retained.find("stage=server_activated configured=false")!=std::string::npos;
+        good=good && !test_start_health_server_ready(stage_evidence) &&
+            !test_start_health_server_ready("[hlclient-test-health-stage] stage=attached\n") &&
+            test_start_health_server_ready("[hlclient-test-health-stage] stage=attached\n[hlclient-test-health-stage] stage=server_activated configured=true\n");
+        for (const auto reason:{"run_missing","run_invalid","profile_missing","profile_mismatch",
+                "globals_unavailable","deathmatch_unavailable","client_limit_invalid","map_mismatch","ready"}) {
+            const auto diagnostic=std::string{"[hlclient-test-health-config] reason="}+reason+"\n";
+            good=good && test_start_health_configuration_reason(diagnostic)==reason &&
+                functional_diagnostic_excerpt(diagnostic).find(diagnostic)!=std::string::npos &&
+                !test_start_health_server_ready(diagnostic);
+        }
+        good=good && !test_start_health_configuration_reason("[hlclient-test-health-config] reason=profile_mismatch_private_value\n") &&
+            !test_start_health_configuration_reason("prefix[hlclient-test-health-config] reason=ready\n") &&
+            test_start_health_configuration_reason("[hlclient-test-health-config] reason=profile_missing\n[hlclient-test-health-config] reason=ready\n")=="ready";
+        constexpr std::string_view deadline="[test-start-health] result=failed reason=fresh_server_50_not_observed client_observed_health=100\n";
+        good=good && functional_diagnostic_excerpt(deadline).find(deadline)!=std::string::npos;
+        good=good && functional_diagnostic_excerpt("[META] ERROR: Failed to load plugin\n").find("Failed to load plugin")!=std::string::npos;
+        print_key_value("test-start-health-contract",good ? "passed" : "failed");
+        print_key_value("stock-processes-started","0"); print_key_value("result",good ? "success" : "failed");
+        return good ? 0 : 2;
     }
     if (options->validate_config) {
         print_key_value("configuration", "valid");
@@ -6246,6 +7879,60 @@ int wmain(const int argc, wchar_t** argv)
             reconnect_fixture);
         const auto preconnection = observe_functional_client_log(
             preconnection_fixture);
+        constexpr std::string_view application_fixture =
+            "[info] live_application_outcome result=error primary_error=runtime_record_failed "
+            "runtime_error=decoder_failed parser_error=unsupported_opcode opcode=255 cursor=1032 "
+            "record=361 source_sequence=380 scripted_coverage=not_evaluated prediction_coverage=limited "
+            "inventory_notifications=2 feedback_rows=1 brush_candidates=9 brush_resolved=8 brush_prepared=71 "
+            "brush_hidden=1 brush_material_unsupported=1 brush_submitted=6 brush_culled=1 brush_uploads=1 "
+            "texture_uploads=94 brush_reject_entity=80 brush_reject_slot=27 brush_reject_submodel=1 "
+            "brush_reject_reason=hidden_by_effects brush_reject_revision=361 "
+            "collision_revision=362 collision_brushes=4 ground_entity=42 ground_model=1 "
+            "ground_normal_x=0 ground_normal_y=0 ground_normal_z=1 grounded_server=true grounded_local=true "
+            "movement_steps=3 brush_server_changes=8 brush_render_changes=8 base_velocity=observed_zero "
+            "support_policy=current_server_frame_no_pusher_extrapolation prediction_fallbacks=2 "
+            "prediction_raw_error=0.03125 prediction_camera_jump=0.02 prediction_ground_status=ready "
+            "prediction_reason=active prediction_last_fallback=collision_solid_field_unavailable "
+            "brush_server_last_entity=42 brush_server_last_model=21 brush_render_last_entity=42 brush_render_last_model=21 "
+            "audio_backend=audio_unavailable audio_error=device_unavailable audio_start_messages=7 audio_stop_messages=2 "
+            "audio_output_frames=48000 audio_underruns=unmeasured weapon_audio_fire=3 weapon_audio_muted=1 "
+            "weapon_audio_marker_duplicates=2 weapon_audio_delivery_duplicates=4 weapon_audio_timeline_corrections=5\n";
+        const auto application_observed = observe_project_client_signon_log(application_fixture);
+        const auto application_retained = functional_diagnostic_excerpt(application_fixture);
+        if (application_observed.application[0U] != "error" ||
+            application_observed.application[1U] != "runtime_record_failed" ||
+            application_observed.application[6U] != "361" ||
+            application_observed.application[9U] != "limited" ||
+            application_observed.application[10U] != "2" ||
+            application_observed.application[55U] != "9" ||
+            application_observed.application[67U] != "hidden_by_effects" ||
+            application_observed.application[68U] != "361" ||
+            application_observed.application[69U] != "362" ||
+            application_observed.application[71U] != "42" ||
+            application_observed.application[81U] != "observed_zero" ||
+            application_observed.application[84U] != "0.03125" ||
+            application_observed.application[88U] != "collision_solid_field_unavailable" ||
+            application_observed.application[90U] != "21" ||
+            application_observed.application[92U] != "21" ||
+            application_observed.application[93U] != "audio_unavailable" ||
+            application_observed.application[94U] != "device_unavailable" ||
+            application_observed.application[109U] != "48000" ||
+            application_observed.application[111U] != "unmeasured" ||
+            application_observed.application[115U] != "3" ||
+            application_observed.application[127U] != "1" ||
+            application_observed.application[128U] != "2" ||
+            application_observed.application[129U] != "4" ||
+            application_observed.application[130U] != "5" ||
+            !valid_application_metric("ground_normal_x","-0.894427") ||
+            valid_application_metric("prediction_raw_error","../private") ||
+            valid_application_metric("prediction_raw_error","nan") ||
+            valid_application_metric("primary_error","private.config") ||
+            application_retained.find(application_fixture.substr(7U)) == std::string::npos ||
+            observe_project_client_signon_log("live_application_outcome result=error primary_error=\"private\"\n")
+                .application[1U]) {
+            std::cerr << "Application primary-error retention contract failed\n";
+            return 1;
+        }
         const auto project_complete = observe_project_client_signon_log(
             project_complete_fixture);
         const auto project_incomplete = observe_project_client_signon_log(
@@ -6402,7 +8089,16 @@ int wmain(const int argc, wchar_t** argv)
             "[info] live_prediction mode=reference "
             "result=live_local_prediction_and_reconciliation_verified "
             "state=active active_frames=250 accepted_corrections=40 "
-            "replayed_commands=45 moving_presented_changes=80\n";
+            "replayed_commands=45 moving_presented_changes=80 "
+            "interpolated_frames=200 endpoint_frames=45 "
+            "collision_blocked_frames=5 visual_correction_frames=3 "
+            "presentation_trace_queries=240 "
+            "presentation_scratch_growths=1 "
+            "long_stall_frames=2 active_time_ms=1700.5 "
+            "fallback_time_ms=30.25 presentation_cpu_total_ms=14.5 "
+            "presentation_cpu_max_ms=0.125 "
+            "maximum_camera_correction_jump=0.03125 "
+            "correction_pair_window=1:2:100:120:0.5:interpolated\n";
         const auto project_visual_prediction =
             observe_project_client_signon_log(project_visual_prediction_fixture);
         const auto project_visual_prediction_diagnostic =
@@ -6430,6 +8126,120 @@ int wmain(const int argc, wchar_t** argv)
         const auto project_visual_prediction_failed =
             observe_project_client_signon_log(
                 project_visual_prediction_failed_fixture);
+        auto project_visual_h4_fixture = project_visual_jump_duck_fixture;
+        replace_all(project_visual_h4_fixture,
+                    "result=fresh_project_client_jump_duck_server_verified",
+                    "result=live_local_prediction_and_reconciliation_verified");
+        project_visual_h4_fixture +=
+            "[info] live_prediction mode=reference "
+            "result=live_local_prediction_and_reconciliation_verified "
+            "state=active active_frames=300 accepted_corrections=40 "
+            "replayed_commands=20\n"
+            "[info] live_h4_phase phase=jump_hold active_frames=40 "
+            "fallback_frames=0 local_steps=30 corrections=8\n"
+            "[info] live_h4_phase phase=duck_crouch_walk "
+            "active_frames=80 fallback_frames=3 local_steps=75 "
+            "corrections=12\n"
+            "[info] live_h4_prediction "
+            "result=live_jump_duck_crouchwalk_prediction_verified "
+            "jump_rising_frames=20 stable_crouch_frames=50\n";
+        const auto project_visual_h4 = observe_project_client_signon_log(
+            project_visual_h4_fixture);
+        const auto project_visual_h4_diagnostic =
+            functional_diagnostic_excerpt(project_visual_h4_fixture);
+        auto project_visual_h4_partial_fixture = project_visual_h4_fixture;
+        replace_all(project_visual_h4_partial_fixture,
+                    "result=live_jump_duck_crouchwalk_prediction_verified",
+                    "result=crouch_walk_prediction_context_blocked");
+        const auto project_visual_h4_partial =
+            observe_project_client_signon_log(project_visual_h4_partial_fixture);
+        auto project_visual_weapon_fixture = project_visual_prediction_fixture;
+        replace_all(project_visual_weapon_fixture, "scripted-speed-check",
+                    "scripted-weapon-check");
+        project_visual_weapon_fixture +=
+            "[info] live_weapon_presentation "
+            "result=live_viewmodel_weapon_selection_and_basic_hud_verified "
+            "viewmodel_frames=120 hud_frames=130 selection_queued=1 "
+            "selection_confirmed=1 viewmodel_pixel_tested=1 "
+            "viewmodel_pixels_distinct=1 hud_pixel_tested=1 "
+            "hud_pixels_distinct=1 pending_selection=none model_index=17 "
+            "active_id=2 hud_hash=123 canonical_hash=456\n";
+        project_visual_weapon_fixture +=
+            "live_viewmodel_camera result=live_viewmodel_camera_space_verified "
+            "binding_status=ready_studio render_space=camera_local "
+            "pitch=0 yaw=0 draw_count=120 pixel_observation_valid=1 "
+            "pixel_count=321 bounds=1,2,3,4 resource_revision=1 "
+            "model_slot=17 projection_profile=world_optics_camera_local "
+            "probes=3\n";
+        const auto project_visual_weapon =
+            observe_project_client_signon_log(project_visual_weapon_fixture);
+        auto project_visual_weapon_partial_fixture = project_visual_weapon_fixture;
+        replace_all(project_visual_weapon_partial_fixture,
+                    "result=live_viewmodel_weapon_selection_and_basic_hud_verified",
+                    "result=live_viewmodel_hud_verified_selection_pending");
+        replace_all(project_visual_weapon_partial_fixture,
+                    "selection_confirmed=1", "selection_confirmed=0");
+        const auto project_visual_weapon_partial =
+            observe_project_client_signon_log(project_visual_weapon_partial_fixture);
+        auto project_visual_fire_fixture = project_visual_weapon_fixture;
+        replace_all(project_visual_fire_fixture, "scripted-weapon-check",
+                    "scripted-fire-reload-check");
+        project_visual_fire_fixture +=
+            "[info] live_fire_reload "
+            "result=live_primary_fire_reload_and_weapon_animation_verified "
+            "attack_generated=16 reload_generated=4 attack_new_submitted=16 "
+            "reload_new_submitted=4 server_confirmed_shots=3 "
+            "reload_starts=1 reload_completions=1 clip_before_fire=17 "
+            "clip_after_fire=14 clip_after_reload=17 "
+            "reserve_before_reload=68 reserve_after_reload=65 "
+            "svc_weaponanim=5 glock_fire_animation=3 "
+            "glock_reload_animation=1 crowbar_attack_animation=1\n";
+        const auto project_visual_fire =
+            observe_project_client_signon_log(project_visual_fire_fixture);
+        const auto project_visual_fire_diagnostic =
+            functional_diagnostic_excerpt(project_visual_fire_fixture);
+        auto project_visual_fire_partial_fixture = project_visual_fire_fixture;
+        replace_all(project_visual_fire_partial_fixture,
+            "result=live_primary_fire_reload_and_weapon_animation_verified",
+            "result=primary_fire_verified_reload_pending");
+        const auto project_visual_fire_partial =
+            observe_project_client_signon_log(project_visual_fire_partial_fixture);
+        auto project_visual_fire_bad_count_fixture = project_visual_fire_fixture;
+        replace_all(project_visual_fire_bad_count_fixture,
+                    "server_confirmed_shots=3", "server_confirmed_shots=true");
+        const auto project_visual_fire_bad_count =
+            observe_project_client_signon_log(project_visual_fire_bad_count_fixture);
+        auto b1_fixture = project_visual_fire_fixture;
+        replace_all(b1_fixture, "scripted-fire-reload-check", "scripted-fire-reload-presentation-check");
+        b1_fixture += "[info] live_weapon_prediction result=live_client_predicted_weapon_presentation_verified "
+            "server_fire_verified=1 server_reload_verified=1 glock_fire_animation_presented=1 "
+            "glock_reload_animation_presented=1 glock_recoil_presented=1 crowbar_swing_presented=1 "
+            "hud_server_state_updated=1 crowbar_hit_status=unavailable\n";
+        const auto b1 = observe_project_client_signon_log(b1_fixture);
+        const auto b1_excerpt = functional_diagnostic_excerpt(b1_fixture);
+        auto b1_bad_fixture = b1_fixture;
+        replace_all(b1_bad_fixture, "glock_recoil_presented=1", "glock_recoil_presented=banana");
+        const auto b1_bad = observe_project_client_signon_log(b1_bad_fixture);
+        auto b1_partial_fixture = b1_fixture;
+        replace_all(b1_partial_fixture, "glock_recoil_presented=1", "glock_recoil_presented=0");
+        const auto b1_partial = observe_project_client_signon_log(b1_partial_fixture);
+        auto c_fixture = b1_fixture;
+        replace_all(c_fixture, "scripted-fire-reload-presentation-check", "scripted-damage-respawn-check");
+        c_fixture += "[info] live_damage_respawn result=live_death_respawn_verified_damage_pending "
+            "application_runtime_result=completed phase=complete blocker=none generation=1 life_epoch=2 "
+            "respawn_input_submitted=1 server_alive=true same_session=1 glock_bound=1 crowbar_bound=1 "
+            "feature_verified=true damage_live=not_observed post_respawn_frames=30 "
+            "local_deaths=1 post_respawn_commands=32 post_respawn_samples=12\n";
+        const auto c_valid = observe_project_client_signon_log(c_fixture);
+        auto c_bad_fixture = c_fixture;
+        replace_all(c_bad_fixture, "server_alive=true", "server_alive=banana");
+        const auto c_bad = observe_project_client_signon_log(c_bad_fixture);
+        auto c_error_fixture = c_fixture;
+        replace_all(c_error_fixture, "application_runtime_result=completed", "application_runtime_result=error");
+        const auto c_error = observe_project_client_signon_log(c_error_fixture);
+        auto c_missing_fixture = c_fixture;
+        replace_all(c_missing_fixture, "same_session=1", "inert=1");
+        const auto c_missing = observe_project_client_signon_log(c_missing_fixture);
         std::string project_visual_incomplete_fixture{
             project_visual_complete_fixture};
         const auto visual_draws = project_visual_incomplete_fixture.find(
@@ -6459,6 +8269,11 @@ int wmain(const int argc, wchar_t** argv)
             }
             project_visual_logging_fixture.insert(terminal, camera_flood);
         }
+        for (std::size_t index = 0U; index < 8U; ++index) {
+            project_visual_logging_fixture +=
+                "[info] live_weapon_observation generation=1 active_id=" +
+                std::to_string(index) + " viewmodel_status=ready_studio\n";
+        }
         project_visual_logging_fixture +=
             "[error] later visual publication failed after retained summary\n";
         project_visual_logging_fixture += std::string(20'000U, 'x');
@@ -6474,7 +8289,205 @@ int wmain(const int argc, wchar_t** argv)
         const auto project_response_ordering =
             observe_project_client_signon_log(
                 project_response_ordering_fixture);
+        // Independent, project-owned numeric evidence. Neither fixture
+        // instantiates a game module, reads installed assets nor opens a peer.
+        const auto visibility_fixture_row = [](const std::size_t ordinal,
+                                              const std::uint32_t entity) {
+            return std::string{"[remote-player-visibility] generation=1 source="} +
+                std::to_string(100U + ordinal) + " ordinal=" + std::to_string(ordinal) +
+                " publication=" + std::to_string(200U + ordinal) + " entity=" +
+                std::to_string(entity) + " model=87 stage=queued_visible game=1 "
+                "server-seconds=47.0596 distance=42.545 effects=0 render-mode=0 "
+                "camera=202.515625,1244.140625,-1791.973267 "
+                "target=202.440644,1243.143440,-1791.908728 near=0.1 "
+                "bounds=185.984375,1196.109375,-1819.968750;217.984375,1228.109375,-1747.968750 "
+                "static-light=0.125,0.25,0.5\n";
+        };
+        const auto occurrence_count = [](const std::string_view haystack,
+                                         const std::string_view needle) {
+            std::size_t count = 0U;
+            for (auto at = haystack.find(needle); at != std::string_view::npos;
+                 at = haystack.find(needle, at + needle.size())) ++count;
+            return count;
+        };
+        bool visibility_retention_valid = true;
+        for (const auto entity : {1U, 2U}) {
+            std::string fixture{
+                "[remote-player-visibility-summary] changes=1 retained=1 dropped=0 evidence=cpu-frame-only\n"};
+            for (std::size_t ordinal = 0U; ordinal < 100U; ++ordinal)
+                fixture += "[info] live_visual_camera_sample synthetic=bounded\n";
+            // Old verbose summaries previously exhausted the whole excerpt
+            // before late visibility rows were considered.
+            for (std::size_t ordinal = 0U; ordinal < 8U; ++ordinal)
+                fixture += "live_application_outcome result=error primary_error=fixture_runtime_error " +
+                    std::string(5'000U, 'x') + "\n";
+            for (std::size_t ordinal = 0U; ordinal < 24U; ++ordinal)
+                fixture += (entity == 2U ? "[info] " : "") + visibility_fixture_row(ordinal, entity);
+            fixture += "[info] [remote-player-visibility-summary] changes=24 retained=16 dropped=8 evidence=cpu-frame-only\r\n";
+            fixture += visibility_fixture_row(23U, entity); // No duplicate retention.
+            fixture += "[remote-player-visibility-summary] changes=1 retained=17 dropped=0 evidence=failed_private_path\n";
+            const auto excerpt = functional_diagnostic_excerpt(fixture);
+            visibility_retention_valid = visibility_retention_valid &&
+                excerpt.starts_with("[remote-player-visibility-summary] changes=24 retained=16 dropped=8 evidence=cpu-frame-only\n") &&
+                excerpt.size() <= 16U * 1'024U &&
+                std::ranges::count(excerpt, '\n') <= 64 &&
+                occurrence_count(excerpt, "[remote-player-visibility] ") == 16U &&
+                occurrence_count(excerpt, "[remote-player-visibility-summary] ") == 1U &&
+                occurrence_count(excerpt, "live_application_outcome result=") == 1U &&
+                excerpt.find("primary_error=fixture_runtime_error") != std::string::npos &&
+                excerpt.find("failed_private_path") == std::string::npos;
+            for (std::size_t ordinal = 0U; ordinal < 24U; ++ordinal)
+                visibility_retention_valid = visibility_retention_valid &&
+                    (excerpt.find(visibility_fixture_row(ordinal, entity)) != std::string::npos) == (ordinal >= 8U);
+        }
+        // The largest permitted journal must not let earlier verbose weapon
+        // or prediction text crowd out the actual application's error prefix.
+        std::string competing_visibility{
+            "[remote-player-visibility-summary] changes=16 retained=16 dropped=0 evidence=cpu-frame-only\n"};
+        for (std::size_t index=0U;index<6U;++index)
+            competing_visibility += "live_weapon_observation generation=1 active_id=2 " +
+                std::string(5'000U,'x') + "\n";
+        competing_visibility += "live_prediction mode=reference " + std::string(5'000U,'x') + "\n";
+        competing_visibility += "live_application_outcome result=error audio_detail=" +
+            std::string(2'700U,'x') + " primary_error=fixture_runtime_error " +
+            std::string(3'000U,'x') + "\n";
+        for (std::size_t ordinal=0U;ordinal<16U;++ordinal) {
+            auto row=visibility_fixture_row(ordinal,1U);
+            row.pop_back(); // Pad legal numeric spellings, not unknown fields.
+            for (const auto key : {"generation=","source=","ordinal=","publication=",
+                     "entity=","model=","game=","effects=","render-mode="}) {
+                const auto begin=row.find(key)+std::string_view{key}.size();
+                const auto end=row.find(' ',begin);
+                const auto length=(end==std::string::npos ? row.size() : end)-begin;
+                row.insert(begin,(std::min)(20U-length,768U-row.size()),'0');
+            }
+            visibility_retention_valid=visibility_retention_valid && valid_visibility_row(row);
+            competing_visibility += row+'\n';
+        }
+        const auto competing_excerpt=functional_diagnostic_excerpt(competing_visibility);
+        visibility_retention_valid=visibility_retention_valid &&
+            competing_excerpt.size()<=16U*1'024U &&
+            std::ranges::count(competing_excerpt,'\n')<=64 &&
+            occurrence_count(competing_excerpt,"[remote-player-visibility] ")==16U &&
+            occurrence_count(competing_excerpt,"live_application_outcome result=")==1U &&
+            competing_excerpt.find("primary_error=fixture_runtime_error")!=std::string::npos &&
+            functional_diagnostic_excerpt("[remote-player-visibility] failed_secret_token live_application_outcome result=error primary_error=private_token\n").empty();
+        auto unavailable_visibility = visibility_fixture_row(0U, 32U);
+        replace_all(unavailable_visibility, "model=87", "model=0");
+        replace_all(unavailable_visibility, "stage=queued_visible", "stage=source_absent");
+        replace_all(unavailable_visibility, "game=1", "game=0");
+        replace_all(unavailable_visibility, "server-seconds=47.0596", "server-seconds=-1");
+        replace_all(unavailable_visibility, "distance=42.545", "distance=-1");
+        replace_all(unavailable_visibility,
+            "bounds=185.984375,1196.109375,-1819.968750;217.984375,1228.109375,-1747.968750",
+            "bounds=unavailable");
+        replace_all(unavailable_visibility, "static-light=0.125,0.25,0.5", "static-light=fallback");
+        visibility_retention_valid = visibility_retention_valid &&
+            functional_diagnostic_excerpt(unavailable_visibility) == unavailable_visibility &&
+            functional_diagnostic_excerpt("[remote-player-visibility-summary] changes=0 retained=0 dropped=0 evidence=cpu-frame-only\n") ==
+                "[remote-player-visibility-summary] changes=0 retained=0 dropped=0 evidence=cpu-frame-only\n";
+        for (const auto stage : {"source_absent", "not_visual", "model_not_advertised",
+                 "server_hidden128", "unsupported_render_mode", "game_not_ready",
+                 "pose_unavailable", "frame_unavailable", "pvs_culled", "frustum_culled",
+                 "queued_visible", "queued_unlit", "queued_dim"}) {
+            auto fixture = visibility_fixture_row(0U, 1U);
+            replace_all(fixture, "stage=queued_visible", std::string{"stage="} + stage);
+            visibility_retention_valid = visibility_retention_valid &&
+                functional_diagnostic_excerpt(fixture) == fixture;
+        }
+        constexpr std::array invalid_visibility_replacements{
+            std::pair{std::string_view{"generation=1"}, std::string_view{"generation=0"}},
+            std::pair{std::string_view{"source=100"}, std::string_view{"source=18446744073709551616"}},
+            std::pair{std::string_view{"source=100"}, std::string_view{"source=failed_private/path"}},
+            std::pair{std::string_view{"source=100"}, std::string_view{"source=100 source=100"}},
+            std::pair{std::string_view{"entity=1"}, std::string_view{"entity=0"}},
+            std::pair{std::string_view{"entity=1"}, std::string_view{"entity=33"}},
+            std::pair{std::string_view{"model=87"}, std::string_view{"model=65536"}},
+            std::pair{std::string_view{"model=87"}, std::string_view{"model=\"private\""}},
+            std::pair{std::string_view{"game=1"}, std::string_view{"game=9"}},
+            std::pair{std::string_view{"stage=queued_visible"}, std::string_view{"stage=failed_secret_token"}},
+            std::pair{std::string_view{"stage=queued_visible"}, std::string_view{"stage=C:\\private"}},
+            std::pair{std::string_view{"server-seconds=47.0596"}, std::string_view{"server-seconds=nan"}},
+            std::pair{std::string_view{"server-seconds=47.0596"}, std::string_view{"server-seconds=-2"}},
+            std::pair{std::string_view{"distance=42.545"}, std::string_view{"distance=-2"}},
+            std::pair{std::string_view{"effects=0"}, std::string_view{"effects=4294967296"}},
+            std::pair{std::string_view{"render-mode=0"}, std::string_view{"render-mode=-1"}},
+            std::pair{std::string_view{"camera=202.515625,1244.140625,-1791.973267"}, std::string_view{"camera=1,2,3,4"}},
+            std::pair{std::string_view{"camera=202.515625,1244.140625,-1791.973267"}, std::string_view{"camera=1,2,inf"}},
+            std::pair{std::string_view{"target=202.440644,1243.143440,-1791.908728"}, std::string_view{"target=1,2,1e300"}},
+            std::pair{std::string_view{"near=0.1"}, std::string_view{"near=0"}},
+            std::pair{std::string_view{"bounds=185.984375,1196.109375,-1819.968750;217.984375,1228.109375,-1747.968750"}, std::string_view{"bounds=3,0,0;2,1,1"}},
+            std::pair{std::string_view{"static-light=0.125,0.25,0.5"}, std::string_view{"static-light=1.1,0,0"}},
+            std::pair{std::string_view{"static-light=0.125,0.25,0.5"}, std::string_view{"static-light=-0.1,0,0"}},
+            std::pair{std::string_view{"static-light=0.125,0.25,0.5"}, std::string_view{"static-light=nan,0,0"}},
+            std::pair{std::string_view{" static-light=0.125,0.25,0.5"}, std::string_view{""}},
+            std::pair{std::string_view{"static-light=0.125,0.25,0.5"}, std::string_view{"static-light=0.125,0.25,0.5 token=failed_secret_token"}},
+            std::pair{std::string_view{" publication="}, std::string_view{"  publication="}}};
+        for (const auto& [before, after] : invalid_visibility_replacements) {
+            auto fixture = visibility_fixture_row(0U, 1U);
+            replace_all(fixture, before, after);
+            visibility_retention_valid = visibility_retention_valid &&
+                functional_diagnostic_excerpt(fixture).empty();
+        }
+        const auto oversized_visibility = visibility_fixture_row(0U, 1U) +
+            "[remote-player-visibility] generation=1 failed_private_path=" + std::string(2'000U, 'x') + "\n";
+        visibility_retention_valid = visibility_retention_valid &&
+            functional_diagnostic_excerpt(oversized_visibility) == visibility_fixture_row(0U, 1U) &&
+            functional_diagnostic_excerpt("[remote-player-visibility-summary] changes=1 retained=1 dropped=1 evidence=cpu-frame-only\n").empty() &&
+            functional_diagnostic_excerpt("[remote-player-visibility-summary] changes=1 retained=1 dropped=0 evidence=failed_secret_token\n").empty() &&
+            functional_diagnostic_excerpt("[info] [info] " + visibility_fixture_row(0U, 1U)).empty() &&
+            functional_diagnostic_excerpt("failed private marker injection " + visibility_fixture_row(0U, 1U)).empty() &&
+            functional_diagnostic_excerpt("failed private oversized marker injection " +
+                std::string(5'000U,'x') + visibility_fixture_row(0U,1U)).empty();
+        const std::string remote_effects_fixture{
+            "[remote-effects-summary] received=12 accepted=9 unresolved=1 unsupported=1 local_echo=1 late=0 invalid=0 fire=7 swing=2 audio_submitted=15 audio_late=0 audio_missing=0 audio_rejected=0 shells=7 impact_hits=5 flash_submissions=42\n"};
+        auto newer_remote_effects = remote_effects_fixture;
+        replace_all(newer_remote_effects, "received=12", "received=20");
+        const auto remote_effects_excerpt = functional_diagnostic_excerpt(
+            remote_effects_fixture + competing_visibility + "[info] " + newer_remote_effects);
+        bool remote_effects_retention_valid =
+            remote_effects_excerpt.starts_with(newer_remote_effects) &&
+            occurrence_count(remote_effects_excerpt, "[remote-effects-summary] ") == 1U &&
+            remote_effects_excerpt.find("received=12") == std::string::npos &&
+            remote_effects_excerpt.find("primary_error=fixture_runtime_error") != std::string::npos &&
+            remote_effects_excerpt.size() <= 16U * 1'024U &&
+            std::ranges::count(remote_effects_excerpt, '\n') <= 64;
+        auto maximum_counter = remote_effects_fixture;
+        replace_all(maximum_counter, "received=12", "received=18446744073709551615");
+        remote_effects_retention_valid = remote_effects_retention_valid &&
+            functional_diagnostic_excerpt(maximum_counter) == maximum_counter;
+        for (const auto replacement : {"received=-1", "received=18446744073709551616",
+                 "received=1.0", "received=failed_private_path", "received=1 received=2",
+                 "received=+1", "received=", "received=nan"}) {
+            auto invalid = remote_effects_fixture;
+            replace_all(invalid, "received=12", replacement);
+            remote_effects_retention_valid = remote_effects_retention_valid &&
+                functional_diagnostic_excerpt(invalid).empty();
+        }
+        for (const auto injection : {
+                 std::string{"[info] [info] "} + remote_effects_fixture,
+                 std::string{"failed private prefix "} + remote_effects_fixture,
+                 std::string{"live_application_outcome result=error "} + remote_effects_fixture,
+                 std::string{"live_weapon_observation generation=1 "} + remote_effects_fixture,
+                 std::string{"[remote-effects-summary] failed_private_path="} + std::string(1'000U, 'x') + "\n"})
+            remote_effects_retention_valid = remote_effects_retention_valid &&
+                functional_diagnostic_excerpt(injection).empty();
+        auto trailing_private = remote_effects_fixture;
+        replace_all(trailing_private, "flash_submissions=42\n", "flash_submissions=42 path=failed_private_path\n");
+        auto missing_field = remote_effects_fixture;
+        replace_all(missing_field, " audio_missing=0", "");
+        auto reordered_fields = remote_effects_fixture;
+        replace_all(reordered_fields, "received=12 accepted=9", "accepted=9 received=12");
+        auto crlf_remote_effects = remote_effects_fixture;
+        crlf_remote_effects.insert(crlf_remote_effects.size()-1U, "\r");
+        remote_effects_retention_valid = remote_effects_retention_valid &&
+            functional_diagnostic_excerpt(trailing_private).empty() &&
+            functional_diagnostic_excerpt(missing_field).empty() &&
+            functional_diagnostic_excerpt(reordered_fields).empty() &&
+            functional_diagnostic_excerpt("[info] " + crlf_remote_effects) == remote_effects_fixture &&
+            functional_diagnostic_excerpt(remote_effects_fixture + trailing_private) == remote_effects_fixture;
         const bool valid =
+            visibility_retention_valid && remote_effects_retention_valid &&
             emits_jump_duck_native_status(
                 ProjectClientLiveInput::scripted_jump_duck_check) &&
             !emits_jump_duck_native_status(
@@ -6578,6 +8591,89 @@ int wmain(const int argc, wchar_t** argv)
                 ProjectClientLiveInput::scripted_speed_check, true) &&
             project_visual_prediction.prediction_result ==
                 "live_local_prediction_and_reconciliation_verified" &&
+            project_visual_h4.complete(
+                ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_jump_duck_check, true) &&
+            project_visual_h4.h4_result ==
+                "live_jump_duck_crouchwalk_prediction_verified" &&
+            project_visual_h4.h4_active_frames[1U] == 40U &&
+            project_visual_h4.h4_local_steps[3U] == 75U &&
+            project_visual_h4_diagnostic.find("live_h4_prediction result=") !=
+                std::string::npos &&
+            !project_visual_h4_partial.complete(
+                ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_jump_duck_check, true) &&
+            project_visual_h4_partial.h4_result ==
+                "crouch_walk_prediction_context_blocked" &&
+            project_visual_weapon.complete(
+                ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_weapon_check, true) &&
+            project_visual_weapon.weapon_result ==
+                "live_viewmodel_weapon_selection_and_basic_hud_verified" &&
+            project_visual_weapon.weapon_selection_queued == 1U &&
+            project_visual_weapon.weapon_selection_confirmed == 1U &&
+            project_visual_weapon.viewmodel_pixels_distinct == true &&
+            project_visual_weapon.hud_pixels_distinct == true &&
+            project_visual_weapon.viewmodel_camera_result ==
+                "live_viewmodel_camera_space_verified" &&
+            project_visual_weapon.viewmodel_camera_pixels_valid == true &&
+            project_visual_weapon.viewmodel_camera_pixel_count == 321U &&
+            project_visual_weapon_partial.complete(
+                ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_weapon_check, true) &&
+            project_visual_weapon_partial.weapon_result ==
+                "live_viewmodel_hud_verified_selection_pending" &&
+            project_visual_fire.complete(
+                ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_fire_reload_check, true) &&
+            project_visual_fire.fire_reload_result ==
+                "live_primary_fire_reload_and_weapon_animation_verified" &&
+            project_visual_fire.server_confirmed_shots == 3U &&
+            project_visual_fire.reload_completions == 1U &&
+            project_visual_fire_diagnostic.find(
+                "live_fire_reload result=live_primary_fire_reload_and_weapon_animation_verified") !=
+                std::string::npos &&
+            !project_visual_fire_partial.complete(
+                ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_fire_reload_check, true) &&
+            project_visual_fire_partial.fire_reload_result ==
+                "primary_fire_verified_reload_pending" &&
+            !project_visual_fire_bad_count.complete(
+                ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_fire_reload_check, true) &&
+            b1.complete(ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_fire_reload_presentation_check, true) &&
+            b1.weapon_prediction.verified() &&
+            c_valid.complete(ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_damage_respawn_check, true) &&
+            !c_bad.complete(ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_damage_respawn_check, true) &&
+            !c_error.complete(ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_damage_respawn_check, true) &&
+            !c_missing.complete(ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_damage_respawn_check, true) &&
+            !b1.life.result &&
+            functional_diagnostic_excerpt(c_fixture).find("live_damage_respawn result=") != std::string::npos &&
+            b1_excerpt.find("live_weapon_prediction result=live_client_predicted_weapon_presentation_verified") != std::string::npos &&
+            !b1_bad.complete(ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_fire_reload_presentation_check, true) &&
+            !b1_partial.complete(ProjectClientStop::live_visual_control,
+                ProjectClientLiveInput::scripted_fire_reload_presentation_check, true) &&
+            !project_visual_fire.weapon_prediction.result &&
+            project_visual_prediction.prediction_interpolated_frames == 200U &&
+            project_visual_prediction.prediction_endpoint_frames == 45U &&
+            project_visual_prediction.prediction_collision_blocked_frames == 5U &&
+            project_visual_prediction.prediction_visual_correction_frames == 3U &&
+            project_visual_prediction.prediction_trace_queries == 240U &&
+            project_visual_prediction.prediction_scratch_growths == 1U &&
+            project_visual_prediction.prediction_long_stall_frames == 2U &&
+            project_visual_prediction.prediction_active_time_ms == 1700.5 &&
+            project_visual_prediction.prediction_fallback_time_ms == 30.25 &&
+            project_visual_prediction.prediction_cpu_total_ms == 14.5 &&
+            project_visual_prediction.prediction_cpu_max_ms == 0.125 &&
+            project_visual_prediction.prediction_maximum_camera_jump == 0.03125 &&
+            project_visual_prediction.prediction_correction_pair_window ==
+                "1:2:100:120:0.5:interpolated" &&
             project_visual_prediction.rx_owning_datagrams_post_input == 38U &&
             project_visual_prediction.rx_payloads_created_post_input == 24U &&
             project_visual_prediction.rx_payloads_consumed_post_input == 24U &&
@@ -6657,6 +8753,12 @@ int wmain(const int argc, wchar_t** argv)
                 std::string::npos &&
             project_visual_diagnostic.find(
                 "later visual publication failed") != std::string::npos &&
+            project_visual_diagnostic.find(
+                "live_weapon_observation generation=1 active_id=7") !=
+                std::string::npos &&
+            project_visual_diagnostic.find(
+                "live_weapon_observation generation=1 active_id=1") ==
+                std::string::npos &&
             project_visual_diagnostic.size() <= 16U * 1'024U &&
             project_transition_failure.serverinfo_received &&
             project_transition_failure.schema_registry_received &&
@@ -6718,6 +8820,70 @@ int wmain(const int argc, wchar_t** argv)
                  .reliable_generation &&
             !project_response_ordering.response_payload_diagnostic
                  .first_transmit_sequence;
+        if (options->runtime_failure_fixture) {
+            std::error_code ec;
+            const auto size = std::filesystem::file_size(*options->runtime_failure_fixture, ec);
+            if (ec || size > 65'536U) return 1;
+            std::ifstream input{*options->runtime_failure_fixture, std::ios::binary};
+            std::string log{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+            if (!input.eof() && input.fail()) return 1;
+            const auto first = observe_project_client_signon_log(log).application;
+            log += "\nlive_application_outcome result=error primary_error=cleanup_failed\n";
+            const bool exact_cause =
+                (first[12U] == "protocol_decoder" && first[15U] == "unsupported_opcode" &&
+                    first[30U] == "5" && first[32U] == "6") ||
+                (first[12U] == "protocol_decoder" && first[15U] == "truncated_body" &&
+                    first[34U] == "Health" && first[36U] == "1" && first[37U] == "0") ||
+                (first[12U] == "game_module" && first[18U] == "invalid_token" &&
+                    first[34U] == "ItemPickup" && first[32U] == "4");
+            if (observe_project_client_signon_log(log).application != first || !exact_cause ||
+                first[1U] != "runtime_record_failed" ||
+                first[39U] != "3" || first[40U] != "2") return 1;
+            if (!valid) return 5;
+            // Exercise real bounded child wait/stdout/cleanup with the existing
+            // project-owned fake client; no sockets, game, Steam or WFP.
+            const auto identity = observe_project_binary(
+                sibling_executable(L"hlclient_stock_runtime_fake_client.exe"));
+            auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+            auto capture = windows::BoundedProcessLogCapture::create({});
+            if (!identity || !created || !capture) return 1;
+            std::string terminal{"live_application_outcome"};
+            for (std::size_t i = 0U; i < first.size(); ++i) {
+                terminal += " "; terminal += kApplicationMetrics[i]; terminal += "=";
+                terminal += first[i].value_or("unavailable");
+            }
+            windows::OwnedProcessLaunchSpec spec;
+            spec.executable = identity.identity->canonical_path;
+            spec.working_directory = spec.executable.parent_path();
+            spec.expected_identity = *identity.identity;
+            spec.stdout_handle = capture->inherited_write_handle();
+            spec.stderr_handle = capture->inherited_write_handle();
+            spec.arguments = {L"--emit-runtime-failure-fixture",
+                std::wstring{terminal.begin(), terminal.end()}};
+            auto [child, launched] = job.launch(spec);
+            capture->close_parent_write_handle();
+            if (!launched) return 1;
+            const auto waited = child.wait_result(std::chrono::seconds{5});
+            const auto captured = capture->finish(std::chrono::seconds{1});
+            const auto cleaned = job.terminate_and_wait(120U, std::chrono::seconds{3});
+            if (!waited || waited.exit_code != 2U || !cleaned ||
+                !windows::bounded_process_log_snapshot_complete(captured) ||
+                observe_project_client_signon_log(captured.bytes).application != first) return 1;
+            if (options->runtime_failure_status_fixture) {
+                print_application_evidence(first);
+                print_key_value("client-exit-code", std::to_string(*waited.exit_code));
+                print_key_value("job-cleanup", "exact");
+                print_key_value("result", "failed");
+                return 0;
+            }
+            std::cout << "{\"schema\":\"hlclient.runtime-diagnostics-offline.v1\","
+                "\"client_exit_code\":" << *waited.exit_code <<
+                ",\"owned_process_cleanup\":\"exact\","
+                "\"application_outcome\":";
+            write_application_evidence(std::cout, first);
+            std::cout << "}\n";
+            return 0;
+        }
         print_key_value("functional-log-observation",
                         valid ? "valid" : "invalid");
         print_key_value("stock-processes-started", "0");
@@ -6763,6 +8929,7 @@ int wmain(const int argc, wchar_t** argv)
         print_key_value("result", cleanup_signalled ? "success" : "failed");
         return cleanup_signalled ? 0 : 4;
     }
+    manual_phase(*options, "preflight");
     const auto environment = validate_environment(*options);
     if (!environment.environment) {
         const bool cleanup_signalled = options->validate_environment ||
@@ -6826,6 +8993,7 @@ int wmain(const int argc, wchar_t** argv)
         return 0;
     }
     auto summary = run_active(*options, *environment.environment);
+    manual_phase(*options, "owned-cleanup-complete");
     if (summary.cleanup_exact &&
         !signal_wrapper_cleanup_capability(*options)) {
         summary.success = false;
@@ -6869,7 +9037,7 @@ int wmain(const int argc, wchar_t** argv)
                 : "fresh_project_client_stock_signon"
             : "functional_smoke");
         print_key_value("evidence-eligible",
-                        options->project_client_stock_signon ? "true" : "false");
+                        options->project_client_stock_signon && !options->fast_manual && !options->test_start_health && !options->remote_audio_peer && !options->manual_duration_seconds && !options->manual_no_time_limit ? "true" : "false");
         print_key_value("route", "direct_loopback");
         print_key_value("stable-duration-ms",
                         std::to_string(summary.stable_duration_ms));
@@ -6883,6 +9051,12 @@ int wmain(const int argc, wchar_t** argv)
                             ? "observed" : "unknown");
         print_key_value("client-process-id",
                         std::to_string(summary.functional_client_process_id));
+        if(options->remote_audio_peer) {
+            print_key_value("remote-audio-peer-process-id",std::to_string(summary.remote_audio_peer_process_id));
+            print_key_value("remote-audio-peer-runtime-published",summary.remote_audio_peer_entered ? "true" : "false");
+            print_key_value("remote-audio-peer-exit-code",summary.remote_audio_peer_exit ? std::to_string(*summary.remote_audio_peer_exit) : "not-observed");
+            print_key_value("remote-audio-output-isolation","focused-client-output");
+        }
         print_key_value("client-image-identity",
                         summary.functional_client_image_identity_verified
                             ? "verified" : summary.functional_client_process_created
@@ -7019,10 +9193,78 @@ int wmain(const int argc, wchar_t** argv)
                 print_key_value("speed-result",
                                 summary.project_speed_result.value_or(
                                     "unavailable"));
+            if (options->project_client_live_input == ProjectClientLiveInput::scripted_damage_respawn_check)
+                print_key_value("damage-respawn-result", summary.project_life.result.value_or(
+                    "damage_death_respawn_implemented_live_pending"));
             if (options->project_client_reference_prediction)
-                print_key_value("prediction-result",
+            print_key_value("prediction-result",
                                 summary.project_prediction_result.value_or(
                                     "unavailable"));
+            if (options->project_client_reference_prediction &&
+                options->project_client_live_input ==
+                    ProjectClientLiveInput::scripted_jump_duck_check)
+                print_key_value("h4-result",
+                            summary.project_h4_result.value_or(
+                                    "unavailable"));
+            if (options->project_client_live_input ==
+                    ProjectClientLiveInput::scripted_weapon_check) {
+                print_key_value("weapon-result",
+                    summary.project_weapon_result.value_or("unavailable"));
+                print_key_value("weapon-selection-queued",
+                    summary.project_weapon_selection_queued
+                        ? std::to_string(*summary.project_weapon_selection_queued)
+                        : "unavailable");
+                print_key_value("weapon-selection-confirmed",
+                    summary.project_weapon_selection_confirmed
+                        ? std::to_string(*summary.project_weapon_selection_confirmed)
+                        : "unavailable");
+                print_key_value("viewmodel-pixels-distinct",
+                    summary.project_viewmodel_pixels_distinct
+                        ? (*summary.project_viewmodel_pixels_distinct ? "true" : "false")
+                        : "unavailable");
+                print_key_value("hud-pixels-distinct",
+                    summary.project_hud_pixels_distinct
+                        ? (*summary.project_hud_pixels_distinct ? "true" : "false")
+                        : "unavailable");
+                print_key_value("viewmodel-camera-result",
+                    summary.project_viewmodel_camera_result.value_or("unavailable"));
+                print_key_value("viewmodel-camera-pixels-valid",
+                    summary.project_viewmodel_camera_pixels_valid
+                        ? (*summary.project_viewmodel_camera_pixels_valid
+                            ? "true" : "false") : "unavailable");
+                print_key_value("viewmodel-camera-pixel-count",
+                    summary.project_viewmodel_camera_pixel_count
+                        ? std::to_string(*summary.project_viewmodel_camera_pixel_count)
+                        : "unavailable");
+            }
+            if (options->project_client_live_input ==
+                    ProjectClientLiveInput::scripted_fire_reload_check ||
+                options->project_client_live_input ==
+                    ProjectClientLiveInput::scripted_fire_reload_presentation_check) {
+                print_key_value("fire-reload-result",
+                    summary.project_fire_reload_result.value_or("unavailable"));
+                print_key_value("server-confirmed-shots",
+                    summary.project_server_confirmed_shots
+                        ? std::to_string(*summary.project_server_confirmed_shots)
+                        : "unavailable");
+                print_key_value("reload-completions",
+                    summary.project_reload_completions
+                        ? std::to_string(*summary.project_reload_completions)
+                        : "unavailable");
+            }
+            if (options->project_client_live_input ==
+                    ProjectClientLiveInput::scripted_fire_reload_presentation_check) {
+                print_key_value("presentation-result",
+                    summary.project_weapon_prediction.result.value_or("unavailable"));
+                for (std::size_t i = 0U; i < kWeaponPredictionFlags.size(); ++i) {
+                    auto key = std::string{kWeaponPredictionFlags[i]};
+                    std::replace(key.begin(), key.end(), '_', '-');
+                    const auto value = summary.project_weapon_prediction.flags[i];
+                    print_key_value(key, value ? (*value ? "true" : "false") : "unavailable");
+                }
+                print_key_value("crowbar-hit-status",
+                    summary.project_weapon_prediction.hit_status.value_or("unavailable"));
+            }
             print_key_value("usercmd-generated",
                             summary.project_usercmd_generated_count
                                 ? std::to_string(
@@ -7110,6 +9352,8 @@ int wmain(const int argc, wchar_t** argv)
         print_key_value("diagnostic-publication",
                         summary.functional_diagnostic_published
                             ? "complete" : "incomplete");
+        if (options->project_client_stock_signon)
+            print_application_evidence(summary.project_application);
         print_key_value("client-name-observed",
                         summary.functional_client_name_observed
                             ? "true" : "false");

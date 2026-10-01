@@ -1,4 +1,5 @@
 #pragma once
+#include <hlclient/goldsrc/movement/local_movement_query_config.hpp>
 
 #include <hlclient/collision/collision_world_query.hpp>
 #include <hlclient/goldsrc/collision/goldsrc_brush_collision_scene.hpp>
@@ -15,6 +16,7 @@ namespace hlclient::goldsrc::movement {
 enum class LocalMovementCollisionProfile : std::uint8_t {
     world_only_v1,
     explicit_synthetic_static_brush_v1,
+    reference_brush_scene_v1,
 };
 
 [[nodiscard]] std::string_view to_string(
@@ -97,7 +99,8 @@ struct LocalMovementCollisionSessionIdentity {
         const bool profile_valid =
             profile == LocalMovementCollisionProfile::world_only_v1 ||
             profile == LocalMovementCollisionProfile::
-                explicit_synthetic_static_brush_v1;
+                explicit_synthetic_static_brush_v1 ||
+            profile == LocalMovementCollisionProfile::reference_brush_scene_v1;
         return profile_valid &&
             (collision_world_primary != 0U ||
                    collision_world_secondary != 0U) &&
@@ -109,14 +112,6 @@ struct LocalMovementCollisionSessionIdentity {
         const LocalMovementCollisionSessionIdentity&) = default;
 };
 
-struct LocalMovementCollisionQueryConfig {
-    hlclient::collision::CollisionQueryLimits query_limits{};
-    hlclient::collision::CollisionTraceToleranceProfile trace_tolerance{};
-    hlclient::goldsrc::collision::BrushCollisionSceneQueryLimits scene_limits{};
-};
-
-[[nodiscard]] bool valid_local_movement_collision_query_config(
-    const LocalMovementCollisionQueryConfig& config) noexcept;
 
 enum class LocalMovementCollisionErrorCode : std::uint8_t {
     invalid_configuration,
@@ -174,7 +169,7 @@ public:
     session_identity() const noexcept;
 
     // Point contents intentionally uses world model zero and point hull zero.
-    // Explicit synthetic brushes are solid trace participants, not liquid
+    // Explicit brushes are solid trace participants, not liquid
     // contents providers.
     [[nodiscard]] virtual LocalMovementPointContentsQueryResult point_contents(
         const assets::AssetVector3& point,
@@ -230,9 +225,9 @@ private:
     std::shared_ptr<const hlclient::collision::CollisionWorldPackage> package_;
 };
 
-class SyntheticBrushMovementCollision final : public ILocalMovementCollision {
+class BrushSceneMovementCollision final : public ILocalMovementCollision {
 public:
-    explicit SyntheticBrushMovementCollision(
+    explicit BrushSceneMovementCollision(
         std::shared_ptr<
             const hlclient::goldsrc::collision::BrushCollisionScene>
             scene) noexcept;
@@ -271,4 +266,6 @@ private:
         scene_;
 };
 
+// Existing synthetic test/tool callers use the same implementation.
+using SyntheticBrushMovementCollision = BrushSceneMovementCollision;
 } // namespace hlclient::goldsrc::movement

@@ -183,26 +183,36 @@ template<typename Integer>
 } // namespace
 
 struct BoundedProcessLogCapture::Impl final {
-    UniqueHandle read;
+    // Detached cancellation failures must never leave a reader pointing into a
+    // destroyed capture owner. State owns only bounded logs and pipe handles.
+    struct ReaderState final {
+        UniqueHandle read;
+        UniqueHandle complete_event;
+        BoundedProcessLogLimits limits{};
+        std::atomic_bool cancellation_requested{false};
+        mutable std::mutex mutex;
+        BoundedProcessLogSnapshot snapshot;
+    };
+    std::shared_ptr<ReaderState> state{std::make_shared<ReaderState>()};
     UniqueHandle write;
-    UniqueHandle complete_event;
-    BoundedProcessLogLimits limits{};
     std::thread worker;
-    std::atomic_bool cancellation_requested{false};
-    mutable std::mutex mutex;
-    BoundedProcessLogSnapshot snapshot;
 
-    ~Impl()
-    {
-        write.reset();
-        if (worker.joinable()) {
-            cancellation_requested.store(true, std::memory_order_relaxed);
-            static_cast<void>(::CancelIoEx(read.get(), nullptr));
-            static_cast<void>(::CancelSynchronousIo(worker.native_handle()));
-            static_cast<void>(::WaitForSingleObject(complete_event.get(), 2'000U));
+    // Join ONLY after the native thread has signaled actual termination.
+    bool stop_worker(const std::chrono::milliseconds grace) noexcept {
+        if (!worker.joinable()) return true;
+        state->cancellation_requested.store(true, std::memory_order_relaxed);
+        static_cast<void>(::CancelIoEx(state->read.get(), nullptr));
+        static_cast<void>(::CancelSynchronousIo(worker.native_handle()));
+        if (::WaitForSingleObject(worker.native_handle(), bounded_timeout(grace)) == WAIT_OBJECT_0) {
             worker.join();
+            return true;
         }
-        read.reset();
+        worker.detach(); // shared ReaderState survives; no unbounded join/UAF
+        return false;
+    }
+    ~Impl() {
+        write.reset();
+        static_cast<void>(stop_worker(std::chrono::seconds{2}));
     }
 };
 
@@ -214,7 +224,10 @@ bool validate_bounded_process_log_limits(
            limits.maximum_line_length > 0U &&
            limits.maximum_line_length <= 64U * 1'024U &&
            limits.maximum_line_count > 0U &&
-           limits.maximum_line_count <= 65'536U;
+           limits.maximum_line_count <= 65'536U &&
+           (limits.retained_prefix_bytes == 0U ||
+            (limits.retained_prefix_bytes < limits.maximum_bytes &&
+             limits.maximum_line_length <= limits.maximum_bytes - limits.retained_prefix_bytes));
 }
 
 bool bounded_process_log_snapshot_complete(
@@ -223,6 +236,13 @@ bool bounded_process_log_snapshot_complete(
     return !snapshot.capture_failed && !snapshot.byte_truncated &&
            !snapshot.line_count_truncated &&
            !snapshot.line_length_truncated;
+}
+
+bool bounded_process_log_diagnostic_window_usable(
+    const BoundedProcessLogSnapshot& snapshot) noexcept
+{
+    return snapshot.retained_window && !snapshot.capture_failed &&
+        !snapshot.line_length_truncated;
 }
 
 BoundedProcessLogReadDisposition classify_bounded_process_log_read(
@@ -269,24 +289,28 @@ std::optional<BoundedProcessLogCapture> BoundedProcessLogCapture::create(
         if (!::CreatePipe(&read, &write, &security, 64U * 1'024U)) {
             return std::nullopt;
         }
+        UniqueHandle owned_read{read};
+        UniqueHandle owned_write{write};
         auto impl = std::make_unique<Impl>();
-        impl->read = UniqueHandle{read};
-        impl->write = UniqueHandle{write};
-        if (!::SetHandleInformation(impl->read.get(), HANDLE_FLAG_INHERIT, 0U)) {
+        impl->state->read = std::move(owned_read);
+        impl->write = std::move(owned_write);
+        if (!::SetHandleInformation(impl->state->read.get(), HANDLE_FLAG_INHERIT, 0U)) {
             return std::nullopt;
         }
-        impl->complete_event = UniqueHandle{
+        impl->state->complete_event = UniqueHandle{
             ::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
-        if (!impl->complete_event) {
+        if (!impl->state->complete_event) {
             return std::nullopt;
         }
-        impl->limits = limits;
-        impl->snapshot.bytes.reserve(limits.maximum_bytes);
-        Impl* state = impl.get();
+        impl->state->limits = limits;
+        impl->state->snapshot.retained_window = limits.retained_prefix_bytes != 0U;
+        impl->state->snapshot.bytes.reserve(limits.maximum_bytes);
+        const auto state = impl->state;
         impl->worker = std::thread{[state]() noexcept {
             try {
                 std::array<char, 4'096U> buffer{};
                 std::size_t current_line = 0U;
+                bool dropping_tail_line = false;
                 for (;;) {
                     DWORD count = 0U;
                     const BOOL read = ::ReadFile(
@@ -308,6 +332,45 @@ std::optional<BoundedProcessLogCapture> BoundedProcessLogCapture::create(
                         break;
                     }
                     std::lock_guard lock{state->mutex};
+                    if (state->limits.retained_prefix_bytes != 0U) {
+                        std::string_view chunk{buffer.data(), count};
+                        if (dropping_tail_line) {
+                            const auto boundary = chunk.find('\n');
+                            if (boundary == std::string_view::npos) chunk = {};
+                            else { chunk.remove_prefix(boundary + 1U); dropping_tail_line = false; }
+                        }
+                        state->snapshot.bytes.append(chunk);
+                        std::size_t prefix_size = 0U;
+                        std::size_t prefix_lines = 0U;
+                        while (prefix_lines < state->limits.maximum_line_count / 2U) {
+                            const auto boundary = state->snapshot.bytes.find('\n', prefix_size);
+                            if (boundary == std::string::npos || boundary >= state->limits.retained_prefix_bytes) break;
+                            prefix_size = boundary + 1U;
+                            ++prefix_lines;
+                        }
+                        if (state->snapshot.bytes.size() > state->limits.maximum_bytes) {
+                            const auto overflow = state->snapshot.bytes.size() - state->limits.maximum_bytes;
+                            const auto tail_boundary = state->snapshot.bytes.find('\n', prefix_size + overflow - 1U);
+                            if (tail_boundary == std::string::npos) {
+                                state->snapshot.bytes.erase(prefix_size);
+                                dropping_tail_line = true;
+                            } else {
+                                state->snapshot.bytes.erase(prefix_size, tail_boundary + 1U - prefix_size);
+                            }
+                            state->snapshot.byte_truncated = true;
+                        }
+                        auto retained_lines = static_cast<std::size_t>(std::count(
+                            state->snapshot.bytes.begin(), state->snapshot.bytes.end(), '\n'));
+                        auto tail_begin = prefix_size;
+                        while (retained_lines > state->limits.maximum_line_count) {
+                            tail_begin = state->snapshot.bytes.find('\n', tail_begin) + 1U;
+                            --retained_lines;
+                        }
+                        if (tail_begin != prefix_size) {
+                            state->snapshot.bytes.erase(prefix_size, tail_begin - prefix_size);
+                            state->snapshot.line_count_truncated = true;
+                        }
+                    }
                     if (state->snapshot.observed_bytes <=
                         (std::numeric_limits<std::size_t>::max)() - count) {
                         state->snapshot.observed_bytes += count;
@@ -318,7 +381,9 @@ std::optional<BoundedProcessLogCapture> BoundedProcessLogCapture::create(
                     }
                     for (DWORD index = 0U; index < count; ++index) {
                         const char value = buffer[index];
-                        if (state->snapshot.bytes.size() < state->limits.maximum_bytes) {
+                        if (state->limits.retained_prefix_bytes != 0U) {
+                            // Prefix/tail bytes were retained as a bounded chunk above.
+                        } else if (state->snapshot.bytes.size() < state->limits.maximum_bytes) {
                             state->snapshot.bytes.push_back(value);
                         } else {
                             state->snapshot.byte_truncated = true;
@@ -389,38 +454,31 @@ BoundedProcessLogSnapshot BoundedProcessLogCapture::snapshot() const
     if (!impl_) {
         return {};
     }
-    std::lock_guard lock{impl_->mutex};
-    return impl_->snapshot;
+    std::lock_guard lock{impl_->state->mutex};
+    return impl_->state->snapshot;
 }
 
 BoundedProcessLogSnapshot BoundedProcessLogCapture::finish(
     const std::chrono::milliseconds timeout) noexcept
 {
-    if (!impl_) {
-        return {};
-    }
+    if (!impl_) return {};
     impl_->write.reset();
-    const DWORD wait = ::WaitForSingleObject(
-        impl_->complete_event.get(), bounded_timeout(timeout));
-    if (wait != WAIT_OBJECT_0) {
-        {
-            std::lock_guard lock{impl_->mutex};
-            impl_->snapshot.capture_failed = true;
-            impl_->snapshot.native_error = WAIT_TIMEOUT;
-        }
-        if (impl_->worker.joinable()) {
-            impl_->cancellation_requested.store(true, std::memory_order_relaxed);
-            static_cast<void>(::CancelIoEx(impl_->read.get(), nullptr));
-            static_cast<void>(::CancelSynchronousIo(impl_->worker.native_handle()));
-        }
-        static_cast<void>(::WaitForSingleObject(
-            impl_->complete_event.get(), 2'000U));
+    const bool timed_out = ::WaitForSingleObject(
+        impl_->state->complete_event.get(), bounded_timeout(timeout)) != WAIT_OBJECT_0;
+    if (!impl_->stop_worker(std::chrono::seconds{2})) {
+        BoundedProcessLogSnapshot incomplete;
+        incomplete.capture_failed = true;
+        incomplete.native_error = WAIT_TIMEOUT;
+        // Do not lock an unresponsive worker's mutex or touch its buffer.
+        impl_.reset();
+        return incomplete;
     }
-    if (impl_->worker.joinable()) {
-        impl_->worker.join();
+    std::lock_guard lock{impl_->state->mutex};
+    if (timed_out) {
+        impl_->state->snapshot.capture_failed = true;
+        impl_->state->snapshot.native_error = WAIT_TIMEOUT;
     }
-    std::lock_guard lock{impl_->mutex};
-    return std::move(impl_->snapshot);
+    return std::move(impl_->state->snapshot);
 }
 
 bool apply_stock_runtime_startup_event(

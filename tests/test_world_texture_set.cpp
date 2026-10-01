@@ -1,4 +1,5 @@
 #include <hlclient/assets/world_texture_types.hpp>
+#include "missing_texture_test_fixture.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -273,6 +274,60 @@ TEST_CASE("World texture set construction is bounded and transactional",
         REQUIRE_FALSE(result);
         CHECK(result.error->code ==
             assets::WorldTextureSetErrorCode::invalid_configuration);
+    }
+}
+
+TEST_CASE("Generated missing textures retain honest provenance at the immutable boundary",
+    "[world-textures][external-map-compat]")
+{
+    const auto original = hlclient::tests::make_missing_texture_set();
+    std::vector textures(original.textures().begin(), original.textures().end());
+    std::vector bindings(original.bindings().begin(), original.bindings().end());
+    std::vector archives(original.archive_metadata().begin(), original.archive_metadata().end());
+
+    SECTION("renderability is not source completeness")
+    {
+        REQUIRE(original.renderable_for_world_materials());
+        CHECK_FALSE(original.complete_for_world_materials());
+        CHECK(original.statistics().decoded_texture_count == 0U);
+        CHECK(original.statistics().generated_placeholder_texture_count == 1U);
+        CHECK(original.statistics().unresolved_material_count == 1U);
+        CHECK_FALSE(assets::is_resolved(bindings[0U].status));
+        CHECK(assets::is_renderable(bindings[0U].status));
+        auto recreated = assets::WorldTextureSet::create(textures, bindings, archives, 1U);
+        REQUIRE(recreated);
+        CHECK(recreated.texture_set->renderable_for_world_materials());
+    }
+
+    SECTION("generated image cannot claim archive ownership")
+    {
+        textures[0U].source_archive_ordinal = 0U;
+        auto result = assets::WorldTextureSet::create(textures, bindings, archives, 1U);
+        REQUIRE_FALSE(result);
+        CHECK(result.error->code == assets::WorldTextureSetErrorCode::invalid_texture_asset);
+    }
+
+    SECTION("placeholder cannot conceal a missing declared archive")
+    {
+        archives[0U].status = assets::WorldTextureArchiveStatus::missing;
+        auto result = assets::WorldTextureSet::create(textures, bindings, archives, 1U);
+        REQUIRE_FALSE(result);
+        CHECK(result.error->code == assets::WorldTextureSetErrorCode::invalid_material_binding);
+    }
+
+    SECTION("placeholder requires verified archive metadata")
+    {
+        auto result = assets::WorldTextureSet::create(textures, bindings, {}, 1U);
+        REQUIRE_FALSE(result);
+        CHECK(result.error->code == assets::WorldTextureSetErrorCode::invalid_material_binding);
+    }
+
+    SECTION("generated image cannot masquerade as resolved WAD content")
+    {
+        bindings[0U].status = assets::WorldMaterialTextureBindingStatus::resolved_wad3;
+        auto result = assets::WorldTextureSet::create(textures, bindings, archives, 1U);
+        REQUIRE_FALSE(result);
+        CHECK(result.error->code == assets::WorldTextureSetErrorCode::invalid_material_binding);
     }
 }
 

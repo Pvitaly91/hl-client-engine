@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/client/client_world_state.hpp>
+#include <hlclient/game_api/presentation.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
 
 #include <cstddef>
@@ -9,6 +10,21 @@
 #include <string_view>
 
 namespace hlclient::app {
+
+// Application completion and verification coverage are independent. The
+// primary runtime error takes precedence; a healthy manual close/limit does
+// not require scripted movement/replay achievements.
+struct LiveVisualSessionOutcome final {
+  int exit_code{2};
+  std::string_view application_result{"incomplete"};
+  std::string_view primary_error{"application_incomplete"};
+  std::string_view scripted_coverage{"not_evaluated"};
+  std::string_view prediction_coverage{"limited"};
+};
+[[nodiscard]] LiveVisualSessionOutcome evaluate_live_visual_session(
+    bool keyboard_mouse, bool completed, bool runtime_failed,
+    bool scripted_verified, bool prediction_verified, bool reference_prediction,
+    std::string_view runtime_error) noexcept;
 
 enum class LiveVisualViewStatus : std::uint8_t {
   ready,
@@ -46,6 +62,7 @@ struct LiveVisualCameraSample final {
   bool fresh_server_sample{false};
   bool vertical_only_view_offset_contract{false};
   bool server_angle_correction_applied{false};
+  std::optional<assets::AssetVector3> server_punch_angle;
 };
 
 struct LiveVisualCameraUpdate final {
@@ -76,6 +93,7 @@ public:
       const client::RuntimeClientObservationState *observation,
       const gameplay_input::GameplayInputIntent &intent,
       client::ClientWorldState &target,
+      const game_api::CameraIntent &camera_intent,
       bool apply_input_delta = true,
       std::optional<LiveVisualPredictedView> predicted_view = {}) noexcept;
 

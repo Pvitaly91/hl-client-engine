@@ -1,4 +1,5 @@
 #pragma once
+#include <hlclient/game_api/command.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +9,10 @@
 #include <string_view>
 #include <vector>
 
+namespace hlclient::goldsrc {
+
+}
+namespace hlclient::client { class RuntimeClientObservationState; }
 namespace hlclient::goldsrc {
 
 // Confirmed by repeated stock Protocol 48 capture. The semantic message is
@@ -86,6 +91,10 @@ public:
     // This intentionally has no arbitrary-command input surface.
     [[nodiscard]] static ClientMessageBuildResult build();
 };
+
+// Encodes a typed module request as one bounded command; never executes text.
+[[nodiscard]] ClientMessageBuildResult encode_game_command(
+    const game_api::GameCommandRequest& request);
 
 [[nodiscard]] ClientMessageParseResult parse_initial_signon_request(
     std::span<const std::byte> bytes);

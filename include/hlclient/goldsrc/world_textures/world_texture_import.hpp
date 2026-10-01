@@ -40,6 +40,13 @@ inline constexpr std::size_t kWorldTextureImportDiagnosticTextLimit = 256U;
 
 using WorldTextureImportTimePoint = std::chrono::steady_clock::time_point;
 
+enum class MissingWorldTexturePolicy {
+    reject,
+    // Only an absent name after successful approved WAD resolution, never a
+    // missing archive, malformed texture or dimension mismatch.
+    placeholder_for_absent_name,
+};
+
 struct GoldSrcWorldTextureImportLimits {
     std::size_t maximum_material_count{kDefaultMaximumWorldTextureMaterials};
     std::size_t maximum_texture_asset_count{kDefaultMaximumWorldTextureAssets};
@@ -71,6 +78,7 @@ struct GoldSrcWorldTextureImportLimits {
         1U,
         std::nullopt};
     std::optional<std::chrono::milliseconds> timeout;
+    MissingWorldTexturePolicy missing_texture_policy{MissingWorldTexturePolicy::reject};
 };
 
 [[nodiscard]] bool valid_goldsrc_world_texture_import_limits(

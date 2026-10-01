@@ -1,4 +1,5 @@
 #pragma once
+#include <hlclient/goldsrc/movement/goldsrc_movement_profile.hpp>
 
 #include <hlclient/goldsrc/move_vars.hpp>
 
@@ -11,10 +12,6 @@ namespace hlclient::goldsrc::movement {
 inline constexpr float kGoldSrcMovementEnvironmentHardMaximumMagnitude =
     kMaximumMoveVarsNumericMagnitude;
 
-enum class GoldSrcMovementEnvironmentProfile : std::uint8_t {
-    movevars_dry_walk_subset_v1,
-    stock_pm_move_full_compatibility_evidence_pending,
-};
 
 enum class GoldSrcMovementEnvironmentEvidenceProfile : std::uint8_t {
     captured_movevars_and_public_valve_pm_shared,

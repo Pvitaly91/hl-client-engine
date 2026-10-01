@@ -147,6 +147,7 @@ namespace {
     const auto valid_profile = [&profile]() noexcept {
         switch (profile) {
         case goldsrc::movement::LocalMovementCollisionProfile::world_only_v1:
+        case goldsrc::movement::LocalMovementCollisionProfile::reference_brush_scene_v1:
         case goldsrc::movement::LocalMovementCollisionProfile::
                 explicit_synthetic_static_brush_v1:
             return true;
@@ -174,6 +175,9 @@ namespace {
     };
     const auto valid_hit = [&profile](const auto& hit) noexcept {
         switch (hit.kind) {
+        case movement::PlayerMovementHitKind::brush_entity:
+            return profile == goldsrc::movement::LocalMovementCollisionProfile::reference_brush_scene_v1 &&
+                hit.source_model_index != 0U && hit.stable_instance_ordinal && hit.source_entity_index;
         case movement::PlayerMovementHitKind::world:
             return hit.source_model_index == 0U &&
                 !hit.stable_instance_ordinal && !hit.source_entity_index;

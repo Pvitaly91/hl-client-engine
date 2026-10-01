@@ -37,6 +37,7 @@ enum class BrushSubmodelRenderSupportStatus {
 };
 
 class WorldSceneRenderPackageBuilder;
+class WorldSceneRenderPackage;
 
 // Immutable owning renderer-neutral brush-model metadata. Construction sets
 // the complete value atomically; consumers receive only const views.
@@ -79,7 +80,9 @@ public:
     BrushSubmodelRenderLibrary() noexcept = default;
     BrushSubmodelRenderLibrary(
         std::shared_ptr<const world_render::WorldRenderPackage> render_package,
-        std::vector<BrushSubmodelRenderModel> models) noexcept;
+        std::vector<BrushSubmodelRenderModel> models,
+        std::shared_ptr<const assets::WorldTextureSet> alternate_textures = {},
+        std::vector<std::optional<std::size_t>> alternate_by_material = {}) noexcept;
 
     BrushSubmodelRenderLibrary(const BrushSubmodelRenderLibrary&) = default;
     BrushSubmodelRenderLibrary(BrushSubmodelRenderLibrary&&) noexcept = default;
@@ -92,12 +95,20 @@ public:
         const world_render::WorldRenderPackage>& render_package() const noexcept;
     [[nodiscard]] std::span<const BrushSubmodelRenderModel> models()
         const noexcept;
+    [[nodiscard]] const std::shared_ptr<const assets::WorldTextureSet>& alternate_textures() const noexcept {
+        return alternate_textures_;
+    }
+    [[nodiscard]] std::span<const std::optional<std::size_t>> alternate_by_material() const noexcept {
+        return alternate_by_material_;
+    }
 
 private:
     friend class WorldSceneRenderPackageBuilder;
 
     std::shared_ptr<const world_render::WorldRenderPackage> render_package_;
     std::vector<BrushSubmodelRenderModel> models_;
+    std::shared_ptr<const assets::WorldTextureSet> alternate_textures_;
+    std::vector<std::optional<std::size_t>> alternate_by_material_;
 };
 
 struct BrushSubmodelRenderInstance {
@@ -128,6 +139,29 @@ struct WorldSceneRenderStatistics {
     std::size_t supported_brush_instance_count{0U};
     std::size_t unsupported_brush_instance_count{0U};
 };
+
+// Owning per-publication instances, separate from immutable map resources.
+// No BSP entity ordinals, native handles or gameplay meanings cross this seam.
+struct RuntimeBrushRenderInstance {
+    std::uint32_t entity_number{};
+    std::uint32_t model_slot{};
+    std::uint32_t source_model_index{};
+    renderer::RenderMatrix4 model_transform{};
+    assets::WorldBounds transformed_bounds{};
+    bool alternate_texture{};
+    // Empty means unavailable: use frustum-only conservative fallback.
+    std::vector<std::uint32_t> touched_leaf_indices;
+};
+
+struct RuntimeBrushRenderFrame {
+    WorldSceneRendererResourceIdentity scene_identity{};
+    std::uint64_t generation{};
+    std::uint64_t revision{};
+    std::vector<RuntimeBrushRenderInstance> instances;
+};
+
+[[nodiscard]] bool valid_runtime_brush_frame(
+    const RuntimeBrushRenderFrame&, const WorldSceneRenderPackage&) noexcept;
 
 enum class WorldSceneRenderErrorCode {
     invalid_world_package,

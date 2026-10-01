@@ -1,4 +1,5 @@
 #pragma once
+#include <hlclient/goldsrc/collision/brush_collision_scene_limits.hpp>
 
 #include <hlclient/collision/collision_world_query.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_brush_rigid_transform.hpp>
@@ -28,6 +29,7 @@ enum class BrushCollisionRole : std::uint8_t {
 enum class BrushCollisionRoleProviderProfile : std::uint8_t {
     explicit_synthetic_brush_solidity_v1,
     stock_brush_solidity_evidence_pending,
+    reference_entity_solid_bsp_v1,
 };
 
 [[nodiscard]] std::string_view to_string(
@@ -228,32 +230,6 @@ trace_explicit_brush_model(
     const ExplicitBrushCollisionTraceRequest& request,
     hlclient::collision::CollisionQueryScratch& scratch);
 
-inline constexpr std::size_t kDefaultMaximumBrushCollisionSceneInstances =
-    4'096U;
-inline constexpr std::size_t kHardMaximumBrushCollisionSceneInstances =
-    65'536U;
-inline constexpr std::size_t kDefaultMaximumBrushCollisionCandidates = 1'024U;
-inline constexpr std::size_t kHardMaximumBrushCollisionCandidates = 65'536U;
-inline constexpr std::size_t kDefaultMaximumBrushCollisionModelTraces = 1'024U;
-inline constexpr std::size_t kHardMaximumBrushCollisionModelTraces = 65'536U;
-
-struct BrushCollisionSceneBuildLimits {
-    std::size_t maximum_instances{
-        kDefaultMaximumBrushCollisionSceneInstances};
-};
-
-[[nodiscard]] bool valid_brush_collision_scene_build_limits(
-    const BrushCollisionSceneBuildLimits& limits) noexcept;
-
-struct BrushCollisionSceneQueryLimits {
-    std::size_t maximum_brush_candidates{
-        kDefaultMaximumBrushCollisionCandidates};
-    std::size_t maximum_model_traces{
-        kDefaultMaximumBrushCollisionModelTraces};
-};
-
-[[nodiscard]] bool valid_brush_collision_scene_query_limits(
-    const BrushCollisionSceneQueryLimits& limits) noexcept;
 
 struct BrushCollisionInstanceDefinition {
     BrushCollisionInstanceIdentity identity{};

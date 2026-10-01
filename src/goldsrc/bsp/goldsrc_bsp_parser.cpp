@@ -1534,16 +1534,22 @@ private:
                     index,
                     "BSP face references texinfo outside the texinfo lump");
             }
+            // 255 terminates the style list. A zero-sample face may retain
+            // the compiler's end-of-lump cursor, but never an out-of-range one.
+            const bool has_light_samples = face.light_styles[0U] != 255U;
             if (face.light_offset < -1 ||
                 (face.light_offset >= 0 &&
-                 static_cast<std::uint64_t>(face.light_offset) >=
-                     static_cast<std::uint64_t>(lighting_size))) {
+                 (static_cast<std::uint64_t>(face.light_offset) >
+                      static_cast<std::uint64_t>(lighting_size) ||
+                  (has_light_samples &&
+                   static_cast<std::uint64_t>(face.light_offset) ==
+                       static_cast<std::uint64_t>(lighting_size))))) {
                 return fail(
                     GoldSrcBspErrorCode::invalid_light_offset,
                     GoldSrcBspLumpId::faces,
                     record_offset + 16U,
                     index,
-                    "BSP face light offset is neither -1 nor inside the lighting lump");
+                    "BSP face light offset exceeds its bounded sample range");
             }
         }
 
@@ -2787,6 +2793,13 @@ private:
         std::vector<std::byte> entity_lump_bytes;
         entity_lump_bytes.assign(entities.begin(), entities.end());
 
+        std::vector<assets::WorldMaterialReference> texture_directory;
+        texture_directory.reserve(textures_.size());
+        for (std::size_t index = 0; index < textures_.size(); ++index) {
+            const auto& texture = textures_[index];
+            texture_directory.push_back({texture.name, texture.width, texture.height,
+                texture.storage, 0, {}, static_cast<std::uint32_t>(index)});
+        }
         return GoldSrcBspParsedDocument{
             std::move(*world),
             std::move(spatial_source),
@@ -2795,6 +2808,7 @@ private:
             std::move(entity_lump_bytes),
             lump_element_counts_,
             geometry_statistics_,
+            std::move(texture_directory),
         };
     }
 

@@ -2,6 +2,7 @@
 
 #include <hlclient/gameplay_camera/first_person_camera.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -14,6 +15,28 @@ namespace {
 }
 
 } // namespace
+
+LiveVisualSessionOutcome evaluate_live_visual_session(
+    bool keyboard_mouse, bool completed, bool runtime_failed,
+    bool scripted_verified, bool prediction_verified, bool reference_prediction,
+    std::string_view runtime_error) noexcept {
+  LiveVisualSessionOutcome result;
+  result.scripted_coverage = keyboard_mouse ? "not_evaluated" :
+      scripted_verified ? "verified" : "limited";
+  result.prediction_coverage = !reference_prediction ? "off" :
+      prediction_verified ? "verified" : "limited";
+  if (runtime_failed) {
+    result.application_result = "error";
+    result.primary_error = runtime_error.empty() ? "runtime_error" : runtime_error;
+    return result;
+  }
+  if (completed) {
+    result.exit_code = 0;
+    result.application_result = "completed";
+    result.primary_error = "none";
+  }
+  return result;
+}
 
 std::string_view to_string(const LiveVisualViewStatus status) noexcept {
   switch (status) {
@@ -67,6 +90,7 @@ LiveVisualCameraUpdate LiveVisualCameraController::update(
     const client::RuntimeClientObservationState *const observation,
     const gameplay_input::GameplayInputIntent &intent,
     client::ClientWorldState &target,
+    const game_api::CameraIntent &camera_intent,
     const bool apply_input_delta,
     const std::optional<LiveVisualPredictedView> predicted_view) noexcept {
   LiveVisualCameraUpdate result;
@@ -86,11 +110,11 @@ LiveVisualCameraUpdate LiveVisualCameraController::update(
     return result;
   }
   const auto &receiving = *observation->receiving_client;
-  if (!receiving.health) {
+  if (camera_intent.status == game_api::CameraIntentStatus::health_unavailable) {
     result.status = LiveVisualViewStatus::health_unavailable;
     return result;
   }
-  if (*receiving.health <= 0.0) {
+  if (camera_intent.status == game_api::CameraIntentStatus::receiving_client_not_alive) {
     result.status = LiveVisualViewStatus::receiving_client_not_alive;
     return result;
   }
@@ -125,7 +149,10 @@ LiveVisualCameraUpdate LiveVisualCameraController::update(
     const auto corrected_yaw = gameplay_camera::normalize_yaw_degrees(
         observation->view_angle_correction->yaw_degrees);
     const auto corrected_pitch = gameplay_camera::clamp_pitch_degrees(
-        observation->view_angle_correction->pitch_degrees, -89.0, 89.0);
+        // svc_setangle retains GoldSrc turns (including e.g. 350 = -10).
+        // Normalize before changing convention and clamping the camera.
+        -std::remainder(observation->view_angle_correction->pitch_degrees, 360.0),
+        -89.0, 89.0);
     if (!corrected_yaw || !corrected_pitch) {
       result.status = LiveVisualViewStatus::invalid_local_angles;
       return result;
@@ -147,15 +174,29 @@ LiveVisualCameraUpdate LiveVisualCameraController::update(
       lateral_complete ? static_cast<float>(*receiving.view_offset.x) : 0.0F,
       lateral_complete ? static_cast<float>(*receiving.view_offset.y) : 0.0F,
       static_cast<float>(*receiving.view_offset.z)};
-  const auto presented_origin = predicted_view ? predicted_view->origin : origin;
-  const auto presented_offset = predicted_view
+  const bool prediction_allowed = predicted_view && camera_intent.allow_predicted_translation;
+  const auto presented_origin = prediction_allowed ? predicted_view->origin : origin;
+  const auto presented_offset = prediction_allowed
       ? predicted_view->view_offset : view_offset;
   const assets::AssetVector3 eye{
       presented_origin.x + presented_offset.x,
       presented_origin.y + presented_offset.y,
       presented_origin.z + presented_offset.z};
-  const auto forward =
-      gameplay_camera::forward_from_yaw_pitch(yaw_degrees_, pitch_degrees_);
+  std::optional<assets::AssetVector3> punch;
+  if (camera_intent.server_punch_angle)
+    punch = assets::AssetVector3{(*camera_intent.server_punch_angle)[0],
+        (*camera_intent.server_punch_angle)[1],(*camera_intent.server_punch_angle)[2]};
+  if (camera_intent.status == game_api::CameraIntentStatus::invalid_local_punch ||
+      !std::isfinite(camera_intent.pitch_offset_degrees) ||
+      !std::isfinite(camera_intent.local_pitch_offset_degrees) ||
+      !std::isfinite(camera_intent.yaw_offset_degrees) || !std::isfinite(camera_intent.roll_degrees))
+    return result;
+  const auto presented_pitch = std::clamp(
+      pitch_degrees_ + camera_intent.pitch_offset_degrees +
+          camera_intent.local_pitch_offset_degrees, -89.0, 89.0);
+  const auto presented_yaw = yaw_degrees_ + camera_intent.yaw_offset_degrees;
+  const auto forward = gameplay_camera::forward_from_yaw_pitch(
+      presented_yaw, presented_pitch);
   if (!forward || !finite_vector(origin) || !finite_vector(view_offset) ||
       !finite_vector(presented_origin) || !finite_vector(presented_offset) ||
       !finite_vector(eye)) {
@@ -168,6 +209,18 @@ LiveVisualCameraUpdate LiveVisualCameraController::update(
   camera.target = {eye.x + forward->x, eye.y + forward->y,
                    eye.z + forward->z};
   camera.up = gameplay_camera::world_up();
+  if (camera_intent.roll_degrees != 0.0 && forward) {
+    constexpr double radians = 0.01745329251994329577;
+    const auto roll = camera_intent.roll_degrees * radians;
+    const auto right_x = forward->y;
+    const auto right_y = -forward->x;
+    const auto horizontal = std::hypot(right_x, right_y);
+    if (horizontal > 1.0e-6F) {
+      camera.up = {static_cast<float>(std::sin(roll) * right_x / horizontal),
+                   static_cast<float>(std::sin(roll) * right_y / horizontal),
+                   static_cast<float>(std::cos(roll))};
+    }
+  }
   const bool camera_changed = !last_camera_ || *last_camera_ != camera;
   if (camera_changed) {
     if (camera_revision_ == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -208,6 +261,7 @@ LiveVisualCameraUpdate LiveVisualCameraController::update(
       fresh,
       lateral_absent,
       server_angle_correction_applied};
+  result.sample->server_punch_angle = punch;
   return result;
 }
 

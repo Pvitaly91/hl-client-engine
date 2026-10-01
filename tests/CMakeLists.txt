@@ -1,4 +1,21 @@
 add_executable(hlclient_tests
+    test_audio_api.cpp
+    test_local_weapon_audio.cpp
+    test_local_weapon_visuals.cpp
+    test_local_weapon_visuals_opengl.cpp
+    test_remote_effect_presentation.cpp
+    test_world_impact_presentation.cpp
+    test_halflife_movement_audio.cpp
+    test_halflife_materials.cpp
+    test_server_audio.cpp
+    test_game_client_module.cpp
+    test_game_camera_intent.cpp
+    test_half_life_client_module.cpp
+    test_remote_player_presentation.cpp
+    test_remote_weapon_effects.cpp
+    test_halflife_pickups.cpp
+    test_halflife_presentation.cpp
+    test_halflife_weapon_presentation_opengl.cpp
     test_auth_material_file.cpp
     test_authentication_provider.cpp
     test_asset_manager.cpp
@@ -188,6 +205,8 @@ add_executable(hlclient_tests
     test_local_player_prediction_controller.cpp
     test_local_player_prepared_update.cpp
     test_local_prediction_history.cpp
+    test_local_weapon_presentation.cpp
+    test_local_player_lifecycle.cpp
     test_local_prediction_reconciliation.cpp
     test_player_walk_camera.cpp
     test_player_walk_failure_latch.cpp
@@ -236,6 +255,7 @@ add_executable(hlclient_tests
     test_runtime_replay_scene_source.cpp
     test_runtime_replay_visual_projection.cpp
     test_live_visual_control.cpp
+    test_remote_player_visibility_trace.cpp
     test_server_info.cpp
     test_stock_spawn_request.cpp
     test_service_payload_envelope.cpp
@@ -273,6 +293,10 @@ endif()
 
 target_link_libraries(hlclient_tests
     PRIVATE
+        hlclient::audio_sdl hlclient::goldsrc_sound_assets
+        hlclient::game_halflife
+        hlclient::game_client_host
+        hlclient::game_policy
         hlclient_reference_move_test_support
         Catch2::Catch2WithMain
         SDL3::SDL3-shared
@@ -385,6 +409,9 @@ if(WIN32)
 endif()
 
 target_compile_features(hlclient_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_tests PRIVATE
+    HLCLIENT_HAS_GAME_HALFLIFE=$<BOOL:${HLCLIENT_BUILD_GAME_HALFLIFE}>)
+set_property(TARGET hlclient_tests PROPERTY HLCLIENT_GAME_COMPOSITION TRUE)
 hlclient_enable_warnings(hlclient_tests)
 hlclient_enable_address_sanitizer(hlclient_tests)
 add_dependencies(hlclient_tests hlclient)

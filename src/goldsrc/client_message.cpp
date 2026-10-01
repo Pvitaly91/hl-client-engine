@@ -1,9 +1,36 @@
 #include <hlclient/goldsrc/client_message.hpp>
+#include <hlclient/client/runtime_observation.hpp>
 
+#include <algorithm>
 #include <array>
+#include <ranges>
+#include <tuple>
 #include <utility>
 
 namespace hlclient::goldsrc {
+ClientMessageBuildResult encode_game_command(const game_api::GameCommandRequest& request) {
+    const auto rejected = [] {
+        return ClientMessageBuildResult{{}, ClientMessageError{
+            ClientMessageErrorCode::unsupported_command_variant, 0U,
+            "Game request is not one bounded permitted token"}};
+    };
+    if (request.token.empty() || request.token.size() > 63U ||
+        (request.kind != game_api::GameCommandKind::inventory_selection &&
+         request.kind != game_api::GameCommandKind::self_kill) ||
+        (request.kind == game_api::GameCommandKind::self_kill && request.token != "kill") ||
+        (request.kind == game_api::GameCommandKind::inventory_selection &&
+         (!request.token.starts_with("weapon_") || request.token.size() <= 7U)))
+        return rejected();
+    for (const unsigned char value : request.token)
+        if (!((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+              (value >= '0' && value <= '9') || value == '_')) return rejected();
+    std::vector<std::byte> bytes;
+    bytes.reserve(request.token.size() + 2U);
+    bytes.push_back(std::byte{static_cast<std::uint8_t>(ClientMessageOpcode::string_command)});
+    for (const unsigned char value : request.token) bytes.push_back(std::byte{value});
+    bytes.push_back(std::byte{0});
+    return {std::move(bytes), {}};
+}
 namespace {
 
 inline constexpr std::array<std::byte, kInitialSignonRequestSize>

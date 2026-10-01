@@ -256,4 +256,14 @@ RenderMatrixResult camera_view_projection(
     return {result, std::nullopt};
 }
 
+RenderCamera camera_local_first_person_camera(
+    const RenderCamera& world_camera) noexcept
+{
+    RenderCamera result = world_camera;
+    result.position = {0.0F, 0.0F, 0.0F};
+    result.target = {1.0F, 0.0F, 0.0F};
+    result.up = {0.0F, 0.0F, 1.0F};
+    return result;
+}
+
 } // namespace hlclient::renderer

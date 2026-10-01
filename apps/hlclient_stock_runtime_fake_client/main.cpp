@@ -72,6 +72,19 @@ struct Options final {
 
 int main(const int argc, char** argv)
 {
+    // Project-owned offline finalization fixture. Returns BEFORE WSAStartup;
+    // the normal fake-peer protocol path below is unchanged.
+    if (argc == 3 && std::string_view{argv[1]} == "--emit-runtime-failure-fixture") {
+        const std::string_view line{argv[2]};
+        if (line.size() > 4096U ||
+            !line.starts_with("live_application_outcome result=error primary_error=runtime_record_failed") ||
+            !std::all_of(line.begin(), line.end(), [](const unsigned char c) {
+                return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '=' || c == ' ';
+            })) return 1;
+        std::cout << line << '\n' << std::flush;
+        return 2;
+    }
     const auto options = parse_options(argc, argv);
     if (!options) return 2;
     WSADATA data{};
