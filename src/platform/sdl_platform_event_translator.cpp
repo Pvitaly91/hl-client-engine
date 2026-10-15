@@ -34,6 +34,8 @@ namespace {
         return input::PhysicalKey::e;
     case SDL_SCANCODE_R:
         return input::PhysicalKey::r;
+    case SDL_SCANCODE_Q:
+        return input::PhysicalKey::q;
     case SDL_SCANCODE_ESCAPE:
         return input::PhysicalKey::escape;
     case SDL_SCANCODE_TAB:
@@ -50,6 +52,8 @@ namespace {
         return input::PhysicalKey::f1;
     case SDL_SCANCODE_F2:
         return input::PhysicalKey::f2;
+    case SDL_SCANCODE_F8:
+        return input::PhysicalKey::f8;
     case SDL_SCANCODE_1:
         return input::PhysicalKey::digit_1;
     case SDL_SCANCODE_2:

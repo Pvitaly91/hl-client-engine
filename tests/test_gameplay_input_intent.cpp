@@ -137,6 +137,56 @@ TEST_CASE("Gameplay intent cancels opposite movement actions exactly",
     CHECK(built.intent->vertical_axis() == 0.0F);
 }
 
+TEST_CASE("Neutral per-sample mouse scale precedes clamping without changing base sensitivity or actions",
+          "[gameplay-input][intent][sensitivity][core-only]")
+{
+    input::InputStateTracker tracker;
+    tracker.begin_frame();
+    tracker.apply_event(input::InputEvent::focus_gained());
+    tracker.apply_event(input::InputEvent::capture_acquired());
+    tracker.apply_event(input::InputEvent::key_pressed(input::PhysicalKey::w));
+    tracker.apply_event(input::InputEvent::mouse_button_pressed(input::PhysicalMouseButton::right));
+    tracker.apply_event(input::InputEvent::mouse_motion(2000, -1000));
+    const auto snapshot=tracker.publish_snapshot();tracker.end_frame();
+    const auto bindings=default_bindings();
+    const auto baseline=gameplay::GameplayInputIntentBuilder{}.build(snapshot,bindings,{},.02);
+    REQUIRE(baseline);
+    CHECK(baseline.intent->look_delta_yaw_degrees()==-180.0);
+    for(const double scale:{0.25,1.0,4.0}) {
+        gameplay::MouseLookConfig config;config.sensitivity_scale=scale;
+        const auto scaled=gameplay::GameplayInputIntentBuilder{}.build(snapshot,bindings,config,.02);
+        REQUIRE(scaled);
+        CHECK(scaled.intent->look_delta_yaw_degrees()==Approx(scale==0.25 ? -50.0 : -180.0));
+        CHECK(scaled.intent->look_delta_pitch_degrees()==Approx(scale==0.25 ? 25.0 : scale==1.0 ? 100.0 : 180.0));
+        CHECK(scaled.intent->held_buttons()==baseline.intent->held_buttons());
+        CHECK(scaled.intent->pressed_buttons()==baseline.intent->pressed_buttons());
+        CHECK(scaled.intent->forward_axis()==baseline.intent->forward_axis());
+        CHECK(scaled.intent->input_sequence()==baseline.intent->input_sequence());
+        CHECK(config.degrees_per_pixel_x==0.1);
+    }
+    gameplay::MouseLookConfig minimum;
+    minimum.degrees_per_pixel_x=minimum.degrees_per_pixel_y=.001;
+    minimum.sensitivity_scale=.01;minimum.invert_y=true;
+    const auto small=gameplay::GameplayInputIntentBuilder{}.build(snapshot,bindings,minimum,.02);
+    REQUIRE(small);
+    CHECK(small.intent->look_delta_yaw_degrees()==Approx(-.02));
+    CHECK(small.intent->look_delta_pitch_degrees()==Approx(-.01));
+    for(const double invalid:{0.0,-1.0,4.01,std::numeric_limits<double>::quiet_NaN(),
+                             std::numeric_limits<double>::infinity()}) {
+        minimum.sensitivity_scale=invalid;
+        const auto rejected=gameplay::GameplayInputIntentBuilder{}.build(snapshot,bindings,minimum,.02);
+        REQUIRE_FALSE(rejected);REQUIRE(rejected.error);
+        CHECK(rejected.error->code==gameplay::GameplayInputIntentErrorCode::invalid_mouse_look_config);
+    }
+    tracker.begin_frame();tracker.apply_event(input::InputEvent::focus_lost());
+    const auto unfocused=tracker.publish_snapshot();tracker.end_frame();
+    minimum.sensitivity_scale=.25;
+    const auto inactive=gameplay::GameplayInputIntentBuilder{}.build(unfocused,bindings,minimum,.02);
+    REQUIRE(inactive);
+    CHECK(inactive.intent->look_delta_yaw_degrees()==0.0);
+    CHECK(inactive.intent->look_delta_pitch_degrees()==0.0);
+}
+
 TEST_CASE("Gameplay intent makes uncaptured left click a capture gesture only",
           "[gameplay-input][intent][capture]")
 {

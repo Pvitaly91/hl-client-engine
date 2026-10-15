@@ -1,5 +1,99 @@
 # GoldSrc BSP geometry compatibility
 
+## Corrective: preserve shared-edge subdivisions — 2026-10-06
+
+`attribution=user_report`: persistent bright pinpixels at a surface seam;
+the supplied image marks the join between a crate and wall. The accepted Egon
+beam shape is unrelated and unchanged. The defect reproduced offline is loss
+of BSP boundary subdivisions, not a white texture key or effect/audio event.
+
+The former builder deleted collinear/near-collinear source corners before
+publishing a fan. This could undo the compiler's T-junction stitches. For a
+slightly bent shared edge within the existing float-distance tolerance, one
+face became a straight edge while its neighbor retained the source bend,
+opening a real gap. Exactly collinear mismatched subdivisions can also lose
+matching rasterization at subpixel edges. Bright background is visible through
+the gap; the screenshot alone does not establish the affected source face ID.
+The pinned official SDK compiler's `utils/qbsp2/tjunc.c` / `FixFaceEdges`
+provides the source-format rationale for retaining those inserted corners;
+its implementation was not copied into this independent geometry builder.
+
+The builder now retains every original position, source vertex ID and affine
+UV in canonical CCW order, anchored at the original first source corner.
+Existing bounded simplification is used only for a temporary convex skeleton.
+After triangulating it, removed splits are reinserted in reverse order by
+splitting the unique boundary triangle. Publication contains all n original
+corners and n-2 positive triangles, without synthetic points, global welding,
+texture edits, polygon offset or a renderer overlay masking the crack.
+If an accepted near-collinear bend meets a skeleton diagonal in a very thin
+face, a deterministic cached-ear fallback changes only the triangulation of
+the retained boundary. Cached point blockers and two-neighbor updates keep
+this O(n-squared) time/O(n) memory, under the existing face limits; it does not
+admit arbitrary concave source polygons or remove the strict winding gate.
+Every final triangle is winding-validated; original structural, side, plane,
+self-intersection and pair-work-budget checks remain in force.
+
+Independent CPU tests verify exact source/UV preservation, each original
+boundary segment used once in the correct direction, triangle area, positive
+winding, deterministic output, wraparound anchors, both face sides and all
+surfedge signs. The production BSP/import/lightmap/package/OpenGL regression
+uses an opaque constant material and explicit background color. A representable
+near-collinear seam (offset 1/512, old tolerance about 1/256 at x=1024) failed on
+old code with 144 background pixels AND 144 unwritten-depth pixels in a 24x24
+region. Corrected output has 0 of each; exact-collinear input is also covered.
+The final GPU test repeats five straight/oblique/translated camera poses for
+both boundary variants, retaining exact opaque color and written-depth checks.
+This is an independently owned fixture, not copied or edited game geometry.
+
+Historical M4.4.1 evidence and its JSON aggregates below remain historical;
+their removed-corner counts must not be read as current output counts.
+The legacy `removed_collinear_corner_count` field now stays 0 on success because
+all source boundary corners survive. Ordinary non-split convex fans remain
+byte-stable. World/brush faces share this mechanism; collision hulls, wire
+state, gameplay, approved resources and the accepted beam renderer are unchanged.
+
+Source snapshot and logs: `manual-artifacts/task-records/bsp-shared-edge-seams-20261006/`.
+Before edits, 1249 ordinary source files were copied and SHA-256 verified.
+Baseline: 39 offline cases / 20,977 assertions passed. Final snapshot comparison
+found exactly seven changed source/test/documentation files and no missing files;
+the pre-existing dirty worktree and empty index were preserved.
+
+### Final verification for this correction
+
+- VS2022 / Win32 Debug and Release builds passed in the existing build tree.
+- Debug and Release focused `[goldsrc-bsp],[renderer][opengl],[e22]` runs each
+  passed 154 cases / 67,624 assertions, with the optional approved local asset
+  root enabled read-only. The seam GPU regression rendered 20 checked frames.
+- Debug core/API: 244 cases / 125,333 assertions passed.
+- Existing `build-core-g1`, `HLCLIENT_BUILD_GAME_HALFLIFE=OFF`: rebuild passed;
+  41/41 CTest checks passed, including the architecture guard (32.46 seconds).
+- One final full audited Release offline run after the last production edit:
+  3019 registered checks, 2972 passed, 47 explicit skips, zero failures
+  (515.92 seconds for CTest). Its Null/process/transport/summary and no-stock
+  launcher checks also passed; `build_source.ps1 -Configuration Release
+  -Parallel 1 -TestOnly` returned 0. The full run intentionally had no installed
+  asset root; skips include optional local resources and unavailable/gated
+  filesystem, interactive SDL and WFP capabilities. Skips are not passes.
+- Actual unchanged launcher `-Prediction reference -RemoteAudioPeer
+  -NoTimeLimit -CheckOnly` passed with process launches=0. Reference/off and
+  launcher failure/report contracts passed in the no-stock fixture.
+- `git diff --check` passed. ASan runtime was not rerun: the previously
+  unverified loader failure `0xC0000135` remains an explicit coverage limit.
+
+Prepared normal Release: `build/bin/Release/hlclient.exe`, 3,828,224 bytes.
+SHA-256: `18CEF15F5B5F7F9B453A128766F731DD07E2FB273BA41E02C36DDEB1CB508A08`.
+Launcher SHA-256 remains
+`AAE46322C7D44A8CBDB6080F464664F207FFE2E99CE9C7D28E4E32A37E8B6DBF`.
+No beam geometry/shader or installed game asset changed. This fixes the
+reproduced boundary-loss defect; it does not claim every possible source of
+image noise has been eliminated or identify the exact face in the live image.
+New-build manual=`not_run`: recheck the reported crate/wall seam while moving
+the camera. New live client/HLDS/Steam/WFP/capture launches=0; staging,
+commit and push=none.
+
+The remaining sections describe the original M4.4.1 implementation/history;
+boundary removal there is superseded by this correction.
+
 M4.4.1 aligns the CPU geometry boundary with the face-loop convention emitted
 by Valve's GoldSrc tools. The parser remains strict: this is a named format
 compatibility profile, not a general option to accept reversed or damaged

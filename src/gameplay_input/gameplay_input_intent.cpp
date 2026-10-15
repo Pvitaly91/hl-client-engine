@@ -202,6 +202,8 @@ bool valid_mouse_look_config(
         std::isfinite(config.degrees_per_pixel_y) &&
         config.degrees_per_pixel_y >= 0.001 &&
         config.degrees_per_pixel_y <= limits.maximum_degrees_per_pixel &&
+        std::isfinite(config.sensitivity_scale) &&
+        config.sensitivity_scale > 0.0 && config.sensitivity_scale <= 4.0 &&
         std::isfinite(config.maximum_delta_per_frame) &&
         config.maximum_delta_per_frame > 0.0 &&
         config.maximum_delta_per_frame <=
@@ -408,9 +410,9 @@ GameplayInputIntentBuildResult GameplayInputIntentBuilder::build(
         // In the project Z-up basis positive yaw turns +X toward +Y (left),
         // so physical motion to the right produces a negative yaw delta.
         yaw_delta = -static_cast<double>(mouse_delta.x) *
-            mouse_look.degrees_per_pixel_x;
+            mouse_look.degrees_per_pixel_x * mouse_look.sensitivity_scale;
         pitch_delta = static_cast<double>(mouse_delta.y) *
-            mouse_look.degrees_per_pixel_y *
+            mouse_look.degrees_per_pixel_y * mouse_look.sensitivity_scale *
             (mouse_look.invert_y ? 1.0 : -1.0);
         if (!std::isfinite(yaw_delta) || !std::isfinite(pitch_delta)) {
             return failure(GameplayInputIntentErrorCode::non_finite_look_delta,

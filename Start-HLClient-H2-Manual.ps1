@@ -20,6 +20,7 @@ param(
     [ValidateSet(50)]
     [int]$TestStartHealth = 0,
     [switch]$MuteGlockFireSound,
+    [switch]$DebugFreezeTracer,
     [switch]$RemoteAudioPeer,
     [ValidateRange(1, 86400)]
     [int]$DurationSeconds = 45,
@@ -45,6 +46,7 @@ function Get-H2ManualConfiguration {
           [string]$SelectedExternalMapBsp,
           [ValidateSet(0, 50)][int]$SelectedTestStartHealth = 0,
           [switch]$SelectedMuteGlockFireSound,
+          [switch]$SelectedDebugFreezeTracer,
           [switch]$SelectedRemoteAudioPeer,
           [Nullable[int]]$SelectedDurationSeconds,
           [switch]$SelectedNoTimeLimit,
@@ -73,8 +75,9 @@ function Get-H2ManualConfiguration {
         throw 'TestStartHealth requires crossfire, manual keyboard-mouse and Prediction reference.'
     }
     if ($SelectedRemoteAudioPeer -and ($SelectedScenario -cne 'manual' -or
-        $SelectedMap -cne 'crossfire' -or $SelectedTestStartHealth -ne 0 -or $SelectedExternalMapBsp)) {
-        throw 'RemoteAudioPeer requires default crossfire, manual input and no health/external-map profile.'
+        ($SelectedMap -cne 'crossfire' -and -not $SelectedExternalMapBsp) -or
+        $SelectedTestStartHealth -ne 0)) {
+        throw 'RemoteAudioPeer requires manual input, no health profile and crossfire or a verified ExternalMapBsp.'
     }
     $release = Join-Path $Root 'build\bin\Release'
     $research = [IO.Path]::GetFullPath($ResearchRoot)
@@ -116,6 +119,12 @@ function Get-H2ManualConfiguration {
             throw 'MuteGlockFireSound requires the manual keyboard-mouse scenario.'
         }
         $configuration.ProjectClientMuteGlockFireSound = $true
+    }
+    if ($SelectedDebugFreezeTracer) {
+        if ($SelectedScenario -cne 'manual') {
+            throw 'DebugFreezeTracer requires the manual keyboard-mouse scenario.'
+        }
+        $configuration.ProjectClientDebugFreezeTracer = $true
     }
     return $configuration
 }
@@ -266,7 +275,7 @@ if ($PSBoundParameters.ContainsKey('ExternalMapBsp') -and [string]::IsNullOrWhit
 }
 $timingArguments = @{}
 if ($PSBoundParameters.ContainsKey('DurationSeconds')) { $timingArguments.SelectedDurationSeconds = $DurationSeconds }
-$configuration = Get-H2ManualConfiguration -Root $PSScriptRoot -Mode $Prediction -ResearchRoot $ResearchHalfLifeRoot -SteamRoot $SteamAppsRoot -SelectedScenario $Scenario -SelectedMap $Map -SelectedExternalMapBsp $ExternalMapBsp -SelectedTestStartHealth $TestStartHealth -SelectedMuteGlockFireSound:$MuteGlockFireSound -SelectedRemoteAudioPeer:$RemoteAudioPeer -SelectedNoTimeLimit:$NoTimeLimit -SelectedValidationMode $ValidationMode @timingArguments
+$configuration = Get-H2ManualConfiguration -Root $PSScriptRoot -Mode $Prediction -ResearchRoot $ResearchHalfLifeRoot -SteamRoot $SteamAppsRoot -SelectedScenario $Scenario -SelectedMap $Map -SelectedExternalMapBsp $ExternalMapBsp -SelectedTestStartHealth $TestStartHealth -SelectedMuteGlockFireSound:$MuteGlockFireSound -SelectedDebugFreezeTracer:$DebugFreezeTracer -SelectedRemoteAudioPeer:$RemoteAudioPeer -SelectedNoTimeLimit:$NoTimeLimit -SelectedValidationMode $ValidationMode @timingArguments
 if ($configuration.Contains('ExternalManualMap') -and $SourceOnly) {
     throw 'external_map_not_supplied: SourceOnly cannot validate external map assets.'
 }
@@ -286,7 +295,14 @@ if ($TestStartHealth -eq 50) {
 if ($MuteGlockFireSound) {
     Write-Host 'Audio diagnostic: local Glock fire sound muted; impact, casing, other weapon and server sounds remain enabled.'
 }
+if ($DebugFreezeTracer) {
+    Write-Host 'Tracer geometry diagnostic: latest solid 3D streak stays fixed until another tracer or map/session reset. Head glow is not retained. Ordinary effects/gameplay remain enabled.'
+}
 if ($CheckOnly) {
+    if (-not $SourceOnly) {
+        & (Join-Path $PSScriptRoot 'build\bin\Release\hlclient_stock_runtime_orchestrator.exe') --validate-session-receipt-contract
+        if ($LASTEXITCODE -ne 0) { throw 'Durable session receipt native dry-run failed.' }
+    }
     if ($RemoteAudioPeer -and -not $SourceOnly) {
         & (Join-Path $PSScriptRoot 'build\bin\Release\hlclient_stock_runtime_orchestrator.exe') --validate-remote-audio-peer-contract
         if ($LASTEXITCODE -ne 0) { throw 'RemoteAudioPeer native dry-run failed.' }
@@ -296,14 +312,14 @@ if ($CheckOnly) {
         $checkedConfiguration = Get-H2ManualConfiguration -Root $PSScriptRoot -Mode $Prediction -ResearchRoot $ResearchHalfLifeRoot -SteamRoot $SteamAppsRoot -SelectedScenario $checkedScenario -SelectedMap $Map -SelectedExternalMapBsp $ExternalMapBsp -SelectedValidationMode $ValidationMode
         Assert-H2ManualFilesAndContract -Runner $runner -Configuration $checkedConfiguration -SourceOnly:$SourceOnly
     }
-    Write-Host 'CheckOnly passed: files and FunctionalSmoke parameters validated. No runner, game, Steam API, WFP or sockets started.'
+    Write-Host 'CheckOnly passed: files and FunctionalSmoke parameters validated. Native dry-runs are offline only; no managed session, game, Steam API, WFP or network sockets started.'
     Write-Host 'Administrator rights and current UDP ownership will be checked only for an actual launch.'
     if ($SourceOnly) { Write-Host 'External game/Steam files: NOT CHECKED (source-only build validation, not live readiness).' }
     return
 }
 if ($RemoteAudioPeer) {
     Write-Host 'Two clients: A=HLC_E9_A; B=HLC_E9_B. Audio follows the focused window; both clients have normal output. Same owned HLDS.'
-    Write-Host 'Select B to move; A remains listener. Closing A ends both owned clients. Two-player authentication and listening: pending manual validation.'
+    Write-Host 'Closing B requests bounded protocol disconnect; A continues. Closing A ends the owned session; wait for the final cleanup/restoration summary.'
 }
 Assert-H2ManualLivePreflight
 if ($TestStartHealth -eq 50) {
@@ -314,11 +330,12 @@ if ($Scenario -eq 'damage-respawn-check') {
     Write-Host 'No combat damage/armor absorption proof; no automatic second session. C budget is tracked separately.'
 }
 Write-Host 'Click: capture mouse | WASD: move | mouse: look | Shift: slow walk'
-Write-Host 'Space: jump | Ctrl: crouch | 1-5 / wheel: select an owned weapon'
+Write-Host 'Space: jump | Ctrl: crouch | 1-5: weapon groups | wheel: selection candidate'
+Write-Host 'Weapon menu: LMB confirms without firing | Escape cancels (mouse stays captured)'
 Write-Host 'E: use | hold E: use a health or armor station (server decides availability)'
 Write-Host 'Escape: release mouse | close game window: finish the managed session'
-Write-Host 'First click: capture mouse  LMB after capture: primary attack  R: reload'
-Write-Host 'Weapon model, server ammo and basic HUD are enabled; secondary attack is not enabled.'
+Write-Host 'First click: capture mouse | LMB with menu closed: primary attack | R: reload'
+Write-Host 'Weapon model, server ammo and basic HUD are enabled; RMB: MP5 M203 secondary (requires server grenade ammo).'
 Write-Host 'Wait for the managed runner to finish cleanup/restoration before closing this console.'
 $exitCode = Invoke-H2ManualManagedRunner -PowerShell $powerShell -Runner $runner -Configuration $configuration
 exit $exitCode

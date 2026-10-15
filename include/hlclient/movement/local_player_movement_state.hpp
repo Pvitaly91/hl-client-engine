@@ -57,6 +57,7 @@ enum class PlayerMovementHitKind : std::uint8_t {
     world,
     explicit_synthetic_brush,
     brush_entity,
+    server_entity_box,
 };
 
 enum class PlayerGroundEvidenceProfile : std::uint8_t {
@@ -169,6 +170,7 @@ struct LocalPlayerMovementStateCreateInfo {
     // the transition; a completed crouch is represented by the duck hull.
     std::uint32_t duck_time_milliseconds{0U};
     bool in_duck_transition{false};
+    bool crouch_jump_enabled{false};
     std::uint32_t source_command_sequence{0U};
     std::uint64_t simulation_time_nanoseconds{0U};
     PlayerMovementContents last_valid_contents{PlayerMovementContents::empty};
@@ -236,6 +238,7 @@ public:
     [[nodiscard]] std::uint16_t old_buttons() const noexcept;
     [[nodiscard]] std::uint32_t duck_time_milliseconds() const noexcept;
     [[nodiscard]] bool in_duck_transition() const noexcept;
+    [[nodiscard]] bool crouch_jump_enabled() const noexcept;
     [[nodiscard]] std::uint32_t source_command_sequence() const noexcept;
     [[nodiscard]] std::uint64_t simulation_time_nanoseconds() const noexcept;
     [[nodiscard]] PlayerMovementContents last_valid_contents() const noexcept;
@@ -261,6 +264,7 @@ private:
     std::uint16_t old_buttons_{0U};
     std::uint32_t duck_time_milliseconds_{0U};
     bool in_duck_transition_{false};
+    bool crouch_jump_enabled_{false};
     std::uint32_t source_command_sequence_{0U};
     std::uint64_t simulation_time_nanoseconds_{0U};
     PlayerMovementContents last_valid_contents_{PlayerMovementContents::empty};

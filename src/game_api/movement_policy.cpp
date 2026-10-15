@@ -1,6 +1,7 @@
 #include <hlclient/game_api/movement_policy.hpp>
 
 #include <cmath>
+#include <algorithm>
 
 namespace hlclient::game_api {
 
@@ -14,7 +15,8 @@ bool valid_game_movement_policy(const GameMovementPolicy& policy) noexcept
         policy.button_policy == goldsrc::GoldSrcReferenceButtonPolicy::jump_duck ||
         policy.button_policy ==
             goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_reload ||
-        policy.button_policy == goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use;
+        policy.button_policy == goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use ||
+        policy.button_policy == goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_secondary_reload_use;
     constexpr auto all_actions =
         (gameplay_input::GameplayButtonMask{1U} <<
             static_cast<unsigned>(gameplay_input::GameplayButton::count)) - 1U;
@@ -22,7 +24,22 @@ bool valid_game_movement_policy(const GameMovementPolicy& policy) noexcept
     for (const auto key : policy.inventory_group_keys)
         valid_inventory_keys = valid_inventory_keys &&
             static_cast<unsigned>(key) < static_cast<unsigned>(input::PhysicalKey::count);
+    valid_inventory_keys = valid_inventory_keys && (!policy.inventory_last_key ||
+        static_cast<unsigned>(*policy.inventory_last_key) < static_cast<unsigned>(input::PhysicalKey::count));
     return policy.bindings &&
+        policy.crouch_jump_physics_key.size() <= 31U &&
+        std::ranges::all_of(policy.crouch_jump_physics_key, [](const unsigned char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '_';
+        }) &&
+        (policy.crouch_jump_physics_key.empty() == !policy.movement_config.crouch_jump) &&
+        (!policy.server_box_solid_code || (*policy.server_box_solid_code > 0U &&
+            *policy.server_box_solid_code <= 65535U)) &&
+        (!policy.server_player_solid_code || (*policy.server_player_solid_code > 0U &&
+            *policy.server_player_solid_code <= 65535U)) &&
+        goldsrc::movement::valid_server_point_box_exclusion_rules(policy.nonblocking_point_boxes) &&
+        (policy.nonblocking_point_boxes.empty() || policy.server_box_solid_code.has_value()) &&
+        (!policy.exclude_receiving_client_owned_boxes || policy.server_box_solid_code.has_value()) &&
         ((policy.live_buttons | policy.held_buttons) & ~all_actions) == 0U &&
         (policy.live_buttons & ~policy.held_buttons) == 0U &&
         (policy.capture_life_scoped_buttons & ~policy.live_buttons) == 0U &&

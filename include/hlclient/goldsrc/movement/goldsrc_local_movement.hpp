@@ -79,6 +79,13 @@ struct GoldSrcLocalMovementScratch {
     PlayerMovementDiagnosticRing diagnostics;
     std::optional<PlayerWallContactDiagnosticFrame> last_diagnostic;
     std::uint16_t diagnostic_substep_ordinal{0U};
+    // Exact existing queries from a failed movement or support transaction. These
+    // optional, bounded observations are not movement inputs or a second query.
+    std::optional<LocalMovementTrace> last_reference_collision_trace;
+    std::optional<LocalMovementPositionTest> last_reference_collision_position;
+    std::optional<hlclient::movement::PlayerMovementHull> last_reference_collision_hull;
+    std::optional<assets::AssetVector3> last_reference_collision_start;
+    std::optional<assets::AssetVector3> last_reference_collision_end;
 };
 
 class GoldSrcLocalMovementKernel final {

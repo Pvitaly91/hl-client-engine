@@ -16,11 +16,12 @@ inline constexpr std::uint32_t kObservedProfileParameter1 = 3U;
 [[nodiscard]] ChallengeResponseParseResult failure(
     const ChallengeProtocolErrorCode code,
     const std::size_t byte_offset,
-    std::string context)
+    std::string context,
+    const ChallengeProtocolField field = ChallengeProtocolField::envelope)
 {
     return ChallengeResponseParseResult{
         std::nullopt,
-        ChallengeProtocolError{code, byte_offset, std::move(context)},
+        ChallengeProtocolError{code, byte_offset, std::move(context),field},
     };
 }
 
@@ -133,13 +134,13 @@ ChallengeResponseParseResult parse_challenge_response(
         return failure(
             ChallengeProtocolErrorCode::packet_too_short,
             kConnectionlessPacketHeaderSize + payload.size(),
-            "Challenge response prefix is truncated");
+            "Challenge response prefix is truncated",ChallengeProtocolField::response_type);
     }
     if (!payload.starts_with(kChallengeResponsePrefix)) {
         return failure(
             ChallengeProtocolErrorCode::unexpected_response_type,
             kConnectionlessPacketHeaderSize,
-            "Connectionless response is not the Protocol 48 challenge variant");
+            "Connectionless response is not the Protocol 48 challenge variant",ChallengeProtocolField::response_type);
     }
 
     auto offset = kChallengeResponsePrefix.size();
@@ -150,32 +151,32 @@ ChallengeResponseParseResult parse_challenge_response(
         return failure(
             ChallengeProtocolErrorCode::missing_challenge,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge token is missing");
+            "Challenge token is missing",ChallengeProtocolField::challenge_token);
     }
     if (!challenge.present) {
         return failure(
             ChallengeProtocolErrorCode::invalid_challenge,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge token is not a canonical unsigned decimal uint32");
+            "Challenge token is not a canonical unsigned decimal uint32",ChallengeProtocolField::challenge_token);
     }
     if (challenge.overflow) {
         return failure(
             ChallengeProtocolErrorCode::challenge_overflow,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge token exceeds the uint32 range");
+            "Challenge token exceeds the uint32 range",ChallengeProtocolField::challenge_token);
     }
     if (!challenge.valid) {
         return failure(
             ChallengeProtocolErrorCode::invalid_challenge,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge token is not a canonical unsigned decimal uint32");
+            "Challenge token is not a canonical unsigned decimal uint32",ChallengeProtocolField::challenge_token);
     }
     offset = challenge.next;
     if (offset >= payload.size() || payload[offset] != ' ') {
         return failure(
             ChallengeProtocolErrorCode::invalid_challenge,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge token must be followed by one ASCII space");
+            "Challenge token must be followed by one ASCII space",ChallengeProtocolField::challenge_token);
     }
 
     ++offset;
@@ -185,20 +186,20 @@ ChallengeResponseParseResult parse_challenge_response(
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Profile parameter 1 is invalid or out of range");
+            "Profile parameter 1 is invalid or out of range",ChallengeProtocolField::authentication_profile);
     }
     if (profile_parameter_1.value != kObservedProfileParameter1) {
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Only observed Steam Half-Life profile parameter 1 value 3 is supported");
+            "Only observed Steam Half-Life profile parameter 1 value 3 is supported",ChallengeProtocolField::authentication_profile);
     }
     offset = profile_parameter_1.next;
     if (offset >= payload.size() || payload[offset] != ' ') {
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Profile parameter 1 must be followed by one ASCII space");
+            "Profile parameter 1 must be followed by one ASCII space",ChallengeProtocolField::authentication_profile);
     }
 
     ++offset;
@@ -208,20 +209,28 @@ ChallengeResponseParseResult parse_challenge_response(
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Profile parameter 2 is invalid or out of range");
+            "Profile parameter 2 is invalid or out of range",ChallengeProtocolField::server_identity);
     }
     if (profile_parameter_2.value == 0U) {
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Steam game-server identity must be nonzero");
+            "Steam game-server identity must be nonzero",ChallengeProtocolField::server_identity);
     }
     offset = profile_parameter_2.next;
+    // The user's Linux build 10211 response was passively observed with one
+    // lowercase 'm' directly after the decimal server identity. Accept only
+    // this exact opaque suffix; it changes neither the identity nor the
+    // explicit security flag that follows. The original suffix-free profile
+    // remains valid. Do not normalize arbitrary bytes or infer auth settings.
+    if (offset < payload.size() && payload[offset] == 'm') {
+        ++offset;
+    }
     if (offset >= payload.size() || payload[offset] != ' ') {
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Profile parameter 2 must be followed by one ASCII space");
+            "Profile parameter 2 must be followed by one ASCII space",ChallengeProtocolField::server_identity);
     }
 
     ++offset;
@@ -231,13 +240,13 @@ ChallengeResponseParseResult parse_challenge_response(
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Profile parameter 3 is invalid or out of range");
+            "Profile parameter 3 is invalid or out of range",ChallengeProtocolField::security_flag);
     }
     if (profile_parameter_3.value > 1U) {
         return failure(
             ChallengeProtocolErrorCode::unsupported_variant,
             kConnectionlessPacketHeaderSize + offset,
-            "Steam game-server secure flag must be 0 or 1");
+            "Steam game-server secure flag must be 0 or 1",ChallengeProtocolField::security_flag);
     }
     offset = profile_parameter_3.next;
 
@@ -246,14 +255,14 @@ ChallengeResponseParseResult parse_challenge_response(
         return failure(
             ChallengeProtocolErrorCode::invalid_terminator,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge response must end with LF followed by NUL");
+            "Challenge response must end with LF followed by NUL",ChallengeProtocolField::terminator);
     }
     offset += 2U;
     if (offset != payload.size()) {
         return failure(
             ChallengeProtocolErrorCode::unexpected_trailing_data,
             kConnectionlessPacketHeaderSize + offset,
-            "Challenge response contains bytes after its LF-NUL terminator");
+            "Challenge response contains bytes after its LF-NUL terminator",ChallengeProtocolField::trailing_data);
     }
 
     return ChallengeResponseParseResult{

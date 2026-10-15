@@ -292,3 +292,14 @@ intent and due times through the existing E1 pipeline. The alternate project
 module emits a distinct test sample through the same method, with no HL1
 factory. See [E2 contract](LOCAL_WEAPON_AUDIO_E2.md). Earlier G1 results above
 are historical, not rerun or relabelled as E2/live verification.
+
+## E29 additive HUD API extension
+
+`hud_resource_preparation`, `bind_hud_resources`, `hud_menu_input`,
+`hud_selection_result` and `hud_sound_preparation` carry bounded owning neutral
+presentation values through the same host/module. The application executes
+approved opening and materialization; Half-Life interprets roles, inventory and
+visibility. A source-owned alternate module exercises this API without concrete
+Half-Life includes or fallback. Historical G1 verification above is unchanged;
+the new sprite command budgets, lifecycle and final checks belong to
+[E29](ORIGINAL_SPRITE_HUD_INVENTORY_CROSSHAIRS_E29.md).

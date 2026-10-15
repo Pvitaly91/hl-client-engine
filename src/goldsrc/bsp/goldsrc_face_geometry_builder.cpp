@@ -428,6 +428,129 @@ struct IntersectionResult {
     return std::nullopt;
 }
 
+[[nodiscard]] std::optional<std::vector<std::uint32_t>>
+triangulate_preserved_boundary_ears(
+    const std::span<const GoldSrcFaceGeometryCorner> corners,
+    const DoubleVector3 normal)
+{
+    struct Ear {
+        std::size_t previous{0U};
+        std::size_t next{0U};
+        std::size_t blocker_count{0U};
+        double tolerance{0.0};
+        bool positive{false};
+        bool alive{true};
+    };
+    std::vector<Ear> ears(corners.size());
+    for (std::size_t index = 0U; index < corners.size(); ++index) {
+        ears[index].previous = index == 0U ? corners.size() - 1U : index - 1U;
+        ears[index].next = (index + 1U) % corners.size();
+    }
+    const auto point_blocks_ear = [&corners, &ears, normal](
+                                     const std::size_t index,
+                                     const std::size_t point_index) {
+        const auto& ear = ears[index];
+        if (point_index == ear.previous || point_index == index ||
+            point_index == ear.next) {
+            return false;
+        }
+        const auto a = as_double(corners[ear.previous].position);
+        const auto b = as_double(corners[index].position);
+        const auto c = as_double(corners[ear.next].position);
+        const auto point = as_double(corners[point_index].position);
+        const auto side = [point, normal](
+                              const DoubleVector3 first,
+                              const DoubleVector3 second) {
+            return dot(cross(subtract(second, first), subtract(point, first)), normal);
+        };
+        // A point on the proposed diagonal blocks the ear too: skipping it
+        // would recreate the boundary T-junction this triangulation preserves.
+        return side(a, b) >= -ear.tolerance &&
+            side(b, c) >= -ear.tolerance &&
+            side(c, a) >= -ear.tolerance;
+    };
+    const auto refresh_ear = [&corners, &ears, normal, &point_blocks_ear](
+                                 const std::size_t index) {
+        auto& ear = ears[index];
+        const auto a = corners[ear.previous].position;
+        const auto b = corners[index].position;
+        const auto c = corners[ear.next].position;
+        ear.tolerance = triangle_winding_tolerance(a, b, c);
+        const auto winding = dot(cross(subtract(as_double(b), as_double(a)),
+            subtract(as_double(c), as_double(a))), normal);
+        ear.positive = std::isfinite(winding) && winding > ear.tolerance;
+        ear.blocker_count = 0U;
+        if (ear.positive) {
+            for (std::size_t point = 0U; point < corners.size(); ++point) {
+                if (ears[point].alive && point_blocks_ear(index, point)) {
+                    ++ear.blocker_count;
+                }
+            }
+        }
+    };
+
+    // Cache all blockers once in O(n^2). Removing an ear changes only its two
+    // neighbors' triangles; all other blocker counts need one point removed.
+    // Thus every removal is O(n), with O(n) memory and no cubic rescanning.
+    for (std::size_t index = 0U; index < corners.size(); ++index) {
+        refresh_ear(index);
+    }
+    std::vector<std::uint32_t> indices;
+    indices.reserve((corners.size() - 2U) * 3U);
+    for (auto remaining = corners.size(); remaining > 3U; --remaining) {
+        std::optional<std::size_t> selected;
+        for (std::size_t index = 0U; index < corners.size(); ++index) {
+            if (ears[index].alive && ears[index].positive &&
+                ears[index].blocker_count == 0U) {
+                selected = index;
+                break;
+            }
+        }
+        if (!selected) {
+            return std::nullopt;
+        }
+        const auto tip = *selected;
+        const auto previous = ears[tip].previous;
+        const auto next = ears[tip].next;
+        indices.insert(indices.end(), {
+            static_cast<std::uint32_t>(previous),
+            static_cast<std::uint32_t>(tip),
+            static_cast<std::uint32_t>(next)});
+        ears[tip].alive = false;
+        ears[previous].next = next;
+        ears[next].previous = previous;
+        for (std::size_t index = 0U; index < corners.size(); ++index) {
+            if (!ears[index].alive) {
+                continue;
+            }
+            if (index == previous || index == next) {
+                refresh_ear(index);
+            } else if (ears[index].positive && point_blocks_ear(index, tip)) {
+                if (ears[index].blocker_count == 0U) {
+                    return std::nullopt;
+                }
+                --ears[index].blocker_count;
+            }
+        }
+    }
+    for (std::size_t first = 0U; first < corners.size(); ++first) {
+        if (!ears[first].alive) {
+            continue;
+        }
+        const auto second = ears[first].next;
+        const auto third = ears[second].next;
+        if (ears[third].next != first || !ears[first].positive) {
+            return std::nullopt;
+        }
+        indices.insert(indices.end(), {
+            static_cast<std::uint32_t>(first),
+            static_cast<std::uint32_t>(second),
+            static_cast<std::uint32_t>(third)});
+        return indices;
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] bool finite_texinfo(
     const GoldSrcFaceGeometrySourceTexinfo& texinfo) noexcept
 {
@@ -690,6 +813,12 @@ struct IntersectionResult {
             intersection.pair_test_count);
     }
 
+    // Collinear BSP boundary vertices are also T-junction stitches. Simplify
+    // only a temporary skeleton for the convexity/fan checks, then restore
+    // every boundary split before publication. Never move or weld a source UV
+    // or position independently from its neighboring face.
+    const auto source_corners = raw_corners;
+    std::vector<std::array<std::uint32_t, 3U>> boundary_splits;
     const auto original_corner_count = raw_corners.size();
     for (std::size_t pass = 0U;
          pass < original_corner_count && raw_corners.size() > 3U;
@@ -699,9 +828,13 @@ struct IntersectionResult {
         if (!removable) {
             break;
         }
+        const auto previous = *removable == 0U ? raw_corners.size() - 1U : *removable - 1U;
+        const auto next = (*removable + 1U) % raw_corners.size();
+        boundary_splits.push_back({raw_corners[previous].source_vertex_index,
+            raw_corners[*removable].source_vertex_index,
+            raw_corners[next].source_vertex_index});
         raw_corners.erase(
             raw_corners.begin() + static_cast<std::ptrdiff_t>(*removable));
-        ++diagnostic.removed_collinear_corner_count;
     }
     if (raw_corners.size() < 3U) {
         return failure(
@@ -778,7 +911,7 @@ struct IntersectionResult {
     }
 
     std::vector<std::uint32_t> triangle_indices;
-    triangle_indices.reserve((canonical_corners.size() - 2U) * 3U);
+    triangle_indices.reserve((original_corner_count - 2U) * 3U);
     auto minimum_winding = std::numeric_limits<double>::infinity();
     auto maximum_winding = -std::numeric_limits<double>::infinity();
     const auto first = as_double(canonical_corners.front().position);
@@ -812,6 +945,112 @@ struct IntersectionResult {
         triangle_indices.push_back(0U);
         triangle_indices.push_back(static_cast<std::uint32_t>(triangle + 1U));
         triangle_indices.push_back(static_cast<std::uint32_t>(triangle + 2U));
+    }
+
+    if (!boundary_splits.empty()) {
+        std::vector<GoldSrcFaceGeometryCorner> retained;
+        retained.reserve(original_corner_count);
+        retained.push_back(source_corners.front());
+        for (std::size_t index = original_corner_count; index > 1U; --index) {
+            retained.push_back(source_corners[index - 1U]);
+        }
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> source_to_local;
+        source_to_local.reserve(original_corner_count);
+        for (std::size_t index = 0U; index < retained.size(); ++index) {
+            source_to_local.emplace_back(retained[index].source_vertex_index,
+                static_cast<std::uint32_t>(index));
+        }
+        std::ranges::sort(source_to_local);
+        const auto local_index = [&source_to_local](const std::uint32_t source) {
+            const auto found = std::lower_bound(source_to_local.begin(), source_to_local.end(),
+                source, [](const auto& entry, const auto value) { return entry.first < value; });
+            return found != source_to_local.end() && found->first == source
+                ? found->second : std::numeric_limits<std::uint32_t>::max();
+        };
+        for (auto& index : triangle_indices) {
+            index = local_index(canonical_corners[index].source_vertex_index);
+        }
+        canonical_corners = std::move(retained);
+        diagnostic.canonical_corner_count = static_cast<std::uint32_t>(canonical_corners.size());
+
+        // Undo skeleton removals in reverse order. Every removed vertex splits
+        // one unique boundary edge of an existing triangle. No synthetic center
+        // is added; n source corners still produce exactly n-2 triangles.
+        for (auto split = boundary_splits.rbegin(); split != boundary_splits.rend(); ++split) {
+            const auto a = local_index((*split)[2U]); // reversed wire -> CCW
+            const auto middle = local_index((*split)[1U]);
+            const auto b = local_index((*split)[0U]);
+            std::optional<std::size_t> triangle;
+            std::uint32_t opposite = 0U;
+            for (std::size_t offset = 0U; offset < triangle_indices.size(); offset += 3U) {
+                for (std::size_t edge = 0U; edge < 3U; ++edge) {
+                    if (triangle_indices[offset + edge] == a &&
+                        triangle_indices[offset + (edge + 1U) % 3U] == b) {
+                        if (triangle) {
+                            return failure(GoldSrcFaceGeometryErrorCode::collinear_canonicalization_failed,
+                                std::move(diagnostic), intersection.pair_test_count);
+                        }
+                        triangle = offset;
+                        opposite = triangle_indices[offset + (edge + 2U) % 3U];
+                    }
+                }
+            }
+            if (!triangle || a >= canonical_corners.size() || b >= canonical_corners.size() ||
+                middle >= canonical_corners.size()) {
+                return failure(GoldSrcFaceGeometryErrorCode::collinear_canonicalization_failed,
+                    std::move(diagnostic), intersection.pair_test_count);
+            }
+            triangle_indices[*triangle] = a;
+            triangle_indices[*triangle + 1U] = middle;
+            triangle_indices[*triangle + 2U] = opposite;
+            triangle_indices.insert(triangle_indices.end(), {middle, b, opposite});
+        }
+        if (triangle_indices.size() != (original_corner_count - 2U) * 3U) {
+            return failure(GoldSrcFaceGeometryErrorCode::collinear_canonicalization_failed,
+                std::move(diagnostic), intersection.pair_test_count);
+        }
+        for (std::size_t offset = 0U; offset < triangle_indices.size(); offset += 3U) {
+            const auto a = canonical_corners[triangle_indices[offset]].position;
+            const auto b = canonical_corners[triangle_indices[offset + 1U]].position;
+            const auto c = canonical_corners[triangle_indices[offset + 2U]].position;
+            const auto winding = dot(cross(subtract(as_double(b), as_double(a)),
+                subtract(as_double(c), as_double(a))), emitted_normal);
+            if (!std::isfinite(winding) || winding <= triangle_winding_tolerance(a, b, c)) {
+                // A retained near-collinear bend can meet a skeleton diagonal
+                // in a very thin face. Change only its triangulation, keeping
+                // the already validated source boundary and convexity policy.
+                if (auto fallback = triangulate_preserved_boundary_ears(
+                        canonical_corners, emitted_normal)) {
+                    triangle_indices = std::move(*fallback);
+                }
+                // A failed fallback leaves the original indices intact so the
+                // final winding gate below preserves its typed rejection.
+                break;
+            }
+        }
+        minimum_winding = std::numeric_limits<double>::infinity();
+        maximum_winding = -std::numeric_limits<double>::infinity();
+        diagnostic.maximum_triangle_winding_tolerance = 0.0;
+        for (std::size_t offset = 0U; offset < triangle_indices.size(); offset += 3U) {
+            const auto a = canonical_corners[triangle_indices[offset]].position;
+            const auto b = canonical_corners[triangle_indices[offset + 1U]].position;
+            const auto c = canonical_corners[triangle_indices[offset + 2U]].position;
+            const auto winding = dot(cross(subtract(as_double(b), as_double(a)),
+                subtract(as_double(c), as_double(a))), emitted_normal);
+            const auto tolerance = triangle_winding_tolerance(a, b, c);
+            diagnostic.maximum_triangle_winding_tolerance = std::max(
+                diagnostic.maximum_triangle_winding_tolerance, tolerance);
+            minimum_winding = std::min(minimum_winding, winding);
+            maximum_winding = std::max(maximum_winding, winding);
+            diagnostic.minimum_triangle_winding_dot = minimum_winding;
+            diagnostic.maximum_triangle_winding_dot = maximum_winding;
+            if (!std::isfinite(winding) || winding <= tolerance) {
+                return failure(winding < -tolerance
+                        ? GoldSrcFaceGeometryErrorCode::invalid_face_winding
+                        : GoldSrcFaceGeometryErrorCode::degenerate_face,
+                    std::move(diagnostic), intersection.pair_test_count);
+            }
+        }
     }
 
     diagnostic.failure_classification = GoldSrcFaceGeometryErrorCode::none;

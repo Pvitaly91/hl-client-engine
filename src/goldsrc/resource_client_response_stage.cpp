@@ -10,6 +10,16 @@ namespace {
 
 inline constexpr std::string_view kSupportedResponseWireName{"tempdecal.wad"};
 
+[[nodiscard]] bool response_payload_reassembled(
+    const OwnedNetchanPayload& payload) noexcept
+{
+    // Match the owning service converter: a contemporaneous suffix is not
+    // reassembled merely because its enclosing header carries fragment flags.
+    return payload.body_kind != NetchanPayloadBodyKind::contemporaneous_fragment_suffix &&
+        (payload.body_kind == NetchanPayloadBodyKind::normal_fragment_completion ||
+         payload.sequence_flags.fragmented);
+}
+
 [[nodiscard]] bool terminal_state(
     const ResourceClientResponseStageState state) noexcept
 {
@@ -813,6 +823,11 @@ const std::optional<ResourceResponsePayloadDiagnostic>&
 ResourceClientResponseStage::payload_diagnostic() const noexcept
 {
     return payload_diagnostic_;
+}
+
+NetchanDriver* ResourceClientResponseStage::close_driver() noexcept
+{
+    return resource_list_stage_.close_driver();
 }
 
 NetchanDriver* ResourceClientResponseStage::retained_driver() noexcept
@@ -1840,10 +1855,32 @@ void ResourceClientResponseStage::handle_server_payload(
         return;
     }
     ++payload_ordinal_;
+    if (current_event_batch_received_after_first_response_transmit_ &&
+        !response_acknowledged_ &&
+        config_.pre_transmit_payload_policy ==
+            ResourceResponsePreTransmitPayloadPolicy::decode_nop_control) {
+        // Receive time does not prove that an in-flight keepalive observed
+        // our resource-response TX. Fully validate pure NOP traffic before
+        // applying the causal ACK guard to a semantic continuation. Keep the
+        // original owning bytes for that strict path if this is not a NOP.
+        try {
+            if (payload.bytes.size() <=
+                    config_.response.maximum_post_response_payload_size &&
+                decode_response_control_payload(payload, now, false)) {
+                return;
+            }
+        } catch (...) {
+            fail(ResourceClientResponseStageErrorCode::post_transmit_control_overflow,
+                 ResourceClientResponseStageState::backpressure,
+                 "Unable to retain bounded response-control classification", now);
+            return;
+        }
+    }
     if (!current_event_batch_received_after_first_response_transmit_) {
         if (config_.pre_transmit_payload_policy ==
             ResourceResponsePreTransmitPayloadPolicy::decode_nop_control) {
-            decode_pre_transmit_control_payload(std::move(payload), now);
+            static_cast<void>(decode_response_control_payload(
+                std::move(payload), now, true));
             return;
         }
         payload_diagnostic_ = ResourceResponsePayloadDiagnostic{
@@ -1857,7 +1894,7 @@ void ResourceClientResponseStage::handle_server_payload(
                 payload.source_acknowledgement.value(),
             .wire_byte_count = payload.bytes.size(),
             .source_reliable = payload.sequence_flags.reliable,
-            .reassembled = payload.sequence_flags.fragmented,
+            .reassembled = response_payload_reassembled(payload),
             .response_queued = response_queue_count_ == 1U,
             .response_transmitted = response_transmitted_,
             .response_acknowledged = response_acknowledged_,
@@ -1867,6 +1904,7 @@ void ResourceClientResponseStage::handle_server_payload(
             .first_transmit_sequence = first_transmit_sequence_
                 ? std::optional{first_transmit_sequence_->value()}
                 : std::nullopt,
+            .source_body_kind = payload.body_kind,
         };
         fail(
             ResourceClientResponseStageErrorCode::
@@ -1886,7 +1924,7 @@ void ResourceClientResponseStage::handle_server_payload(
         .source_acknowledgement = payload.source_acknowledgement.value(),
         .wire_byte_count = payload.bytes.size(),
         .source_reliable = payload.sequence_flags.reliable,
-        .reassembled = payload.sequence_flags.fragmented,
+        .reassembled = response_payload_reassembled(payload),
         .response_queued = response_queue_count_ == 1U,
         .response_transmitted = response_transmitted_,
         .response_acknowledged = response_acknowledged_,
@@ -1896,6 +1934,7 @@ void ResourceClientResponseStage::handle_server_payload(
         .first_transmit_sequence = first_transmit_sequence_
             ? std::optional{first_transmit_sequence_->value()}
             : std::nullopt,
+        .source_body_kind = payload.body_kind,
     };
     if (response_queue_count_ != 1U) {
         fail(
@@ -1981,38 +2020,52 @@ void ResourceClientResponseStage::handle_server_payload(
         decoding_server_continuation;
 }
 
-void ResourceClientResponseStage::decode_pre_transmit_control_payload(
+bool ResourceClientResponseStage::decode_response_control_payload(
     OwnedNetchanPayload payload,
-    const ResourceClientResponseStageTimePoint now)
+    const ResourceClientResponseStageTimePoint now,
+    const bool required)
 {
     const auto wire_size = payload.bytes.size();
-    payload_diagnostic_ = ResourceResponsePayloadDiagnostic{
-        .classification =
-            ResourceResponsePayloadClassification::pre_transmit_control,
-        .receive_position = ResourceResponseReceivePosition::
-            before_first_response_transmit,
+    const bool after_transmit = current_event_batch_received_after_first_response_transmit_;
+    auto candidate = ResourceResponsePayloadDiagnostic{
+        .classification = after_transmit
+            ? ResourceResponsePayloadClassification::post_transmit_control
+            : ResourceResponsePayloadClassification::pre_transmit_control,
+        .receive_position = after_transmit
+            ? ResourceResponseReceivePosition::after_first_response_transmit
+            : ResourceResponseReceivePosition::before_first_response_transmit,
         .payload_ordinal = payload_ordinal_,
         .source_sequence = payload.source_sequence.value(),
         .source_acknowledgement = payload.source_acknowledgement.value(),
         .wire_byte_count = wire_size,
         .source_reliable = payload.sequence_flags.reliable,
-        .reassembled = payload.sequence_flags.fragmented,
+        .reassembled = response_payload_reassembled(payload),
         .response_queued = response_queue_count_ == 1U,
         .response_transmitted = response_transmitted_,
         .response_acknowledged = response_acknowledged_,
+        .reliable_generation = response_transmitted_
+            ? std::optional{reliable_generation_} : std::nullopt,
+        .first_transmit_sequence = first_transmit_sequence_
+            ? std::optional{first_transmit_sequence_->value()} : std::nullopt,
+        .source_body_kind = payload.body_kind,
     };
-
-    if (pre_transmit_control_payload_count_ >=
+    const auto exceeds_budget = [&]() noexcept {
+        return pre_transmit_control_payload_count_ >=
             config_.maximum_pre_transmit_control_payloads ||
         wire_size > config_.maximum_pre_transmit_control_bytes -
-                        pre_transmit_control_byte_count_) {
+                        pre_transmit_control_byte_count_;
+    };
+    // Preserve the historical pre-TX admission and its exact failure codes.
+    // Post-TX budget rejection applies only after the whole body proves NOP.
+    if (required && exceeds_budget()) {
+        payload_diagnostic_ = candidate;
         fail(
             ResourceClientResponseStageErrorCode::
                 pre_transmit_control_overflow,
             ResourceClientResponseStageState::backpressure,
             "Pre-transmit control traffic exceeded its bounded count or byte budget",
             now);
-        return;
+        return true;
     }
 
     auto decoded = ServicePayloadEnvelopeDecoder{
@@ -2021,8 +2074,10 @@ void ResourceClientResponseStage::decode_pre_transmit_control_payload(
             config_.post_response_payload_compression}}.decode(
                 std::move(payload));
     if (!decoded || !decoded.envelope) {
-        payload_diagnostic_->classification =
+        if (!required) return false;
+        candidate.classification =
             ResourceResponsePayloadClassification::invalid_framing;
+        payload_diagnostic_ = candidate;
         fail(
             ResourceClientResponseStageErrorCode::
                 pre_transmit_control_decode_failed,
@@ -2037,17 +2092,17 @@ void ResourceClientResponseStage::decode_pre_transmit_control_payload(
             std::nullopt,
             decoded.error ? std::optional{decoded.error->code}
                           : std::nullopt);
-        return;
+        return true;
     }
 
     auto& envelope = *decoded.envelope;
     auto& service = envelope.payload;
-    payload_diagnostic_->wire_encoding = service.decompressed
+    candidate.wire_encoding = service.decompressed
         ? ResourceResponseWireEncodingKind::bzip2
         : service.wire_uncompressed
             ? ResourceResponseWireEncodingKind::wire_uncompressed
             : ResourceResponseWireEncodingKind::unavailable;
-    payload_diagnostic_->decoded_byte_count = service.bytes.size();
+    candidate.decoded_byte_count = service.bytes.size();
 
     const RuntimeControlDecoder decoder{RuntimeControlDecodeLimits{
         config_.response.maximum_post_response_payload_size,
@@ -2055,23 +2110,25 @@ void ResourceClientResponseStage::decode_pre_transmit_control_payload(
     std::size_t cursor = 0U;
     std::size_t message_ordinal = 0U;
     while (cursor < service.bytes.size()) {
-        payload_diagnostic_->cursor_byte_offset = cursor;
-        payload_diagnostic_->cursor_bit_offset = 0U;
-        payload_diagnostic_->validated_message_boundary = true;
-        payload_diagnostic_->actual_opcode =
+        candidate.cursor_byte_offset = cursor;
+        candidate.cursor_bit_offset = 0U;
+        candidate.validated_message_boundary = true;
+        candidate.actual_opcode =
             std::to_integer<std::uint8_t>(service.bytes[cursor]);
         const auto source_cursor = StockRuntimeSourceCursor::create(
             cursor, 0U, service.bytes.size());
         if (!source_cursor) {
-            payload_diagnostic_->control_code =
+            if (!required) return false;
+            candidate.control_code =
                 RuntimeControlDecodeErrorCode::invalid_cursor;
+            payload_diagnostic_ = candidate;
             fail(
                 ResourceClientResponseStageErrorCode::
                     pre_transmit_control_decode_failed,
                 ResourceClientResponseStageState::protocol_error,
                 "Pre-transmit control cursor cannot be represented",
                 now);
-            return;
+            return true;
         }
         const auto one = decoder.decode_one(
             RuntimeControlDecodeInput{
@@ -2082,9 +2139,11 @@ void ResourceClientResponseStage::decode_pre_transmit_control_payload(
                 {}},
             message_ordinal);
         if (!one || !one.event) {
-            payload_diagnostic_->control_code = one.error
+            if (!required) return false;
+            candidate.control_code = one.error
                 ? std::optional{one.error->code}
                 : std::nullopt;
+            payload_diagnostic_ = candidate;
             fail(
                 ResourceClientResponseStageErrorCode::
                     pre_transmit_control_decode_failed,
@@ -2094,63 +2153,82 @@ void ResourceClientResponseStage::decode_pre_transmit_control_payload(
                     : std::string_view{
                           "Pre-transmit control decoder returned no event"},
                 now);
-            return;
+            return true;
         }
         const auto& event = *one.event;
         if (event.kind != RuntimeControlMessageKind::nop ||
             event.opcode != RuntimeControlOpcode::svc_nop) {
+            if (!required) return false;
+            payload_diagnostic_ = candidate;
             fail(
                 ResourceClientResponseStageErrorCode::
                     unexpected_pre_transmit_control_message,
                 ResourceClientResponseStageState::protocol_error,
                 "Only decoder-validated svc_nop is admissible before the first resource-response transmission",
                 now);
-            return;
+            return true;
         }
         const auto end = event.provenance.end_cursor.byte_offset();
         if (end <= cursor || end > service.bytes.size()) {
-            payload_diagnostic_->control_code =
+            if (!required) return false;
+            candidate.control_code =
                 RuntimeControlDecodeErrorCode::size_overflow;
+            payload_diagnostic_ = candidate;
             fail(
                 ResourceClientResponseStageErrorCode::
                     pre_transmit_control_decode_failed,
                 ResourceClientResponseStageState::protocol_error,
                 "Pre-transmit control decoder did not advance within the owning payload",
                 now);
-            return;
+            return true;
         }
         cursor = end;
         ++message_ordinal;
-        ++pre_transmit_control_message_count_;
-        payload_diagnostic_->consumed_control_message_count =
-            pre_transmit_control_message_count_;
-        payload_diagnostic_->last_successful_handoff_cursor = cursor;
+        candidate.consumed_control_message_count =
+            pre_transmit_control_message_count_ + message_ordinal;
+        candidate.last_successful_handoff_cursor = cursor;
     }
-
-    ++pre_transmit_control_payload_count_;
-    pre_transmit_control_byte_count_ += wire_size;
+    // Empty, malformed or mixed bodies never receive a post-TX exemption.
+    if (!required && message_ordinal == 0U) return false;
+    candidate.consumed_control_message_count = pre_transmit_control_message_count_;
+    payload_diagnostic_ = candidate;
+    if (!required && exceeds_budget()) {
+        fail(ResourceClientResponseStageErrorCode::post_transmit_control_overflow,
+             ResourceClientResponseStageState::backpressure,
+             "Response-control traffic exceeded its bounded count or byte budget", now);
+        return true;
+    }
     if (!can_push_events()) {
         fail(
             ResourceClientResponseStageErrorCode::event_backpressure,
             ResourceClientResponseStageState::backpressure,
-            "No bounded event slot remains for a pre-transmit control payload",
+            "No bounded event slot remains for a response-control payload",
             now);
-        return;
+        return true;
     }
+    // Commit only after every decoded message is NOP. No pending semantic
+    // slot, response ACK, reliable generation or fixed deadline is changed.
+    ++pre_transmit_control_payload_count_;
+    pre_transmit_control_byte_count_ += wire_size;
+    pre_transmit_control_message_count_ += message_ordinal;
+    payload_diagnostic_->consumed_control_message_count = pre_transmit_control_message_count_;
     push_event(ResourceClientResponseStageEvent{
-        .type = ResourceClientResponseStageEventType::
-            pre_transmit_control_consumed,
+        .type = after_transmit
+            ? ResourceClientResponseStageEventType::post_transmit_control_consumed
+            : ResourceClientResponseStageEventType::pre_transmit_control_consumed,
         .payload_byte_count = wire_size,
         .remaining_byte_count = 0U,
         .opcode = static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop),
         .occurred_at = now,
     });
     emit_trace(
-        ResourceClientResponseTraceClassification::
-            pre_transmit_control_consumed,
+        after_transmit
+            ? ResourceClientResponseTraceClassification::post_transmit_control_consumed
+            : ResourceClientResponseTraceClassification::pre_transmit_control_consumed,
         wire_size,
         0U,
         static_cast<std::uint8_t>(RuntimeControlOpcode::svc_nop));
+    return true;
 }
 
 void ResourceClientResponseStage::decode_pending_server_payload(

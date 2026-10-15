@@ -255,6 +255,8 @@ private:
         bool retain_connection_at_boundary);
 
     [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    // Terminal-only same-driver borrow; does not relax normal handoff gates.
+    [[nodiscard]] NetchanDriver* close_driver() noexcept;
     void finalize_retained_boundary(ResourceListStageTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count = 1U) const noexcept;
     void push_event(ResourceListStageEvent event) noexcept;

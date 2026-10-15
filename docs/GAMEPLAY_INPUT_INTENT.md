@@ -25,6 +25,14 @@ displacement is never multiplied by frame duration; keyboard translation is.
 Because positive project yaw turns +X toward +Y (camera-left), mouse motion to
 the physical right produces a negative yaw delta and turns the view right.
 
+`MouseLookConfig::sensitivity_scale` is a neutral per-sample multiplier,
+default1 and finite in (0,4]. It multiplies physical displacement before the
+existing per-frame look cap, without changing base sensitivity, frame duration,
+movement axes or action edges. The base .001..10 degrees/pixel envelope remains
+unchanged; a valid modifier may produce a smaller effective sensitivity. The
+live application obtains its optional modifier through GameClientAPI; concrete
+FOV/zoom rules remain in the selected game module, not this input mechanism.
+
 Space and Control remain the typed `jump` and `duck` buttons. The diagnostic
 free-flight adapter may additionally interpret them as local up/down movement
 under `diagnostic_free_flight_v1`; this is not player movement semantics.

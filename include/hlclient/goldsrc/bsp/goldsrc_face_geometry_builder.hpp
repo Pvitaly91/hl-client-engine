@@ -93,6 +93,8 @@ struct GoldSrcFaceGeometryDiagnostic {
     std::uint32_t unique_vertex_count{0U};
     std::uint32_t negative_surfedge_count{0U};
     std::uint32_t positive_surfedge_count{0U};
+    // Legacy diagnostic field: successful publication retains all source
+    // boundary/T-junction corners, so this remains zero.
     std::uint32_t removed_collinear_corner_count{0U};
     assets::AssetVector3 emitted_face_normal{};
     assets::AssetVector3 polygon_area_vector_direction{};
@@ -123,6 +125,8 @@ struct GoldSrcFaceGeometryCorner {
 };
 
 struct GoldSrcFaceGeometryCandidate {
+    // Every original source boundary corner, including collinear stitches,
+    // in CCW order with the original first source corner as the anchor.
     std::vector<GoldSrcFaceGeometryCorner> corners;
     // Local indices into corners. Every three consecutive values form one
     // counter-clockwise triangle relative to emitted_face_normal.

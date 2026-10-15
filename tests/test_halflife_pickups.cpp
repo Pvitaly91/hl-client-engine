@@ -39,6 +39,9 @@ struct Harness {
   std::string error;
   Harness() {
     host.reset({1U, 1U, 1U});
+    api::HudPresentationContext diagnostic_context;
+    diagnostic_context.diagnostic_overlay=true; // Historical text-feedback pixel tests opt in explicitly.
+    host.set_hud_context(diagnostic_context);
     state.generation = 1U;
     state.receiving_client.emplace();
     state.receiving_client->health = 100.0;

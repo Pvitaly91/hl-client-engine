@@ -1373,6 +1373,11 @@ ResourceTransitionStage::retained_source_payload() const noexcept
     return retained_source_payload_ ? &*retained_source_payload_ : nullptr;
 }
 
+NetchanDriver* ResourceTransitionStage::close_driver() noexcept
+{
+    return user_info_stage_.close_driver();
+}
+
 NetchanDriver* ResourceTransitionStage::retained_driver() noexcept
 {
     if (!retain_connection_at_boundary_) {

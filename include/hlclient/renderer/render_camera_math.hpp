@@ -9,20 +9,6 @@
 
 namespace hlclient::renderer {
 
-// Column-major storage, column-vector multiplication and OpenGL upload with
-// transpose=false. Element (row, column) is values[column * 4 + row].
-struct RenderMatrix4 {
-    std::array<float, 16U> values{
-        1.0F, 0.0F, 0.0F, 0.0F,
-        0.0F, 1.0F, 0.0F, 0.0F,
-        0.0F, 0.0F, 1.0F, 0.0F,
-        0.0F, 0.0F, 0.0F, 1.0F,
-    };
-
-    [[nodiscard]] friend bool operator==(const RenderMatrix4&, const RenderMatrix4&) =
-        default;
-};
-
 struct RenderHomogeneousVector {
     float x{0.0F};
     float y{0.0F};
@@ -80,11 +66,17 @@ struct RenderMatrixResult {
     float near_plane,
     float far_plane) noexcept;
 [[nodiscard]] bool is_valid(const RenderCamera& camera) noexcept;
+[[nodiscard]] bool valid_render_screen_effects(const game_api::ScreenEffectsFrame&) noexcept;
+// Applies only to a private render-camera value, preserving its target axis,
+// projection and caller ownership. Invalid effects/cameras have no fallback.
+[[nodiscard]] std::optional<RenderCamera> apply_screen_effects(
+    const RenderCamera&, const game_api::ScreenEffectsFrame&) noexcept;
 [[nodiscard]] RenderMatrixResult camera_view_projection(
     const RenderCamera& camera,
     RenderExtent extent) noexcept;
-// Uses the world camera's optical parameters but a fixed +X-forward, Z-up
-// camera at the origin. First-person Studio geometry stays camera-local.
+// Uses the world camera's FOV/far plane but a fixed +X-forward, Z-up camera
+// at the origin and an independent 1-unit near plane. First-person Studio
+// geometry stays camera-local; the world camera/depth range is not mutated.
 [[nodiscard]] RenderCamera camera_local_first_person_camera(
     const RenderCamera& world_camera) noexcept;
 

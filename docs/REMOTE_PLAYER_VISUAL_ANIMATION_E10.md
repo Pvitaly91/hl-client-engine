@@ -134,7 +134,10 @@ Renderer has no player bone names, weapon sequence meanings or gait policy.
 Shared materialization samples the nearest downward retained static-world triangle
 within2048units, barycentric lightmap UV and bilinear selected-style atlas RGB.
 Nearest unlit geometry does not borrow light from a farther floor. Probe budget is
-1,048,576 triangles; at most32 player cache entries, reprobe after>8units motion.
+1,048,576 triangles; reprobe after>8units motion. The 2026-10-15 Studio-lighting
+corrective extends the same cache to ordinary packet models, one world-eye
+viewmodel sample and 64 bounded transient slots; removed packet keys are pruned.
+See `OPENGL_STUDIO_RENDERER.md`. Player lighting itself is unchanged.
 No per-frame asset I/O. This is local-compatible RGB lighting, not stock-exact
 LightPoint/style accumulation/directional player lighting. No sample means explicit
 legacy0.85 fallback; fullbright material and existing local point light rules remain.
@@ -948,3 +951,470 @@ misrepresented as new post-E10 work. Required source, headers, fixtures, build
 definitions, scripts and task contracts are ordinary Git files. Build outputs,
 private captures, ignored manual artifacts and loose local diagnostic logs are
 excluded from publication and preserved locally; no game assets are added.
+
+## Subsequent manual confirmation before E11 (2026-10-01)
+
+New user report: “Зробив ручний тест 2-х клієнтів все працює”. Current E10
+manual outcome is `passed`, `attribution=user_report`, for reported two-client
+body/animation and post-E10 behavior. No numeric gait/interpolation measurement,
+new stock trace, audio recording, run ID or launched-process SHA is inferred.
+Historical offline reports with `manual=not_run` above are not rewritten.
+E11 remote attachments/impact particles are a separate build and require their
+own manual check; see `REMOTE_PMODELS_BULLET_PARTICLES_E11.md`.
+
+## E32 remote-player packet-phase smoothing (2026-10-13)
+
+User authorizes the next correction after the read-only audit of runs
+3ab506514bc6f0fa72f1598d32d1738b and1765739d73a569cb62b30b85b476dad6,
+both actually using93358D21... on192.168.0.104:27016. The own-prediction path
+was active about99.6% of controlled frames, with remaining lift67 and large
+correction events; those separate movement defects are not claimed fixed here.
+Retained contiguous remote render samples show short holds and packet-arrival
+phase advances even with local prediction active. These are clock witnesses,
+not per-player position/velocity recordings or evidence of packet loss.
+
+Cause: normal `RuntimeReplayLocalAssets::present_entities` retained only the
+latest pair, reduced the requested100ms delay to that pair's interval and
+reset its application anchor on each publication. Irregular receipts therefore
+changed playback phase rather than merely adding authoritative observations.
+
+Task record: `manual-artifacts/task-records/e32-remote-player-buffer-20261013`.
+1390 source files,36 ready Release files,3 configuration/cache files and22
+latest user-run files were copied and SHA256-verified before edits. Existing
+dirty/untracked code, branch/HEAD, SDK, launcher settings and other projects
+are preserved; no staging/commit/push or new agent live game session is used.
+
+Production mechanism: `RuntimePlayerSnapshotPresentation` extends the existing
+GoldSrc interpolation layer with16 owning immutable observation references,
+at most32 numeric player-continuity entries and bounded returned anchor data.
+It reuses `EntitySnapshotInterpolator::interpolate_runtime` for actual pose
+mixing, not a new renderer/physics implementation. Its clock is anchored once
+per continuous episode, never per packet. Startup retains the short actual
+initial pair interval and fills the game-selected <=100ms reserve with at
+most25% render-clock slowdown. Once filled, ordinary arrivals do not shift
+phase. This is explicit local-compatible presentation, not stock constants.
+Samples never extrapolate past an observed endpoint or rewind during ordinary
+continuous sampling. Gap/clock recovery follows the selected bounded policy.
+
+Only selected remote player presentation fields are merged into an owning
+copy of the latest current list. Receiving player, latest visibility/effects,
+nonplayers/brushes, network state, command history, collision and gameplay
+authority are not rewritten. Missing current fields are not fabricated.
+Exact immutable buffered brackets are borrowed by the existing game-owned
+Studio/gait/transition composer; proxies and raw excessive-gap semantics keep
+their existing rules. Map/session reset, absent/reused slots, model change,
+teleport, EF_NOINTERP and game-selected historical respawn boundaries prevent
+bridging old lives. Equal-time corrections retain exact new source identity.
+
+Ordinary projectiles/gibs/glows keep their separate existing cadence/birth
+profile. Both buffers share the same immutable observations; they do not copy
+game assets, open new paths or run object simulation. Socket receipt freshness
+is separate from delayed player presentation. An incompatible delayed old
+p-model omits only its numeric socket so the existing server-event fallback
+can present a new weapon's effects; mismatch guards are not relaxed.
+
+Required project-owned regression cases are in
+`tests/test_remote_snapshot_buffer_e32.cpp`, normal full acceptance and core-only.
+A fast test-only target runs those same production mechanisms, not a replacement
+application. Normal materializer tests verify jittered receipts, exact committed
+Studio clocks, unchanged nonplayer/brush ownership and p-model/socket readiness.
+An independent old-clock negative control exhibits packet-phase jumps. Existing
+p-model pixel/signature assertions caught a cancellation boundary infinitesimally
+before an endpoint; the sampler now snaps only within1e-9 server-time seconds
+to exact observed endpoint identity. No collision epsilon or old assertion was
+weakened. Final Debug/Release/core-only results and ready-image identity follow
+after the last production edit. Fresh manual remains not_run.
+
+Final targeted validation: VS2022/v143 Win32 Debug, Release and core-only
+ALL_BUILD pass /WX. Debug and Release each pass147 remote/animation/attachment/
+interpolation cases /85384 assertions, with3 explicit installed-resource
+opt-in skips. The previously failing unchanged E11 p-model socket, signature
+and OpenGL pixel assertions pass. Core-only CTest passes44/44 including the
+architecture guard;364 shared API cases pass319935 assertions without HL1.
+The full Release offline suite is repeated after the last production edit;
+its completed result is recorded below, not inferred from these subsets.
+
+Ready normal client SHA256:
+`2C6EAA63B261B20E1D6539132ED3460D0F62590153CF31D4F970CACD393BAA34`.
+Normal SourceOnly/CheckOnly selects that exact Release image. Launcher SHA256
+remains`AF58350DA40A7B1C0885A33A59EB96CEE8D0E33696CD51D3DA87617203C8E62A`;
+saved user settings and endpoint192.168.0.104:27016 are preserved. No new live
+game/stock client/HLDS session, server change, asset copy, stage/commit/push or
+ASan runtime claim is introduced. Fresh manual=not_run.
+
+Full acceptance history is preserved rather than hidden: the first complete
+run has only2 timeouts, the unchanged resource-manifest fixture at60.16s and
+normal-close/verdict fixture at180.08s; no actor/interpolation assertions fail.
+A direct unchanged manifest retry passes in8.86s. The entire suite is then
+repeated, without changing assertions, test limits, code or binary. Final
+repeat:3597 registrations,3532 passed,65 explicit optional skips,0 failures,
+718.94s; normal-close/verdict passes in124.20s. Subsequent version/help/Null,
+synthetic UDP, functional-log, no-stock wrapper and SourceOnly/CheckOnly checks
+also pass; `FULL_RELEASE_EXIT=0`. Initial and final logs remain separate in the
+task record. The timing cause is not attributed to the server or game code.
+
+Final source audit preserves1390 original files;9 existing source/doc/build/
+test files changed plus one ordinary project-owned regression file. No originals
+are missing. Branch/HEAD, clean pinned SDK, saved launcher configuration and
+the unchanged launcher remain preserved; no staging/commit/push. Normal client
+remains2C6EAA63... and fresh manual remains not_run. Own movement/prediction,
+collision, ammo/health/damage and server files are unchanged by this correction.
+
+Manual handoff: use the same normal launcher and server192.168.0.104:27016,
+watch other players running/strafe/crouch, including close range and stopping/
+turning. Check their p-model switches/fire effects and death/respawn boundaries.
+Keep movement diagnostics enabled and use F8 if a jerk remains. The existing
+remote clock/bracket fields now describe the selected buffered presentation
+anchors, not necessarily the latest pair. No claim of universal stock engine
+parity or resolution of the separate lift67 prediction failure is made.
+
+## E32 railing presentation follow-up (2026-10-13)
+
+New manual report, attribution=user_report: other players running on railings
+appear jerky. Run8d56959e9b9ab0fb8c392003d1d305cc is identity-bound to the
+preceding2C6EAA63... normal image, crossfire, endpoint192.168.0.104:27016;
+exit0, window_close, transport_acknowledged. The bounded movement recording
+contains1719 retained detailed frames, not every actor's trajectory. Its
+controlled-alive cohort has16495 frames,16389 prediction-active,106 inactive,
+8 fallback entries,5 frames over33.3ms and none over50ms. The global buffered
+clock is not proof of individual player/pose smoothness. No per-player evidence
+identifies the exact railing episode, so this report does not claim to have
+replayed or proven the user's particular live incident.
+
+Three production defects were independently reproduced before editing code:
+
+- `RuntimePlayerSnapshotPresentation::sample` treated any changed player row
+  at the same server timestamp as a position correction. A gait/frame-only
+  publication could hold a delayed actor at its future pose: the owned fixture
+  jumps from expected x3.2/z12 to x12.8/z48. The floor now changes only for an
+  actual origin correction (other life/model/teleport/EF boundaries remain).
+  Newer same-position anchors at an already held boundary preserve exact
+  metadata/source identity; the unchanged E10 assertions caught this case.
+- `HalfLifeRemotePlayerPresentation::sample` used the upper anchor's main/gait
+  descriptor even when the sampled entity retained the previous run/jump pose.
+  Valid continuous pairs now retain the selected discrete main/gait until the
+  endpoint; same-sequence raw wire clocks remain authoritative. Future main
+  transition blending does not replace that older pose. Death/life/nointerp/
+  teleport/gap paths remain bounded and discrete.
+- Moving gait yaw jumped to the upper interval direction on its first render
+  sample. It now interpolates committed compensated facing directions on the
+  same selected clock. Backwards walk compensation is applied before angle
+  interpolation, within the supported torso-facing arc; a90 -> -90 turn does
+  not take the180-degree tie and flip midway. Aim and the server transform are
+  not rewritten.
+
+This is local-compatible presentation, not stock-binary parity or predicted
+movement. Official pinned SDK b1b5cf5892918535619b2937bb927e46cb097ba1 was
+inspected read-only for gait semantics; no implementation was copied and no
+ReHLDS/Xash code was used. Four project-owned regressions cover same-time
+animation updates, delayed run/jump descriptors, rail turns and the actual
+Half-Life host + production Studio composition over180 buffered samples.
+The three initial negative controls have70 assertions/28 failures across3
+cases on the previous implementation. Old assertions are retained unchanged.
+
+Source/Release/configuration/current-run evidence was preserved using the
+existing snapshot mechanism in
+`manual-artifacts/task-records/e32-remote-railing-20261013`:
+1391 source files,37 Release files,3 configuration files and22 run files,
+all SHA-verified. Previous dirty/untracked work is retained. No server/Steam
+files, physics, wire grammar, gameplay authority or weapon effects were changed.
+Final verification and normal executable identity are appended after acceptance.
+New agent live game/stock client/HLDS sessions=0; staging/commit/push=0;
+new image manual=not_run. ASan runtime remains historically unconfirmed.
+
+Final validation after the last production edit: VS2022/v143 Win32 /WX Debug
+and Release targeted suites each pass151 cases /104367 assertions, with3
+explicit read-only installed-resource opt-in skips. Core-only ALL_BUILD and
+all44 CTest registrations pass, including the architecture guard;365 shared
+API cases pass319959 assertions without the Half-Life module. Full Release
+offline CTest:3601 registrations,3536 passed,65 explicit optional skips,
+0 failures,768.81s. The unchanged normal-close/verdict fixture passes142.05s.
+No old assertions or test deadlines were weakened. Additional normal launcher/
+CLI/no-stock checks and source/image audits are recorded in the task directory.
+
+Normal Release client SHA256:
+`45B5B5DF2E16CC96B3FCA57394F23F0D14A7D1A497B316D499D44F5416AFC6BC`.
+Unchanged launcher SHA256:
+`AF58350DA40A7B1C0885A33A59EB96CEE8D0E33696CD51D3DA87617203C8E62A`.
+SourceOnly/CheckOnly selects that exact normal executable. Saved launcher
+settings, branch/HEAD and pinned SDK are preserved. This check is not live
+resource attestation or fresh manual confirmation. Use the same launcher and
+server, watch a player running/turning/jumping on the railings, and retain
+diagnostics/F8 if a jerk remains. The exact reported live railing scene has
+not yet been retested with the new image: manual=not_run. Remaining local
+movement/lift corrections or genuine server trajectories are not claimed fixed.
+
+## E32 delayed looping animation clock follow-up (2026-10-13)
+
+New reports, attribution=user_report: remote Barney running/firing Glock and
+then Gman running, crouching, jumping and switching crowbar/Glock appear jerky;
+the latter was in crossfire's Egon/wall-charger room. This is not classified as
+a model- or weapon-specific defect. User runs a78c0fde84ce109fe1b67b7da325bde9
+and c402633f66b142894d479510affc01b7 used the preceding CC4E64AF... normal image.
+Both closed normally. The latter has40 controlled-play frames over33.3ms,
+maximum47.7184ms; its retained851 paired render/remote clocks progress together
+within0.001ms. These bounded global samples do not record each actor's position,
+pose or actions, and do not establish the exact cause of the user's live moment.
+Local prediction activity is not proof of remote animation smoothness.
+
+An independent production-path regression proves a remaining animation defect:
+`HalfLifeRemotePlayerPresentation::sample` passed the upper looping raw anchor
+to `main_sample` even before that anchor's animtime. The raw evaluator correctly
+clamps negative elapsed time, so the whole delayed interval displayed its future
+frame. Consecutive owned11-frame/20FPS anchors0,51.2,102.4 at10.0,10.1,10.2
+therefore held frame2 then frame4 rather than advancing0 through4. Production
+Studio composition independently shows the same plateau in an upper-body bone.
+The initial unchanged-production negative control has4 cases/361 assertions,
+3 failing cases/50 failing assertions; the boundary-only case already passes.
+
+The correction selects the preceding raw anchor only for a valid continuous
+delayed pair, matching sampled/previous/current looping main sequence, and
+strictly increasing animtimes whose older clock applies at the sample time.
+The sample must be within the observed server interval; the new animtime must
+not be later than its current observation. At/after new animtime the current
+raw anchor is used exactly. Equal/regressing animtimes and unsupported pairs
+retain prior behavior. No blend of wrapped byte frames, guessed extra loops,
+new smoothing history, allocation or per-frame I/O is added.
+
+Signed frame rates, pauses, forward/reverse wrap and discrete same-sequence
+restarts stay in the existing evaluator. The separate `delayed_main` flag still
+means a different-sequence transition, so choosing an older same-sequence clock
+does not suppress an active transition blend. Existing nonloop/death endpoint
+interpolation, gait, pitch/controllers, sampled appearance and weapon attachment
+selection are unchanged. Model/life/map/session/teleport/gap/no-interpolation
+boundaries also remain effective on repeated sampling.
+
+Only the selected HL module changes production behavior; ordinary application
+materialization already supplies its exact buffered anchors. No wire, server,
+physics, own movement prediction, asset, renderer, audio or launcher change is
+needed. Pinned official SDK b1b5cf5892918535619b2937bb927e46cb097ba1 was read for
+raw frame/animtime semantics; no implementation was copied or submodule updated.
+This is local-compatible delayed presentation, not a stock-binary parity claim.
+Quantized authoritative corrections may still be discrete at their true anchor;
+CPU/FPS spikes and remaining local collision fallbacks are separate observations.
+
+Four additive `[e32-loop-clock]` regressions exercise two committed brackets
+through GameClientHost and Studio composition, dense/sparse/duplicate sampling,
+gait/weapon endpoint changes, forward/reverse wrap, pause/rate changes, restart
+timing, unchanged raw-clock corrections and13 repeated continuity guard variants.
+Existing assertions were not weakened. Evidence and SHA-verified pre-edit
+preservation (1391 sources,37 Release files,3 configurations,22 latest-run files)
+are in `manual-artifacts/task-records/e32-remote-loop-clock-20261013`.
+Final verification after the last production edit:
+
+- VS2022/v143 Win32 /WX Debug and Release ALL_BUILD pass. The four focused
+  regressions now pass all361 assertions; the negative control above remains
+  preserved. Debug and Release targeted suites each pass81 cases /33998
+  assertions, with2 explicit installed-resource opt-in skips (83 cases total).
+- Core-only ALL_BUILD, all44 CTest registrations (including architecture guard)
+  and369 shared API cases /320106 assertions pass with the HL module disabled.
+- Full Release offline suite:3609 registrations,3544 passed,65 explicit optional
+  skips,0 failures,698.58s. The unchanged no-stock normal-close/verdict fixture
+  passes in121.32s. Existing assertions and test deadlines were not weakened.
+- Normal CLI/version/help/Null and synthetic UDP checks, functional-log
+  validation, G/H1 summaries, H2 launcher/no-stock fixtures and SourceOnly
+  CheckOnly pass. These do not constitute game-resource or LAN live validation.
+
+Normal ready Release client (`build/bin/Release/hlclient.exe`) SHA256:
+`8BC236DB35A2A79C9AF1A5C95206405CB4D1BDC6CC8FCDE8D411DA65796B0433`.
+Normal launcher (`build/bin/Release/HLClientLauncher.exe`) SHA256:
+`AC5F628B93A1DB84A0226F92DD2EE36EB933631459E0472FB9B7B3007557083A`.
+ALL_BUILD relinked the launcher; its source and saved settings are unchanged.
+SourceOnly CheckOnly selects this exact normal client. The final source audit
+is limited to remote_player.cpp, its additive tests, this task record and the
+existing architecture document. Prior dirty/untracked work, branch/HEAD, pinned
+SDK and rollback/source snapshots remain preserved.
+
+Use the same launcher and192.168.0.104:27016, with existing movement/FPS
+diagnostics retained. Recheck remote running, crouching, jumping and weapon
+switches, including the Egon room. This fixes the reproduced looping-clock
+plateau; it does not establish that every live positional jerk or CPU/FPS spike
+has the same cause. New agent live game/stock client/HLDS/LAN sessions=0;
+staging/commit/push=0; fresh manual=not_run. Historical ASan runtime remains
+unconfirmed.
+
+## E32 per-player position diagnostics follow-up (2026-10-13)
+
+Attribution=user_report: after the looping-clock correction, a remote player
+crouching and switching Glock/crowbar near the Crossfire outer pillar appeared
+to jump from one location to another. The older screenshot identifies the
+location, not the motion or its cause. The next explicit request is to extend
+diagnostics, not change interpolation, prediction, physics or animation policy.
+
+The last run `f61a2b519f1dad78278a48137a947f01` used the preceding 8BC236DB...
+normal client, closed normally, and retained no F8 marker or per-actor position
+trajectory. Its healthy common remote clock does not rule out a single actor's
+continuity reset. No exact cause for that live positional jump is claimed.
+
+The existing launcher movement/FPS checkbox now also records bounded numeric
+per-player observations in `external-movement.json` (`remote_players`, schema
+`hlclient.remote-players.v1`). Every successfully presented frame compares up
+to32 players. It distinguishes actual position-bracket raw endpoints, latest
+RX position, sampled position and the submitted parent Studio transform.
+Submitted/culled/missing remain distinct; a submitted transform is not GPU
+pixel proof. Snapshot sequence/gait/weapon/effects, source ordinals and times,
+slot lifetime, network/map generation, per-actor interpolation/hold decision,
+logical/resolved continuity floors and typed reset/hold/clock reasons are
+recorded alongside the existing local movement and frame-time diagnostics.
+
+This uses the actual interpolation result, not an independent guess from the
+common bracket. Same-server-time changed-origin corrections, removal/reentry,
+model/schema changes, game boundaries, no-interpolation flags, teleport/gap
+guards and clock resets are distinguishable. A missing capture is unavailable,
+not an empty actor list. Missing model materialization does not fabricate a
+rendered origin. Records contain no player names, native asset paths, handles,
+auth material or new server queries.
+
+The recorder is opt-in, heap-backed and bounded, with no per-frame file I/O.
+The normal application transports numeric observations only after successful
+scene publication. All authority, collision, movement, interpolation results,
+Studio blending, weapons, resource permissions and launcher settings remain
+unchanged. Offline fixtures compare diagnostics on/off through the production
+asset importer, host and scene publication, including a per-actor reset while
+the global bracket remains healthy. Further tests cover bounded long sessions,
+invalid input, generation/lifetime boundaries, F8 and legacy report analysis.
+
+Source/Release/config/latest-run preservation and current-task acceptance are
+in `manual-artifacts/task-records/e32-remote-position-diagnostics-20261013`.
+Use the existing launcher and192.168.0.104:27016 with diagnostics enabled;
+press F8 promptly after a positional jump, then close normally. Automatic
+observations also work without F8. These logs support the next diagnosis; they
+are not a claim that the remaining live stutter has been fixed.
+
+Retention is640 samples (all32 actors at5Hz for about4s),128 exact before/after
+events and two independent F8 captures, each up to160 samples including the
+latest exact actor frame plus64 retained events from the preceding second.
+Every-frame aggregate comparisons are not downsampled. Displacement events
+use an8-unit diagnostic threshold and250ms cooldown; these are observation
+heuristics, not teleport verdicts or movement constants. Benign interpolated/
+exact-endpoint alternation does not flood the event ring. All evictions,
+invalid data, manual truncation and event suppression are explicit counters.
+Memory is separately capped at1MiB and the remote JSON section at2MiB, within
+the existing16MiB overall receipt limit. Near that overall limit, omitted local
+detailed frames are explicitly counted while session/FPS summaries and incident
+headers survive. Disabled, awaiting presentation, allocation/encoding failure
+and byte-budget exhaustion are not reported as zero motion. Skipped captures
+can miss transient clock details; persistent floor reasons remain observations,
+not proof of complete event coverage. F8 after more than a second cannot recover
+an already evicted exact incident, so press it promptly.
+
+Final VS2022/v143 Win32 acceptance after the last production edit:
+
+- Debug and Release ALL_BUILD pass. Each targeted suite has103 cases,
+  101 passed,2 explicit installed-resource opt-in skips,103038 assertions.
+- Core-only ALL_BUILD,384 API cases/340759 assertions and all44 CTest
+  registrations pass, including the architecture guard.
+- Full Release offline suite:3625 registrations,3560 passed,65 explicit
+  optional skips,0 failures,668.74s. The no-stock normal-close/receipt verdict
+  regression passes in122.40s. The initial new-fixture failures were corrected
+  without changing existing assertions or deadlines; final logs are separate.
+- The analysis script's125 fixtures pass; the preceding real session remains
+  readable with `remote_players=not_recorded`, not a false zero-event result.
+- SourceOnly CheckOnly selects the exact ordinary Release image. The saved
+  launcher configuration,1391 source backups,37 Release rollback files, branch,
+  HEAD and pinned SDK remain preserved. Staged entries and deleted sources:0.
+
+Ready normal client SHA256:
+`B8D9A708307D2F85BF9C60CC536831F30E41BB7646F017CCD2E3CEEBA050165E`.
+Launcher SHA256:
+`B25036E55DD276A7ED71D44A2CD03574B67350889ADFDA1C42B1E157C8EFC282`.
+The linker updated the launcher binary; its source and settings did not change.
+New live game/stock/HLDS/LAN sessions=0; staging/commit/push=0; manual=not_run.
+Historical ASan runtime remains unconfirmed and was not retested here.
+
+## E32 firing-player motion continuity corrective (2026-10-13)
+
+Attribution=user_report: a perceived jump of another player's model near a
+lift, marked with F8. Run `1ab2299dbe7bbebe1d3b1ce70b294fba` used the preceding
+B8D9A708... normal client and closed normally. The marker is106.150140s.
+Visible entity11/model155/lifetime167 moves10.146 units in12.527ms at106.192824s,
+42.684ms after the marker. Earlier visible resets at103.830710/104.124144s
+move39.459/21.431 units. The flagged latest-server displacement near F8 is
+6.266 units over42.969ms, while presentation advances its selected clock by
+140.179ms and snaps to the newest position. Clearing the flag then moves the
+position floor again and holds the model until106.370963s. The F8 local window
+has no frame longer than19.9836ms. These are position-presentation observations;
+the retained fields do not establish that this actor is attached to a lift.
+
+Raw effects alternate0 ->34 ->0, with the same model/lifetime/weapon/main.
+The pinned SDK `common/const.h` defines muzzleflash2 and nointerp32. Its Glock
+attack sets muzzleflash, and `CBasePlayer::SetAnimation(PLAYER_ATTACK1)` may
+set nointerp when restarting a nonlooping attack. The same nointerp bit is
+also used by death and other position-discontinuity contexts. Treating every
+such attack pulse as a new position lifetime floor discards the render delay;
+OR-ing both endpoints repeats that reset on the falling edge.
+
+The concrete HL module now selects a narrow animation-only interpretation for
+an exact flagged observation. Eligibility requires exact effects34, an existing
+matching player/model and stable nonzero weapon, valid positive gait, complete
+finite transforms, bounded increasing clocks/displacement, and an already
+approved compatible model with a nonlooping `ref_shoot_*`/`crouch_shoot_*`
+sequence. Unknown/missing/unsupported metadata, effect32 alone, spectator,
+death/rearm, zero gait, changed model/weapon, large displacement and excessive
+gap retain strict behavior. This is a documented local-compatible profile:
+observations cannot distinguish a custom small teleport deliberately combined
+with an otherwise qualifying muzzle/animation pulse.
+
+The ordinary application transports sorted bounded numeric qualifications by
+entity and exact committed ordinal. The engine subtracts only that qualified
+effect mask from motion-discontinuity checks, including the previous flagged
+endpoint after its flag clears. It retains every immutable raw effect, source
+identity and animation anchor. Generic/core defaults, explicit no-interpolation,
+actual teleport/model/schema/life/map/session/removal/gap and same-time position
+correction guards remain independent. No input, local prediction, physics,
+server configuration, damage, asset files or wire grammar changes.
+
+The HL pose owner independently preserves gait/yaw for the qualified position
+pair while the raw effect still clears main-animation transitions and preserves
+the existing exact restart/frame rules. The renderer/materializer continues
+to use the sampled world transform and existing Studio path. No per-contact
+or render-time asset I/O, second smoothing owner or guessed player motion is
+introduced. Qualification holds only synchronous approved metadata borrows;
+the reusable numeric table is bounded by16 observations x32 players.
+
+Regression fixtures exercise moving horizontal trajectories and rising/falling
+platform trajectories, both pulse edges, exact-source/actor isolation, default
+strict behavior and lifecycle/teleport/schema/gap guards. The normal approved
+fixture importer/HL host/scene materializer verifies the final published
+transform; separate HL tests verify gait retention and main-animation restart.
+Existing assertions and architecture guards are preserved. The latest run and
+pre-edit source/image/configuration hashes are retained in
+`manual-artifacts/task-records/e32-remote-nointerp-pulse-20261013`.
+
+The final VS2022/v143 Win32 /WX build and focused acceptance pass:
+
+- Debug and Release mechanism suites:19 cases/17816 assertions each.
+- Normal Release targeted suite:120 cases,117 passed,3 explicit installed-
+  resource skips,122355 assertions. All prior assertions remain unchanged.
+- Core API binary (without the concrete HL module):389 cases/355349 assertions;
+  the CMake architecture guard passes without conditional HL dependencies.
+- Separate exact-root approved asset control: models/player.mdl and the zombie
+  appearance both expose sequence34 `ref_shoot_onehanded`, loop0, and qualify
+  mask32 for the observed numeric pulse;10 assertions pass. No game, Steam API,
+  stock client, HLDS or LAN session is started by this read-only asset control.
+- The initial configuration rejection of an HL include in a shared test source
+  was repaired by separating neutral and HL test files; the architecture rule
+  was not relaxed. One new-test INFO macro precedence error was also repaired.
+
+Ready normal client SHA256:
+`6661897B72FCF7983B093A2A17EA806034FE706012AA8280C8924EC2D4BEC14A`.
+Launcher SHA256:
+`9726588AAC10A63B075C4DBAEDF308271D2B10799B9F0C22BB5B8171E0C4319B`.
+SourceOnly CheckOnly selects this exact client. The linker regenerated the
+launcher binary; its source and saved configuration are unchanged. Current
+source scope is11 modified files and2 new test files;1395 pre-edit sources,
+37 prior Release files,3 configurations and22 latest-run files were preserved
+and SHA-verified before changes. Branch/HEAD, pinned SDK and prior dirty work
+remain unchanged. Staging/commit/push and new agent live sessions:0.
+Fresh manual=not_run; the user's old F8 run is evidence for the preceding image.
+ASan runtime remains historically unconfirmed, not retested here.
+
+After the last production edit, the full Release offline suite passes all3634
+registrations:3568 passed,66 explicit optional skips,0 failures,752.52s. The
+unchanged normal-close/receipt-verdict fixture and subsequent normal CLI/Null,
+synthetic UDP, summaries, no-stock wrappers and SourceOnly CheckOnly pass.
+The existing cleanup policy is applied again after verification: temporary
+compiled objects/Debug outputs and raw test logs are removable, while the new
+ordinary Release, source/Git/dependency caches, compact final verification and
+MDL-Viewer are preserved. Detailed raw logs are not archived by this cleanup;
+the final numeric verification records remain in the task record.

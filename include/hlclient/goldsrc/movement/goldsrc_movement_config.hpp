@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace hlclient::goldsrc::movement {
 
@@ -50,7 +51,15 @@ struct ReferenceLadderMovementPolicy {
     float jump_away_speed{};
 };
 
+struct ReferenceCrouchJumpPolicy {
+    float forward_speed{};
+    float vertical_impulse{};
+    float minimum_speed{};
+};
+
 struct GoldSrcLocalMovementConfig {
+    // Optional game-selected boost; capability comes from authoritative state.
+    std::optional<ReferenceCrouchJumpPolicy> crouch_jump;
     // Simulation-local ground command cap, selected by the game policy.
     // Applied before duck scaling. Never mutates wire values or MoveVars.
     std::uint16_t ground_button_speed_limit_mask{};

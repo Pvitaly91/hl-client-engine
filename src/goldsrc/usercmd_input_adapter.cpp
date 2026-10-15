@@ -325,14 +325,17 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
         forward_button | back_button | left_button | right_button;
     constexpr auto weapon_actions = permitted_actions | attack | reload;
     constexpr auto use = gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::use);
-    const bool use_policy = context.reference_button_policy ==
+    constexpr auto secondary = gameplay_input::gameplay_button_mask(gameplay_input::GameplayButton::attack_secondary);
+    const bool secondary_policy = context.reference_button_policy ==
+        GoldSrcReferenceButtonPolicy::jump_duck_primary_secondary_reload_use;
+    const bool use_policy = secondary_policy || context.reference_button_policy ==
         GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use;
     const bool weapons = use_policy || context.reference_button_policy ==
         GoldSrcReferenceButtonPolicy::jump_duck_primary_reload;
     const auto observed_actions = intent.held_buttons() |
         intent.pressed_buttons() | intent.released_buttons() |
-        context.one_shot_buttons;
-    if ((use_policy && (observed_actions & ~(weapon_actions | use)) != 0U) ||
+        context.one_shot_buttons | context.edge_triggered_buttons;
+    if ((use_policy && (observed_actions & ~(weapon_actions | use | (secondary_policy ? secondary : 0U))) != 0U) ||
         (!use_policy && !weapons &&
          context.reference_button_policy != GoldSrcReferenceButtonPolicy::none &&
          context.reference_button_policy != GoldSrcReferenceButtonPolicy::jump_duck) ||
@@ -405,7 +408,8 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
     command.side = *side;
     command.up = 0;
     if (intent.focused()) {
-        const auto actions = intent.held_buttons() | context.one_shot_buttons;
+        const auto actions = (intent.held_buttons() & ~context.edge_triggered_buttons) |
+            context.one_shot_buttons;
         command.buttons = static_cast<std::uint16_t>(
             (context.reference_button_policy != GoldSrcReferenceButtonPolicy::none &&
                 (actions & jump) != 0U ? kReferenceGoldSrcButtonJump : 0U) |
@@ -417,6 +421,8 @@ GoldSrcUserCmdInputAdapter::build_reference_wire(
             ((actions & right_button) != 0U ? kReferenceGoldSrcButtonMoveRight : 0U) |
             (weapons && (actions & attack) != 0U
                  ? kReferenceGoldSrcButtonAttack : 0U) |
+            (secondary_policy && (actions & secondary) != 0U
+                 ? kReferenceGoldSrcButtonAttack2 : 0U) |
             (weapons && (actions & reload) != 0U
                  ? kReferenceGoldSrcButtonReload : 0U) |
             (use_policy && (actions & use) != 0U ? kReferenceGoldSrcButtonUse : 0U));

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <hlclient/auth/authentication_provider.hpp>
 #include <hlclient/client/client_world_state.hpp>
 #include <hlclient/game_api/presentation.hpp>
 #include <hlclient/gameplay_input/gameplay_input_intent.hpp>
@@ -12,7 +13,7 @@
 namespace hlclient::app {
 
 // Application completion and verification coverage are independent. The
-// primary runtime error takes precedence; a healthy manual close/limit does
+// primary runtime/startup error takes precedence; a healthy manual close/limit does
 // not require scripted movement/replay achievements.
 struct LiveVisualSessionOutcome final {
   int exit_code{2};
@@ -24,7 +25,10 @@ struct LiveVisualSessionOutcome final {
 [[nodiscard]] LiveVisualSessionOutcome evaluate_live_visual_session(
     bool keyboard_mouse, bool completed, bool runtime_failed,
     bool scripted_verified, bool prediction_verified, bool reference_prediction,
-    std::string_view runtime_error) noexcept;
+    std::string_view runtime_error,
+    std::optional<auth::AuthenticationErrorCode> authentication_error = {}) noexcept;
+[[nodiscard]] std::string_view live_authentication_failure_reason(
+    auth::AuthenticationErrorCode) noexcept;
 
 enum class LiveVisualViewStatus : std::uint8_t {
   ready,
@@ -63,6 +67,8 @@ struct LiveVisualCameraSample final {
   bool vertical_only_view_offset_contract{false};
   bool server_angle_correction_applied{false};
   std::optional<assets::AssetVector3> server_punch_angle;
+  // Observed composed camera, never fed back into movement/wire input.
+  assets::AssetVector3 presented_angles_degrees{};
 };
 
 struct LiveVisualCameraUpdate final {
@@ -95,7 +101,9 @@ public:
       client::ClientWorldState &target,
       const game_api::CameraIntent &camera_intent,
       bool apply_input_delta = true,
-      std::optional<LiveVisualPredictedView> predicted_view = {}) noexcept;
+      std::optional<LiveVisualPredictedView> predicted_view = {},
+      double viewport_aspect = 4.0 / 3.0,
+      std::optional<double> presentation_seconds = {}) noexcept;
 
   [[nodiscard]] double yaw_degrees() const noexcept { return yaw_degrees_; }
   [[nodiscard]] double pitch_degrees() const noexcept { return pitch_degrees_; }
@@ -109,7 +117,16 @@ private:
   std::uint64_t camera_revision_{0U};
   std::optional<client::RuntimeObservationSource> last_server_source_;
   std::optional<client::RuntimeObservationSource> last_angle_correction_source_;
+  std::uint64_t last_angle_correction_generation_{0U};
   std::optional<client::RenderCameraState> last_camera_;
+  std::uint64_t last_camera_generation_{}, last_camera_life_{};
+  struct AuthoritativeBlend final {
+    std::uint64_t generation{}, life{}, deaths{};
+    client::RuntimeObservationSource source{};
+    assets::AssetVector3 from{}, target{};
+    double start{}, duration{}, last_sample_time{};
+  };
+  std::optional<AuthoritativeBlend> authoritative_blend_;
 };
 
 } // namespace hlclient::app

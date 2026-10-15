@@ -7,6 +7,7 @@
 #include <hlclient/goldsrc/resource_client_response_stage.hpp>
 #include <hlclient/goldsrc/reference_prediction_seed.hpp>
 #include <hlclient/goldsrc/runtime_control_decoder.hpp>
+#include <hlclient/goldsrc/runtime_effect_diagnostics.hpp>
 #include <hlclient/goldsrc/runtime_replay_session.hpp>
 #include <hlclient/goldsrc/service_payload_envelope.hpp>
 #include <hlclient/goldsrc/stock_spawn_request.hpp>
@@ -88,6 +89,9 @@ struct LiveVisualControlInput final {
     gameplay_input::GameplayButtonMask held_buttons{0U};
     gameplay_input::GameplayButtonMask pressed_buttons{0U};
     gameplay_input::GameplayButtonMask released_buttons{0U};
+    // Owning pre-command UI consumption. Clears only unsent current/pending
+    // input, never an already materialized/history/transmitted command.
+    gameplay_input::GameplayButtonMask consumed_buttons{0U};
 };
 
 // Bounded project-action edge latch. The owning stage adds presses only after
@@ -95,9 +99,10 @@ struct LiveVisualControlInput final {
 class LiveVisualButtonLatch final {
 public:
     void observe(gameplay_input::GameplayButtonMask pressed,
-                 bool focused) noexcept {
+                 bool focused,
+                 gameplay_input::GameplayButtonMask module_edges=0U) noexcept {
         if (!focused) { clear(); return; }
-        pending_ |= pressed & allowed();
+        pending_ |= pressed & (allowed() | module_edges);
     }
     void consume_after_history_insert(
         gameplay_input::GameplayButtonMask consumed) noexcept {
@@ -128,6 +133,22 @@ private:
     gameplay_input::GameplayButtonMask pending_{0U};
 };
 
+inline void consume_live_visual_input_buttons(LiveVisualControlInput& input,
+    LiveVisualButtonLatch& latch) noexcept {
+    input.held_buttons &= ~input.consumed_buttons;
+    input.pressed_buttons &= ~input.consumed_buttons;
+    latch.clear(input.consumed_buttons);
+    // Real releases are retained for current action/life ownership.
+}
+inline void release_live_visual_input_capture(LiveVisualControlInput& input,
+    gameplay_input::GameplayButtonMask scoped_buttons) noexcept {
+    input.captured=false;
+    input.consumed_buttons|=scoped_buttons;
+    input.held_buttons&=~scoped_buttons;
+    input.pressed_buttons&=~scoped_buttons;
+    // Keep physical releases, focus, movement axes and view orientation intact.
+}
+
 // The scripted forward/backward check deliberately has no side speed. The
 // keyboard source retains the signed project side axis through wire sampling.
 [[nodiscard]] GoldSrcUserCmdMovementSpeedConfig live_visual_movement_speeds(
@@ -150,9 +171,9 @@ enum class LiveUserCmdMotionOutcome : std::uint8_t {
 };
 
 inline constexpr std::size_t kLiveUserCmdPhaseCount = 5U;
-// The keyboard route permits a 300-second session. At its 20 ms command
-// interval it can submit 15,000 packets; fresh server observations may arrive
-// more often. These are bounded diagnostic capacities, allocated as needed.
+// Bounded diagnostic retention, allocated as needed. Normal keyboard sessions
+// retain the newest entries without imposing a duration limit; scripted checks
+// retain their complete evidence and reject exhaustion of these bounds.
 inline constexpr std::size_t kMaximumLiveUserCmdSamples = 32'768U;
 inline constexpr std::size_t kMaximumLiveUserCmdTransmitRanges = 16'384U;
 
@@ -194,6 +215,10 @@ struct LiveRuntimeStageConfig final {
         LiveVisualControlInputSource::scripted_check};
     LiveUserCmdScenarioConfig usercmd_scenario{};
     bool reference_prediction{false};
+    bool effect_diagnostics{false};
+    bool movement_diagnostics{false};
+    // Optional application-selected compatibility profile, not a wire rewrite.
+    std::optional<std::string> required_game_directory;
     std::shared_ptr<game_api::GameClientHost> game_client;
     std::shared_ptr<CommittedSoundQueue> sound_events;
 };
@@ -219,6 +244,7 @@ struct LiveReferencePredictionSnapshot final {
     std::shared_ptr<const collision::BrushCollisionScene> presented_brush_scene;
     std::uint64_t collision_context_revision{};
     std::size_t collision_brush_count{}, server_brush_transform_changes{};
+    std::size_t collision_excluded_point_boxes{};
     std::optional<std::uint32_t> last_changed_brush_entity, last_changed_brush_model;
     std::uint64_t step_selections{};
     std::optional<hlclient::movement::PlayerMovementHitIdentity> ground_hit;
@@ -268,6 +294,74 @@ struct LiveReferencePredictionSnapshot final {
     std::optional<ReferencePredictionGroundStatus> last_ground_status;
     std::optional<movement::LocalMovementCollisionSessionIdentity>
         collision_identity;
+    std::optional<double> command_simulation_seconds;
+    std::optional<std::int64_t> render_sample_time_ns;
+    std::optional<double> support_observation_seconds;
+    std::optional<double> support_velocity_z;
+    std::optional<movement::LocalMovementPositionTest> collision_position_evidence;
+    std::optional<movement::LocalMovementTrace> collision_trace_evidence;
+    std::optional<hlclient::movement::PlayerMovementHull> collision_query_hull;
+    std::optional<assets::AssetVector3> collision_query_start;
+    std::optional<assets::AssetVector3> collision_query_end;
+    std::optional<assets::AssetVector3> seed_origin;
+    std::optional<assets::AssetVector3> previous_valid_origin;
+    std::optional<std::int64_t> fallback_started_ns;
+    double fallback_duration_ms{0.0};
+    std::string_view rebase_reason{"not_attempted"};
+    std::optional<movement::LocalMovementSimulationErrorCode> last_simulation_error;
+    std::optional<assets::AssetVector3> canonical_velocity;
+    std::optional<std::uint64_t> canonical_source_record_identity;
+    std::optional<std::uint32_t> canonical_source_sequence;
+    std::string_view canonical_body_kind{"unavailable"};
+    std::optional<assets::AssetVector3> matched_origin_before_correction;
+    std::optional<assets::AssetVector3> matched_velocity_before_correction;
+    std::optional<ReferencePredictionAnchorStatus> last_anchor_status;
+    bool anchor_coherent_reliable_frame{false};
+    std::string_view collision_query_purpose{"unavailable"};
+};
+
+// Metadata-only measurement of the most recent owning update. Actual clocks
+// use steady_clock epoch nanoseconds, separate from caller simulation time.
+// Socket timestamps bracket receive(), not the unknown kernel arrival time.
+// A reassembled payload is dated by its final fragment read. Empty optionals
+// mean unavailable, never a synthetic timestamp or an implied zero latency.
+struct LiveRuntimeMovementDiagnostics final {
+    bool enabled{false};
+    double network_driver_ms{0.0};
+    double network_parse_commit_ms{0.0};
+    double collision_scene_ms{0.0};
+    double prediction_command_ms{0.0};
+    double prediction_replay_ms{0.0};
+    std::size_t driver_queue_before{0U};
+    std::size_t driver_queue_after{0U};
+    std::size_t processed_driver_events{0U};
+    std::size_t committed_records{0U};
+    std::size_t committed_bytes{0U};
+    std::size_t replayed_commands{0U};
+    std::optional<std::uint64_t> socket_read_begin_ns;
+    std::optional<std::uint64_t> socket_read_end_ns;
+    std::optional<std::uint64_t> parse_begin_ns;
+    std::optional<std::uint64_t> atomic_commit_ns;
+    std::optional<std::uint64_t> prediction_use_ns;
+    // Latest same-record clientdata + entity reconstruction. HUD/audio-only
+    // commits do not make an old local movement observation appear fresh.
+    std::optional<std::uint64_t> latest_state_commit_ns;
+    std::optional<std::uint32_t> source_transport_sequence;
+    std::optional<std::uint64_t> record_identity;
+    std::optional<double> server_time_seconds;
+    std::size_t entity_count{0U};
+    std::size_t observed_player_count{0U};
+    NetchanDriverReceiveStatistics receive_statistics{};
+    std::size_t choke_markers_total{0U};
+    // Sum of exact immutable command msec replayed this update, separate from
+    // CPU execution time. Unavailable when diagnostics are off or replay fails.
+    std::optional<double> replayed_simulation_ms;
+    // Most recent successfully queued immutable command, not a reconstructed
+    // input, transport ACK or claim that the server executed it.
+    std::optional<GoldSrcWireUserCmd> latest_command;
+    std::optional<std::uint32_t> latest_command_sequence;
+    std::optional<std::int64_t> latest_command_sample_time_ns;
+    std::string_view source_body_kind{"unavailable"};
 };
 
 // Re-applies the explicit live-session compatibility profile after a caller
@@ -306,6 +400,7 @@ enum class LiveRuntimeStageErrorCode : std::uint8_t {
     retained_driver_missing,
     retained_payload_missing,
     initialization_context_missing,
+    unsupported_game_profile,
     spawn_request_build_failed,
     spawn_request_queue_failed,
     spawn_request_transmit_mismatch,
@@ -325,7 +420,16 @@ enum class LiveRuntimeStageErrorCode : std::uint8_t {
     event_backpressure,
     driver_failed,
     time_moved_backwards,
+    server_disconnected,
 };
+
+enum class LiveUserCmdDiagnosticErrorCode : std::uint8_t {
+    invalid_transmit_metadata,
+    transmit_retention_exhausted,
+    server_sample_retention_exhausted,
+};
+
+[[nodiscard]] std::string_view to_string(LiveUserCmdDiagnosticErrorCode) noexcept;
 
 struct LiveRuntimeStageError final {
     LiveRuntimeStageErrorCode code{
@@ -348,7 +452,13 @@ struct LiveRuntimeStageError final {
     std::optional<GoldSrcUserCmdInputAdapterErrorCode> usercmd_adapter_code;
     std::optional<GoldSrcUserCmdTransmissionErrorCode>
         usercmd_transmission_code;
+    std::optional<GoldSrcUserCmdHistoryErrorCode> usercmd_history_code;
+    std::optional<LiveUserCmdDiagnosticErrorCode> usercmd_diagnostic_code;
     std::optional<NetchanDriverErrorCode> driver_code;
+    // Owning first cause, copied before retained-driver teardown. The legacy
+    // code above remains available; this also preserves packet/session/
+    // reassembly and transport metadata without packet or authentication data.
+    std::optional<NetchanDriverError> driver_failure;
     std::optional<std::uint8_t> wire_opcode;
     std::optional<PacketEntityDecodeErrorCode> runtime_decoder_error;
     std::optional<StockRuntimeSourceCursor> runtime_cursor;
@@ -408,6 +518,11 @@ struct LiveUserCmdTransmitRange final {
     std::size_t backup_command_count{0U};
 };
 
+// Validate the actual successful-send metadata before retaining diagnostics.
+// Retention policy must never make an incomplete or inconsistent receipt valid.
+[[nodiscard]] std::optional<LiveUserCmdTransmitRange>
+inspect_live_usercmd_transmit_range(const GoldSrcUserCmdTransmissionEvent&) noexcept;
+
 // Exactly one notification for each newly submitted immutable command carrying
 // a weapon bit. Backup transmission and reconciliation never publish here.
 struct LiveWeaponCommandSubmission final {
@@ -418,6 +533,8 @@ struct LiveWeaponCommandSubmission final {
     // recovery can skip wall slots without skipping command identities.
     std::int64_t command_end_nanoseconds{0};
     std::array<std::uint16_t, 3> angle_turns{};
+    std::optional<assets::AssetVector3> player_origin;
+    std::optional<bool> player_ducked;
 };
 
 struct LiveUserCmdCheckState final {
@@ -442,6 +559,12 @@ struct LiveUserCmdCheckState final {
     std::size_t new_command_submission_count{0U};
     std::size_t backup_command_submission_count{0U};
     std::size_t transmitted_packet_count{0U};
+    // Lifetime totals remain independent of the bounded diagnostic windows.
+    std::size_t server_sample_count{0U};
+    std::size_t transmit_ranges_evicted{0U};
+    std::size_t server_samples_evicted{0U};
+    std::optional<std::uint32_t> first_new_command_sequence;
+    std::optional<std::uint32_t> last_new_command_sequence;
     NetchanDriverReceiveStatistics driver_rx_total{};
     NetchanDriverReceiveStatistics driver_rx_at_input_activation{};
     std::size_t payload_events_consumed_total{0U};
@@ -590,6 +713,7 @@ enum class LiveRuntimeStageEventType : std::uint8_t {
     service_payload_received,
     baseline_registry_ready,
     runtime_record_applied,
+    committed_effect_observed,
     stability_interval_started,
     stable_runtime_state_ready,
     live_visual_input_ready,
@@ -618,6 +742,8 @@ struct LiveRuntimeStageEvent final {
     bool wire_uncompressed{false};
     std::optional<LiveUserCmdInputPhase> input_phase;
     LiveRuntimeStageTimePoint occurred_at{};
+    std::optional<RuntimeEffectDiagnostic> effect_diagnostic;
+    std::size_t message_bit_offset{};
 };
 
 struct LiveRuntimeStageTraceEvent final {
@@ -661,6 +787,8 @@ public:
         std::unique_ptr<INetchanDriverLifetime> connection_lifetime = {});
     void update(LiveRuntimeStageTimePoint now);
     void cancel(LiveRuntimeStageTimePoint now);
+    [[nodiscard]] bool request_graceful_close(LiveRuntimeStageTimePoint now);
+    [[nodiscard]] GracefulCloseSummary graceful_close_snapshot() const noexcept;
     [[nodiscard]] bool submit_live_visual_input(
         const LiveVisualControlInput& input,
         LiveRuntimeStageTimePoint now) noexcept;
@@ -688,6 +816,8 @@ public:
     // response has completed.
     [[nodiscard]] const ResourceListState* live_resource_list() const noexcept;
     [[nodiscard]] const ServerInfoState* live_server_info() const noexcept;
+    // Borrowed immutable signon metadata; caller must copy before async work.
+    [[nodiscard]] std::string_view live_sky_name() const noexcept;
     [[nodiscard]] std::optional<LiveUserCmdCheckState>
     live_usercmd_snapshot() const;
     [[nodiscard]] std::size_t live_use_new_submission_count() const noexcept;
@@ -699,6 +829,8 @@ public:
         std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> package);
     [[nodiscard]] LiveReferencePredictionSnapshot
     live_reference_prediction_snapshot(LiveRuntimeStageTimePoint now) const;
+    [[nodiscard]] LiveRuntimeMovementDiagnostics
+    movement_diagnostics_snapshot() const noexcept;
 
 private:
     class Implementation;
@@ -748,6 +880,8 @@ private:
         return "retained_payload_missing";
     case LiveRuntimeStageErrorCode::initialization_context_missing:
         return "initialization_context_missing";
+    case LiveRuntimeStageErrorCode::unsupported_game_profile:
+        return "unsupported_game_profile";
     case LiveRuntimeStageErrorCode::spawn_request_build_failed:
         return "spawn_request_build_failed";
     case LiveRuntimeStageErrorCode::spawn_request_queue_failed:
@@ -786,6 +920,8 @@ private:
         return "driver_failed";
     case LiveRuntimeStageErrorCode::time_moved_backwards:
         return "time_moved_backwards";
+    case LiveRuntimeStageErrorCode::server_disconnected:
+        return "server_disconnected";
     }
     return "unknown";
 }

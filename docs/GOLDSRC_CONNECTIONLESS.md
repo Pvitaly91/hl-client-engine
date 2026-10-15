@@ -2,6 +2,11 @@
 
 ## M1 scope and interoperability reference
 
+This section retains the historical M1 capture/profile. The current E31.1
+server-identity/security normalization and narrowly observed suffix extension
+are specified separately below; the historical fixed tuple is not a statement
+that the current parser accepts only that one server identity.
+
 M1 implements only the initial IPv4 connectionless challenge exchange. M2.1
 uses its result in a separate one-shot connect stage; M1 itself still does not
 create a netchan, authenticate a client, or enter sign-on.
@@ -85,9 +90,42 @@ The original server tolerated some alternate request endings during diagnostic
 probes. M1 deliberately sends only the captured profile above and has no
 shotgun fallback.
 
-Known unsupported variants are WON/protocol 47, Xash protocol 49,
-Counter-Strike-specific authentication variants, ReHLDS extensions, IPv6, and
-any connectionless response shape other than the strict profile above.
+M1 did not claim support for WON/protocol 47, Xash protocol 49,
+Counter-Strike-specific authentication variants, ReHLDS extensions, IPv6, or
+connectionless shapes beyond that strict captured profile. The specific
+extension below does not establish general support for those variants.
+
+## Current E31.1 identity suffix extension
+
+The current Steam profile retains the canonical uint32 challenge and exact
+authentication profile `3`, and accepts a canonical **nonzero uint64 server
+identity** followed by an **explicit security flag `0` or `1`**. These values
+reach the existing authentication provider unchanged; no default security flag
+or fabricated identity is supplied.
+
+User-initiated LAN retries against a Linux server advertising build 10211 were
+passively observed on 2026-10-11. Its challenge has exactly one lowercase
+`m` (`0x6d`) immediately after the decimal identity, before the separating
+space. E31.1 additionally accepts this exact opaque suffix:
+
+```text
+A00000000 <uint32-challenge> 3 <nonzero-uint64-identity>[m] <0-or-1>\n\0
+```
+
+`[m]` means optional one-byte literal `m`, not literal brackets. The suffix
+does not change the normalized identity or imply a security setting. Other
+suffixes, repetition, missing/invalid explicit flags, alternate whitespace,
+numeric overflow and noncanonical numbers remain errors. Exact LF-NUL
+termination, no trailing data, datagram bounds and exact target matching remain
+unchanged. The accepted suffix-free response remains valid.
+
+This extension is based on observed packet structure, not copied engine code
+or an assumption about stock/ReHLDS binary provenance. No captured server
+identity/auth token is retained in the E31.1 evidence. Synthetic parser and
+coordinator regressions exercise both flags, limits, malformed variants,
+provider failure and accepted-connect deduplication. See
+[E31 launcher acceptance](SIMPLE_LAUNCHER_EXTERNAL_LAN_E31.md) for the bounded
+observation, ready-binary identities and user-confirmed LAN connection/playability.
 
 ## Bounds and parse errors
 

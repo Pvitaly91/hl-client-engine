@@ -18,6 +18,7 @@ enum class DatagramSendStatus {
 struct DatagramSendResult {
     DatagramSendStatus status{DatagramSendStatus::error};
     std::string error;
+    SocketNativeError native_error{};
 
     [[nodiscard]] explicit operator bool() const noexcept
     {
@@ -38,6 +39,7 @@ struct DatagramTransportReceiveResult {
     std::optional<NetworkAddress> source;
     std::size_t payload_size{0};
     std::string error;
+    SocketNativeError native_error{};
 };
 
 struct DatagramLocalAddressResult {
@@ -86,6 +88,7 @@ public:
         std::span<const std::byte> payload) override;
     [[nodiscard]] DatagramTransportReceiveResult receive(
         std::size_t maximum_size) override;
+    [[nodiscard]] SocketNativeError close() noexcept;
 
 private:
     UdpSocket socket_;

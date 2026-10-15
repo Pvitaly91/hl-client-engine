@@ -1,0 +1,2082 @@
+{
+  "schema": "hlclient.hl1-weapon-suite-coverage.v1",
+  "task": "HLC-E28-WEAPON-SUITE-INTEGRATION-AND-PEER-DISCONNECT",
+  "result": "offline_verified_with_scoped_disconnect_manual_acceptance_and_audited_shutdown_gap",
+  "historical_offline_handoff_result": "Blocked",
+  "weapon_suite_checks": "hl1_weapon_suite_integration_offline_verified",
+  "completion_gate": "Current disconnect behavior accepted in user_report scope; missing historical packet does not block this acceptance. Exact old cause remains not_established. Entire E28 manual is not passed; graceful-close and reporting gaps require separate narrow production work.",
+  "authoritative_worktree": "D:/DEV/CPP/HLC-steamcfg-5e48b7c1",
+  "preflight_identity": {
+    "branch": "codex/stock-runtime-campaign-5e48b7c1",
+    "head": "00505f71ff2547a9a6b083e53edf69ec45d48213",
+    "head_branch_unchanged": true,
+    "final_git_entries": 284,
+    "final_unstaged": 163,
+    "final_untracked": 121,
+    "final_staged": 0,
+    "other_worktrees": "read_only_inventory_only",
+    "handoff_processes": "no hlclient_hlds_cmake_MSBuild_cl running"
+  },
+  "reference": {
+    "repository": "ValveSoftware/halflife",
+    "revision": "b1b5cf5892918535619b2937bb927e46cb097ba1",
+    "scope": "behavioral reference, not stock-binary parity"
+  },
+  "accepted_e271": {
+    "manual": "passed",
+    "attribution": "user_report",
+    "scope": "Snark blood-pop correction manual scenario",
+    "release_sha256": "07BCCCB4A3E55607C3F0E5AD335E2FD461795EA6951954EA922CD22451E8B4C3",
+    "text": "Протестував все ок"
+  },
+  "new_release": {
+    "manual": "partial_disconnect_scope_passed_user_report",
+    "manual_at_offline_handoff": "not_run",
+    "manual_scope": "two reported disconnect scenarios only; entire arsenal/manual matrix not promoted",
+    "post_manual_evidence": "docs/evidence/HL1_WEAPON_SUITE_E28_POST_MANUAL.json",
+    "sha256": "73D412ACE92B0EB2C3432B305DB61AA8EBFE9790159D2FDF65C11D290CB2B3C2",
+    "path": "D:/DEV/CPP/HLC-steamcfg-5e48b7c1/build/bin/Release/hlclient.exe",
+    "bytes": 3934208,
+    "mtime_utc": "2026-10-09T16:14:15.9057852Z",
+    "launcher_selection": "verified_actual_Release_path_CheckOnly_exit0",
+    "orchestrator_sha256": "F78AE37FB4F9DD9FADF24041AE33EFEAA7A372E047C169E7F155C2EEC7B2CDD7"
+  },
+  "sessions": {
+    "new_live": 0,
+    "staging": "none",
+    "commit": "none",
+    "push": "none"
+  },
+  "production_wiring": {
+    "normal_host": "apps/hlclient/main.cpp -> GameClientHost -> HalfLifeClientModule",
+    "local": [
+      "src/games/halflife/local_weapon_presentation.cpp",
+      "src/games/halflife/weapon_visuals.cpp",
+      "src/games/halflife/weapon_audio.cpp",
+      "src/games/halflife/presentation.cpp"
+    ],
+    "remote": [
+      "src/games/halflife/remote_effects.cpp",
+      "src/app/runtime_replay_local_assets.cpp"
+    ]
+  },
+  "resource_contract": {
+    "pipeline": "approved manifest -> importer -> neutral asset -> existing normal application materializer/audio mixer",
+    "local_dependencies": "exact compiled HL profile allowlists only",
+    "numeric_indices": "session assigned; not semantic identity",
+    "source_assets": "read only; never repo fixtures",
+    "absence": "typed component degradation; optional asset checks report skip",
+    "inventory_evidence": "Source tokens and production consumers are verified; this inventory alone does not attest file existence, successful importer use, GPU pixels or audible output.",
+    "shared_material_impact_profile": {
+      "source": "src/games/halflife/materials.cpp",
+      "names": [
+        "player/pl_step1.wav",
+        "player/pl_step2.wav",
+        "player/pl_metal1.wav",
+        "player/pl_metal2.wav",
+        "player/pl_dirt1.wav",
+        "player/pl_dirt2.wav",
+        "player/pl_dirt3.wav",
+        "player/pl_duct1.wav",
+        "player/pl_grate1.wav",
+        "player/pl_grate4.wav",
+        "player/pl_tile1.wav",
+        "player/pl_tile2.wav",
+        "player/pl_tile3.wav",
+        "player/pl_tile4.wav",
+        "player/pl_slosh1.wav",
+        "player/pl_slosh2.wav",
+        "player/pl_slosh3.wav",
+        "player/pl_slosh4.wav",
+        "debris/wood1.wav",
+        "debris/wood2.wav",
+        "debris/wood3.wav",
+        "debris/glass1.wav",
+        "debris/glass2.wav",
+        "debris/glass3.wav"
+      ],
+      "consumer": "HalfLifeClientModule::accepted_world_impact/resolved_world_impact and HalfLifeRemoteEffects::impact select typed supported static-surface samples",
+      "applicable_weapons": [
+        "Crowbar",
+        "Glock",
+        "Python",
+        "MP5 primary",
+        "Shotgun"
+      ],
+      "authorization": "compiled pinned Half-Life client-effect profile; not a required server numeric precache slot",
+      "status": "source_wired; aggregate E28 importer/GL/PCM checks passed; per-resource listening not claimed"
+    },
+    "optional_ricochet_profile": {
+      "source": "src/games/halflife/materials.cpp::bullet_ricochet_preload",
+      "names": [
+        "weapons/ric1.wav",
+        "weapons/ric2.wav",
+        "weapons/ric3.wav",
+        "weapons/ric4.wav",
+        "weapons/ric5.wav"
+      ],
+      "policy": "Separate optional action-stable effect, not a replacement for mandatory eligible material contact",
+      "status": "source_wired; aggregate focused checks passed; optional effect not mandatory on every shot"
+    },
+    "server_explosion_audio_profile": {
+      "source": "src/games/halflife/temporary_effects.cpp",
+      "names": [
+        "weapons/explode3.wav",
+        "weapons/explode4.wav",
+        "weapons/explode5.wav"
+      ],
+      "trigger": "eligible committed TE_EXPLOSION, not projectile disappearance or local fuse",
+      "server_aftermath": [
+        "weapons/debris1.wav",
+        "weapons/debris2.wav",
+        "weapons/debris3.wav"
+      ],
+      "server_aftermath_trigger": "committed ordinary server audio only",
+      "status": "source_wired; aggregate execution checks passed; dynamic water/scorch gaps remain separate"
+    }
+  },
+  "integration": {
+    "roster_count": 14,
+    "directed_idle_transition_count": 182,
+    "tests": [
+      "tests/test_weapon_suite_e28.cpp"
+    ],
+    "idle_transition_status": "offline_verified",
+    "stateful_transition_status": "offline_verified",
+    "shared_ammo_status": "offline_verified",
+    "long_synthetic_status": "offline_verified",
+    "render_owner_lifecycle_status": "offline_verified",
+    "remote_transition_contract": "Every directed idle pair executes approved project-owned p-model import and the normal RuntimeReplayLocalAssets child materializer; checks server slot -> module attachment intent -> selected child resource identity. No 14 original-asset GPU-render claim.",
+    "remote_transition_status": "offline_verified_final_visible_decision",
+    "long_synthetic_measurements": {
+      "simulated_seconds": 900,
+      "phases": 180,
+      "voices_high_water": 3,
+      "shells_high_water": 1,
+      "temporary_sprites_high_water": 17,
+      "beam_ribbons_high_water": 2,
+      "egon_beams_high_water": 2,
+      "gauss_beams_high_water": 0,
+      "gauss_scope": "charge/release in long mix; positive beams separately covered by focused Gauss tests",
+      "egon_run_replacements": 9,
+      "accepted_snark_pops": 180,
+      "death_world_survival_checks": 60,
+      "pcm_fixture_instances": 2,
+      "final_voices": 0,
+      "history_publications": 18000,
+      "history_high_water": 16,
+      "entity_lifetimes_high_water": 1,
+      "final_history": 0,
+      "gpu_cycles": 180,
+      "fixture_studio_assets": 4,
+      "fixture_sprite_assets": 2,
+      "warm_and_final_studio_uploads": 4,
+      "warm_and_final_sprite_uploads": 2,
+      "process_memory": "not_measured; resource/object bounds are not a process leak proof"
+    }
+  },
+  "peer_disconnect": {
+    "root_cause": "not_established",
+    "fix": "not_verified",
+    "exact_live_reproduction_status": "current_user_manual_scenarios_reported_passed; exact_historical_packet_not_recovered",
+    "at_offline_handoff_exact_live_reproduction_status": "not_run",
+    "client_disconnect_handling": "offline_verified_for_exact_candidate_grammar_and_validated_absence",
+    "runner_peer_exit_policy": "normal_B0_continues_A; real_B_crash_is_primary_and_bounded_owned_cleanup; A_close_uses_existing_shutdown",
+    "cleanup_result": "offline_verified_fake_owned_processes_and_exact_restoration_roundtrip; historical_exact_scoped_restore",
+    "candidate_compatibility_fix": "offline_verified; independently authored empty-userinfo fixture, not recovered historical bytes",
+    "failure_boundary": "historical opcode13 record2381 source2393 publication2380; string checkpoint60 at opcode54; empty vs malformed unavailable",
+    "manual_repro": "User performed two reported scenarios; approximately70s removal estimate is not telemetry; no repeat requested by post-manual audit.",
+    "current_manual": {"status": "passed", "attribution": "user_report", "scope": "A survives B exit, eventual world/scoreboard removal, continued A gameplay, no persistent peer loop/beam"},
+    "post_manual_candidates": ["d4d53289a56b4cc9941fee7e6d325529", "b85665337b8f4486a0d4b00b36a59d09"],
+    "scenario_to_run_mapping": "not_verified",
+    "current_shutdown_classification": "shutdown_ordering_defect_supported",
+    "timeout_or_graceful_delivery": "insufficient_evidence; no timeout value or successful graceful packet inferred",
+    "post_manual_cleanup": "both candidates exact/scoped_exact, empty managed scope; full tree not_verified; artifacts and ownership contract",
+    "post_manual_runner_verdict": "both client-map-entry-not-observed / runner1 despite A0B0; bounded non-latched progress reporting gap supported"
+  },
+  "weapons": [
+    {
+      "name": "Crowbar",
+      "id": 1,
+      "catalogue_aliases": [
+        "weapon_crowbar"
+      ],
+      "primary_ammo_pool": null,
+      "clip": "no_clip",
+      "secondary_ammo_pool": null,
+      "action_state": "melee swing; no secondary or magazine reload",
+      "viewmodels": [
+        "models/v_crowbar.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_crowbar.mdl"
+      ],
+      "world_entities": [
+        "weapon_crowbar"
+      ],
+      "event_names": [
+        "events/crowbar.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/cbar_miss1.wav",
+        "weapons/cbar_hit1.wav",
+        "weapons/cbar_hit2.wav"
+      ],
+      "visual_resources": [
+        "decals.wad"
+      ],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_local_weapon_presentation.cpp",
+        "tests/test_local_weapon_audio.cpp",
+        "tests/test_world_impact_presentation.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/LOCAL_CROWBAR_WORLD_IMPACTS_E6.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E6 exact reported scope: miss, wall hit, contact sound/decal and camera-stable decal; excludes player/entity damage, multiplayer, material classification and universal map/timing parity",
+        "source_report": "docs/LOCAL_CROWBAR_WORLD_IMPACTS_E6.md",
+        "source_section": "Subsequent E6 manual report"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/w_crowbar.mdl"
+      ],
+      "production_consumer": "Accepted swing -> supported static BSP hit -> decals.wad {SHOT2} and material/crowbar strike cues; no local damage claim.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement"
+      },
+      "shared_material_profile": true,
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "melee swing",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": false,
+        "presentation_contract": null,
+        "absence_reason": "No implemented local secondary mode in the current pinned-profile presentation contract",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "none",
+        "persistent_state": "none",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": null,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "Glock",
+      "id": 2,
+      "catalogue_aliases": [
+        "weapon_9mmhandgun",
+        "weapon_glock"
+      ],
+      "primary_ammo_pool": "9mm",
+      "clip": 17,
+      "secondary_ammo_pool": null,
+      "action_state": "primary/secondary shared clip; magazine reload",
+      "viewmodels": [
+        "models/v_9mmhandgun.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_9mmhandgun.mdl"
+      ],
+      "world_entities": [
+        "weapon_9mmhandgun",
+        "weapon_glock"
+      ],
+      "event_names": [
+        "events/glock1.sc",
+        "events/glock2.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/pl_gun3.wav",
+        "player/pl_shell1.wav"
+      ],
+      "visual_resources": [
+        "decals.wad",
+        "models/shell.mdl"
+      ],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_local_weapon_presentation.cpp",
+        "tests/test_local_weapon_audio.cpp",
+        "tests/test_local_weapon_visuals.cpp",
+        "tests/test_remote_weapon_effects.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/LOCAL_WEAPON_VISUALS_E4.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "B1 server fire/reload/selection and E4.1 corrected Glock shot light/visible brass only; no inferred E5 impact audio, shell-contact listening or stress acceptance",
+        "source_reports": [
+          "docs/CLIENT_PREDICTED_WEAPON_PRESENTATION_M473B1.md",
+          "docs/LOCAL_WEAPON_VISUALS_E4.md"
+        ],
+        "source_section": "E4.1 subsequent «Тепер все працює» report",
+        "release_hash_attestation": "not_supplied_for_manual_run"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/w_9mmhandgun.mdl"
+      ],
+      "production_consumer": "Accepted Glock fire -> Studio marker -> muzzle/light/brass -> supported static hit {SHOT1}; shell contact audio is a collision event.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement"
+      },
+      "shared_material_profile": true,
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "ordinary bullet primary",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "ordinary bullet secondary; shares clip and cooldown contract",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "magazine reload",
+        "persistent_state": "none",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 250,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": "Glock/MP5 9mm"
+      }
+    },
+    {
+      "name": "Python",
+      "id": 3,
+      "catalogue_aliases": [
+        "weapon_357",
+        "weapon_python"
+      ],
+      "primary_ammo_pool": "357",
+      "clip": 6,
+      "secondary_ammo_pool": null,
+      "action_state": "primary; server zoom secondary; magazine reload",
+      "viewmodels": [
+        "models/v_357.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_357.mdl"
+      ],
+      "world_entities": [
+        "weapon_357",
+        "weapon_python"
+      ],
+      "event_names": [
+        "events/python.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/357_shot1.wav",
+        "weapons/357_shot2.wav",
+        "weapons/357_reload1.wav",
+        "weapons/357_cock1.wav"
+      ],
+      "visual_resources": [
+        "decals.wad"
+      ],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_python_357_local.cpp",
+        "tests/test_python_357_remote.cpp",
+        "tests/test_python_357_camera.cpp",
+        "tests/test_python_357_assets.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/PYTHON_357_FIRE_ZOOM_RELOAD_E18.md",
+      "manual": {
+        "status": "not_run",
+        "attribution": null,
+        "scope": "E18 has no documented full manual acceptance"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/w_357.mdl"
+      ],
+      "production_consumer": "Accepted Python fire -> validated v_357 pose -> static world impact/material cue; no brass or MP5 tracer.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement"
+      },
+      "shared_material_profile": true,
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "Python bullet primary",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "server-confirmed multiplayer zoom toggle",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "magazine reload resets zoom",
+        "persistent_state": "server FOV",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 36,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "MP5",
+      "id": 4,
+      "catalogue_aliases": [
+        "weapon_9mmAR",
+        "weapon_mp5"
+      ],
+      "primary_ammo_pool": "9mm",
+      "clip": 50,
+      "secondary_ammo_pool": "ARgrenades",
+      "action_state": "primary; M203 secondary; magazine reload",
+      "viewmodels": [
+        "models/v_9mmAR.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_9mmAR.mdl"
+      ],
+      "world_entities": [
+        "weapon_9mmAR",
+        "weapon_mp5",
+        "grenade"
+      ],
+      "event_names": [
+        "events/mp5.sc",
+        "events/mp52.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/hks1.wav",
+        "weapons/hks2.wav",
+        "weapons/glauncher.wav",
+        "weapons/glauncher2.wav",
+        "player/pl_shell1.wav"
+      ],
+      "visual_resources": [
+        "decals.wad",
+        "models/shell.mdl"
+      ],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_mp5_primary.cpp",
+        "tests/test_mp5_secondary.cpp",
+        "tests/test_local_weapon_visuals_opengl.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/MP5_M203_SECONDARY_E16.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E17 request user report: preceding MP5/M203 launch, server projectile/explosion and continued clients; water/stress/exact audio excluded"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/w_9mmAR.mdl",
+        "models/grenade.mdl"
+      ],
+      "production_consumer": "MP5 primary uses brass and supported bullet impacts/streaks; M203 secondary uses launch cue and server grenade/committed explosion/smoke, never the primary package.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement"
+      },
+      "shared_material_profile": true,
+      "server_temporary_effects": [
+        "TE_EXPLOSION",
+        "TE_SMOKE"
+      ],
+      "server_explosion_audio_profile": true,
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "MP5 automatic bullet primary",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "M203 server grenade launch; independent assigned ARgrenades pool",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "magazine reload",
+        "persistent_state": "none",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 250,
+        "secondary_reference_maximum": 10,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": "Glock/MP5 9mm"
+      }
+    },
+    {
+      "name": "Shotgun",
+      "id": 7,
+      "catalogue_aliases": [
+        "weapon_shotgun"
+      ],
+      "primary_ammo_pool": "buckshot",
+      "clip": 8,
+      "secondary_ammo_pool": null,
+      "action_state": "single/double primary/secondary; staged shell insertion reload",
+      "viewmodels": [
+        "models/v_shotgun.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_shotgun.mdl"
+      ],
+      "world_entities": [
+        "weapon_shotgun"
+      ],
+      "event_names": [
+        "events/shotgun1.sc",
+        "events/shotgun2.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/sbarrel1.wav",
+        "weapons/dbarrel1.wav",
+        "weapons/sshell1.wav"
+      ],
+      "visual_resources": [
+        "decals.wad",
+        "models/shotgunshell.mdl"
+      ],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_shotgun_local.cpp",
+        "tests/test_shotgun_remote.cpp",
+        "tests/test_shotgun_composition.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/SHOTGUN_SINGLE_DOUBLE_RELOAD_E17.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E19 request user report scoped Shotgun checks; no water/stress or universal stock parity"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/w_shotgun.mdl"
+      ],
+      "production_consumer": "Single/double Shotgun uses shotgunshell.mdl, independent pellet impacts and material cues; staged reload remains a server weapon-data presentation.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement"
+      },
+      "shared_material_profile": true,
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "single shotgun fire",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "double shotgun fire, requiring two authoritative eligible shells",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "server staged shell insertion, interruption and pump",
+        "persistent_state": "none",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 125,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "Crossbow",
+      "id": 6,
+      "catalogue_aliases": [
+        "weapon_crossbow"
+      ],
+      "primary_ammo_pool": "bolts",
+      "clip": 5,
+      "secondary_ammo_pool": null,
+      "action_state": "primary projectile or MP zoom sniper; server zoom secondary; magazine reload",
+      "viewmodels": [
+        "models/v_crossbow.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_crossbow.mdl"
+      ],
+      "world_entities": [
+        "weapon_crossbow",
+        "crossbow_bolt"
+      ],
+      "event_names": [
+        "events/crossbow1.sc",
+        "events/crossbow2.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/xbow_fire1.wav",
+        "weapons/xbow_reload1.wav",
+        "weapons/xbow_hit1.wav",
+        "weapons/xbow_hitbod1.wav",
+        "weapons/xbow_hitbod2.wav"
+      ],
+      "visual_resources": [
+        "models/crossbow_bolt.mdl"
+      ],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_crossbow_local.cpp",
+        "tests/test_crossbow_remote.cpp",
+        "tests/test_crossbow_assets.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/CROSSBOW_PROJECTILE_ZOOM_SNIPER_E19.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E20 request preceding Crossbow scenario; water/bubbles/dynamic-hit evidence excluded"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate",
+        "sniper local world impact suppresses a decal; it is not the generic bullet-decal path"
+      ],
+      "world_models": [
+        "models/w_crossbow.mdl",
+        "models/crossbow_bolt.mdl"
+      ],
+      "production_consumer": "Crossbow sniper static hit explicitly suppresses decal and materializes an approved crossbow_bolt transient; ordinary bolts and TE feedback remain server observations.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement"
+      },
+      "server_temporary_effects": [
+        "TE_SPARKS",
+        "TE_EXPLOSION",
+        "TE_BUBBLETRAIL (parsed; bubble visuals limited/deferred)"
+      ],
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "Crossbow ordinary bolt or multiplayer zoom-sniper primary",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "server-confirmed zoom toggle",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "magazine reload resets zoom",
+        "persistent_state": "server FOV",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 50,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "RPG",
+      "id": 8,
+      "catalogue_aliases": [
+        "weapon_rpg"
+      ],
+      "primary_ammo_pool": "rockets",
+      "clip": 1,
+      "secondary_ammo_pool": null,
+      "action_state": "primary; spot toggle secondary; reload/holster gated by authoritative spot and active rocket fields",
+      "viewmodels": [
+        "models/v_rpg.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_rpg.mdl"
+      ],
+      "world_entities": [
+        "weapon_rpg",
+        "rpg_rocket",
+        "laser_spot"
+      ],
+      "event_names": [
+        "events/rpg.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/rocketfire1.wav",
+        "weapons/rocket1.wav"
+      ],
+      "visual_resources": [
+        "sprites/laserdot.spr",
+        "sprites/smoke.spr",
+        "sprites/hotglow.spr"
+      ],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_rpg_local.cpp",
+        "tests/test_rpg_entities.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/RPG_LASER_GUIDED_ROCKET_E20.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E21 request explicit user report RPG scenario; later exhaust/reload follow-ups retain their own not_run"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/w_rpg.mdl",
+        "models/rpgrocket.mdl"
+      ],
+      "production_consumer": "Server rocket, designator, TE_BEAMFOLLOW and committed motor voice; module supplies smoke/head-hotglow trail profile and original launch cue.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement",
+        "launch_overlay": "weapons/glauncher.wav is SDK precached but intentionally not used by this accepted local RPG launch mix"
+      },
+      "server_temporary_effects": [
+        "TE_BEAMFOLLOW",
+        "TE_EXPLOSION",
+        "TE_SMOKE"
+      ],
+      "server_explosion_audio_profile": true,
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "server rocket launch",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "server designator toggle; no zoom",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "reload and holster gated by authoritative spot/active-rockets fields",
+        "persistent_state": "server designator",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 5,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "Gauss",
+      "id": 9,
+      "catalogue_aliases": [
+        "weapon_gauss"
+      ],
+      "primary_ammo_pool": "uranium",
+      "clip": "no_clip",
+      "secondary_ammo_pool": null,
+      "action_state": "primary; charged secondary; one immutable command movement impulse",
+      "viewmodels": [
+        "models/v_gauss.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_gauss.mdl"
+      ],
+      "world_entities": [
+        "weapon_gauss"
+      ],
+      "event_names": [
+        "events/gauss.sc",
+        "events/gaussspin.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "ambience/pulsemachine.wav",
+        "weapons/gauss2.wav",
+        "weapons/357_cock1.wav",
+        "weapons/electro4.wav",
+        "weapons/electro6.wav"
+      ],
+      "visual_resources": [
+        "sprites/smoke.spr",
+        "sprites/hotglow.spr",
+        "decals.wad"
+      ],
+      "source_paths": [
+        "src/games/halflife/gauss.cpp",
+        "src/games/halflife/client_module.cpp",
+        "src/games/halflife/presentation.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_gauss.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/GAUSS_PRIMARY_CHARGE_BEAM_E21.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E22 request previous Gauss scenario; later observer-aim/visual tuning acceptance not inferred"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/w_gauss.mdl"
+      ],
+      "production_consumer": "Gauss controller emits smoke/hotglow beam sprites and neutral supported world-decal requests; charge voice has a stable emitter owner.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement"
+      },
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "Gauss primary beam",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "hold charge and release beam; one immutable-command prediction impulse",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "none; shared uranium reserve",
+        "persistent_state": "charge/spin/release",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 100,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": "Gauss/Egon uranium"
+      }
+    },
+    {
+      "name": "Egon",
+      "id": 10,
+      "catalogue_aliases": [
+        "weapon_egon"
+      ],
+      "primary_ammo_pool": "uranium",
+      "clip": "no_clip",
+      "secondary_ammo_pool": null,
+      "action_state": "primary continuous WIDE; no fabricated secondary; windup/run/stop",
+      "viewmodels": [
+        "models/v_egon.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_egon.mdl"
+      ],
+      "world_entities": [
+        "weapon_egon"
+      ],
+      "event_names": [
+        "events/egon_fire.sc",
+        "events/egon_stop.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/egon_windup2.wav",
+        "weapons/egon_run3.wav",
+        "weapons/egon_off1.wav"
+      ],
+      "visual_resources": [
+        "sprites/xbeam1.spr"
+      ],
+      "source_paths": [
+        "src/games/halflife/egon.cpp",
+        "src/games/halflife/client_module.cpp",
+        "src/games/halflife/presentation.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_egon.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/EGON_CONTINUOUS_BEAM_E22.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E23 request user report multiplayer audio/beam/shared-ammo/cleanup; visual ScreenShake excluded"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/w_egon.mdl"
+      ],
+      "production_consumer": "Egon fallback emits two xbeam1 layers; ordinary server custom beams/sprites use advertised slots. XSpark1 is a pinned server flare resource, not a hardcoded local fallback dependency.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement",
+        "server_flare": "XSpark1 is a pinned declared server ordinary-sprite resource; this inventory does not claim every session emits/materializes it"
+      },
+      "server_advertised_visual_resources": [
+        "sprites/xbeam1.spr",
+        "sprites/XSpark1.spr"
+      ],
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "continuous wide Egon beam",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": false,
+        "presentation_contract": null,
+        "absence_reason": "No implemented local secondary mode in the current pinned-profile presentation contract",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "none; shared uranium reserve",
+        "persistent_state": "windup/run/stop",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 100,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": "Gauss/Egon uranium"
+      }
+    },
+    {
+      "name": "Hornet Gun",
+      "id": 11,
+      "catalogue_aliases": [
+        "weapon_hornetgun"
+      ],
+      "primary_ammo_pool": "Hornets",
+      "clip": "no_clip",
+      "secondary_ammo_pool": null,
+      "action_state": "TRACK primary; FAST secondary; server biological recharge; no key-R magazine reload",
+      "viewmodels": [
+        "models/v_hgun.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_hgun.mdl"
+      ],
+      "world_entities": [
+        "weapon_hornetgun",
+        "hornet"
+      ],
+      "event_names": [
+        "events/firehornet.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "agrunt/ag_fire1.wav",
+        "agrunt/ag_fire2.wav",
+        "agrunt/ag_fire3.wav",
+        "hornet/ag_buzz1.wav",
+        "hornet/ag_buzz2.wav",
+        "hornet/ag_buzz3.wav",
+        "hornet/ag_hornethit1.wav",
+        "hornet/ag_hornethit2.wav",
+        "hornet/ag_hornethit3.wav"
+      ],
+      "visual_resources": [
+        "sprites/laserbeam.spr"
+      ],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_hornet_local.cpp",
+        "tests/test_hornet_remote.cpp",
+        "tests/test_hornet_entities.cpp",
+        "tests/test_hornet_assets.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/HORNET_GUN_TRACKING_FAST_RECHARGE_E23.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E24 request user report TRACK/FAST/ammo/recharge/projectile/remote scenario"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate",
+        "sprites/muz1.spr is a pinned SP-only puff reference, not a newly implemented multiplayer effect"
+      ],
+      "world_models": [
+        "models/w_hgun.mdl",
+        "models/hornet.mdl"
+      ],
+      "production_consumer": "Hornet controller emits launch cues and local pose; server hornet model, beam-follow sprite, buzz and hit sounds remain committed world effects. No bullet decal.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement"
+      },
+      "server_temporary_effects": [
+        "TE_BEAMFOLLOW"
+      ],
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "TRACK Hornet launch",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "FAST Hornet launch",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "server biological recharge; R does not create magazine reload",
+        "persistent_state": "server recharge",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 8,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "Hand Grenade",
+      "id": 12,
+      "catalogue_aliases": [
+        "weapon_handgrenade"
+      ],
+      "primary_ammo_pool": "Hand Grenade",
+      "clip": "no_clip",
+      "secondary_ammo_pool": null,
+      "action_state": "primary prime/cook/release; no secondary or magazine reload; exhaustible",
+      "viewmodels": [
+        "models/v_grenade.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_grenade.mdl"
+      ],
+      "world_entities": [
+        "weapon_handgrenade",
+        "grenade"
+      ],
+      "event_names": [],
+      "event_absence": "no scripted firing event in pinned profile; command/server weapon state supplies presentation",
+      "sounds": [
+        "weapons/grenade_hit1.wav",
+        "weapons/grenade_hit2.wav",
+        "weapons/grenade_hit3.wav",
+        "common/null.wav"
+      ],
+      "visual_resources": [],
+      "source_paths": [
+        "src/games/halflife/local_weapon_presentation.cpp",
+        "src/games/halflife/weapon_visuals.cpp",
+        "src/games/halflife/weapon_audio.cpp",
+        "src/games/halflife/presentation.cpp",
+        "src/games/halflife/client_module.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_hand_grenade_local.cpp",
+        "tests/test_hand_grenade_observations.cpp",
+        "tests/test_hand_grenade_world.cpp",
+        "tests/test_hand_grenade_assets.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/HAND_GRENADE_COOK_THROW_E24.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E25 request user report performed prime/cook/release/server grenade/bounce/explosion; server scorch excluded"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate",
+        "server scorch presentation remains unsupported"
+      ],
+      "world_models": [
+        "models/w_grenade.mdl"
+      ],
+      "production_consumer": "Prime/release pose has no firing event or locally spawned effect; server w_grenade, TE_EXPLOSION/TE_SMOKE and bounce/null/debris sounds use existing generic paths. Scorch draw remains unsupported.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement",
+        "explosion_sprites": "These names are source/test reference resources. Production TE consumes its exact approved advertised sprite slot, not these guessed fixed slots.",
+        "scorch": "server decal grammar can be parsed; server scorch is not materialized. No decals.wad usage/pass is claimed for local prime/throw/radio actions."
+      },
+      "server_temporary_effects": [
+        "TE_EXPLOSION",
+        "TE_SMOKE"
+      ],
+      "server_advertised_visual_resources": [
+        "sprites/zerogxplode.spr",
+        "sprites/steam1.spr"
+      ],
+      "server_explosion_audio_profile": true,
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "prime, hold/cook and release Hand Grenade",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": false,
+        "presentation_contract": null,
+        "absence_reason": "No implemented local secondary mode in the current pinned-profile presentation contract",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "none; exhaustible reserve",
+        "persistent_state": "prime/release/throw/recovery",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 10,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "Satchel",
+      "id": 14,
+      "catalogue_aliases": [
+        "weapon_satchel"
+      ],
+      "primary_ammo_pool": "Satchel Charge",
+      "clip": "no_clip",
+      "secondary_ammo_pool": null,
+      "action_state": "primary deploy/additional throw; secondary radio detonation; server iuser1; empty radio selectable; no fuse",
+      "viewmodels": [
+        "models/v_satchel.mdl",
+        "models/v_satchel_radio.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_satchel.mdl",
+        "models/p_satchel_radio.mdl"
+      ],
+      "world_entities": [
+        "weapon_satchel",
+        "monster_satchel"
+      ],
+      "event_names": [],
+      "event_absence": "no scripted firing event in pinned profile; command/server weapon state supplies presentation",
+      "sounds": [
+        "weapons/g_bounce1.wav",
+        "weapons/g_bounce2.wav",
+        "weapons/g_bounce3.wav",
+        "common/null.wav"
+      ],
+      "visual_resources": [],
+      "source_paths": [
+        "src/games/halflife/satchel_presentation.cpp",
+        "src/games/halflife/client_module.cpp",
+        "src/games/halflife/presentation.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_satchel_local.cpp",
+        "tests/test_satchel_observations.cpp",
+        "tests/test_satchel_world.cpp",
+        "tests/test_satchel_assets.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/SATCHEL_DEPLOY_RADIO_DETONATE_E25.md",
+      "manual": {
+        "status": "not_run",
+        "attribution": null,
+        "scope": "own task record has no subsequent acceptance; do not reuse E24 acceptance"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate",
+        "server scorch presentation remains unsupported"
+      ],
+      "world_models": [
+        "models/w_satchel.mdl"
+      ],
+      "production_consumer": "Two viewmodel/pmodel variants follow authoritative charge_ready; server w_satchel, bounce/TE_EXPLOSION/TE_SMOKE use generic paths. No local fuse or scorch decal.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement",
+        "explosion_sprites": "These names are source/test reference resources. Production TE consumes its exact approved advertised sprite slot, not these guessed fixed slots.",
+        "scorch": "server decal grammar can be parsed; server scorch is not materialized. No decals.wad usage/pass is claimed for local prime/throw/radio actions."
+      },
+      "server_temporary_effects": [
+        "TE_EXPLOSION",
+        "TE_SMOKE"
+      ],
+      "server_advertised_visual_resources": [
+        "sprites/zerogxplode.spr",
+        "sprites/steam1.spr"
+      ],
+      "server_explosion_audio_profile": true,
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "Satchel throw/additional deploy",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": true,
+        "presentation_contract": "radio detonation when authoritative/predicted radio state is eligible",
+        "absence_reason": null,
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "none; zero pocket radio can remain usable",
+        "persistent_state": "charge_ready 0/1/2; server world charges, no fuse",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 5,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "Tripmine",
+      "id": 13,
+      "catalogue_aliases": [
+        "weapon_tripmine"
+      ],
+      "primary_ammo_pool": "Trip Mine",
+      "clip": "no_clip",
+      "secondary_ammo_pool": null,
+      "action_state": "primary placement attempt; no secondary/reload; server arming/laser; exhaustible",
+      "viewmodels": [
+        "models/v_tripmine.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_tripmine.mdl"
+      ],
+      "world_entities": [
+        "weapon_tripmine",
+        "monster_tripmine",
+        "beam"
+      ],
+      "event_names": [
+        "events/tripfire.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "weapons/mine_deploy.wav",
+        "weapons/mine_charge.wav",
+        "weapons/mine_activate.wav"
+      ],
+      "visual_resources": [
+        "sprites/laserbeam.spr"
+      ],
+      "source_paths": [
+        "src/games/halflife/tripmine_presentation.cpp",
+        "src/games/halflife/client_module.cpp",
+        "src/games/halflife/presentation.cpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_tripmine_local.cpp",
+        "tests/test_tripmine_world.cpp",
+        "tests/test_tripmine_assets.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/TRIPMINE_PLACEMENT_ARMING_LASER_E26.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E27 request user report E26 scenario only; original E26 reimplementation baseline retained"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate"
+      ],
+      "world_models": [
+        "models/v_tripmine.mdl"
+      ],
+      "production_consumer": "Tripfire is a point-clearance attempt/DRAW only; server v_tripmine body3/world7 and custom ENTITY_BEAM execute from authoritative entity state.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement",
+        "world_model": "models/v_tripmine.mdl is both held and server world model; body3/sequence7 deployed or sequence8 pickup; no w_tripmine model"
+      },
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "Tripmine placement attempt and local DRAW; acceptance remains server ammo/entity evidence",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": false,
+        "presentation_contract": null,
+        "absence_reason": "No implemented local secondary mode in the current pinned-profile presentation contract",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "none; exhaustible reserve",
+        "persistent_state": "server world arming/custom laser",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 5,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    },
+    {
+      "name": "Snark",
+      "id": 15,
+      "catalogue_aliases": [
+        "weapon_snark"
+      ],
+      "primary_ammo_pool": "Snarks",
+      "clip": "no_clip",
+      "secondary_ammo_pool": null,
+      "action_state": "primary clearance attempt/throw; no secondary/reload; server world Snark; exhaustible",
+      "viewmodels": [
+        "models/v_squeak.mdl"
+      ],
+      "remote_pmodels": [
+        "models/p_squeak.mdl"
+      ],
+      "world_entities": [
+        "weapon_snark",
+        "monster_snark"
+      ],
+      "event_names": [
+        "events/snarkfire.sc"
+      ],
+      "event_absence": null,
+      "sounds": [
+        "squeek/sqk_deploy1.wav",
+        "squeek/sqk_hunt1.wav",
+        "squeek/sqk_hunt2.wav",
+        "squeek/sqk_hunt3.wav",
+        "squeek/sqk_die1.wav",
+        "squeek/sqk_blast1.wav",
+        "common/bodysplat.wav"
+      ],
+      "visual_resources": [
+        "gfx/palette.lmp",
+        "sprites/bloodspray.spr",
+        "sprites/blood.spr"
+      ],
+      "source_paths": [
+        "src/games/halflife/snark_presentation.cpp",
+        "src/games/halflife/temporary_effects.cpp",
+        "src/games/halflife/client_module.cpp",
+        "src/games/halflife/presentation.cpp",
+        "include/hlclient/games/halflife/snark_profile.hpp"
+      ],
+      "normal_path": "HalfLifeClientModule methods compose with GameClientHost; app normal command/frame/audio/world drains",
+      "ownership": {
+        "weapon_state": "current authoritative catalogue/model/player life",
+        "world_entities": "server state; not retired by local weapon switch",
+        "one_shots": "bounded independent audio/effect lifetimes",
+        "persistent_loops": "per-emitter stable identities; stop on owning boundary"
+      },
+      "focused_tests": [
+        "tests/test_snark_local.cpp",
+        "tests/test_snark_world.cpp",
+        "tests/test_snark_sound_pop.cpp",
+        "tests/test_snark_pop_visibility.cpp",
+        "tests/test_snark_blood_asset_audit.cpp",
+        "tests/test_snark_assets.cpp"
+      ],
+      "integration_tests": [
+        "tests/test_weapon_suite_e28.cpp"
+      ],
+      "report": "docs/SNARK_SQUEAK_LIVING_PROJECTILE_E27.md",
+      "manual": {
+        "status": "passed",
+        "attribution": "user_report",
+        "scope": "E28 request user report accepted E27.1 Snark original blood-pop manual scenario, accepted Release SHA only; numeric particle/timing/socket parity excluded"
+      },
+      "evidence_status": {
+        "source": "present",
+        "production_wiring": "confirmed_by_source",
+        "historical_focused_tests": "documented_in_report",
+        "e28_tests": "offline_verified_shared_module_matrix_and_registered_focused_tests",
+        "stock_exact": "not_claimed"
+      },
+      "limits": [
+        "client presentation is not authoritative damage/trace/projectile simulation",
+        "unreported water/dynamic-body/stress and exact numeric visual parity remain separate",
+        "TE has no emitter ID: an otherwise identical colocated large-yellow TE can remain correlation-ambiguous"
+      ],
+      "world_models": [
+        "models/w_sqknest.mdl",
+        "models/w_squeak.mdl"
+      ],
+      "production_consumer": "Server w_squeak and registered sounds; validated pop sound or qualifying TE feeds shared original palette/bloodspray/blood moving-drop profile with cross-source dedup.",
+      "resource_usage": {
+        "local_models": "validated imported model metadata through bind_model; Satchel variants prepared via local_model_preparation/bind_model_variants",
+        "remote_pmodels": "authoritative entity.weaponmodel slot -> approved imported model -> generic child-bone merge; per-weapon existence does not prove rendered output",
+        "world_models": "authoritative model/body/sequence/origin state only; no retirement from local weapon switch",
+        "sprite_indices": "advertised same-session resource indices; names are not stable numeric identities",
+        "e28_asset_execution": "aggregate approved-importer suite passed; individual listed file verdict not assumed",
+        "e28_pixel_or_pcm_execution": "see aggregate GL/PCM checks; not per-filename pixels or user-listening confirmation",
+        "missing_component": "typed degradation; no wrong-asset replacement",
+        "pop": "gfx/palette.lmp + original bloodspray/blood sprites are the accepted shared TE/inferred-sound profile; explicit disabled policy suppresses only optional sound fallback"
+      },
+      "sound_delivery_rules": {
+        "local": "Only compiled eligible launch/action/model-marker profiles publish local cues; rows may also list server-only sounds.",
+        "server": "World entity, bounce, buzz/hit/motor/aftermath samples require committed server sound at an approved slot; no local timer synthesis.",
+        "readiness": "approved ready decoder/mixer evidence required separately; listed filename is not a played verdict."
+      },
+      "primary": {
+        "input_available": true,
+        "presentation_contract": "Snark clearance attempt and throw",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "secondary": {
+        "input_available": false,
+        "presentation_contract": null,
+        "absence_reason": "No implemented local secondary mode in the current pinned-profile presentation contract",
+        "gameplay_authority": "server",
+        "profile_status": "source contract checked; E28 module checks passed; per-resource output not individualized"
+      },
+      "reload_recharge": {
+        "contract": "none; exhaustible reserve",
+        "persistent_state": "throw/recovery and server world Snark",
+        "numeric_timing": "source profiles and imported metadata; no stock-binary parity inferred"
+      },
+      "ammo_registry": {
+        "mapping": "WeaponList supplies assigned numeric ammo IDs; AmmoX supplies absolute reserves",
+        "reference_primary_maximum": 15,
+        "secondary_reference_maximum": null,
+        "canonical_ownership": "server; fixtures assign their own slots",
+        "sharing": null
+      }
+    }
+  ],
+  "gaps": [
+    {
+      "id": "peer_disconnect",
+      "status": "historical_exact_cause_unresolved_current_behavior_accepted_in_scoped_user_report",
+      "evidence": "historical run a9ccb57ef86349fdb708c447db4316f4",
+      "impact": "client A runtime failure after peer B leave",
+      "severity": "P0",
+      "blocks_e28": false,
+      "next": "No full-arsenal retest; retain exact historical uncertainty. Separately implement verified graceful close and bounded progress evidence retention."
+    },
+    {
+      "id": "screen_shake_visual",
+      "status": "parsed_not_presented",
+      "evidence": "src/games/halflife/server_messages.cpp; E22 record",
+      "impact": "no visual camera shake",
+      "severity": "P2",
+      "blocks_e28": false,
+      "next": "separate bounded visual presentation"
+    },
+    {
+      "id": "server_scorch",
+      "status": "not_presented",
+      "evidence": "E24/E25 records",
+      "impact": "server scorch decals not displayed",
+      "severity": "P2",
+      "blocks_e28": false,
+      "next": "strict TE decal resource/material mapping"
+    },
+    {
+      "id": "water_bubbles",
+      "status": "limited_deferred",
+      "evidence": "E19/E20/E23 records",
+      "impact": "water projectile paths lack full bubbles",
+      "severity": "P2",
+      "blocks_e28": false,
+      "next": "validate existing bubble TE presentation"
+    },
+    {
+      "id": "dynamic_body_hits",
+      "status": "limited",
+      "evidence": "E19/E21 static IStaticEffectTrace contract",
+      "impact": "some hitscan/beam cosmetics use static BSP only",
+      "severity": "P2",
+      "blocks_e28": false,
+      "next": "separate server-evidence dynamic hit presentation"
+    },
+    {
+      "id": "ordinary_studio_frame_clock",
+      "status": "limited",
+      "evidence": "ordinary entity history presentation vs remote player-specific frame anchors",
+      "impact": "nonplayer animation not independently stock-clock exact",
+      "severity": "P2",
+      "blocks_e28": false,
+      "next": "neutral bounded clock contract audit"
+    },
+    {
+      "id": "stock_numeric_parity",
+      "status": "local_compatible",
+      "evidence": "per-stage reports and user visual tuning",
+      "impact": "sockets particles RNG FOV and rates differ from full stock parity",
+      "severity": "P2",
+      "blocks_e28": false,
+      "next": "targeted approved asset comparison"
+    },
+    {
+      "id": "asan_runtime",
+      "status": "not_verified",
+      "evidence": "current E28 ASan Debug normal app compiled; fresh --help exits0xC0000135 with zero output",
+      "impact": "ASan application runtime is not confirmed",
+      "severity": "P2",
+      "blocks_e28": false,
+      "next": "separate runtime dependency diagnosis"
+    },
+    {
+      "id": "peer_reconnect",
+      "status": "not_verified",
+      "evidence": "existing E14 acceptance excludes reconnect",
+      "impact": "not part of manual acceptance",
+      "severity": "P2",
+      "blocks_e28": false,
+      "next": "separate leave/rejoin slot-reuse verification"
+    }
+  ],
+  "automatic_results": {
+    "debug": {
+      "status": "passed_post_last_production_edit",
+      "scope": "focused E28",
+      "test_cases": 30,
+      "assertions": 691334,
+      "skipped": 0,
+      "failed": 0
+    },
+    "release": {
+      "status": "passed_post_last_production_edit_full_wrapper_exit0",
+      "ctest_entries": 3269,
+      "passed": 3213,
+      "skipped": 56,
+      "failed": 0,
+      "ctest_seconds": 541.78,
+      "focused_e28": {"test_cases": 30, "assertions": 691334, "skipped": 0, "failed": 0},
+      "direct_hlclient_catch": {"test_cases": 3148, "passed": 3092, "skipped": 56, "assertions": 1775177, "failed": 0},
+      "separate_core_api_catch": {"ctest_entries": 1, "test_cases": 274, "assertions": 141233, "skipped": 0, "failed": 0},
+      "cli_non_catch_entries": 120,
+      "count_provenance": "catch-aggregate-postlast.json; final summary per exact top-level executable, no nested child double-count",
+      "historical_entry_comparison": "3239 -> 3269; 30 entries added, no decrease"
+    },
+    "core_only": {
+      "status": "passed",
+      "halflife_module": "not_built_or_linked",
+      "ctest_entries": 42,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 18.62,
+      "alternate_module": "passed_same_host_API",
+      "architecture_guard": "passed"
+    },
+    "actual_assets": {
+      "status": "passed_post_last_production_edit_read_only",
+      "test_cases": 52,
+      "assertions": 421253,
+      "failed": 0,
+      "skipped": 0,
+      "scope": "existing original-resource importer/model/audio/GL cases; listed filenames are not individual played/pixel verdicts"
+    },
+    "opengl": {
+      "status": "passed_project_owned_long_fixture_and_existing_original_asset_cases",
+      "snark_original_asset_pixels_distance128": {"age0_1": 3152, "TE_age0_25": 2258, "sound_fallback_age0_25": 2255, "both_age0_8": 0},
+      "provenance": "injected validated profile with read-only original assets; not live delivery or stock comparison"
+    },
+    "pcm": {
+      "status": "passed_production_mixer_and_registered_focused_resource_cases",
+      "real_device": "silent_backend_startup_output_passed;1920frames,480queued,0voices",
+      "user_listening_for_E28": "not_run"
+    },
+    "asan": {
+      "build": "current_E28_Debug_normal_app_passed",
+      "runtime": "unavailable_not_passed",
+      "exit_hex": "0xC0000135",
+      "exit_signed": -1073741515,
+      "output_bytes": 0,
+      "repair_workaround": "none"
+    },
+    "producer_native_wrapper_roundtrip": {"status": "passed", "producer_cases": 1, "producer_assertions": 16, "primary_exit": 2, "restoration": "exact", "five_typed_userinfo_fields": "preserved"},
+    "launcher_CheckOnly": {"status": "passed_exit0", "map": "crossfire", "prediction": "reference", "peer": true, "NoTimeLimit": true, "live_launches": 0},
+    "no_stock": "passed_reference_off_Scenario_external_map_and_failure_contracts",
+    "null_renderer_prediction_E13_E27_1": "passed_registered_full_Release_entries",
+    "git_diff_check": "passed; LF_CRLF_advisories_only",
+    "source_preservation": {
+      "status": "verified_exit0",
+      "snapshot_files": 1283,
+      "snapshot_missing_or_hash_mismatch": 0,
+      "current_original_files_missing": 0,
+      "changed_original_files": 19,
+      "change_scope": "E28 owned source/tests/scripts/CMake plus appended scoped E27.1 user acceptance",
+      "rollback_files": 34,
+      "rollback_missing_or_size_hash_mismatch": 0,
+      "historical_a9ccb_logs_verified_unchanged": 4,
+      "evidence": "manual-artifacts/task-records/e28-weapon-suite-20261009/source-preservation-verified.json"
+    }
+  },
+  "inventory_audit": {
+    "entries": 14,
+    "ordinary_source_paths": "present",
+    "focused_test_and_report_paths": "present",
+    "usage_claims": "source verified/classified; shared module matrix plus aggregate actual asset/GL/PCM checks passed, not every filename independently heard/rendered",
+    "manual_provenance": "scope checked; Python E18 and Satchel E25 remain not_run; E27.1 accepted Snark-only scenario",
+    "corrected_fields": [
+      "Crowbar E6 exact manual scope/report",
+      "Glock B1/E4.1 scope",
+      "Crossbow no bullet decal",
+      "Hornet no bullet decal and server buzz/hit/follow",
+      "Hand Grenade/Satchel no local decals, server scorch deferred",
+      "Egon local xbeam vs server XSpark flare",
+      "RPG launch vs motor/unused overlay",
+      "models vs server entity class distinction"
+    ],
+    "all_e28_result_fields": "automatic checks verified; current disconnect user_report accepted; rest of manual matrix not promoted; historical cause and audited shutdown/reporting gaps kept separate"
+  }
+}

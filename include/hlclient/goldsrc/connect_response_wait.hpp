@@ -56,7 +56,23 @@ struct ConnectResponseWaitError {
     ConnectResponseWaitErrorCode code{ConnectResponseWaitErrorCode::malformed_connect_response};
     std::optional<ConnectResponseErrorCode> protocol_code;
     std::string context;
+    std::optional<std::size_t> protocol_byte_offset{};
 };
+
+[[nodiscard]] constexpr std::string_view to_string(ConnectResponseWaitErrorCode code) noexcept {
+    switch(code) {
+    case ConnectResponseWaitErrorCode::invalid_configuration:return "invalid_configuration";
+    case ConnectResponseWaitErrorCode::time_moved_backwards:return "time_moved_backwards";
+    case ConnectResponseWaitErrorCode::local_endpoint_unavailable:return "local_endpoint_unavailable";
+    case ConnectResponseWaitErrorCode::local_endpoint_changed:return "local_endpoint_changed";
+    case ConnectResponseWaitErrorCode::receive_failed:return "receive_failed";
+    case ConnectResponseWaitErrorCode::inconsistent_receive_result:return "inconsistent_receive_result";
+    case ConnectResponseWaitErrorCode::response_truncated:return "response_truncated";
+    case ConnectResponseWaitErrorCode::malformed_connect_response:return "malformed_connect_response";
+    case ConnectResponseWaitErrorCode::unexpected_sequenced_packet_pending_m2_3:return "unexpected_sequenced_packet_pending_m2_3";
+    }
+    return "unknown";
+}
 
 enum class ConnectResponseTraceClassification {
     wait_started,
@@ -128,7 +144,8 @@ private:
         ConnectResponseWaitTimePoint now,
         ConnectResponseTraceClassification classification,
         network::NetworkAddress endpoint,
-        std::size_t datagram_size);
+        std::size_t datagram_size,
+        std::optional<std::size_t> protocol_byte_offset = {});
     void emit_trace(
         ConnectResponseTraceClassification classification,
         ConnectResponseWaitTimePoint now,

@@ -546,6 +546,11 @@ DeltaDescriptionStage::retained_source_payload() const noexcept
     return pre_resource_stage_.retained_source_payload();
 }
 
+NetchanDriver* DeltaDescriptionStage::close_driver() noexcept
+{
+    return pre_resource_stage_.close_driver();
+}
+
 NetchanDriver* DeltaDescriptionStage::retained_driver() noexcept
 {
     if (!retain_connection_at_boundary_) {

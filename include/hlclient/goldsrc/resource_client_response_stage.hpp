@@ -64,6 +64,8 @@ enum class ClientResourceAdvertisementProfile : std::uint8_t {
 
 enum class ResourceResponsePreTransmitPayloadPolicy : std::uint8_t {
     reject,
+    // Live-policy control admission remains available while waiting for the
+    // response ACK: a fully decoded NOP has no resource-response dependency.
     decode_nop_control,
 };
 
@@ -92,6 +94,8 @@ struct ResourceClientResponseStageConfig {
         kDefaultPostResourceResponseBoundaryTimeout};
     std::size_t maximum_driver_events_per_update{
         kDefaultMaximumResourceResponseDriverEventsPerUpdate};
+    // Legacy names retained for source compatibility. The live policy shares
+    // these cumulative count/byte budgets across pre-TX and post-TX pure NOPs.
     std::size_t maximum_pre_transmit_control_payloads{
         kDefaultMaximumPreTransmitControlPayloads};
     std::size_t maximum_pre_transmit_control_bytes{
@@ -152,6 +156,7 @@ enum class ResourceClientResponseStageErrorCode {
     event_backpressure,
     driver_failed,
     time_moved_backwards,
+    post_transmit_control_overflow,
 };
 
 enum class ResourceResponsePayloadClassification : std::uint8_t {
@@ -159,6 +164,7 @@ enum class ResourceResponsePayloadClassification : std::uint8_t {
     pre_transmit_control,
     post_transmit_continuation_candidate,
     invalid_framing,
+    post_transmit_control,
 };
 
 enum class ResourceResponseReceivePosition : std::uint8_t {
@@ -203,6 +209,7 @@ struct ResourceResponsePayloadDiagnostic final {
     std::size_t pending_byte_count{0U};
     std::optional<std::size_t> last_successful_handoff_cursor;
     std::optional<RuntimeControlDecodeErrorCode> control_code;
+    NetchanPayloadBodyKind source_body_kind{NetchanPayloadBodyKind::direct_body};
 };
 
 struct ResourceClientResponseStageError {
@@ -327,6 +334,7 @@ enum class ResourceClientResponseStageEventType {
     secondary_stream_pending,
     network_error,
     protocol_error,
+    post_transmit_control_consumed,
 };
 
 // Bounded metadata only. Response bytes, tail bytes, provider material,
@@ -368,6 +376,7 @@ enum class ResourceClientResponseTraceClassification {
     secondary_stream_pending,
     network_failure,
     protocol_failure,
+    post_transmit_control_consumed,
 };
 
 struct ResourceClientResponseTraceEvent {
@@ -513,6 +522,8 @@ private:
         bool retain_post_resource_payload_at_boundary);
 
     [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    // Terminal-only same-driver borrow; does not relax normal handoff gates.
+    [[nodiscard]] NetchanDriver* close_driver() noexcept;
     [[nodiscard]] const OwnedServicePayload* retained_source_payload()
         const noexcept;
     void release_retained_source_payload() noexcept;
@@ -548,9 +559,10 @@ private:
     void handle_server_payload(
         OwnedNetchanPayload payload,
         ResourceClientResponseStageTimePoint now);
-    void decode_pre_transmit_control_payload(
+    [[nodiscard]] bool decode_response_control_payload(
         OwnedNetchanPayload payload,
-        ResourceClientResponseStageTimePoint now);
+        ResourceClientResponseStageTimePoint now,
+        bool required);
     void publish_acknowledgement_completion(
         ResourceClientResponseStageTimePoint now);
     void decode_pending_server_payload(
@@ -708,6 +720,8 @@ private:
         return "driver_failed";
     case ResourceClientResponseStageErrorCode::time_moved_backwards:
         return "time_moved_backwards";
+    case ResourceClientResponseStageErrorCode::post_transmit_control_overflow:
+        return "post_transmit_control_overflow";
     }
     return "unknown";
 }
@@ -724,6 +738,8 @@ private:
         return "post_transmit_continuation_candidate";
     case ResourceResponsePayloadClassification::invalid_framing:
         return "invalid_framing";
+    case ResourceResponsePayloadClassification::post_transmit_control:
+        return "post_transmit_control";
     }
     return "unavailable";
 }

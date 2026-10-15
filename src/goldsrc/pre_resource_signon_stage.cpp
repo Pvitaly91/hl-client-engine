@@ -570,6 +570,11 @@ PreResourceSignonStage::retained_source_payload() const noexcept
     return initial_result ? &initial_result->boundary_payload : nullptr;
 }
 
+NetchanDriver* PreResourceSignonStage::close_driver() noexcept
+{
+    return initial_stage_.close_driver();
+}
+
 NetchanDriver* PreResourceSignonStage::retained_driver() noexcept
 {
     if (!retain_connection_at_boundary_) {

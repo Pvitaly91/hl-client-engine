@@ -157,6 +157,19 @@ std::uint64_t runtime_observation_visual_hash_v2(
     return hash;
 }
 
+std::uint64_t runtime_observation_visual_hash_v3(const RuntimeClientObservationState& state) noexcept
+{
+    auto hash=runtime_observation_visual_hash_v2(state);
+    hash_byte(hash,3U);
+    for(const auto& entity:state.packet_entities) {
+        for(const auto value:{entity.render_effect,entity.render_amount}) {
+            hash_byte(hash,value ? 1U : 0U);
+            if(value) hash_unsigned(hash,*value);
+        }
+    }
+    return hash;
+}
+
 std::uint64_t runtime_observation_weapon_hud_hash(
     const RuntimeClientObservationState& state) noexcept
 {
@@ -231,7 +244,8 @@ bool valid_runtime_observation(
             &state.lifecycle.last_damage_source, &state.lifecycle.last_death_source,
             &state.lifecycle.health_before_source, &state.lifecycle.health_after_source,
             &state.lifecycle.armor_before_source, &state.lifecycle.armor_after_source,
-            &state.weapon_hud.health_source, &state.weapon_hud.armor_source})
+            &state.weapon_hud.health_source, &state.weapon_hud.armor_source,
+            &state.weapon_hud.field_of_view_source})
         if (*source && !valid_source(**source)) return false;
     std::array<bool, 64U> seen_weapons{};
     for (std::size_t i = 0U; i < state.weapon_hud.reserve_ammo_sources.size(); ++i) {
@@ -269,12 +283,27 @@ bool valid_runtime_observation(
     }
     std::uint32_t previous_entity = 0U;
     for (const auto& entity : state.packet_entities) {
+        if(entity.custom_beam) {
+            const auto& b=*entity.custom_beam;
+            if(entity.ordinary_visual_schema || entity.player_movement_schema || b.start_reference.entity>4095 || b.end_reference.entity>4095 ||
+                b.start_reference.attachment>15 || b.end_reference.attachment>15 || b.sprite_model_index>1023 ||
+                !std::isfinite(b.width_units) || b.width_units<0 || b.width_units>25.5 ||
+                !std::isfinite(b.noise_raw) || b.noise_raw<0 || b.noise_raw>255 ||
+                !std::isfinite(b.scroll_rate) || b.scroll_rate<0 || b.scroll_rate>25.5 ||
+                !std::isfinite(b.frame) || b.frame<0 || b.frame>255 ||
+                (b.supported && (!b.complete || static_cast<unsigned>(b.type)>2 || !b.sprite_model_index || b.width_units<=0)))return false;
+        }
         if (entity.entity_number == 0U ||
             entity.entity_number <= previous_entity ||
             !valid_vector(entity.origin) || !valid_vector(entity.angles) ||
+            !valid_vector(entity.collision_mins) || !valid_vector(entity.collision_maxs) ||
             !finite_optional(entity.frame) ||
+            !finite_optional(entity.visual_scale) || (entity.visual_scale && (*entity.visual_scale<0 || *entity.visual_scale>256)) ||
             !finite_optional(entity.animation_time_seconds) ||
             !finite_optional(entity.frame_rate) || !valid_vector(entity.velocity) ||
+            (entity.render_effect && *entity.render_effect > 255U) ||
+            (entity.render_amount && *entity.render_amount > 255U) ||
+            (!entity.ordinary_visual_schema && (entity.render_effect || entity.render_amount)) ||
             (!entity.ordinary_visual_schema &&
                 (entity.animation_time_seconds || entity.frame_rate ||
                  entity.gait_sequence || entity.weapon_model_index ||
@@ -297,12 +326,19 @@ bool valid_runtime_observation(
     }
     if (state.receiving_client &&
         (!finite_optional(state.receiving_client->health) ||
+         !finite_optional(state.receiving_client->field_of_view) ||
          !valid_vector(state.receiving_client->origin) ||
          !valid_vector(state.receiving_client->velocity) ||
          !valid_vector(state.receiving_client->view_offset) ||
          !valid_vector(state.receiving_client->punch_angle) ||
+         !valid_vector(state.receiving_client->auxiliary_vector2) ||
+         !finite_optional(state.receiving_client->auxiliary_float2) ||
+         !finite_optional(state.receiving_client->auxiliary_float3) ||
          !finite_optional(state.receiving_client->next_weapon_attack) ||
          !finite_optional(state.receiving_client->maximum_speed) ||
+         (state.receiving_client->physics_info &&
+             (state.receiving_client->physics_info->size() >= 256U ||
+              state.receiving_client->physics_info->find('\0') != std::string::npos)) ||
          (state.receiving_client->maximum_speed &&
              *state.receiving_client->maximum_speed < 0.0) ||
          (state.receiving_client->water_level &&
@@ -328,6 +364,15 @@ bool valid_runtime_observation(
             !finite_optional(weapon.next_primary_attack) ||
             !finite_optional(weapon.next_secondary_attack) ||
             !finite_optional(weapon.time_weapon_idle) ||
+            !finite_optional(weapon.pump_time) ||
+            !finite_optional(weapon.auxiliary_float2) ||
+            !finite_optional(weapon.auxiliary_float3) ||
+            (weapon.auxiliary_integer1_updated_in_record &&
+                (!weapon.auxiliary_integer1 || state.client_metadata.freshness != RuntimeObservationFreshness::observed_in_record)) ||
+            (weapon.auxiliary_float2_updated_in_record &&
+                (!weapon.auxiliary_float2 || state.client_metadata.freshness != RuntimeObservationFreshness::observed_in_record)) ||
+            (weapon.auxiliary_float3_updated_in_record &&
+                (!weapon.auxiliary_float3 || state.client_metadata.freshness != RuntimeObservationFreshness::observed_in_record)) ||
             (weapon.weapon_id && *weapon.weapon_id > 31U)) {
             return false;
         }

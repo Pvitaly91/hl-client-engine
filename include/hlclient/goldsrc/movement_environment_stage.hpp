@@ -224,6 +224,8 @@ private:
 
     [[nodiscard]] const OwnedServicePayload* retained_source_payload() const noexcept;
     [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    // Terminal-only same-driver borrow; does not relax normal handoff gates.
+    [[nodiscard]] NetchanDriver* close_driver() noexcept;
     void finalize_retained_boundary(MovementEnvironmentStageTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count) const noexcept;
     void push_event(MovementEnvironmentStageEvent event) noexcept;

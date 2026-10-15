@@ -7,6 +7,8 @@
 #include <hlclient/world_visibility/world_visible_draw_list.hpp>
 
 #include <stdexcept>
+#include <algorithm>
+#include <cmath>
 
 namespace hlclient::renderer::null {
 
@@ -22,6 +24,11 @@ const RendererInfo& NullRenderer::information() const noexcept
 
 void NullRenderer::render(const RenderScene& scene, const RenderExtent extent)
 {
+    if (!core::valid_image_adjustments(scene.image_adjustments))
+        throw std::invalid_argument{"Image adjustments are outside the finite bounded contract"};
+    if(scene.requested_msaa_samples!=0 && scene.requested_msaa_samples!=2 &&
+       scene.requested_msaa_samples!=4 && scene.requested_msaa_samples!=8)
+        throw std::invalid_argument{"Scene MSAA request must be Off, 2, 4 or 8"};
     if (!statistics_.initialized) {
         throw std::logic_error{"Null renderer must be initialized before rendering"};
     }
@@ -33,6 +40,56 @@ void NullRenderer::render(const RenderScene& scene, const RenderExtent extent)
     }
 
     statistics_.last_clear_color = scene.clear_color;
+    statistics_.last_decal_submitted=statistics_.last_decal_valid=statistics_.last_decal_rejected=0;
+    const auto validate_decal=[&](const RenderWorldDecals& decal) {
+        ++statistics_.decal_submitted;++statistics_.last_decal_submitted;
+        const auto reject=[&](std::uint64_t& reason) {
+            ++reason;++statistics_.decal_rejected;++statistics_.last_decal_rejected;
+        };
+        if(!decal.texture || !decal.vertices) {reject(statistics_.decal_missing_resource);return;}
+        const auto& pixels=decal.texture->mip_levels[0];
+        if((decal.texture->alpha_mode!=assets::WorldTextureAlphaMode::masked_index_255 &&
+            decal.texture->alpha_mode!=assets::WorldTextureAlphaMode::straight_alpha) ||
+            !pixels.width || !pixels.height || pixels.width>256U || pixels.height>256U ||
+            pixels.width!=decal.texture->width || pixels.height!=decal.texture->height ||
+            pixels.rgba_pixels.size()!=std::size_t(pixels.width)*pixels.height*4U) {
+            reject(statistics_.decal_invalid_texture);return;
+        }
+        if(decal.material_mode!=game_api::LocalDecalMaterialMode::straight_alpha &&
+            decal.material_mode!=game_api::LocalDecalMaterialMode::white_neutral_modulate &&
+            decal.material_mode!=game_api::LocalDecalMaterialMode::lit_straight_alpha) {
+            reject(statistics_.decal_unsupported_material);return;
+        }
+        if(!is_finite(decal.model_transform)) {reject(statistics_.decal_invalid_transform);return;}
+        if(decal.vertices->empty() || decal.vertices->size()>64U*96U || decal.vertices->size()%3U ||
+            std::any_of(decal.vertices->begin(),decal.vertices->end(),[](const auto& v) {
+                return !is_finite(v.position) || !is_finite(v.uv) || v.uv.x<-.001F || v.uv.x>1.001F ||
+                    v.uv.y<-.001F || v.uv.y>1.001F ||
+                    std::any_of(v.surface_light_rgb.begin(),v.surface_light_rgb.end(),[](float c){return !std::isfinite(c)||c<0||c>1;});
+            })) {reject(statistics_.decal_invalid_geometry);return;}
+        ++statistics_.decal_valid;++statistics_.last_decal_valid;
+    };
+    if(scene.world_decals)validate_decal(*scene.world_decals);
+    if(scene.secondary_world_decals)validate_decal(*scene.secondary_world_decals);
+    const auto decal_batches=std::min<std::size_t>(scene.additional_world_decals.size(),64U);
+    for(std::size_t i=0;i<decal_batches;++i)validate_decal(scene.additional_world_decals[i]);
+    if(scene.additional_world_decals.size()>decal_batches) {
+        const auto rejected=scene.additional_world_decals.size()-decal_batches;
+        statistics_.decal_batch_limit+=rejected;statistics_.decal_submitted+=rejected;
+        statistics_.decal_rejected+=rejected;statistics_.last_decal_submitted+=rejected;
+        statistics_.last_decal_rejected+=rejected;
+    }
+    if(scene.transient_sprite_entities &&
+       (!scene.transient_sprite_entities->package || !scene.transient_sprite_entities->frame ||
+        scene.transient_sprite_entities->frame->scene_package_identity()!=
+          entity_render::EntityRenderResourceIdentity{scene.transient_sprite_entities->package->resource_id(),
+              scene.transient_sprite_entities->package->resource_revision()}))
+        throw std::invalid_argument{"Transient sprite package/frame identity is invalid"};
+    for(const auto* sprites:{&scene.first_person_muzzle_entities,&scene.world_muzzle_entities})
+        if(*sprites && (!(*sprites)->package || !(*sprites)->frame ||
+            (*sprites)->frame->scene_package_identity()!=entity_render::EntityRenderResourceIdentity{
+                (*sprites)->package->resource_id(),(*sprites)->package->resource_revision()}))
+            throw std::invalid_argument{"Muzzle sprite package/frame identity is invalid"};
     statistics_.camera_valid = is_valid(scene.camera);
     statistics_.last_camera = scene.camera;
     statistics_.static_world_present =

@@ -7,7 +7,7 @@ namespace hlclient::audio {
 inline constexpr std::size_t maximum_voices=128, maximum_static_voices=64;
 inline constexpr std::uint32_t output_rate=48000;
 using Vec3=assets::AssetVector3;
-enum class Operation { start, stop, change, source, reset };
+enum class Operation { start, stop, change, source, reset, stop_group };
 enum class ChannelPolicy { automatic, replace, ambient };
 struct Command {
     Operation operation{};
@@ -16,9 +16,12 @@ struct Command {
     Vec3 origin{};
     float volume{1}, attenuation{1}, pitch{1};
     bool static_voice{}, local{}, loop_enabled{true};
+    bool repeat_sample{}; // Explicit persistent client voice without WAV loop markers.
     // Logical due time; submission latency and SDL buffering are separate.
     double scheduled_seconds{};
     bool presentation_voice{};
+    // stop_group only: owner-selected exact bit namespace; zero is invalid.
+    std::uint64_t voice_group_mask{};
 };
 struct Listener { Vec3 origin{}, right{0,-1,0}; float master{0.35F}; bool muted{}; };
 struct Statistics { std::uint64_t started{},stopped{},updated{},rejected{},frames{},presentation_started{}; };

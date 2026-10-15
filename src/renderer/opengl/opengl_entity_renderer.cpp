@@ -1,4 +1,5 @@
 #include "opengl_entity_renderer.hpp"
+#include "opengl_effect_lights.hpp"
 
 #include <hlclient/entity_render/entity_scene_render.hpp>
 #include <hlclient/entity_render/sprite_billboard_basis.hpp>
@@ -6,6 +7,7 @@
 #include <glad/gl.h>
 
 #include <algorithm>
+#include <hlclient/entity_render/beam_ribbon.hpp>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -300,6 +302,9 @@ uniform vec3 u_point_light_center;
 uniform vec3 u_point_light_color;
 uniform float u_point_light_radius;
 uniform float u_point_light_intensity;
+uniform int u_effect_light_count;
+uniform vec4 u_effect_light_center_radius[8];
+uniform vec4 u_effect_light_color_intensity[8];
 out vec4 output_color;
 
 void main()
@@ -314,6 +319,12 @@ void main()
             u_point_light_center) / u_point_light_radius);
         light_factor += u_point_light_color *
             (u_point_light_intensity * falloff * falloff);
+    }
+    for (int i=0; i<u_effect_light_count && i<8; ++i) {
+        float falloff=max(0.0,1.0-length(fragment_world_position-
+            u_effect_light_center_radius[i].xyz)/u_effect_light_center_radius[i].w);
+        light_factor+=u_effect_light_color_intensity[i].rgb *
+            (u_effect_light_color_intensity[i].w*falloff*falloff);
     }
     output_color = vec4(sampled.rgb * light_factor, sampled.a);
 }
@@ -344,6 +355,28 @@ void main()
 }
 )GLSL";
 
+inline constexpr char kSpriteFragmentShader[] = R"GLSL(#version 330 core
+in vec2 fragment_uv;
+uniform sampler2D u_texture;
+uniform int u_masked;
+uniform float u_opacity;
+uniform vec3 u_tint;
+uniform vec2 u_beam_uv;
+uniform int u_beam_repeat;
+out vec4 output_color;
+void main()
+{
+    vec2 uv=fragment_uv;
+    // Ribbon geometry X runs along the beam, but the sprite's U carries
+    // its transverse glow profile. Only V repeats/scrolls along the beam.
+    if(u_beam_repeat != 0)
+        uv=vec2(fragment_uv.y,fract(u_beam_uv.x+fragment_uv.x*u_beam_uv.y));
+    vec4 sampled = texture(u_texture, uv);
+    if (u_masked != 0 && sampled.a < 0.5) discard;
+    output_color = vec4(sampled.rgb * u_tint, sampled.a * u_opacity);
+}
+)GLSL";
+
 struct StudioProgram {
     Object program;
     GLint view_projection{-1};
@@ -358,6 +391,7 @@ struct StudioProgram {
     GLint point_light_color{-1};
     GLint point_light_radius{-1};
     GLint point_light_intensity{-1};
+    EffectLightUniforms effect_lights;
 };
 
 struct SpriteProgram {
@@ -370,6 +404,9 @@ struct SpriteProgram {
     GLint corner_size{-1};
     GLint scale{-1};
     GLint masked{-1};
+    GLint opacity{-1};
+    GLint tint{-1};
+    GLint beam_uv{-1},beam_repeat{-1};
 };
 
 [[nodiscard]] StudioProgram create_studio_program()
@@ -393,6 +430,7 @@ struct SpriteProgram {
     result.point_light_color = glGetUniformLocation(name, "u_point_light_color");
     result.point_light_radius = glGetUniformLocation(name, "u_point_light_radius");
     result.point_light_intensity = glGetUniformLocation(name, "u_point_light_intensity");
+    result.effect_lights=EffectLightUniforms::locate(name);
     const GLint texture = glGetUniformLocation(name, "u_texture");
     const GLuint block = glGetUniformBlockIndex(name, "BonePalette");
     if (result.view_projection < 0 || result.entity_transform < 0 ||
@@ -400,7 +438,7 @@ struct SpriteProgram {
         result.camera_up < 0 || result.chrome < 0 ||
         result.masked < 0 || result.static_light_rgb < 0 || result.point_light_center < 0 ||
         result.point_light_color < 0 || result.point_light_radius < 0 ||
-        result.point_light_intensity < 0 || texture < 0 ||
+        result.point_light_intensity < 0 || !result.effect_lights.valid() || texture < 0 ||
         block == GL_INVALID_INDEX) {
         fail_entity(OpenGlRendererErrorCode::program_link_failed,
             "Studio entity shader did not retain required inputs");
@@ -418,7 +456,7 @@ struct SpriteProgram {
     SpriteProgram result;
     result.program = link_program(
         kSpriteVertexShader,
-        kEntityFragmentShader,
+        kSpriteFragmentShader,
         "Built-in Sprite entity shader");
     const auto name = result.program.name();
     result.view_projection = glGetUniformLocation(name, "u_view_projection");
@@ -429,10 +467,14 @@ struct SpriteProgram {
     result.corner_size = glGetUniformLocation(name, "u_corner_size");
     result.scale = glGetUniformLocation(name, "u_scale");
     result.masked = glGetUniformLocation(name, "u_masked");
+    result.opacity = glGetUniformLocation(name, "u_opacity");
+    result.tint = glGetUniformLocation(name, "u_tint");
+    result.beam_uv=glGetUniformLocation(name,"u_beam_uv");
+    result.beam_repeat=glGetUniformLocation(name,"u_beam_repeat");
     const GLint texture = glGetUniformLocation(name, "u_texture");
     if (result.view_projection < 0 || result.origin < 0 || result.right < 0 ||
         result.up < 0 || result.corner_min < 0 || result.corner_size < 0 ||
-        result.scale < 0 || result.masked < 0 || texture < 0) {
+        result.scale < 0 || result.masked < 0 || result.opacity < 0 || result.tint < 0 || result.beam_uv<0 || result.beam_repeat<0 || texture < 0) {
         fail_entity(OpenGlRendererErrorCode::program_link_failed,
             "Sprite entity shader did not retain required inputs");
     }
@@ -729,6 +771,8 @@ struct SpriteQuad {
 
 void bind_neutral_entity_state() noexcept
 {
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0U);
     glBindVertexArray(0U);
@@ -886,7 +930,8 @@ public:
         const entity_render::EntityDrawCommand& command,
         const RenderCamera& camera,
         const RenderMatrix4& view_projection,
-        const std::optional<RenderPointLight>& light)
+        const std::optional<RenderPointLight>& light,
+        std::span<const RenderPointLight> effect_lights)
     {
         if (command.instance_index >= frame.studio_instances().size()) {
             fail_entity(OpenGlRendererErrorCode::entity_draw_invalid,
@@ -930,6 +975,7 @@ public:
             std::array<float,3U>{0.85F,0.85F,0.85F});
         glUniform3f(studio_program_.static_light_rgb,
             static_light[0],static_light[1],static_light[2]);
+        studio_program_.effect_lights.upload(effect_lights);
         if (light && valid_render_point_light(*light) && light->intensity>0.0F) {
             glUniform3f(studio_program_.point_light_center,
                 light->center.x,light->center.y,light->center.z);
@@ -994,8 +1040,8 @@ public:
                     static_cast<float>(selected.height));
                 glUniform1i(studio_program_.masked, masked ? 1 : 0);
                 // Explicit world-light sampling must respect source fullbright
-                // metadata. Absent light retains the pre-existing fallback,
-                // including the unchanged camera-local viewmodel path.
+                // metadata. Absent light retains the pre-existing diagnostic
+                // fallback; normal viewmodels supply a world-eye light sample.
                 const auto material_light = instance.static_light_rgb && selected.fullbright_metadata
                     ? std::array<float,3U>{1.0F,1.0F,1.0F} : static_light;
                 glUniform3f(studio_program_.static_light_rgb,
@@ -1072,6 +1118,7 @@ public:
             {rotation.values[8U], rotation.values[9U], rotation.values[10U]},
             {rotation.values[0U], rotation.values[1U], rotation.values[2U]},
             {rotation.values[4U], rotation.values[5U], rotation.values[6U]},
+            instance.transform.rotation_degrees.x,
         };
         const auto basis = entity_render::SpriteBillboardBasis::calculate(basis_input);
         if (!basis) {
@@ -1084,6 +1131,26 @@ public:
             static_cast<float>(geometry.height);
         const bool masked = selected.profile ==
             entity_render::SpriteRenderTextureProfile::alpha_test_masked;
+        auto blend = instance.blend_mode;
+        if (blend == entity_render::SpriteBlendMode::source_asset_default) {
+            blend = selected.profile == entity_render::SpriteRenderTextureProfile::additive
+                ? entity_render::SpriteBlendMode::additive
+                : selected.profile == entity_render::SpriteRenderTextureProfile::index_alpha
+                ? entity_render::SpriteBlendMode::alpha_blended : entity_render::SpriteBlendMode::opaque;
+        }
+        const bool glow=blend==entity_render::SpriteBlendMode::glow;
+        // Glow changes compositing, not visibility. Ordinary world depth must
+        // still occlude server sprites; additive glows only suppress writes.
+        if (glow || blend == entity_render::SpriteBlendMode::additive ||
+            blend == entity_render::SpriteBlendMode::alpha_blended) {
+            glEnable(GL_BLEND);
+            glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_SRC_ALPHA, glow || blend == entity_render::SpriteBlendMode::additive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        } else {
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+        }
         glUseProgram(sprite_program_.program.name());
         glUniformMatrix4fv(sprite_program_.view_projection, 1, GL_FALSE,
             view_projection.values.data());
@@ -1097,22 +1164,72 @@ public:
         glUniform2f(sprite_program_.corner_size,
             static_cast<float>(geometry.width),
             static_cast<float>(geometry.height));
-        glUniform1f(sprite_program_.scale, instance.transform.uniform_scale);
+        auto presentation_scale=instance.transform.uniform_scale;
+        if(glow) {
+            // Local-compatible near-camera guard, not stock distance dissipation:
+            // retain asset/entity scale until the quad exceeds 10% of view height.
+            // A world-space server spot must never turn into a fullscreen overlay.
+            const auto delta=subtract(instance.transform.origin,camera.position);
+            const auto distance=std::sqrt(delta.x*delta.x+delta.y*delta.y+delta.z*delta.z);
+            const auto largest=static_cast<float>(std::max(geometry.width,geometry.height));
+            if(largest>0) presentation_scale=std::min(presentation_scale,
+                distance*std::tan(camera.vertical_field_of_view_radians*.5F)*.2F/largest);
+        }
+        glUniform1f(sprite_program_.scale, presentation_scale);
         glUniform1i(sprite_program_.masked, masked ? 1 : 0);
+        glUniform1f(sprite_program_.opacity, instance.opacity);
+        glUniform3f(sprite_program_.tint,instance.tint[0],instance.tint[1],instance.tint[2]);
+        glUniform2f(sprite_program_.beam_uv,0,1);glUniform1i(sprite_program_.beam_repeat,0);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D,
-            resource.textures[instance.selected_frame_index].name());
+        glBindTexture(GL_TEXTURE_2D,resource.textures[instance.selected_frame_index].name());
         glBindVertexArray(sprite_quad_.vertex_array.name());
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
-        ++statistics_.sprite_draw_count;
+        if(instance.ribbon_end) {
+            const auto points=entity_render::beam_ribbon_points(instance.transform.origin,*instance.ribbon_end,
+                instance.ribbon_noise_amplitude,instance.ribbon_sine_noise,instance.ribbon_phase_seconds,instance.entity_number);
+            const unsigned segments=instance.ribbon_noise_amplitude>0 ?
+                entity_render::beam_ribbon_segment_count(instance.ribbon_sine_noise) : 1U;
+            for(unsigned i=0;i<segments;++i) {
+                const auto a=points[i*entity_render::beam_ribbon_max_segments/segments];
+                const auto b=points[(i+1)*entity_render::beam_ribbon_max_segments/segments];const auto delta=subtract(b,a);
+                const auto along=normalize(delta);auto side=along ? normalize(cross(*camera_forward,*along)) : std::nullopt;
+                if(along && !side)side=normalize(cross(camera.up,*along));
+                if(!along || !side)continue;
+                const auto length=std::sqrt(delta.x*delta.x+delta.y*delta.y+delta.z*delta.z);
+                glUniform3f(sprite_program_.origin,a.x,a.y,a.z);glUniform3f(sprite_program_.right,along->x,along->y,along->z);
+                glUniform3f(sprite_program_.up,side->x,side->y,side->z);glUniform2f(sprite_program_.corner_min,0,-instance.ribbon_width*.5F);
+                glUniform2f(sprite_program_.corner_size,length,instance.ribbon_width);glUniform1f(sprite_program_.scale,1);
+                glUniform1i(sprite_program_.beam_repeat,1);
+                const auto phase=static_cast<float>(std::fmod(instance.ribbon_phase_seconds*instance.ribbon_scroll_cycles_per_second,1.));
+                glUniform2f(sprite_program_.beam_uv,phase+static_cast<float>(i)/static_cast<float>(segments),1.F/static_cast<float>(segments));
+                if(instance.ribbon_glow_opacity>0) {
+                    // Same exact segment spine and source sprite; a wider,
+                    // low-opacity additive halo never changes the accepted
+                    // core shape, phase, endpoints or depth-test policy.
+                    const auto glow_width=instance.ribbon_width*instance.ribbon_glow_width_scale;
+                    glUniform2f(sprite_program_.corner_min,0,-glow_width*.5F);
+                    glUniform2f(sprite_program_.corner_size,length,glow_width);
+                    glUniform1f(sprite_program_.opacity,instance.opacity*instance.ribbon_glow_opacity);
+                    glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,nullptr);++statistics_.sprite_draw_count;
+                    glUniform2f(sprite_program_.corner_min,0,-instance.ribbon_width*.5F);
+                    glUniform2f(sprite_program_.corner_size,length,instance.ribbon_width);
+                    glUniform1f(sprite_program_.opacity,instance.opacity);
+                }
+                glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,nullptr);++statistics_.sprite_draw_count;
+            }
+        } else {
+            glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,nullptr);++statistics_.sprite_draw_count;
+        }
         ++statistics_.sprite_texture_bind_count;
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
     }
 
     void render(
         const RenderDynamicEntities& entities,
         const RenderCamera& camera,
         const RenderMatrix4& view_projection,
-        const std::optional<RenderPointLight>& light)
+        const std::optional<RenderPointLight>& light,
+        std::span<const RenderPointLight> effect_lights)
     {
         if (!entities.package || !entities.frame) {
             fail_entity(OpenGlRendererErrorCode::invalid_entity_scene,
@@ -1140,7 +1257,7 @@ public:
             for (const auto& command : frame.draw_commands()) {
                 switch (command.visual_kind) {
                 case entity_render::RuntimeEntityVisualKind::studio_model:
-                    draw_studio(gpu, frame, command, camera, view_projection, light);
+                    draw_studio(gpu, frame, command, camera, view_projection, light,effect_lights);
                     break;
                 case entity_render::RuntimeEntityVisualKind::sprite:
                     draw_sprite(gpu, frame, command, camera, view_projection);
@@ -1187,9 +1304,10 @@ void OpenGlEntityRendererBackend::render(
     const RenderDynamicEntities& entities,
     const RenderCamera& camera,
     const RenderMatrix4& view_projection,
-    const std::optional<RenderPointLight>& light)
+    const std::optional<RenderPointLight>& light,
+    std::span<const RenderPointLight> effect_lights)
 {
-    implementation_->render(entities, camera, view_projection, light);
+    implementation_->render(entities, camera, view_projection, light,effect_lights);
 }
 
 void OpenGlEntityRendererBackend::release_resources() noexcept

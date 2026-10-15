@@ -66,6 +66,17 @@ struct ModelAttachment {
     std::array<AssetVector3, 3U> local_vectors{};
 };
 
+// Neutral requested socket; basis is in the owning bone's local space.
+// A game may select an existing attachment or a validated numeric profile.
+struct ModelSocketDefinition {
+    std::uint32_t bone_index{};
+    AssetVector3 local_origin{};
+    AssetVector3 forward{1,0,0}, right{0,-1,0}, up{0,0,1};
+};
+struct EvaluatedModelSocket {
+    AssetVector3 origin{}, forward{}, right{}, up{};
+};
+
 struct ModelSkinnedVertex {
     AssetVector3 source_position{};
     AssetVector3 source_normal{};

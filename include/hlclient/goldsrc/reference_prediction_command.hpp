@@ -8,6 +8,13 @@ namespace hlclient::goldsrc {
 reference_jump_duck_weapon_use_movement_command(
     GoldSrcUserCmdSequence identity, const GoldSrcWireUserCmd& wire) noexcept;
 
+// Explicit opt-in carrier for the generic secondary weapon bit. Like other
+// weapon buttons it remains inert to movement physics/replay; no weapon
+// simulation is implied. The older helper still rejects secondary commands.
+[[nodiscard]] GoldSrcUserCmdState::CreationResult
+reference_jump_duck_secondary_weapon_use_movement_command(
+    GoldSrcUserCmdSequence identity, const GoldSrcWireUserCmd& wire) noexcept;
+
 // Adapts the exact quantized command retained by network history. It never
 // samples live input, changes the wire value, or assigns a packet sequence as
 // a command identity. The v1 dry-walk and v2 jump/duck profiles are distinct.

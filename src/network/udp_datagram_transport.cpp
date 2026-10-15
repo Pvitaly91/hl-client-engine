@@ -10,6 +10,11 @@ UdpDatagramTransport::UdpDatagramTransport(UdpSocket socket) noexcept
 {
 }
 
+SocketNativeError UdpDatagramTransport::close() noexcept
+{
+    return socket_.close();
+}
+
 DatagramLocalAddressResult UdpDatagramTransport::local_address() const
 {
     std::string error;
@@ -27,7 +32,7 @@ DatagramSendResult UdpDatagramTransport::send_to(
         if ((native.domain == SocketNativeErrorDomain::winsock && native.code == 10035U) ||
             (native.domain == SocketNativeErrorDomain::posix && (native.code == EAGAIN || native.code == EWOULDBLOCK)))
             return {DatagramSendStatus::would_block, {}};
-        return DatagramSendResult{DatagramSendStatus::error, std::move(error)};
+        return DatagramSendResult{DatagramSendStatus::error, std::move(error), native};
     }
     return DatagramSendResult{DatagramSendStatus::sent, {}};
 }
@@ -91,6 +96,7 @@ DatagramTransportReceiveResult UdpDatagramTransport::receive(const std::size_t m
             result.source,
             result.payload_size_lower_bound,
             std::move(result.error),
+            result.native_error,
         };
     case ReceiveStatus::error:
         return DatagramTransportReceiveResult{
@@ -99,6 +105,7 @@ DatagramTransportReceiveResult UdpDatagramTransport::receive(const std::size_t m
             std::nullopt,
             0U,
             std::move(result.error),
+            result.native_error,
         };
     }
 

@@ -620,6 +620,57 @@ TEST_CASE("Clientdata history handles wrap eviction duplicates and recovery",
     CHECK(old.error->code == goldsrc::ClientDataDecodeErrorCode::old_source_frame);
 }
 
+TEST_CASE("E32.1 completed clientdata body cannot own its contemporary suffix delta base",
+          "[e321][e321-a-cache][goldsrc][clientdata][history][fragment][suffix]")
+{
+    const auto apply = [](ClientFixture& target, const std::span<const std::byte> bytes,
+                          const std::uint32_t sequence, const bool completion, const bool suffix) {
+        auto payload = owning_payload(bytes, sequence);
+        payload.source_reliable = completion || suffix;
+        payload.reassembled = completion;
+        payload.normal_fragment_completion = completion;
+        payload.contemporaneous_fragment_suffix = suffix;
+        const auto cursor = goldsrc::StockRuntimeSourceCursor::create(0U,0U,payload.bytes.size());
+        REQUIRE(cursor);
+        return target.decoder.decode_one_and_apply({payload,*cursor,target.state.source_generation(),4U,0U,100.0},target.state);
+    };
+    ClientFixture target;
+    const auto completion = apply(target,kNoBaseEmpty,100U,true,false);
+    REQUIRE(completion); REQUIRE(target.state.current_frame());
+    CHECK(target.state.history().frame_count() == 0U);
+    const auto current_completion = target.state.current_frame();
+    const auto duplicate = apply(target,kNoBaseEmpty,100U,true,false);
+    REQUIRE_FALSE(duplicate); REQUIRE(duplicate.error);
+    CHECK(duplicate.error->code == goldsrc::ClientDataDecodeErrorCode::duplicate_source_frame);
+    const auto conflict = apply(target,kNoBaseWithWeapons,100U,true,false);
+    REQUIRE_FALSE(conflict); REQUIRE(conflict.error);
+    CHECK(conflict.error->code == goldsrc::ClientDataDecodeErrorCode::conflicting_source_frame);
+    CHECK(target.state.current_frame() == current_completion);
+    const auto suffix = apply(target,kNoBaseWithWeapons,100U,false,true);
+    REQUIRE(suffix); REQUIRE(suffix.event); REQUIRE(suffix.event->frame);
+    CHECK(signed_value(suffix.event->frame->client_data(),"health") == 100);
+    CHECK(target.state.history().frame_count() == 1U);
+    const auto normal_conflict = apply(target,kNoBaseEmpty,100U,false,false);
+    REQUIRE_FALSE(normal_conflict); REQUIRE(normal_conflict.error);
+    CHECK(normal_conflict.error->code == goldsrc::ClientDataDecodeErrorCode::conflicting_source_frame);
+    const auto delta = apply(target,kDeltaFrom100,101U,false,false);
+    REQUIRE(delta); REQUIRE(delta.event); REQUIRE(delta.event->frame);
+    CHECK(signed_value(delta.event->frame->client_data(),"health") == 90);
+    REQUIRE(delta.event->frame->find_weapon_slot(63U));
+    CHECK(signed_value(delta.event->frame->find_weapon_slot(63U)->object(),"m_iClip") == 30);
+    CHECK(target.state.history().frame_count() == 2U);
+
+    ClientFixture no_suffix;
+    REQUIRE(apply(no_suffix,kNoBaseEmpty,100U,true,false));
+    const auto missing = apply(no_suffix,kDeltaFrom100,101U,false,false);
+    REQUIRE_FALSE(missing); REQUIRE(missing.error);
+    CHECK(missing.error->code == goldsrc::ClientDataDecodeErrorCode::missing_delta_base);
+    CHECK(no_suffix.state.history().frame_count() == 0U);
+    REQUIRE(target.state.reset_source_generation(2U,target.schemas));
+    REQUIRE(apply(target,kNoBaseEmpty,100U,true,false));
+    CHECK(target.state.history().frame_count() == 0U);
+}
+
 TEST_CASE("Clientdata configured record payload frame and history limits are transactional",
           "[goldsrc][clientdata][limit]")
 {

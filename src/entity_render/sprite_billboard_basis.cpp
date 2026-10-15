@@ -1,6 +1,7 @@
 #include <hlclient/entity_render/sprite_billboard_basis.hpp>
 
 #include <cmath>
+#include <numbers>
 #include <optional>
 
 namespace hlclient::entity_render {
@@ -69,6 +70,8 @@ std::string_view to_string(const SpriteBillboardBasisStatus status) noexcept
         return "supported_view_parallel_upright";
     case SpriteBillboardBasisStatus::supported_oriented:
         return "supported_oriented";
+    case SpriteBillboardBasisStatus::supported_view_parallel_oriented:
+        return "supported_view_parallel_oriented";
     case SpriteBillboardBasisStatus::unsupported_facing_upright_evidence_pending:
         return "unsupported_facing_upright_evidence_pending";
     case SpriteBillboardBasisStatus::
@@ -96,17 +99,10 @@ SpriteBillboardBasisResult SpriteBillboardBasis::calculate(
             SpriteBillboardBasisStatus::
                 unsupported_facing_upright_evidence_pending};
     }
-    if (input.orientation ==
-        assets::SpriteOrientation::view_parallel_oriented) {
-        return {{},
-            {},
-            {},
-            SpriteBillboardBasisStatus::
-                unsupported_view_parallel_oriented_evidence_pending};
-    }
-
-    if (input.orientation == assets::SpriteOrientation::view_parallel) {
-        if (!finite(input.camera_right) || !finite(input.camera_up)) {
+    if (input.orientation == assets::SpriteOrientation::view_parallel ||
+        input.orientation == assets::SpriteOrientation::view_parallel_oriented) {
+        if (!finite(input.camera_right) || !finite(input.camera_up) ||
+            !std::isfinite(input.roll_degrees)) {
             return {{},
                 {},
                 {},
@@ -126,6 +122,13 @@ SpriteBillboardBasisResult SpriteBillboardBasis::calculate(
                 {},
                 {},
                 SpriteBillboardBasisStatus::degenerate_camera_basis};
+        }
+        if (input.orientation == assets::SpriteOrientation::view_parallel_oriented) {
+            const auto radians = std::remainder(input.roll_degrees,360.0F)*std::numbers::pi_v<float>/180.0F;
+            const auto cosine=std::cos(radians), sine=std::sin(radians);
+            return {{right->x*cosine+up->x*sine,right->y*cosine+up->y*sine,right->z*cosine+up->z*sine},
+                {up->x*cosine-right->x*sine,up->y*cosine-right->y*sine,up->z*cosine-right->z*sine},
+                *normal,SpriteBillboardBasisStatus::supported_view_parallel_oriented};
         }
         return {*right,
             *up,

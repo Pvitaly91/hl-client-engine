@@ -36,6 +36,11 @@ struct NullRendererStatistics {
     bool camera_valid{false};
     std::optional<RenderCamera> last_camera;
     RenderExtent last_extent{};
+    // Validation/submission evidence only: the Null backend renders no pixels.
+    std::uint64_t decal_submitted{},decal_valid{},decal_rejected{},decal_missing_resource{},
+        decal_invalid_texture{},decal_invalid_geometry{},decal_invalid_transform{},
+        decal_unsupported_material{},decal_batch_limit{};
+    std::size_t last_decal_submitted{},last_decal_valid{},last_decal_rejected{};
 
     [[nodiscard]] friend bool operator==(
         const NullRendererStatistics& left,

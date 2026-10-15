@@ -71,6 +71,13 @@ struct StudioEntityRenderInstance {
     // Neutral linear light multiplier sampled upstream from approved world
     // data. Absence preserves the established 0.85 Studio fallback.
     std::optional<std::array<float, 3U>> static_light_rgb;
+    // Draw identity within the original server entity: 0 primary, 1 attached.
+    // Attached candidates require a primary Studio owner, never a fake entity.
+    std::uint32_t subinstance_ordinal{};
+};
+
+enum class SpriteBlendMode : std::uint8_t {
+    source_asset_default, opaque, additive, alpha_blended, glow
 };
 
 struct SpriteEntityRenderInstance {
@@ -85,6 +92,22 @@ struct SpriteEntityRenderInstance {
     assets::WorldBounds bounds{};
     RuntimeEntityVisibilityStatus visibility_status{
         RuntimeEntityVisibilityStatus::visible};
+    // Neutral per-instance execution overrides for finite transient effects.
+    SpriteBlendMode blend_mode{SpriteBlendMode::source_asset_default};
+    float opacity{1.0F};
+    std::array<float,3> tint{1,1,1};
+    // Neutral textured ribbon: endpoint/width in world units, no game profile.
+    std::optional<assets::AssetVector3> ribbon_end;
+    float ribbon_width{1};
+    float ribbon_noise_amplitude{},ribbon_scroll_cycles_per_second{};
+    bool ribbon_sine_noise{};
+    double ribbon_phase_seconds{};
+    // Optional same-centerline additive halo. Core width/UV/noise stay exact.
+    float ribbon_glow_width_scale{1},ribbon_glow_opacity{};
+    // Explicit neutral surface attachment: only an additive, non-ribbon
+    // view-parallel source may execute with an oriented instance transform.
+    // The source asset metadata remains unchanged and authoritative otherwise.
+    bool surface_aligned{false};
 };
 
 enum class UnsupportedEntityVisualReason {
@@ -163,6 +186,14 @@ enum class EntitySceneRenderAssetSource {
 };
 
 struct EntitySceneRenderPackageCreateInfo {
+    struct PresentationStudioSource {
+        EntityRenderResourceIdentity identity;
+        std::shared_ptr<const assets::ModelAsset> model;
+    };
+    struct PresentationSpriteSource {
+        EntityRenderResourceIdentity identity;
+        std::shared_ptr<const assets::SpriteAsset> sprite;
+    };
     EntitySceneRenderAssetSource asset_source{
         EntitySceneRenderAssetSource::imported_asset_library};
     std::shared_ptr<const entity_visual::EntityVisualAssetLibraryState>
@@ -172,6 +203,10 @@ struct EntitySceneRenderPackageCreateInfo {
     std::optional<EntityRenderResourceIdentity> world_scene_association;
     std::vector<std::shared_ptr<const StudioModelRenderAsset>> studio_assets;
     std::vector<std::shared_ptr<const SpriteRenderAsset>> sprite_assets;
+    // Already imported owning client-presentation dependencies. They are not
+    // manifest entries and never acquire a fictitious network model slot.
+    std::vector<PresentationStudioSource> presentation_studio_sources;
+    std::vector<PresentationSpriteSource> presentation_sprite_sources;
 };
 
 class EntitySceneRenderPackage final {
@@ -188,6 +223,10 @@ public:
     [[nodiscard]] EntityRenderResourceIdentity asset_library_identity()
         const noexcept;
     [[nodiscard]] EntitySceneRenderAssetSource asset_source() const noexcept;
+    [[nodiscard]] std::span<const EntitySceneRenderPackageCreateInfo::PresentationStudioSource>
+    presentation_studio_sources() const noexcept { return presentation_studio_sources_; }
+    [[nodiscard]] std::span<const EntitySceneRenderPackageCreateInfo::PresentationSpriteSource>
+    presentation_sprite_sources() const noexcept { return presentation_sprite_sources_; }
     [[nodiscard]] std::span<
         const std::shared_ptr<const StudioModelRenderAsset>> studio_assets()
         const noexcept;
@@ -213,6 +252,8 @@ private:
         std::optional<EntityRenderResourceIdentity> world_scene_association,
         std::vector<std::shared_ptr<const StudioModelRenderAsset>> studio_assets,
         std::vector<std::shared_ptr<const SpriteRenderAsset>> sprite_assets,
+        std::vector<EntitySceneRenderPackageCreateInfo::PresentationStudioSource> presentation_studio_sources,
+        std::vector<EntitySceneRenderPackageCreateInfo::PresentationSpriteSource> presentation_sprite_sources,
         EntitySceneRenderStatistics statistics) noexcept;
 
     EntitySceneRenderAssetSource asset_source_{
@@ -225,6 +266,8 @@ private:
     std::optional<EntityRenderResourceIdentity> world_scene_association_;
     std::vector<std::shared_ptr<const StudioModelRenderAsset>> studio_assets_;
     std::vector<std::shared_ptr<const SpriteRenderAsset>> sprite_assets_;
+    std::vector<EntitySceneRenderPackageCreateInfo::PresentationStudioSource> presentation_studio_sources_;
+    std::vector<EntitySceneRenderPackageCreateInfo::PresentationSpriteSource> presentation_sprite_sources_;
     EntitySceneRenderStatistics statistics_{};
 };
 

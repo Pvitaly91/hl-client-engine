@@ -1328,6 +1328,45 @@ void GoldSrcHandshakeCoordinator::update(const ChallengeExchangeTimePoint now)
     release_authentication_session_if_terminal();
 }
 
+bool GoldSrcHandshakeCoordinator::request_graceful_close(const ChallengeExchangeTimePoint now)
+{
+    if (graceful_close_snapshot().requested) return true;
+    if (live_runtime_stage_) {
+        const bool accepted = live_runtime_stage_->request_graceful_close(now);
+        synchronize_from_live_runtime();
+        release_authentication_session_if_terminal();
+        return accepted;
+    }
+    graceful_close_.requested = true;
+    graceful_close_.operation_identity = 1U;
+    graceful_close_.requested_at = now;
+    graceful_close_.netchan_closed_at = now;
+    if (terminal() && state_ != GoldSrcHandshakeState::cancelled) {
+        graceful_close_.outcome = GracefulCloseOutcome::fatal_failure;
+        return true;
+    }
+    // Before the confirmed live-channel owner exists, do not invent endpoint
+    // identity, a goodbye socket, or another handshake to deliver a goodbye.
+    graceful_close_.outcome = GracefulCloseOutcome::cancel_without_protocol_disconnect;
+    cancel(now);
+    if (!terminal()) {
+        // A close intent is also terminal before start; the ordinary cancel
+        // helper intentionally leaves an idle challenge untouched.
+        state_ = GoldSrcHandshakeState::cancelled;
+        release_authentication_session_if_terminal();
+    }
+    return true;
+}
+
+GracefulCloseSummary GoldSrcHandshakeCoordinator::graceful_close_snapshot() const noexcept
+{
+    if (live_runtime_stage_) {
+        const auto live = live_runtime_stage_->graceful_close_snapshot();
+        if (live.requested || live.server_disconnect_observed) return live;
+    }
+    return graceful_close_;
+}
+
 void GoldSrcHandshakeCoordinator::cancel(const ChallengeExchangeTimePoint now)
 {
     if (terminal()) {
@@ -1769,6 +1808,11 @@ GoldSrcHandshakeCoordinator::live_server_info() const noexcept
     return live_runtime_stage_ ? live_runtime_stage_->live_server_info()
                                : nullptr;
 }
+std::string_view GoldSrcHandshakeCoordinator::live_sky_name() const noexcept
+{
+    return live_runtime_stage_ ? live_runtime_stage_->live_sky_name()
+                               : std::string_view{};
+}
 bool GoldSrcHandshakeCoordinator::submit_live_visual_input(
     const LiveVisualControlInput& input,
     const ChallengeExchangeTimePoint now) noexcept
@@ -1824,6 +1868,13 @@ GoldSrcHandshakeCoordinator::live_reference_prediction_snapshot(
     return live_runtime_stage_
         ? live_runtime_stage_->live_reference_prediction_snapshot(now)
         : LiveReferencePredictionSnapshot{};
+}
+
+LiveRuntimeMovementDiagnostics
+GoldSrcHandshakeCoordinator::movement_diagnostics_snapshot() const noexcept
+{
+    return live_runtime_stage_ ? live_runtime_stage_->movement_diagnostics_snapshot()
+                               : LiveRuntimeMovementDiagnostics{};
 }
 const std::optional<PrecacheManifestSignonState>&
 GoldSrcHandshakeCoordinator::precache_manifest_result() const noexcept
@@ -1994,6 +2045,33 @@ std::string_view GoldSrcHandshakeCoordinator::error_context() const noexcept
         return challenge_exchange_.error()->context;
     }
     return {};
+}
+
+std::optional<HandshakeEarlyFailureDiagnostic>
+GoldSrcHandshakeCoordinator::early_failure_diagnostic() const noexcept
+{
+    if(const auto& error=challenge_exchange_.error();error) {
+        const auto category=error->category==ChallengeExchangeErrorCategory::network ? "network" :
+            error->category==ChallengeExchangeErrorCategory::invalid_configuration ? "configuration" : "protocol";
+        return HandshakeEarlyFailureDiagnostic{"challenge",category,
+            error->protocol_code ? to_string(*error->protocol_code) : "not_observed",
+            error->protocol_byte_offset,error->protocol_field ? to_string(*error->protocol_field) : "not_observed"};
+    }
+    if(connect_stage_ && connect_stage_->error()) {
+        const auto& error=*connect_stage_->error();
+        const auto category=error.category==ConnectRequestStageErrorCategory::network ? "network" :
+            error.category==ConnectRequestStageErrorCategory::configuration ? "configuration" : "protocol";
+        return HandshakeEarlyFailureDiagnostic{"connect_request",category,
+            error.protocol_code ? to_string(*error.protocol_code) : "request_stage_failed",{}};
+    }
+    if(response_stage_ && response_stage_->error()) {
+        const auto& error=*response_stage_->error();
+        const auto category=response_stage_->state()==ConnectResponseWaitState::network_error ? "network" :
+            error.code==ConnectResponseWaitErrorCode::invalid_configuration ? "configuration" : "protocol";
+        return HandshakeEarlyFailureDiagnostic{"connect_response",category,
+            error.protocol_code ? to_string(*error.protocol_code) : to_string(error.code),error.protocol_byte_offset};
+    }
+    return std::nullopt;
 }
 
 void GoldSrcHandshakeCoordinator::synchronize_from_challenge(

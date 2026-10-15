@@ -29,6 +29,14 @@ enum class GoldSrcMiptexStorageProfile {
     indexed_pixels,
 };
 
+// Explicit caller-selected material semantics. The ordinary palette/masked
+// interpretation is unchanged. Tint/coverage is for an independently verified
+// decal palette profile, not a rule inferred from a texture's name or color.
+enum class GoldSrcIndexedTextureInterpretation {
+    palette_color,
+    palette_tint_index_coverage,
+};
+
 struct GoldSrcIndexedTextureLimits {
     std::uint32_t maximum_dimension{4'096U};
     std::uint64_t maximum_level_zero_texels{16'777'216ULL};
@@ -127,7 +135,9 @@ public:
         assets::WorldTextureSourceKind source_kind,
         std::optional<std::uint32_t> source_bsp_texture_index = std::nullopt,
         std::optional<std::uint32_t> source_archive_ordinal = std::nullopt,
-        const GoldSrcIndexedTextureLimits& limits = {});
+        const GoldSrcIndexedTextureLimits& limits = {},
+        GoldSrcIndexedTextureInterpretation interpretation =
+            GoldSrcIndexedTextureInterpretation::palette_color);
 
     GoldSrcIndexedTextureDecodeOperation(
         const GoldSrcIndexedTextureDecodeOperation&) = delete;
@@ -153,7 +163,8 @@ private:
         std::span<const std::byte> record,
         GoldSrcParsedMiptex parsed,
         assets::WorldTextureAsset texture,
-        std::size_t total_rgba_bytes) noexcept;
+        std::size_t total_rgba_bytes,
+        GoldSrcIndexedTextureInterpretation interpretation) noexcept;
 
     std::span<const std::byte> record_;
     GoldSrcParsedMiptex parsed_;
@@ -165,6 +176,8 @@ private:
     std::size_t current_level_texel_{0U};
     std::size_t converted_rgba_bytes_{0U};
     std::size_t total_rgba_bytes_{0U};
+    GoldSrcIndexedTextureInterpretation interpretation_{
+        GoldSrcIndexedTextureInterpretation::palette_color};
 };
 
 struct GoldSrcIndexedTextureDecodeStartResult {
@@ -197,7 +210,9 @@ public:
         assets::WorldTextureSourceKind source_kind,
         std::optional<std::uint32_t> source_bsp_texture_index = std::nullopt,
         std::optional<std::uint32_t> source_archive_ordinal = std::nullopt,
-        const GoldSrcIndexedTextureLimits& limits = {});
+        const GoldSrcIndexedTextureLimits& limits = {},
+        GoldSrcIndexedTextureInterpretation interpretation =
+            GoldSrcIndexedTextureInterpretation::palette_color);
 };
 
 } // namespace hlclient::goldsrc::indexed_texture

@@ -77,6 +77,12 @@ std::uint64_t prediction_movement_config_signature(
     hash_value(hash, config.stop_epsilon);
     hash_value(hash, config.air_wish_speed_cap);
     hash_value(hash, config.jump_impulse);
+    if (config.crouch_jump) {
+        hash_value(hash, std::uint32_t{0x434A5031U});
+        hash_value(hash, config.crouch_jump->forward_speed);
+        hash_value(hash, config.crouch_jump->vertical_impulse);
+        hash_value(hash, config.crouch_jump->minimum_speed);
+    }
     hash_vector(hash, config.standing_view_offset);
     hash_vector(hash, config.duck_view_offset);
     hash_value(hash, config.gravity_profile);

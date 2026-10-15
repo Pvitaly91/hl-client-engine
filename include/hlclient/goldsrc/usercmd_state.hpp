@@ -169,6 +169,12 @@ struct GoldSrcUserCmdCreateInfo {
     std::uint64_t source_input_sequence{0U};
     std::int64_t sample_time_nanoseconds{0};
     std::uint64_t sample_duration_nanoseconds{0U};
+    // Simulation-only immutable one-shot delta, never encoded on the wire.
+    // Retained with this exact command for deterministic rollback/replay.
+    std::array<float,3> velocity_impulse{};
+    // Independent post-step delta. Does not change the movement interval,
+    // origin, collision/ground evidence or bytes of the submitted wire command.
+    std::array<float,3> post_velocity_impulse{};
 };
 
 class GoldSrcUserCmdState final {
@@ -207,6 +213,10 @@ public:
     [[nodiscard]] std::uint64_t source_input_sequence() const noexcept;
     [[nodiscard]] std::int64_t sample_time_nanoseconds() const noexcept;
     [[nodiscard]] std::uint64_t sample_duration_nanoseconds() const noexcept;
+    [[nodiscard]] const std::array<float,3>& velocity_impulse() const noexcept { return values_.velocity_impulse; }
+    [[nodiscard]] CreationResult with_velocity_impulse(std::array<float,3>) const noexcept;
+    [[nodiscard]] const std::array<float,3>& post_velocity_impulse() const noexcept { return values_.post_velocity_impulse; }
+    [[nodiscard]] CreationResult with_post_velocity_impulse(std::array<float,3>) const noexcept;
 
 private:
     explicit GoldSrcUserCmdState(

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/goldsrc/move_vars.hpp>
+#include <hlclient/game_api/player_appearance.hpp>
 
 #include <array>
 #include <cstddef>
@@ -64,8 +65,8 @@ enum class UserInfoUpdateEvidenceProfile {
 };
 
 // The key names below are exact captured byte strings. Raw values are never
-// exposed: player identity text and all unknown/protected values remain
-// private even when the key itself is recognized.
+// exposed: only bounded display-compatible name and typed safe appearance
+// projections are available. Raw values and protected entries remain private.
 enum class UserInfoSafeField {
     player_name,
     player_model,
@@ -99,6 +100,13 @@ public:
     [[nodiscard]] std::size_t info_entry_count() const noexcept;
     [[nodiscard]] std::span<const UserInfoSafeFieldMetadata> safe_fields() const noexcept;
     [[nodiscard]] std::optional<std::size_t> player_name_length() const noexcept;
+    // Narrow owned UI projection; unsupported bytes become '?' for the current
+    // ASCII glyph renderer. Raw userinfo, private ID and suffix stay private.
+    [[nodiscard]] std::string player_display_name() const;
+    // A safe ASCII model token and strict 0..360 colors, not raw userinfo or
+    // an asset-opening capability. Invalid model bytes are never returned.
+    [[nodiscard]] game_api::PlayerAppearanceFields player_appearance() const;
+    [[nodiscard]] bool same_occupant(const UserInfoUpdateState&) const noexcept;
     [[nodiscard]] std::optional<std::size_t> player_model_length() const noexcept;
     [[nodiscard]] bool has_private_user_id() const noexcept;
     [[nodiscard]] std::size_t opaque_suffix_size() const noexcept;
@@ -142,6 +150,14 @@ private:
         UserInfoUpdateCompatibilityProfile::
             valve_half_life_protocol_48_build_10210};
 };
+
+// Confirmed zero-based userinfo routing vs one-based entity/player slot.
+[[nodiscard]] inline std::optional<std::uint32_t> player_slot_from_client_index(
+    std::uint8_t index, std::uint32_t maximum_clients) noexcept {
+    if (maximum_clients == 0U || maximum_clients > 32U || index >= maximum_clients)
+        return {};
+    return static_cast<std::uint32_t>(index) + 1U;
+}
 
 enum class UserInfoStringErrorCode {
     missing_leading_separator,

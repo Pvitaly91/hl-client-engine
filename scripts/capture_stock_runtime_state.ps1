@@ -66,6 +66,7 @@ param(
 
     [Parameter(ParameterSetName = 'FunctionalSmoke')]
     [switch]$ProjectClientMuteGlockFireSound,
+    [switch]$ProjectClientDebugFreezeTracer,
 
     [Parameter(ParameterSetName = 'FunctionalSmoke')]
     [switch]$RemoteAudioPeer,
@@ -492,6 +493,10 @@ if ($ProjectClientPrediction -ceq 'reference' -and -not $projectClientVisualMode
 if ($ProjectClientMuteGlockFireSound -and
     (-not $projectClientVisualMode -or $ProjectClientLiveInput -cne 'keyboard-mouse')) {
     throw 'ProjectClientMuteGlockFireSound requires keyboard-mouse live-visual-control.'
+}
+if ($ProjectClientDebugFreezeTracer -and
+    (-not $projectClientVisualMode -or $ProjectClientLiveInput -cne 'keyboard-mouse')) {
+    throw 'ProjectClientDebugFreezeTracer requires keyboard-mouse live-visual-control.'
 }
 if ($TestStartHealth -eq 50) {
     if ($RemoteAudioPeer) { throw 'RemoteAudioPeer incompatible with TestStartHealth.' }
@@ -4193,7 +4198,7 @@ function Invoke-BoundedOrchestrator {
             'remote-audio-peer-exit-code', 'remote-audio-output-isolation',
             'client-image-identity', 'client-resume-result',
             'client-initialized', 'connect-requested',
-            'connection-status', 'client-map-entry-status',
+            'connection-status', 'connection-establishment', 'session-terminal-state', 'client-map-entry-status',
             'map-entry-source', 'last-confirmed-stage',
             'client-steam-argument', 'server-logging',
             'client-connect-port',
@@ -4485,6 +4490,192 @@ function Assert-OrchestratorValue {
     }
 }
 
+# E28.2: connection/gameplay commitments are historical facts, while close,
+# cleanup and automatic evidence eligibility remain separate outcomes.
+function Get-FunctionalEvidenceEligibility {
+    param([bool]$ProjectClientStockSignonMode, [bool]$FastManualMode,
+          [int]$TestStartHealth, [bool]$Peer, [bool]$ManualSessionTiming)
+    return $ProjectClientStockSignonMode -and -not $FastManualMode -and
+        $TestStartHealth -ne 50 -and -not $Peer -and -not $ManualSessionTiming
+}
+
+function Get-ProjectWorldPublicationExpectation {
+    param([bool]$ManualKeyboard, [bool]$ManualReceiptAttested)
+    if ($ManualKeyboard -and -not $ManualReceiptAttested) {
+        throw 'manual_completion_receipt_not_attested'
+    }
+    # This field is the owning committed session fact, not the transient
+    # current world after teardown. Non-manual successful live paths retain
+    # their existing true expectation.
+    return 'true'
+}
+
+function Test-ManualUnsignedIntegral {
+    param([object]$Value, [UInt64]$Minimum = 0, [UInt64]$Maximum = [UInt64]::MaxValue)
+    return ($Value -is [byte] -or $Value -is [UInt16] -or $Value -is [UInt32] -or
+        $Value -is [UInt64] -or $Value -is [Int16] -or $Value -is [Int32] -or
+        $Value -is [Int64]) -and $Value -ge 0 -and
+        [UInt64]$Value -ge $Minimum -and [UInt64]$Value -le $Maximum
+}
+
+function Assert-ManualNormalCompletionAttestation {
+    param([object]$Result, [object]$NativeSummary, [string]$RunId,
+          [string]$ExpectedMap, [bool]$Peer, [object]$LaunchIdentity,
+          [Collections.IDictionary]$ClientBindings)
+    $field = { param($Object, $Name) Get-ManualSummaryField $Object $Name }
+    $require = { param([bool]$Condition, [string]$Category)
+        if (-not $Condition) { throw "manual_completion_attestation_failed:$Category" }
+    }
+    & $require ($RunId -cmatch '^[0-9a-f]{32}$') 'run_identity'
+    & $require ($null -ne $Result -and (Test-ManualUnsignedIntegral $Result.ExitCode 0 0)) 'native_exit'
+    foreach ($entry in ([ordered]@{
+        orchestrator='success'; result='success'; 'failure-category'='none';
+        'job-cleanup'='exact'; 'server-ready'='true'; 'client-ready'='true';
+        'connection-status'='accepted'; 'connection-accepted'='true';
+        'client-map-entry-status'='observed'; 'live-visual-verified'='true';
+        'usercmd-transmitted'='true'; 'application-result'='completed';
+        'application-primary-error'='none'
+    }).GetEnumerator()) { Assert-OrchestratorValue $Result $entry.Key $entry.Value }
+    & $require ((& $field $NativeSummary 'schema') -ceq 'hlclient.local-research-copy-smoke.v2' -and
+        (& $field $NativeSummary 'mode') -ceq 'project_client_live_visual_control_v1' -and
+        (& $field $NativeSummary 'primary_failure') -ceq 'none' -and
+        (& $field $NativeSummary 'owned_process_cleanup') -ceq 'exact') 'native_completion'
+    $application = & $field $NativeSummary 'application_outcome'
+    & $require ((& $field $application 'result') -ceq 'completed' -and
+        (& $field $application 'primary_error') -ceq 'none') 'application_failure'
+    foreach ($name in @('server_ready','connection_accepted','client_world_state_published',
+                        'usercmd_transmitted','live_visual_verified')) {
+        $value = & $field $NativeSummary $name
+        & $require ($value -is [bool] -and $value) "native_$name"
+    }
+    & $require ((& $field $LaunchIdentity 'schema') -ceq 'hlclient.client-launch-identity.v1' -and
+        (& $field $LaunchIdentity 'run_id') -ceq $RunId -and
+        (& $field $LaunchIdentity 'publication_phase') -ceq 'before_client_execution') 'launch_identity'
+    $sha = & $field $LaunchIdentity 'client_sha256_at_launch'
+    & $require ($sha -is [string] -and $sha -match '^[0-9A-Fa-f]{64}$' -and
+        (& $field $NativeSummary 'client_sha256_at_launch') -eq $sha -and
+        (& $field $NativeSummary 'client_sha256_after_run') -eq $sha -and
+        (& $field $NativeSummary 'client_binary_change_status') -ceq 'unchanged') 'binary_identity'
+    $receipts = & $field $NativeSummary 'session_receipts'
+    & $require ((& $field $receipts 'schema') -ceq 'hlclient.session-receipt.v1') 'receipt_schema'
+    $roles = if ($Peer) { @('A','B') } else { @('A') }
+    [UInt64]$mapEpoch = 0
+    foreach ($role in $roles) {
+        $binding = if ($null -ne $ClientBindings) { $ClientBindings[$role] } else { $null }
+        $receipt = & $field $receipts $role
+        & $require ((Test-ManualUnsignedIntegral (& $field $binding 'process_id') 1 ([UInt32]::MaxValue)) -and
+            (Test-ManualUnsignedIntegral (& $field $binding 'process_creation_filetime') 1) -and
+            (Test-ManualUnsignedIntegral (& $field $receipt 'process_id') 1 ([UInt32]::MaxValue)) -and
+            (Test-ManualUnsignedIntegral (& $field $receipt 'process_creation_filetime') 1)) "process_identity_$role"
+        & $require ((& $field $binding 'schema') -ceq 'hlclient.client-process-binding.v1' -and
+            (& $field $binding 'run_id') -ceq $RunId -and
+            (& $field $binding 'client_role') -ceq $role -and
+            (& $field $binding 'client_sha256_at_launch') -eq $sha) "binding_$role"
+        & $require ((& $field $receipt 'run_id') -ceq $RunId -and
+            (& $field $receipt 'role') -ceq $role -and
+            (Test-ManualUnsignedIntegral (& $field $receipt 'network_generation') 1 1) -and
+            (& $field $receipt 'map_identifier') -ceq $ExpectedMap -and
+            (& $field $receipt 'process_id') -eq (& $field $binding 'process_id') -and
+            (& $field $receipt 'process_creation_filetime') -eq (& $field $binding 'process_creation_filetime')) "receipt_identity_$role"
+        $terminated = & $field $receipt 'runner_terminated'
+        & $require ($terminated -is [bool] -and ($role -ceq 'B' -or -not $terminated)) "runner_termination_$role"
+        $ownedPeerStop = $role -ceq 'B' -and $terminated
+        $mapObserved = & $field $receipt 'map_entry_observed'
+        & $require ($mapObserved -is [bool] -and $mapObserved) "receipt_${role}_map_entry_observed"
+        & $require ((Test-ManualUnsignedIntegral (& $field $receipt 'map_generation') 1) -and
+            (Test-ManualUnsignedIntegral (& $field $receipt 'generation_ordinal') 1 8) -and
+            (Test-ManualUnsignedIntegral (& $field $receipt 'fact_mask') 0 131071)) "generation_type_$role"
+        [UInt64]$epoch = & $field $receipt 'map_generation'
+        [UInt64]$ordinal = & $field $receipt 'generation_ordinal'
+        & $require ($epoch -gt 0 -and $ordinal -ge 1 -and $ordinal -le 8 -and
+            ($mapEpoch -eq 0 -or $mapEpoch -eq $epoch)) "map_epoch_$role"
+        $mapEpoch = $epoch
+        [UInt64]$facts = & $field $receipt 'fact_mask'
+        $milestones = @(& $field $receipt 'milestones')
+        & $require ($milestones.Count -eq 5 -and $null -ne $milestones[2] -and
+            (Test-ManualUnsignedIntegral (& $field $milestones[2] 'publication_ordinal') 1)) "map_milestone_$role"
+        $exitName = if ($role -ceq 'A') { 'client_exit_code' } else { 'remote_audio_peer_exit_code' }
+        $pidName = if ($role -ceq 'A') { 'client_process_id' } else { 'remote_audio_peer_process_id' }
+        & $require ((Test-ManualUnsignedIntegral (& $field $NativeSummary $exitName) 0 0) -and
+            (Test-ManualUnsignedIntegral (& $field $NativeSummary $pidName) 1 ([UInt32]::MaxValue)) -and
+            (& $field $NativeSummary $pidName) -eq (& $field $binding 'process_id')) "child_exit_$role"
+        if ($ownedPeerStop) {
+            # E28.1 A-close-first policy: B's bound committed map survives its
+            # explicit owned stop. This is not a normal B quit or protocol send.
+            & $require ((& $field $receipt 'status') -cin @('ready','progress') -and
+                (& $field $receipt 'stage') -cin @('map_entry_committed','world_ready','first_gameplay_update','terminal') -and
+                ($facts -band 32768) -ne 0) 'owned_peer_map_commit'
+            continue
+        }
+        & $require ((& $field $receipt 'status') -ceq 'ready' -and
+            (& $field $receipt 'stage') -ceq 'terminal' -and $facts -eq 131071) "committed_facts_$role"
+        foreach ($name in @('terminal_valid','keyboard_readiness')) {
+            $value = & $field $receipt $name
+            & $require ($value -is [bool] -and $value) "receipt_${role}_$name"
+        }
+        & $require (@($milestones | Where-Object {$null -eq $_}).Count -eq 0 -and
+            (Test-ManualUnsignedIntegral (& $field $milestones[4] 'publication_ordinal') 1)) "milestones_$role"
+        $counters = & $field $receipt 'counters'
+        foreach ($name in @('new_usercmd_count','transmitted_usercmd_packet_count','server_sample_count')) {
+            $value = & $field $counters $name
+            & $require (Test-ManualUnsignedIntegral $value 1) "traffic_${role}_$name"
+        }
+        $zero = & $field $counters 'usercmd_zero_observed'
+        & $require ($zero -is [bool] -and -not $zero) "traffic_zero_$role"
+        $close = & $field $receipt 'close'
+        foreach ($entry in ([ordered]@{
+            session_generation=@(1,1); operation_identity=@(1,[UInt64]::MaxValue);
+            send_attempt_count=@(1,3); successful_send_count=@(1,3);
+            transport_closed_process_ms=@(0,[UInt64]::MaxValue)
+        }).GetEnumerator()) {
+            & $require (Test-ManualUnsignedIntegral (& $field $close $entry.Key) $entry.Value[0] $entry.Value[1]) "shutdown_${role}_type_$($entry.Key)"
+        }
+        foreach ($name in @('ack_observed','server_disconnect_observed','deadline_reached')) {
+            & $require ((& $field $close $name) -is [bool]) "shutdown_${role}_type_$name"
+        }
+        & $require ((& $field $close 'reason') -cin @('window_close','duration_limit') -and
+            (& $field $close 'outcome') -cin @('sent_but_unconfirmed','transport_acknowledged','server_disconnect_confirmed') -and
+            (& $field $close 'session_generation') -eq 1 -and
+            (& $field $close 'operation_identity') -gt 0 -and
+            (& $field $close 'successful_send_count') -ge 1 -and
+            (& $field $close 'successful_send_count') -le (& $field $close 'send_attempt_count') -and
+            (& $field $close 'send_attempt_count') -le 3 -and
+            $null -ne (& $field $close 'transport_closed_process_ms')) "shutdown_$role"
+        foreach ($name in @('requested','eligible','queued')) {
+            $value = & $field $close $name
+            & $require ($value -is [bool] -and $value) "shutdown_${role}_$name"
+        }
+        if ((& $field $close 'outcome') -ceq 'transport_acknowledged') {
+            & $require ((& $field $close 'ack_observed') -is [bool] -and (& $field $close 'ack_observed')) "ACK_$role"
+        }
+        if ((& $field $close 'outcome') -ceq 'server_disconnect_confirmed') {
+            & $require ((& $field $close 'server_disconnect_observed') -is [bool] -and (& $field $close 'server_disconnect_observed')) "server_confirmation_$role"
+        }
+    }
+    # authentication and scripted/prediction coverage are intentionally not
+    # promoted here. A healthy manual completion is not full evidence eligibility.
+}
+
+function Get-FunctionalSmokeFinalVerdict {
+    param([Collections.IDictionary]$Context)
+    $success = $null -eq $Context['PrimaryError'] -and
+        $Context['CleanupErrorCount'] -eq 0 -and $Context['RunExists'] -and
+        $Context['OwnedStopped'] -and $Context['RestorationSucceeded'] -and
+        $Context['ServerReady'] -and $Context['ClientReady'] -and
+        $Context['NativeExit'] -eq 0 -and -not $Context['TestHealthFailed']
+    if ($Context['ManualKeyboard']) {
+        $success = $success -and $Context['ManualReceiptAttested']
+    }
+    $result = if ($success) { $Context['SuccessResult'] }
+        elseif (-not $Context['OwnedStopped'] -or -not $Context['RestorationSucceeded'] -or
+                $Context['CleanupErrorCount'] -ne 0) { 'local_smoke_integrity_failed' }
+        elseif ($Context['NativeExit'] -eq 0 -and $Context['TestHealthFailed']) { 'test_start_health_not_confirmed' }
+        elseif ($null -ne $Context['PendingResult']) { $Context['PendingResult'] }
+        elseif ($Context['ServerReady']) { 'local_server_ready_client_blocked' }
+        else { 'local_server_startup_failed' }
+    return [pscustomobject]@{ Success=[bool]$success; Result=[string]$result; ExitCode=$(if ($success) {0} else {1}) }
+}
+
 function Write-StockServerProfileDiagnosticPublicOutput {
     param([Collections.Generic.Dictionary[string, string]]$Values)
     Write-Output ("[stock-server-profile] parse-status={0}" -f
@@ -4656,6 +4847,11 @@ function Get-ApplicationOutcomeFieldNames {
     'failure_stage',
     'replay_error',
     'control_error',
+    'temporary_entity_type',
+    'packet_entity',
+    'packet_schema_boundary',
+    'user_info_error', 'user_info_string_error', 'user_info_string_length',
+    'user_info_empty', 'user_info_private_id_present',
     'clientdata_error',
     'delta_error',
     'module_error',
@@ -4706,6 +4902,23 @@ function Get-ApplicationOutcomeFieldNames {
 function Test-ApplicationOutcomeToken {
     param([string]$Name,[string]$Value)
     if ($Value.Length -lt 1 -or $Value.Length -gt 64) { return $false }
+    if ($Name -cin @('user_info_empty','user_info_private_id_present')) {
+        return $Value -cin @('unavailable','0','1')
+    }
+    if ($Name -ceq 'user_info_string_length' -and $Value -cne 'unavailable') {
+        [uint64]$lengthValue = 0
+        return ($Value -cmatch '^[0-9]+$' -and [uint64]::TryParse($Value,[ref]$lengthValue) -and $lengthValue -le 4096)
+    }
+    if ($Name -ceq 'user_info_error') {
+        return $Value -cin @('unavailable','invalid_configuration','empty_input','wrong_opcode',
+            'message_too_large','truncated_client_index','invalid_client_index','truncated_user_id',
+            'invalid_user_id','unterminated_info_string','info_string_too_large','invalid_info_string',
+            'truncated_opaque_suffix','unexpected_trailing_bytes','size_overflow')
+    }
+    if ($Name -ceq 'user_info_string_error') {
+        return $Value -cin @('unavailable','missing_leading_separator','empty_key','empty_value',
+            'malformed_key_value_sequence','duplicate_key','key_too_long','value_too_long','too_many_entries')
+    }
     if ($Name -cin @('ground_normal_x','ground_normal_y','ground_normal_z',
             'prediction_raw_error','prediction_camera_jump') -and $Value -cne 'unavailable') {
         return $Value -cmatch '^-?[0-9]+(?:\.[0-9]+)?$'
@@ -4745,6 +4958,131 @@ function Get-RuntimeFailureStdoutFallback {
     }
 }
 
+function Get-ManualSummaryField {
+    param([object]$Value, [string]$Name, [object]$Default = $null)
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [Collections.IDictionary]) {
+        if ($Value.Contains($Name)) { return $Value[$Name] }
+    } else {
+        $property = $Value.PSObject.Properties[$Name]
+        if ($null -ne $property) { return $property.Value }
+    }
+    return $Default
+}
+
+function Get-ManualFinalSessionSummary {
+    param([string]$RunId, [object]$NativeSummary, [string]$Verdict,
+          [string]$Cleanup, [string]$Restoration, [bool]$Fast,
+          [Nullable[long]]$ManagedScopeEntries, [bool]$Peer)
+    $receipts = Get-ManualSummaryField $NativeSummary 'session_receipts'
+    $peerTiming = Get-ManualSummaryField $NativeSummary 'peer_disconnect_timing'
+    $peerTimingStatus = Get-ManualSummaryField $peerTiming 'status' 'not_observed'
+    $peerDelay = Get-ManualSummaryField $peerTiming 'close_to_postcommit_removal_ms'
+    if ($peerTimingStatus -cne 'observed' -or
+        $peerDelay -isnot [ValueType] -or $peerDelay -is [bool] -or
+        -not [double]::IsFinite([double]$peerDelay) -or [double]$peerDelay -lt 0) {
+        $peerDelay = $null
+    }
+    $sha = Get-ManualSummaryField $NativeSummary 'client_sha256_at_launch'
+    if ($null -eq $sha -or [string]$sha -cnotmatch '^[0-9A-F]{64}$') { $sha = 'not_recorded' }
+    $summary = [ordered]@{
+        schema = 'hlclient.manual-session-final-summary.v1'
+        run_id = $RunId
+        client_sha256_at_launch = $sha
+        client_sha256_after_run = (Get-ManualSummaryField $NativeSummary 'client_sha256_after_run')
+        binary_change_status = (Get-ManualSummaryField $NativeSummary 'client_binary_change_status' 'not_observed')
+        connection_establishment = (Get-ManualSummaryField $NativeSummary 'connection_establishment' `
+            (Get-ManualSummaryField $NativeSummary 'connection_status' 'unknown'))
+        session_terminal_state = (Get-ManualSummaryField $NativeSummary 'session_terminal_state' 'not_observed')
+        world_publication_phase = $(
+            $committedWorld = Get-ManualSummaryField $NativeSummary 'client_world_state_published'
+            if ($committedWorld -is [bool] -and $committedWorld) { 'committed_during_session' }
+            else { 'not_observed' })
+        B_close_to_A_postcommit_removal_ms = $peerDelay
+        peer_removal_timing_status = $peerTimingStatus
+        peer_removal_timing_semantics = 'close_intent_to_server_derived_postcommit_absence_observation_not_packet_delivery'
+        runner_verdict = $Verdict
+        cleanup_result = $Cleanup
+        restoration_result = $Restoration
+        restoration_scope = $(if ($Fast) { 'managed_mutable_files' } else { 'full_tree' })
+        managed_scope_entries = $ManagedScopeEntries
+        full_tree_verification = $(if ($Fast) { 'not_performed' } else { $Restoration })
+        server_exit_code = (Get-ManualSummaryField $NativeSummary 'server_exit_code')
+        server_exit_status = (Get-ManualSummaryField $NativeSummary 'server_exit_status' 'not_observed')
+        guard_exit_code = (Get-ManualSummaryField $NativeSummary 'guard_exit_code')
+        guard_exit_status = (Get-ManualSummaryField $NativeSummary 'guard_exit_status' 'not_observed')
+        clients = [ordered]@{}
+    }
+    foreach ($role in @('A', 'B')) {
+        if ($role -eq 'B' -and -not $Peer) { continue }
+        $entry = Get-ManualSummaryField $receipts $role
+        $close = Get-ManualSummaryField $entry 'close'
+        $map = Get-ManualSummaryField $entry 'map_entry_observed'
+        $exitField = if ($role -eq 'A') { 'client_exit_code' } else { 'remote_audio_peer_exit_code' }
+        $exitCode = Get-ManualSummaryField $NativeSummary $exitField
+        $reason = Get-ManualSummaryField $close 'reason' 'not_observed'
+        $forced = Get-ManualSummaryField $entry 'runner_terminated' $false
+        if ($forced -is [bool] -and $forced) { $reason = 'runner_termination' }
+        elseif ($null -ne $exitCode -and $exitCode -ne 0) {
+            $reason = Get-ManualSummaryField $NativeSummary 'primary_failure' 'nonzero_exit'
+        }
+        $sentCount = Get-ManualSummaryField $close 'successful_send_count'
+        $eligible = Get-ManualSummaryField $close 'eligible'
+        $serverConfirmed = Get-ManualSummaryField $close 'server_disconnect_observed'
+        $disconnect = if ($null -ne $sentCount -and $sentCount -gt 0) { 'sent' }
+            elseif ($eligible -is [bool] -and -not $eligible) { 'not_applicable' }
+            elseif ($null -ne $close) { 'not_sent' } else { 'not_observed' }
+        $summary.clients[$role] = [ordered]@{
+            receipt_status = (Get-ManualSummaryField $entry 'status' 'legacy_evidence_unavailable')
+            map_entry = $(if ($map -is [bool] -and $map) { 'observed' } else { 'not_observed' })
+            exit_code = $exitCode
+            exit_reason = $reason
+            disconnect_request = $disconnect
+            server_confirmation = $(if ($serverConfirmed -is [bool] -and $serverConfirmed) { 'observed' } else { 'not_observed' })
+            transport_ack_observed = (Get-ManualSummaryField $close 'ack_observed')
+            shutdown_outcome = (Get-ManualSummaryField $close 'outcome' 'not_observed')
+        }
+    }
+    return $summary
+}
+
+function Write-ManualFinalSessionSummary {
+    param([Collections.IDictionary]$Summary, [string]$ReportPath)
+    Write-Output ("[manual-summary] Run ID: {0}" -f $Summary.run_id)
+    Write-Output ("[manual-summary] Client build SHA: {0}; ending identity: {1}" -f
+        $Summary.client_sha256_at_launch, $Summary.binary_change_status)
+    Write-Output ("[manual-summary] Connection establishment: {0}; session terminal: {1}; world publication: {2}" -f
+        $Summary.connection_establishment, $Summary.session_terminal_state, $Summary.world_publication_phase)
+    foreach ($role in $Summary.clients.Keys) {
+        $client = $Summary.clients[$role]
+        $exit = if ($null -ne $client.exit_code) { [string]$client.exit_code } else { 'not_observed' }
+        Write-Output ("[manual-summary] {0} map entry: {1}; receipts: {2}" -f $role, $client.map_entry, $client.receipt_status)
+        Write-Output ("[manual-summary] {0} exit: {1}; reason: {2}" -f $role, $exit, $client.exit_reason)
+        $ack = if ($client.transport_ack_observed -is [bool]) {
+            $client.transport_ack_observed.ToString().ToLowerInvariant()
+        } else { 'not_observed' }
+        Write-Output ("[manual-summary] {0} disconnect request: {1}; transport ACK: {2}; server confirmation: {3}; outcome: {4}" -f
+            $role, $client.disconnect_request, $ack, $client.server_confirmation, $client.shutdown_outcome)
+    }
+    Write-Output ("[manual-summary] Runner verdict: {0}" -f $Summary.runner_verdict)
+    if ($Summary.clients.Contains('B')) {
+        Write-Output ("[manual-summary] B close intent -> A committed absence observation: {0} ms; status: {1}" -f
+            $(if ($null -eq $Summary.B_close_to_A_postcommit_removal_ms) { 'not_observed' } else {
+                ([double]$Summary.B_close_to_A_postcommit_removal_ms).ToString('G', [Globalization.CultureInfo]::InvariantCulture) }),
+            $Summary.peer_removal_timing_status)
+    }
+    Write-Output ("[manual-summary] Cleanup result: {0}" -f $Summary.cleanup_result)
+    Write-Output ("[manual-summary] Restoration result: {0}; scope: {1}" -f
+        $Summary.restoration_result, $Summary.restoration_scope)
+    Write-Output ("[manual-summary] Managed scope size: {0}; full-tree verification: {1}" -f
+        $(if ($null -eq $Summary.managed_scope_entries) { 'not_observed' } else { $Summary.managed_scope_entries }),
+        $Summary.full_tree_verification)
+    Write-Output ("[manual-summary] HLDS exit: {0}; guard exit: {1}" -f
+        $(if ($null -eq $Summary.server_exit_code) { $Summary.server_exit_status } else { $Summary.server_exit_code }),
+        $(if ($null -eq $Summary.guard_exit_code) { $Summary.guard_exit_status } else { $Summary.guard_exit_code }))
+    Write-Output ("[manual-summary] Report path: {0}" -f $(if ($ReportPath) { $ReportPath } else { 'not_published' }))
+}
+
 function Publish-FunctionalWrapperResult {
     param([string]$RunRoot, [Collections.IDictionary]$Value, [object]$Capability)
     # One normal publication and at most one bounded fallback in the SAME
@@ -4758,6 +5096,9 @@ function Publish-FunctionalWrapperResult {
         $Value['publication_failure'] = 'normal_report_publication_failed'
         $Value['cleanup_error_count'] = [int]$Value['cleanup_error_count'] + 1
         $Value['result'] = 'local_smoke_integrity_failed'
+        if ($Value.Contains('session_summary')) {
+            $Value.session_summary.runner_verdict = 'local_smoke_integrity_failed'
+        }
         $fallback = Join-Path $RunRoot 'functional-smoke-wrapper.incomplete.json'
         try {
             Write-AtomicJsonNoOverwrite $fallback $Value 'incomplete functional wrapper' $Capability
@@ -6565,10 +6906,19 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalFailureRetentionSelfTest') {
             $cause = $native.application_outcome
             $exactCause = ($cause.control_error -ceq 'unsupported_opcode' -and
                     $cause.message_start_byte -ceq '5' -and $cause.failure_byte -ceq '6') -or
+                ($cause.control_error -ceq 'unsupported_temporary_entity_type' -and
+                    $cause.temporary_entity_type -ceq '12' -and
+                    $cause.message_start_byte -ceq '5' -and $cause.failure_byte -ceq '7') -or
                 ($cause.control_error -ceq 'truncated_body' -and $cause.user_message_name -ceq 'Health' -and
                     $cause.expected_body -ceq '1' -and $cause.actual_body -ceq '0') -or
                 ($cause.module_error -ceq 'invalid_token' -and $cause.user_message_name -ceq 'ItemPickup' -and
-                    $cause.failure_byte -ceq '4')
+                    $cause.failure_byte -ceq '4') -or
+                ($cause.control_error -ceq 'user_info_update_failed' -and
+                    $cause.user_info_error -ceq 'invalid_info_string' -and
+                    $cause.user_info_string_error -ceq 'missing_leading_separator' -and
+                    $cause.user_info_string_length -ceq '15' -and $cause.user_info_empty -ceq '0' -and
+                    $cause.user_info_private_id_present -ceq '1' -and
+                    $cause.message_start_byte -ceq '54' -and $cause.failure_byte -ceq '60')
             if ($native.schema -cne 'hlclient.runtime-diagnostics-offline.v1' -or
                 $native.client_exit_code -ne 2 -or
                 -not $exactCause -or
@@ -6629,7 +6979,9 @@ if ($PSCmdlet.ParameterSetName -eq 'FunctionalFailureRetentionSelfTest') {
             [string]$wrapper.Value.native_summary.application_outcome.primary_error -cne 'runtime_record_failed' -or
             [string]$wrapper.Value.native_summary.application_outcome.prediction_coverage -cne 'limited' -or
             [string]$wrapper.Value.native_summary.application_outcome.inventory_notifications -cne
-                $(if ($RuntimeFailureRoundtripJson) { '1' } else { '2' }) -or
+                $(if ($RuntimeFailureRoundtripJson) {
+                    [string]$native.application_outcome.inventory_notifications
+                } else { '2' }) -or
             [string]$wrapper.Value.restoration_status -cne 'exact' -or
             [string]$wrapper.Value.result -cne
                 'local_server_ready_client_blocked') {
@@ -8098,6 +8450,12 @@ if ($functionalSmokeMode) {
 }
 $orchestratorResult = $null
 $orchestratorExitCode = 255
+$manualKeyboardCompletion = $functionalSmokeMode -and $projectClientVisualMode -and
+    $ProjectClientLiveInput -ceq 'keyboard-mouse'
+$manualKeyboardCompletionAttested = $false
+$functionalEvidenceEligible = Get-FunctionalEvidenceEligibility `
+    $projectClientStockSignonMode $fastManualMode $TestStartHealth `
+    ([bool]$RemoteAudioPeer) $manualSessionTiming
 $wrapperCapability = [IntPtr]::Zero
 $wrapperCleanupCapability = [IntPtr]::Zero
 $wrapperJob = [IntPtr]::Zero
@@ -8196,7 +8554,9 @@ try {
         if ($projectClientVisualMode) { $arguments += @('--validation-mode', $ValidationMode.ToLowerInvariant()) }
         if ($TestStartHealth -eq 50) { $arguments += @('--test-start-health', '50') }
         if ($ProjectClientMuteGlockFireSound) { $arguments += '--project-client-mute-glock-fire-sound' }
+        if ($ProjectClientDebugFreezeTracer) { $arguments += '--project-client-debug-freeze-tracer' }
         if ($RemoteAudioPeer) { $arguments += '--remote-audio-peer' }
+        if ($ExternalManualMap) { $arguments += '--external-manual-map' }
         if ($ProjectClientNoTimeLimit) { $arguments += '--manual-no-time-limit' }
         if ($PSBoundParameters.ContainsKey('ProjectClientDurationSeconds')) {
             $arguments += @('--manual-duration-seconds', [string]$ProjectClientDurationSeconds)
@@ -8334,6 +8694,30 @@ try {
     Assert-OrchestratorValue $orchestratorResult failure-category none
     Assert-OrchestratorValue $orchestratorResult result success
     Assert-OrchestratorValue $orchestratorResult job-cleanup exact
+    if ($manualKeyboardCompletion) {
+        # The native immutable staged report and handle-bound manifests are
+        # available after its exact owned cleanup, before wrapper restoration.
+        # Read only through the existing pinned/size-bounded artifact pipeline.
+        if ($null -eq $runDirectoryCapability) {
+            $runDirectoryCapability = New-RunDirectoryCapability $runRoot
+        }
+        Assert-RunDirectoryCapability $runDirectoryCapability $runRoot
+        $manualNative = (Read-BoundedJsonWithRetainedBytes `
+            (Join-Path $runRoot 'functional-smoke.staged.json') 131072 `
+            'manual completion native summary' $runDirectoryCapability).Value
+        $manualLaunch = (Read-BoundedJsonWithRetainedBytes `
+            (Join-Path $runRoot 'client-launch-identity.json') 8192 `
+            'manual completion launch identity' $runDirectoryCapability).Value
+        $manualBindings = [ordered]@{}
+        foreach ($role in $(if ($RemoteAudioPeer) { @('A','B') } else { @('A') })) {
+            $manualBindings[$role] = (Read-BoundedJsonWithRetainedBytes `
+                (Join-Path $runRoot "client-$role-process-binding.json") 4096 `
+                'manual completion process binding' $runDirectoryCapability).Value
+        }
+        Assert-ManualNormalCompletionAttestation $orchestratorResult $manualNative `
+            $runId "maps/$Map.bsp" ([bool]$RemoteAudioPeer) $manualLaunch $manualBindings
+        $manualKeyboardCompletionAttested = $true
+    }
     if ($EnableWriterTraceHandoff) {
         Assert-OrchestratorValue $orchestratorResult `
             writer-trace-prelaunch-ready true
@@ -8374,7 +8758,7 @@ try {
                             'fresh_project_client_live_runtime_state'
                         } else { 'fresh_project_client_stock_signon' }
                     } else { 'functional_smoke' })
-                'evidence-eligible' = $(if ($projectClientStockSignonMode -and -not $fastManualMode -and $TestStartHealth -ne 50 -and -not $RemoteAudioPeer -and -not $manualSessionTiming) {
+                'evidence-eligible' = $(if ($functionalEvidenceEligible) {
                         'true'
                     } else { 'false' })
                 route = 'direct_loopback'
@@ -8403,7 +8787,15 @@ try {
                     'authentication-status' = 'pending-or-unknown'
                     'last-confirmed-stage' = $(if (
                             $projectClientVisualMode) {
-                            if ($ProjectClientPrediction -ceq 'reference' -and
+                            if ($ProjectClientLiveInput -ceq 'keyboard-mouse') {
+                                # Match the native stage without promoting manual
+                                # coverage to scripted prediction verification.
+                                if ($ProjectClientPrediction -ceq 'reference' -and
+                                    $orchestratorResult.Values['prediction-result'] -ceq
+                                        'live_local_prediction_and_reconciliation_verified') {
+                                    'live_local_prediction_and_reconciliation_verified'
+                                } else { 'live_visual_control_verified' }
+                            } elseif ($ProjectClientPrediction -ceq 'reference' -and
                                 $ProjectClientLiveInput -ceq
                                     'scripted-jump-duck-check') {
                                 'live_jump_duck_crouchwalk_prediction_verified'
@@ -8441,11 +8833,8 @@ try {
                         'resource-continuation-sent' = 'true'
                         'spawn-request-transmitted' = 'true'
                         'live-service-payloads-received' = 'true'
-                        'client-world-state-published' = $(if (
-                                $projectClientVisualMode -and
-                                $ProjectClientLiveInput -ceq 'keyboard-mouse') {
-                                'false'
-                            } else { 'true' })
+                        'client-world-state-published' = (Get-ProjectWorldPublicationExpectation `
+                            $manualKeyboardCompletion $manualKeyboardCompletionAttested)
                     }).GetEnumerator()) {
                     Assert-OrchestratorValue $orchestratorResult `
                         $entry.Key $entry.Value
@@ -8680,7 +9069,10 @@ try {
     $writerTraceLaunchReleaseCapability = [IntPtr]::Zero
     $writerTraceStockStoppedCapability = [IntPtr]::Zero
     if (Test-Path -LiteralPath $runRoot -PathType Container) {
-        try { $runDirectoryCapability = New-RunDirectoryCapability $runRoot }
+        try {
+            if ($null -eq $runDirectoryCapability) { $runDirectoryCapability = New-RunDirectoryCapability $runRoot }
+            else { Assert-RunDirectoryCapability $runDirectoryCapability $runRoot }
+        }
         catch { [void]$cleanupErrors.Add($_.Exception.Message) }
     }
     $cleanupAttested = $orchestratorExitState.ExitConfirmed -and
@@ -8813,7 +9205,7 @@ if ($functionalSmokeMode) {
                 } else { 'research_root' }
             $expectedActualClientArgvProfile =
                 if ($projectClientVisualMode) {
-                    "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=$ProjectClientLiveInput;basedir=research-root;game=valve$(if ($ProjectClientPrediction -ceq 'reference') {';prediction=reference'})$(if ($ProjectClientMuteGlockFireSound) {';glock-fire-sound=muted'})"
+                    "renderer=opengl;auth-provider=steam;stop-after=live-visual-control;live-input=$ProjectClientLiveInput;basedir=research-root;game=valve$(if ($ProjectClientPrediction -ceq 'reference') {';prediction=reference'})$(if ($ProjectClientMuteGlockFireSound) {';glock-fire-sound=muted'})$(if ($ProjectClientDebugFreezeTracer) {';tracer-geometry=frozen-debug'})"
                 } elseif ($projectClientUserCmdMode) {
                     'renderer=null;auth-provider=steam;stop-after=live-usercmd-check;resource-advertisement=empty'
                 } elseif ($projectClientLiveRuntimeMode) {
@@ -8828,7 +9220,7 @@ if ($functionalSmokeMode) {
                     $expectedFunctionalPurpose -or
                 [string]$functionalStaged.validation_mode -cne $ValidationMode.ToLowerInvariant() -or
                 [bool]$functionalStaged.evidence_eligible -ne
-                    ($projectClientStockSignonMode -and $TestStartHealth -ne 50 -and -not $fastManualMode) -or
+                    $functionalEvidenceEligible -or
                 [string]$functionalStaged.route -cne 'direct_loopback' -or
                 [string]$functionalStaged.game -cne 'valve' -or
                 [string]$functionalStaged.map -cne $Map -or
@@ -9065,6 +9457,9 @@ if ($functionalSmokeMode) {
         $cleanupErrors.Count -eq 0 -and $runExists -and $ownedStopped -and
         $restorationSucceeded -and $serverReady -and $clientReady -and
         $orchestratorExitCode -eq 0
+    if ($manualKeyboardCompletion) {
+        $functionalSuccess = $functionalSuccess -and $manualKeyboardCompletionAttested
+    }
     $testHealthEvidence = $null
     if ($TestStartHealth -eq 50) {
         $testHealthEvidence = Get-TestStartHealthEvidence $runRoot $runId
@@ -9156,10 +9551,43 @@ if ($functionalSmokeMode) {
     } else {
         'local_server_startup_failed'
     }
+    # Complete integrity evidence before selecting a verdict or its summary.
+    # A runner-hash failure must not publish success with a cleanup error.
+    $orchestratorSha256 = $null
     if ($runExists -and $null -ne $runDirectoryCapability) {
-        $orchestratorSha256 = $null
         try { $orchestratorSha256 = Get-FileSha256 $orchestratorPath }
         catch { [void]$cleanupErrors.Add('orchestrator_hash_publication_failed') }
+    }
+    # Preserve scenario-specific success/pending labels; overall completion and
+    # exit are decided by the same phase-aware predicate used by offline tests.
+    $pendingResult = if (-not $functionalSuccess -and $functionalResult -cnotin @(
+        'local_smoke_integrity_failed','test_start_health_not_confirmed',
+        'local_server_ready_client_blocked','local_server_startup_failed')) {
+        $functionalResult
+    } else { $null }
+    $functionalVerdict = Get-FunctionalSmokeFinalVerdict ([ordered]@{
+        PrimaryError=$primaryError; CleanupErrorCount=$cleanupErrors.Count;
+        RunExists=$runExists; OwnedStopped=$ownedStopped;
+        RestorationSucceeded=$restorationSucceeded; ServerReady=$serverReady;
+        ClientReady=$clientReady; NativeExit=$orchestratorExitCode;
+        ManualKeyboard=$manualKeyboardCompletion;
+        ManualReceiptAttested=$manualKeyboardCompletionAttested;
+        SuccessResult=$functionalResult; PendingResult=$pendingResult;
+        TestHealthFailed=($null -ne $testHealthEvidence -and $testHealthEvidence.result -cne 'confirmed')
+    })
+    $functionalSuccess = $functionalVerdict.Success
+    $functionalResult = $functionalVerdict.Result
+    $managedScopeEntries = if ($fastManualMode) {
+        $scopedRecord = Get-ManualSummaryField $guard 'ScopedRecord'
+        @(Get-ManualSummaryField $scopedRecord 'entries' @()).Count
+    } elseif ($null -ne $before) { $before.EntryCount } else { $null }
+    $manualFinalSummary = Get-ManualFinalSessionSummary -RunId $runId `
+        -NativeSummary $retainedNativeSummary -Verdict $functionalResult `
+        -Cleanup $(if ($ownedStopped) { 'exact' } else { 'incomplete' }) `
+        -Restoration $restorationStatus -Fast $fastManualMode `
+        -ManagedScopeEntries $managedScopeEntries -Peer ([bool]$RemoteAudioPeer)
+    $wrapperPublication = $null
+    if ($runExists -and $null -ne $runDirectoryCapability) {
         $functionalWrapper = [ordered]@{
             schema = 'hlclient.local-research-copy-smoke-wrapper.v2'
             mode = $(if ($projectClientStockSignonMode) {
@@ -9180,7 +9608,7 @@ if ($functionalSmokeMode) {
                         'fresh_project_client_live_runtime_state'
                     } else { 'fresh_project_client_stock_signon' }
                 } else { 'functional_smoke' })
-            evidence_eligible = $projectClientStockSignonMode -and -not $fastManualMode -and $TestStartHealth -ne 50 -and -not $RemoteAudioPeer
+            evidence_eligible = $functionalEvidenceEligible
             validation_mode = $ValidationMode.ToLowerInvariant()
             backup_scope = $(if ($fastManualMode) { 'managed_mutable_files' } else { 'full_tree' })
             full_tree_backup = -not $fastManualMode
@@ -9210,9 +9638,14 @@ if ($functionalSmokeMode) {
                 configuration = 'Release'
                 orchestrator_path = $orchestratorPath
                 orchestrator_sha256 = $orchestratorSha256
+                orchestrator_sha256_at_launch = (Get-ManualSummaryField $retainedNativeSummary 'runner_build_sha256')
+                orchestrator_source_identity = (Get-ManualSummaryField $retainedNativeSummary 'runner_source_identity')
                 research_root = $research.Root
                 server_path = $research.Server
                 client_path = $research.Client
+                client_sha256_at_launch = (Get-ManualSummaryField $retainedNativeSummary 'client_sha256_at_launch')
+                client_sha256_after_run = (Get-ManualSummaryField $retainedNativeSummary 'client_sha256_after_run')
+                binary_change_status = (Get-ManualSummaryField $retainedNativeSummary 'client_binary_change_status' 'not_observed')
                 game = $Game
                 map = $Map
                 server_port = $ServerPort
@@ -9228,6 +9661,7 @@ if ($functionalSmokeMode) {
                 connect_argument = "127.0.0.1:$ServerPort"
                 game_time_limit_mode = $(if ($ProjectClientNoTimeLimit) { 'unlimited' } elseif ($manualSessionTiming) { 'timed' } else { 'legacy' })
                 game_duration_seconds = $(if ($ProjectClientNoTimeLimit -or -not $manualSessionTiming) { $null } else { $ProjectClientDurationSeconds })
+                effective_game_duration_seconds = (Get-ManualSummaryField $retainedNativeSummary 'effective_game_duration_seconds')
             }
             startup = [ordered]@{
                 status = $orchestratorExitState.StartupStatus
@@ -9239,6 +9673,7 @@ if ($functionalSmokeMode) {
                 ($null -ne $retainedNativeSummary)
             native_summary_status = $nativeSummaryStatus
             native_summary = $retainedNativeSummary
+            session_summary = $manualFinalSummary
             external_steam_state = $(if ($projectClientStockSignonMode) {
                     'current_user_session_used'
                 } else { 'not_assessed' })
@@ -9289,7 +9724,7 @@ if ($functionalSmokeMode) {
                 } else { 'fresh_project_client_stock_signon' } }
             else { 'functional_smoke' }))
     Write-Output ("[research-copy-smoke] evidence_eligible={0}" -f
-        ($projectClientStockSignonMode -and $TestStartHealth -ne 50 -and -not $fastManualMode).ToString().ToLowerInvariant())
+        $functionalEvidenceEligible.ToString().ToLowerInvariant())
     Write-Output ("[research-copy-smoke] external_steam_state={0}" -f $(if (
             $projectClientStockSignonMode) { 'current_user_session_used' }
             else { 'not_assessed' }))
@@ -9372,6 +9807,8 @@ if ($functionalSmokeMode) {
         Write-Output "[research-copy-smoke] scoped_restoration_status=$restorationStatus"
     }
     Write-Output ("[research-copy-smoke] result={0}" -f $functionalResult)
+    $manualFinalSummary.runner_verdict = $functionalResult
+    Write-ManualFinalSessionSummary $manualFinalSummary $(if ($null -ne $wrapperPublication) { $wrapperPublication.Path } else { $null })
     if ($null -ne $runDirectoryCapability) {
         $runDirectoryCapability.Dispose()
         $runDirectoryCapability = $null

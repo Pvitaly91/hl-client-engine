@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlclient/client/client_world_state.hpp>
+#include <hlclient/client/temporary_effect.hpp>
 #include <hlclient/goldsrc/packet_entity_decoder.hpp>
 #include <hlclient/goldsrc/move_vars.hpp>
 #include <hlclient/game_api/game_client_host.hpp>
@@ -77,6 +78,7 @@ struct RuntimeReplayInitialization final {
     // with no implicit game-module selection.
     std::shared_ptr<game_api::GameClientHost> game_client;
     std::shared_ptr<CommittedSoundQueue> sound_events;
+    std::vector<std::shared_ptr<const UserInfoUpdateState>> initial_player_identities;
 };
 
 // Project-owned replay envelope. `payload.bytes` is exactly one already
@@ -138,6 +140,8 @@ struct RuntimeReplayError final {
     std::optional<std::uint32_t> source_sequence, source_acknowledgement;
     std::optional<bool> reliable, reassembled, decompressed, wire_uncompressed;
     std::optional<std::size_t> payload_size, attempted_records, committed_records;
+    std::optional<std::uint32_t> decoder_entity_number;
+    std::string decoder_schema_boundary;
 };
 
 struct RuntimeReplayApplyEvent final {
@@ -150,6 +154,9 @@ struct RuntimeReplayApplyEvent final {
     std::uint64_t publication_revision{0U};
     std::uint64_t canonical_state_hash{0U};
     PacketEntityDecodedBatch decoded_batch;
+    // Current record only, independently owning after the payload/session is
+    // destroyed. Allocated before the atomic commit and delivered afterward.
+    std::vector<client::CommittedTemporaryEffect> temporary_effects;
 };
 
 struct RuntimeReplayApplyResult final {
@@ -213,6 +220,7 @@ private:
         std::uint64_t committed_state_hash) noexcept;
 
     RuntimeReplayInitialization initialization_;
+    std::array<std::shared_ptr<const UserInfoUpdateState>, 32U> player_identities_;
     PacketEntitySnapshotState decoder_state_;
     GoldSrcPacketEntityDecoder decoder_;
     client::ClientWorldState* target_{nullptr};

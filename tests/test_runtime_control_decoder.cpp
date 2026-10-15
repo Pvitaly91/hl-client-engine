@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/runtime_control_decoder.hpp>
+#include <hlclient/goldsrc/runtime_effect_diagnostics.hpp>
 
 #include "user_info_test_fixture.hpp"
 #include "event_test_fixture.hpp"
@@ -96,6 +97,131 @@ TEST_CASE("Reference runtime control profile is explicit and executable",
   require_error(decode(invalid_decoder, service_payload({std::byte{0x01U}}),
                        invalid_state),
                 goldsrc::RuntimeControlDecodeErrorCode::invalid_profile);
+}
+
+TEST_CASE("E14 runtime vacant userinfo is bounded while signon stays strict",
+          "[e14][runtime-control][userinfo]") {
+    std::vector<std::byte> vacant(23U,std::byte{0});vacant[0]=std::byte{13};vacant[1]=std::byte{31};
+    const goldsrc::RuntimeControlDecoder decoder;
+    goldsrc::RuntimeControlState state{1U};
+    const auto accepted=decode(decoder,service_payload(vacant),state);REQUIRE(accepted);
+    REQUIRE(accepted.batch->events.size()==1U);
+    const auto& update=std::get<goldsrc::RuntimeControlUserInfoUpdate>(accepted.batch->events[0].body);
+    CHECK_FALSE(update.present);CHECK_FALSE(update.identity);CHECK(update.client_index==31U);
+    CHECK_FALSE(goldsrc::UserInfoUpdateParser{}.parse(vacant));
+    for(std::size_t n=1U;n<23U;++n) {
+        auto short_body=vacant;short_body.resize(n);goldsrc::RuntimeControlState clean{1U};
+        CHECK_FALSE(decode(decoder,service_payload(short_body),clean));CHECK(clean.committed_message_count()==0U);
+    }
+    vacant[1]=std::byte{32};goldsrc::RuntimeControlState clean{1U};
+    CHECK_FALSE(decode(decoder,service_payload(vacant),clean));CHECK(clean.committed_message_count()==0U);
+}
+
+TEST_CASE("E28 runtime departure accepts an empty userinfo with a retained positive ID",
+          "[e28][peer-disconnect][runtime-control][userinfo]") {
+    // Independently authored candidate for the retained E27 opcode-13 failure,
+    // not the missing historical packet body. An empty runtime info string is
+    // a slot vacancy; a retained nonnegative private ID does not make it present.
+    for (const auto id : {0U, 12U, 0x7fffffffU}) {
+        auto wire = user_info_fixture::make_message(1U, id, "");
+        CHECK_FALSE(goldsrc::UserInfoUpdateParser{}.parse(wire));
+        wire.push_back(std::byte{1U}); // exact following svc_nop
+        goldsrc::RuntimeControlState state{1U};
+        const auto result = decode(goldsrc::RuntimeControlDecoder{}, service_payload(wire), state);
+        REQUIRE(result);
+        REQUIRE(result.batch->events.size() == 2U);
+        const auto& update = std::get<goldsrc::RuntimeControlUserInfoUpdate>(result.batch->events[0].body);
+        CHECK(update.client_index == 1U);
+        CHECK_FALSE(update.present);
+        CHECK_FALSE(update.identity);
+        CHECK(update.info_string_length == 0U);
+        CHECK(update.info_entry_count == 0U);
+        CHECK(update.opaque_suffix_size == 16U);
+        CHECK(result.batch->events[0].provenance.end_cursor.byte_offset() == 23U);
+        CHECK(result.batch->events[1].opcode == goldsrc::RuntimeControlOpcode::svc_nop);
+    }
+}
+
+TEST_CASE("E28 departure grammar retains strict IDs strings suffix and continuation",
+          "[e28][peer-disconnect][runtime-control][userinfo]") {
+    for (const auto id : {0x80000000U, 0xffffffffU}) {
+        goldsrc::RuntimeControlState state{1U};
+        const auto result = decode(goldsrc::RuntimeControlDecoder{},
+            service_payload(user_info_fixture::make_message(1U, id, "")), state);
+        require_error(result, goldsrc::RuntimeControlDecodeErrorCode::user_info_update_failed);
+        CHECK(state.committed_message_count() == 0U);
+    }
+    for (const auto text : {"name\\Candidate", "\\name\\", "\\name\\Candidate\\", "\\name\\A\\NAME\\B"}) {
+        goldsrc::RuntimeControlState state{1U};
+        const auto result = decode(goldsrc::RuntimeControlDecoder{},
+            service_payload(user_info_fixture::make_message(1U, 12U, text)), state);
+        require_error(result, goldsrc::RuntimeControlDecodeErrorCode::user_info_update_failed);
+        CHECK(state.committed_message_count() == 0U);
+    }
+    const auto vacancy = user_info_fixture::make_message(1U, 12U, "");
+    for (std::size_t length = 1U; length < vacancy.size(); ++length) {
+        auto short_body = vacancy;
+        short_body.resize(length);
+        goldsrc::RuntimeControlState state{1U};
+        CHECK_FALSE(decode(goldsrc::RuntimeControlDecoder{}, service_payload(short_body), state));
+        CHECK(state.committed_message_count() == 0U);
+    }
+    for (const auto index : {32U, 255U}) {
+        goldsrc::RuntimeControlState state{1U};
+        CHECK_FALSE(decode(goldsrc::RuntimeControlDecoder{}, service_payload(
+            user_info_fixture::make_message(static_cast<std::uint8_t>(index), 12U, "")), state));
+    }
+    auto bad_continuation = vacancy;
+    bad_continuation.push_back(std::byte{255U});
+    goldsrc::RuntimeControlState state{1U};
+    require_error(decode(goldsrc::RuntimeControlDecoder{}, service_payload(bad_continuation), state),
+        goldsrc::RuntimeControlDecodeErrorCode::unsupported_opcode);
+    CHECK(state.committed_message_count() == 0U);
+}
+
+TEST_CASE("E28 userinfo failure retains exact nested checkpoint and bounded private shape",
+          "[e28][peer-disconnect][runtime-control][userinfo][runtime-diagnostics]") {
+    const goldsrc::RuntimeControlDecoder decoder;
+    // The actual historical body is absent. A nonempty missing separator and
+    // an empty retained-ID candidate used to have the same (60,55) diagnostics.
+    // Preserve the exact message checkpoint and typed error without values.
+    const auto malformed = user_info_fixture::make_message(1U, 12U, "name\\Candidate");
+    std::vector<std::byte> wire(54U, std::byte{1U});
+    wire.insert(wire.end(), malformed.begin(), malformed.end());
+    goldsrc::RuntimeControlState state{1U};
+    const auto rejected = decode(decoder, service_payload(wire), state);
+    require_error(rejected, goldsrc::RuntimeControlDecodeErrorCode::user_info_update_failed);
+    REQUIRE(rejected.error->cursor); REQUIRE(rejected.error->failure_cursor);
+    CHECK(rejected.error->cursor->byte_offset() == 54U);
+    CHECK(rejected.error->failure_cursor->byte_offset() == 60U);
+    CHECK(rejected.error->user_info_error == goldsrc::UserInfoUpdateErrorCode::invalid_info_string);
+    CHECK(rejected.error->user_info_string_error == goldsrc::UserInfoStringErrorCode::missing_leading_separator);
+    CHECK(rejected.error->user_info_string_length == 14U);
+    CHECK(rejected.error->user_info_empty == false);
+    CHECK(rejected.error->user_info_private_id_present == true);
+    CHECK(rejected.error->context.find("Candidate") == std::string::npos);
+    CHECK(state.committed_message_count() == 0U);
+
+    auto truncated = user_info_fixture::make_message(1U, 12U, "");
+    truncated.resize(20U);
+    const auto suffix = decode(decoder, service_payload(truncated), state);
+    require_error(suffix, goldsrc::RuntimeControlDecodeErrorCode::user_info_update_failed);
+    REQUIRE(suffix.error->cursor); REQUIRE(suffix.error->failure_cursor);
+    CHECK(suffix.error->cursor->byte_offset() == 0U);
+    CHECK(suffix.error->failure_cursor->byte_offset() == 20U);
+    CHECK(suffix.error->user_info_error == goldsrc::UserInfoUpdateErrorCode::truncated_opaque_suffix);
+    CHECK_FALSE(suffix.error->user_info_string_error);
+    CHECK(suffix.error->user_info_string_length == 0U);
+    CHECK(suffix.error->user_info_empty == true);
+    CHECK(suffix.error->user_info_private_id_present == true);
+
+    const auto negative = decode(decoder,
+        service_payload(user_info_fixture::make_message(1U, 0xffffffffU, "")), state);
+    require_error(negative, goldsrc::RuntimeControlDecodeErrorCode::user_info_update_failed);
+    REQUIRE(negative.error->failure_cursor);
+    CHECK(negative.error->failure_cursor->byte_offset() == 2U);
+    CHECK(negative.error->user_info_error == goldsrc::UserInfoUpdateErrorCode::invalid_user_id);
+    CHECK(negative.error->user_info_private_id_present == true);
 }
 
 TEST_CASE(
@@ -663,6 +789,58 @@ TEST_CASE("Unsupported temp-entity subtype stops before its unknown body",
   CHECK(result.error->failure_cursor->byte_offset() == 2U);
   CHECK(result.error->context.find("subtype 12;") != std::string::npos);
   CHECK(state == before);
+  CHECK(result.error->temporary_entity_type == 12U);
+}
+
+TEST_CASE("E13 hit blood sprite framing owns exact fields and preserves the following service",
+          "[e13-hit][goldsrc][runtime-control][temp-entity]") {
+  // Independent literal of the pinned SDK public layout, not stock capture bytes.
+  auto payload=service_payload({std::byte{23},std::byte{115},std::byte{8},std::byte{0},
+      std::byte{240},std::byte{255},std::byte{24},std::byte{0},std::byte{129},std::byte{0},
+      std::byte{130},std::byte{0},std::byte{247},std::byte{3}});
+  payload.bytes.insert(payload.bytes.begin(),241U,std::byte{1});
+  payload.bytes.push_back(std::byte{5}); // svc_setview body follows the 14-byte message.
+  payload.bytes.push_back(std::byte{2});payload.bytes.push_back(std::byte{0});
+  goldsrc::RuntimeControlState state{5};
+  auto result=decode(goldsrc::RuntimeControlDecoder{},payload,state,241U);REQUIRE(result);
+  REQUIRE(result.batch->events.size()==2U);
+  const auto& event=result.batch->events[0U];
+  REQUIRE(event.kind==goldsrc::RuntimeControlMessageKind::temporary_entity);
+  REQUIRE(std::holds_alternative<goldsrc::RuntimeControlBloodSprite>(event.body));
+  const auto retained=std::get<goldsrc::RuntimeControlBloodSprite>(event.body);
+  CHECK(retained.coordinate_eighths==std::array<std::int16_t,3>{8,-16,24});
+  CHECK(retained.sprite_references==std::array<std::int16_t,2>{129,130});
+  CHECK(retained.palette_color==247);CHECK(retained.scale==3);
+  CHECK(event.provenance.start_cursor.byte_offset()==241U);
+  CHECK(event.provenance.end_cursor.byte_offset()==255U);
+  CHECK(result.batch->events.back().provenance.start_cursor.byte_offset()==255U);
+  std::fill(payload.bytes.begin(),payload.bytes.end(),std::byte{0});
+  CHECK(std::get<goldsrc::RuntimeControlBloodSprite>(event.body)==retained);
+  auto invalid=event;invalid.opcode=goldsrc::RuntimeControlOpcode::svc_nop;
+  const auto before=state;
+  CHECK(goldsrc::RuntimeControlDecoder{}.apply_events(std::span{&invalid,1U},state));
+  CHECK(state==before);
+}
+
+TEST_CASE("E13 every truncated blood sprite and malformed suffix rejects atomically without scan",
+          "[e13-hit][goldsrc][runtime-control][transactional]") {
+  const std::vector bytes{std::byte{23},std::byte{115},std::byte{8},std::byte{0},
+      std::byte{23},std::byte{7},std::byte{24},std::byte{0},std::byte{1},std::byte{0},
+      std::byte{2},std::byte{0},std::byte{0},std::byte{0}};
+  for(std::size_t length=1;length<bytes.size();++length) {
+    CAPTURE(length);
+    auto payload=service_payload({std::byte{7},std::byte{0},std::byte{0},std::byte{128},std::byte{63}});
+    payload.bytes.insert(payload.bytes.end(),bytes.begin(),bytes.begin()+static_cast<std::ptrdiff_t>(length));
+    goldsrc::RuntimeControlState state{5};const auto before=state;
+    const auto result=decode(goldsrc::RuntimeControlDecoder{},payload,state);
+    require_error(result,goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+    CHECK(state==before);
+    if(length>=2) CHECK(result.error->temporary_entity_type==115U);
+  }
+  auto payload=service_payload(bytes);payload.bytes.push_back(std::byte{254});
+  goldsrc::RuntimeControlState state{5};const auto before=state;
+  const auto result=decode(goldsrc::RuntimeControlDecoder{},payload,state);
+  require_error(result,goldsrc::RuntimeControlDecodeErrorCode::unsupported_opcode);CHECK(state==before);
 }
 
 struct DecalFixture final {
@@ -780,6 +958,36 @@ TEST_CASE("Decal event application rejects incompatible typed metadata atomicall
     REQUIRE(error);
     CHECK(error->code == goldsrc::RuntimeControlDecodeErrorCode::invalid_configuration);
     CHECK(state == before);
+  }
+}
+
+TEST_CASE("E30 decal wire boundaries retain unsigned indices and inert signed target shorts",
+          "[e30][goldsrc][runtime-control][temp-entity][literal][no-stock]") {
+  for(const std::uint8_t subtype : {std::uint8_t{104},std::uint8_t{116},
+                                    std::uint8_t{117},std::uint8_t{118}}) {
+    for(const std::uint8_t index : {std::uint8_t{0},std::uint8_t{127},
+                                    std::uint8_t{128},std::uint8_t{255}}) {
+      CAPTURE(subtype,index);
+      std::vector<std::byte> bytes{std::byte{23},static_cast<std::byte>(subtype),
+          std::byte{0},std::byte{128},std::byte{255},std::byte{127},std::byte{0},std::byte{0},
+          static_cast<std::byte>(index)};
+      const bool world=subtype==116 || subtype==117;
+      if(!world)bytes.insert(bytes.end(),{std::byte{0},std::byte{128}});
+      bytes.push_back(std::byte{1});
+      auto payload=service_payload(bytes);
+      goldsrc::RuntimeControlState state{5};
+      const auto result=decode(goldsrc::RuntimeControlDecoder{},payload,state);
+      REQUIRE(result);REQUIRE(result.batch->events.size()==2U);
+      const auto& event=result.batch->events[0];
+      const auto& body=std::get<goldsrc::RuntimeControlDecal>(event.body);
+      CHECK(body.coordinate_eighths==std::array<std::int16_t,3>{-32768,32767,0});
+      CHECK(body.decal_reference==index+((subtype==117 || subtype==118) ? 256U : 0U));
+      CHECK(body.entity_reference==(world ? 0 : -32768));
+      CHECK(event.provenance.end_cursor.byte_offset()==(world ? 9U : 11U));
+      CHECK(result.batch->events.back().kind==goldsrc::RuntimeControlMessageKind::nop);
+      // A wire-valid but unsupported entity is downstream target policy;
+      // decoding never silently replaces it with worldspawn.
+    }
   }
 }
 
@@ -1341,6 +1549,179 @@ TEST_CASE("Scripted event padding is inert and following service boundary stays 
   REQUIRE(result);
   REQUIRE(result.batch->events.size() == 2U);
   CHECK(result.batch->events[1].provenance.start_cursor.byte_offset() == 4U);
+}
+
+TEST_CASE("E16 explosion smoke bubbles and sparks consume exact pinned literal bodies",
+          "[e16][goldsrc][runtime-control][temp-entity][literal]") {
+  // Independent little-endian literals: (-1.125, 2.25, 3.375), sprite 0x1234.
+  const std::vector<std::byte> explosion{std::byte{23}, std::byte{3},
+      std::byte{0xf7}, std::byte{0xff}, std::byte{0x12}, std::byte{0},
+      std::byte{0x1b}, std::byte{0}, std::byte{0x34}, std::byte{0x12},
+      std::byte{60}, std::byte{15}, std::byte{0xf5}};
+  auto smoke = explosion; smoke[1] = std::byte{5}; smoke.pop_back();
+  const std::vector<std::byte> sparks{std::byte{23}, std::byte{9},
+      std::byte{0xf7}, std::byte{0xff}, std::byte{0x12}, std::byte{0},
+      std::byte{0x1b}, std::byte{0}};
+  const std::vector<std::byte> bubbles{std::byte{23}, std::byte{113},
+      std::byte{0xf7}, std::byte{0xff}, std::byte{0x12}, std::byte{0},
+      std::byte{0x1b}, std::byte{0}, std::byte{0x20}, std::byte{0},
+      std::byte{0x28}, std::byte{0}, std::byte{0x30}, std::byte{0},
+      std::byte{0x40}, std::byte{0}, std::byte{0x34}, std::byte{0x12},
+      std::byte{100}, std::byte{0x40}, std::byte{0}};
+  const goldsrc::RuntimeControlDecoder decoder;
+  auto bubble_trail=bubbles; bubble_trail[1]=std::byte{114};
+  for (const auto& bytes : {explosion, smoke, sparks, bubbles, bubble_trail}) {
+    auto stream = bytes; stream.push_back(std::byte{1});
+    goldsrc::RuntimeControlState state{7};
+    const auto result = decode(decoder, service_payload(stream), state);
+    REQUIRE(result);
+    REQUIRE(result.batch->events.size() == 2U);
+    CHECK(result.batch->events[0].provenance.end_cursor.byte_offset() == bytes.size());
+    CHECK(result.batch->events[1].provenance.start_cursor.byte_offset() == bytes.size());
+    CHECK(result.batch->events[1].opcode == goldsrc::RuntimeControlOpcode::svc_nop);
+    CHECK(state.committed_message_count() == 2U);
+    if(bytes[1]==std::byte{113} || bytes[1]==std::byte{114})
+      CHECK(std::get<goldsrc::RuntimeControlBubbles>(result.batch->events[0].body).trail==(bytes[1]==std::byte{114}));
+    for (std::size_t length = 1U; length < bytes.size(); ++length) {
+      auto truncated = bytes; truncated.resize(length);
+      // An earlier valid message must remain uncommitted on any short body.
+      truncated.insert(truncated.begin(), std::byte{1});
+      goldsrc::RuntimeControlState clean{7};
+      const auto before = clean;
+      const auto short_result = decode(decoder, service_payload(truncated), clean);
+      require_error(short_result, goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+      CHECK(clean == before);
+      REQUIRE(short_result.error->failure_cursor);
+      CHECK(short_result.error->failure_cursor->byte_offset() <= truncated.size());
+      if (length >= 2U)
+        CHECK(short_result.error->temporary_entity_type == std::to_integer<std::uint8_t>(bytes[1]));
+    }
+  }
+  goldsrc::RuntimeControlState state{7};
+  auto stream = explosion;
+  stream.insert(stream.end(), smoke.begin(), smoke.end());
+  stream.insert(stream.end(), bubbles.begin(), bubbles.end());
+  stream.insert(stream.end(), sparks.begin(), sparks.end());
+  const auto result = decode(decoder, service_payload(stream), state);
+  REQUIRE(result);
+  const auto& a = std::get<goldsrc::RuntimeControlExplosion>(result.batch->events[0].body);
+  CHECK(a.coordinate_eighths == std::array<std::int16_t, 3>{-9, 18, 27});
+  CHECK(a.sprite_reference == 0x1234); CHECK(a.scale_tenths == 60);
+  CHECK(a.framerate == 15); CHECK(a.flags == 0xf5); // Unknown bits retained, not guessed.
+  const auto& b = std::get<goldsrc::RuntimeControlSmoke>(result.batch->events[1].body);
+  CHECK(b.coordinate_eighths == a.coordinate_eighths); CHECK(b.sprite_reference == 0x1234);
+  CHECK(b.scale_tenths == 60); CHECK(b.framerate == 15);
+  const auto& c = std::get<goldsrc::RuntimeControlBubbles>(result.batch->events[2].body);
+  CHECK(c.minimum_eighths == a.coordinate_eighths);
+  CHECK(c.maximum_eighths == std::array<std::int16_t, 3>{32, 40, 48});
+  CHECK(c.height_eighths == 64); CHECK(c.sprite_reference == 0x1234);
+  CHECK(c.count == 100); CHECK(c.speed_eighths == 64);
+  CHECK(std::get<goldsrc::RuntimeControlSparks>(result.batch->events[3].body).coordinate_eighths == a.coordinate_eighths);
+}
+
+TEST_CASE("E16 mixed blood sprite explosion smoke and decal boundaries do not drift",
+          "[e16][e13][goldsrc][runtime-control][temp-entity][transaction]") {
+  const std::vector<std::byte> bytes{
+      std::byte{23}, std::byte{115}, // Blood sprite: 3 coords, 2 shorts, color, scale.
+      std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0},
+      std::byte{1}, std::byte{0}, std::byte{2}, std::byte{0}, std::byte{70}, std::byte{4},
+      std::byte{23}, std::byte{3}, // Explosion: 3 coords, short, scale, fps, flags.
+      std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0},
+      std::byte{3}, std::byte{0}, std::byte{60}, std::byte{15}, std::byte{0},
+      std::byte{23}, std::byte{5}, // Smoke: same body WITHOUT flags.
+      std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0},
+      std::byte{4}, std::byte{0}, std::byte{80}, std::byte{12},
+      std::byte{23}, std::byte{116}, // World decal: 3 coords, byte index.
+      std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0},
+      std::byte{7}, std::byte{1}};
+  goldsrc::RuntimeControlState state{1};
+  const auto result = decode(goldsrc::RuntimeControlDecoder{}, service_payload(bytes), state);
+  REQUIRE(result); REQUIRE(result.batch->events.size() == 5U);
+  CHECK(result.batch->events[0].provenance.end_cursor.byte_offset() == 14U);
+  CHECK(result.batch->events[1].provenance.end_cursor.byte_offset() == 27U);
+  CHECK(result.batch->events[2].provenance.end_cursor.byte_offset() == 39U);
+  CHECK(result.batch->events[3].provenance.end_cursor.byte_offset() == 48U);
+  CHECK(result.batch->events[4].opcode == goldsrc::RuntimeControlOpcode::svc_nop);
+  auto unsupported = bytes; unsupported.push_back(std::byte{23}); unsupported.push_back(std::byte{12});
+  goldsrc::RuntimeControlState clean{1};
+  const auto before = clean;
+  require_error(decode(goldsrc::RuntimeControlDecoder{}, service_payload(unsupported), clean),
+                goldsrc::RuntimeControlDecodeErrorCode::unsupported_temporary_entity_type);
+  CHECK(clean == before);
+}
+
+TEST_CASE("E16 manual beam follow observation keeps exact boundaries and atomic truncation",
+          "[e16][e20][manual-fix][goldsrc][runtime-control][temp-entity][transaction]") {
+  // Pinned const.h: two shorts, life/width, RGB, brightness. No trajectory.
+  const std::vector<std::byte> beam{std::byte{23}, std::byte{22},
+      std::byte{0x34}, std::byte{0xf2}, std::byte{0x78}, std::byte{0x56},
+      std::byte{10}, std::byte{3}, std::byte{255}, std::byte{128},
+      std::byte{0}, std::byte{200}};
+  auto bytes = beam; bytes.push_back(std::byte{1});
+  goldsrc::RuntimeControlState state{1};
+  const auto result = decode(goldsrc::RuntimeControlDecoder{}, service_payload(bytes), state);
+  REQUIRE(result); REQUIRE(result.batch->events.size() == 2U);
+  const auto& body = std::get<goldsrc::RuntimeControlBeamFollow>(result.batch->events[0].body);
+  CHECK(body.entity_attachment == 0xf234U);
+  CHECK(body.sprite_reference == 0x5678);
+  CHECK(body.life_tenths == 10U); CHECK(body.width_tenths == 3U);
+  CHECK(body.color == std::array<std::uint8_t, 3U>{255U,128U,0U});
+  CHECK(body.brightness == 200U);
+  CHECK(result.batch->events[0].provenance.end_cursor.byte_offset() == 12U);
+  CHECK(result.batch->events[1].provenance.start_cursor.byte_offset() == 12U);
+  CHECK(result.batch->events[1].opcode == goldsrc::RuntimeControlOpcode::svc_nop);
+  for (std::size_t size = 1U; size < beam.size(); ++size) {
+    auto truncated = beam; truncated.resize(size);
+    truncated.insert(truncated.begin(), std::byte{1});
+    goldsrc::RuntimeControlState clean{1}; const auto before = clean;
+    const auto rejected = decode(goldsrc::RuntimeControlDecoder{}, service_payload(truncated), clean);
+    require_error(rejected, goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+    CHECK(clean == before);
+    if (size >= 2U) CHECK(rejected.error->temporary_entity_type == 22U);
+  }
+  auto malformed = bytes; malformed.push_back(std::byte{23}); malformed.push_back(std::byte{12});
+  goldsrc::RuntimeControlState clean{1}; const auto before = clean;
+  require_error(decode(goldsrc::RuntimeControlDecoder{}, service_payload(malformed), clean),
+      goldsrc::RuntimeControlDecodeErrorCode::unsupported_temporary_entity_type);
+  CHECK(clean == before); // Other unsupported types are not globally ignored.
+  std::array forged{result.batch->events[0]};
+  forged[0].opcode = goldsrc::RuntimeControlOpcode::svc_nop;
+  REQUIRE(goldsrc::RuntimeControlDecoder{}.apply_events(forged, clean));
+  CHECK(clean == before);
+}
+
+TEST_CASE("Effect diagnostics retain inert particle count/color and reject truncated records",
+          "[goldsrc][runtime-control][effect-diagnostics]") {
+  std::vector<std::byte> particle{std::byte{18},std::byte{0},std::byte{1},
+    std::byte{0},std::byte{2},std::byte{0},std::byte{3},std::byte{0},std::byte{0},
+    std::byte{0},std::byte{160},std::byte{195}};
+  goldsrc::RuntimeControlState state{1};
+  const auto result=decode(goldsrc::RuntimeControlDecoder{},service_payload(particle),state);
+  REQUIRE(result); REQUIRE(result.batch->events.size()==1);
+  const auto row=goldsrc::runtime_effect_diagnostic(result.batch->events.front());
+  REQUIRE(row); CHECK(row->opcode==18); CHECK(row->color==195); CHECK(row->amount==160);
+  CHECK(row->detail==0);
+  for(std::size_t size=1;size<particle.size();++size) {
+    auto bytes=particle;bytes.resize(size);
+    goldsrc::RuntimeControlState clean{1};const auto before=clean;
+    const auto rejected=decode(goldsrc::RuntimeControlDecoder{},service_payload(bytes),clean);
+    CHECK_FALSE(rejected);CHECK(clean==before);
+  }
+  goldsrc::RuntimeControlEvent text;
+  text.opcode=goldsrc::RuntimeControlOpcode::svc_print;
+  text.body=goldsrc::RuntimeControlText{64};
+  CHECK_FALSE(goldsrc::runtime_effect_diagnostic(text));
+  text.opcode=goldsrc::RuntimeControlOpcode::svc_temp_entity;
+  text.body=goldsrc::RuntimeControlBloodSprite{{},{},195,16};
+  const auto blood=goldsrc::runtime_effect_diagnostic(text);
+  REQUIRE(blood);CHECK(blood->detail==115);CHECK(blood->color==195);CHECK(blood->amount==16);
+  text.opcode=goldsrc::RuntimeControlOpcode::svc_sound;
+  goldsrc::RuntimeControlSound sound;sound.sound_reference=61;sound.entity_reference=300;
+  text.body=sound;
+  const auto audio=goldsrc::runtime_effect_diagnostic(text);
+  REQUIRE(audio);CHECK(audio->detail==61);CHECK(audio->entity==300);
+  CHECK(goldsrc::effect_sample_fingerprint("squeek/sqk_blast1.wav")!=
+        goldsrc::effect_sample_fingerprint("common/bodysplat.wav"));
 }
 
 } // namespace

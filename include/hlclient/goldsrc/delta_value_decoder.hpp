@@ -193,6 +193,9 @@ struct DeltaValueDecodeResult {
     std::size_t bits_consumed{0U};
     std::size_t next_bit_offset{0U};
     std::size_t next_byte_offset{0U};
+    // Exact decoded field mask, bounded by validated schema/decoder limits.
+    // Metadata only: equality of a value does not imply it was omitted.
+    std::vector<bool> wire_updated_fields;
 
     [[nodiscard]] explicit operator bool() const noexcept
     {

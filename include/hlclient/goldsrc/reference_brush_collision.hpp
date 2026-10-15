@@ -12,18 +12,24 @@ struct ReferenceBrushCollisionContext {
   std::shared_ptr<const collision::BrushCollisionScene> scene;
   std::uint64_t generation{}, revision{}, record{};
   std::size_t solid_count{}, non_solid_count{};
+  std::size_t excluded_point_box_count{};
   std::optional<double> server_time;
   std::vector<collision::BrushCollisionInstanceIdentity> pushers;
   // Nonblocking server-marked CONTENTS_LADDER brush hulls retained in this
   // exact committed entity frame. Never inferred from a map classname alone.
   std::vector<collision::BrushCollisionInstanceIdentity> ladders;
+  std::vector<movement::ServerEntityCollisionBox> boxes;
   std::string_view reason{"collision_entities_unavailable"};
 };
 [[nodiscard]] ReferenceBrushCollisionContext build_reference_brush_collision(
     std::shared_ptr<const collision::BrushCollisionModelLibrary> library,
     const std::map<std::uint32_t, std::string> &model_names,
     const client::RuntimeClientObservationState &observation,
-    std::uint64_t expected_generation);
+    std::uint64_t expected_generation,
+    std::optional<std::uint32_t> server_box_solid_code = {},
+    std::optional<std::uint32_t> receiving_entity = {}, bool exclude_owned_boxes = false,
+    std::optional<std::uint32_t> server_player_solid_code = {},
+    std::span<const movement::ServerPointBoxExclusionRule> nonblocking_point_boxes = {});
 
 struct ReferenceLadderContact {
   collision::BrushCollisionInstanceIdentity identity{};
@@ -47,6 +53,14 @@ public:
   ReferenceVerticalSupportMotion(const ReferenceBrushCollisionContext& previous,
       const ReferenceBrushCollisionContext& current);
   [[nodiscard]] bool active() const noexcept { return !velocities_.empty(); }
+  // A newer committed entity frame can change unrelated blockers at the same
+  // svc_time. Keep only each unchanged pusher's established trajectory, replace
+  // scene/boxes atomically, and retain its original bounded time horizon.
+  // Different time/generation/library is a new derivation, not this refresh.
+  [[nodiscard]] bool refresh_same_time_context(const ReferenceBrushCollisionContext& current);
+  [[nodiscard]] std::optional<double> velocity_z_for(
+      const hlclient::movement::PlayerMovementHitIdentity& hit) const noexcept;
+  [[nodiscard]] std::span<const movement::ServerEntityCollisionBox> entity_boxes() const noexcept { return current_.boxes; }
   [[nodiscard]] std::shared_ptr<const collision::BrushCollisionScene>
       sample(double server_seconds) const;
   [[nodiscard]] float displacement(const hlclient::movement::PlayerMovementHitIdentity& hit,
@@ -60,7 +74,9 @@ private:
 // Same entry point for append and replay. The seed already contains all
 // server-applied displacement. Only the command's own time interval is carried;
 // velocity/basevelocity and command bytes are not changed. Jump/edge/world
-// contact detaches. Blocked carry fails atomically (no client crush authority).
+// contact detaches unless the sampled rising top proves a new bounded contact
+// with the still-overlapping grounded hull. Blocked carry fails atomically
+// (no client crush authority).
 [[nodiscard]] movement::LocalMovementSimulationResult simulate_reference_movement(
     const hlclient::movement::LocalPlayerMovementState& previous,
     const GoldSrcUserCmdState& command,
@@ -86,6 +102,20 @@ struct ReferenceSupportPresentation {
     const ReferenceVerticalSupportMotion* support,
     hlclient::collision::CollisionQueryScratch& scratch,
     const movement::LocalMovementCollisionQueryConfig& config = {});
+
+struct ReferenceStepEyePresentation final {
+  assets::AssetVector3 origin{}, view_offset{};
+};
+// A confirmed small box-support step may have a blocked straight body chord.
+// Keep a verified raised hull path; interpolate only its eye within that hull.
+// Source step_size is required. No local physics or unbounded camera smoothing.
+[[nodiscard]] std::optional<ReferenceStepEyePresentation>
+sample_reference_box_step_eye(
+    const hlclient::movement::LocalPlayerMovementState& from,
+    const hlclient::movement::LocalPlayerMovementState& to, double alpha,
+    double maximum_step_height, const movement::ILocalMovementCollision& collision,
+    hlclient::collision::CollisionQueryScratch& scratch,
+    const movement::GoldSrcLocalMovementConfig& config);
 
 // A render-only fallback for a blocked straight chord between two verified
 // world-grounded prediction endpoints. Re-sample the same walkable BSP support

@@ -170,3 +170,51 @@ build. The historical first E4 partial report and the above E4.1 offline
 The later E5.1 user report about decal rectangles, impact audio and shell
 contact audio is recorded in `LOCAL_GLOCK_WORLD_IMPACTS_E5.md`; it does not
 relabel this E4.1 light/visible-casing confirmation as an audio confirmation.
+
+## Original muzzle sprite presentation corrective (2026-10-15)
+
+The normal local and remote firearm presentation now uses the installed HL
+additive SPR pixels, instead of the historical generated orange quad above.
+The existing accepted-action/Studio-marker gate, current evaluated attachment,
+75 ms deadline, audio, world impact, brass, and independent muzzle light remain
+unchanged. Original view-parallel frame origin/extents, palette RGB, additive
+black neutrality and deterministic per-action source-frame variation are kept.
+The original pixels are not recolored or dimmed by world lighting. World flashes
+retain scene depth; first-person flashes retain the viewmodel's own depth/pass.
+
+Read-only installed model metadata confirms event 5001 at frame zero:
+Glock sequences 3/4 option 11; MP5 sequences 5/6/7 option 20; Python sequence 2
+option 31; Shotgun single/double sequences 1/2 options 31/41. Separately, the SDK
+contract was checked at pinned revision
+`b1b5cf5892918535619b2937bb927e46cb097ba1`. The SDK's
+`HUD_StudioEvent` forwards the attachment and integer to `R_MuzzleFlash`, whose
+engine implementation is not included. This project's explicit compatibility
+table selects muzzleflash2 for 11/31/41 at .1/.3/.4 source scale, and muzzleflash1
+for 20 at .2 source scale. Remote eligible fire events use the corresponding
+profile and frozen validated p-model socket. This is original resource usage,
+not an assertion of stock-binary sprite-choice/randomness/scale parity.
+Both sprites are additive, view-parallel, 64x64 with two source frames in the
+inspected installation. No muzzle is invented for crowbar, crossbow, RPG,
+Gauss/Egon beams, thrown weapons or MP5 grenade launch.
+
+The concrete module supplies a compiled two-name preparation recipe. The
+existing local-asset preparation worker resolves each name in the exact
+approved world root, uses the verified source opener and canonical SPR importer,
+and retains owning presentation sources beside the existing immutable entity
+package. These are not synthetic server precache slots. Bounds are 8 dependencies,
+256 KiB per source, 256x256 and 8 frames; invalid/grouped/non-additive/nonparallel
+resources are rejected. No shot or render callback opens a file. Missing or
+rejected optional sprites skip only the sprite, without delaying stale fire or
+disabling light/audio/shells. Default/core-only modules prepare no dependencies;
+neutral callers without resource composition retain the existing generated
+flash mechanism for their diagnostic fixtures and other effect profiles.
+
+Tests tagged `[muzzle-sprites]` cover project-owned indexed fixtures through
+approved exact-root preparation, source/decoded pixels, first-ready-frame,
+unchanged prepared ownership, unsupported/missing/unsafe input and strict
+supplemental package identities. Actual OpenGL A/B checks cover original additive
+pixels, black border neutrality, source frames, unchanged upload counts, world
+occlusion and independent camera-local projection. Remote owner coverage retains
+one flash per identity, expiry/reset and independent light with absent resources.
+Existing E4/E12 action/audio/light tests remain intact. No live session was
+started; new visual manual confirmation remains `not_run` until the user tests.

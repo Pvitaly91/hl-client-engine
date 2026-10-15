@@ -1,5 +1,569 @@
 # Architecture
 
+## Observer Egon emission (2026-10-16)
+
+The existing optional beam scene-light profile can now specify a bounded RGB
+override and whether to inherit ribbon opacity. The application still samples
+only accepted current-frame geometry into the existing light budget; a fully
+transparent ribbon cannot emit. Defaults preserve existing modules. Half-Life
+uses this for the approved observer Egon main strand, whose original server
+ribbon RGB/opacity pulses previously suppressed its scene light. Its fixed
+blue-violet emission now matches the current local beam while visible server
+ribbon parameters remain unchanged. No new resource path, lifetime, renderer
+or network authority is added. See E22's additive follow-up and evidence under
+`manual-artifacts/task-records/egon-observer-light-20261016/`.
+
+Follow-up validation: normal Debug client build, Release client/test target,
+199 focused Release cases (66,622 assertions; two approved-asset opt-in skips),
+core-only Release build and all 44 CTests, normal architecture guard, launcher
+`-CheckOnly` and null bootstrap pass. The isolated actual attached-observer
+GPU test verifies stable wall/Studio lighting across SDK dim/bright ribbon
+states, preserved ribbon presentation, transparent/removal cleanup and no
+duplicate light from the noise strand. Local fixture readbacks match the prior
+build byte for byte. Historical full-suite counts below are not this follow-up's
+test count. Manual acceptance remains `not_run`; live sessions/captures and
+staging/commit/push are zero. ASan runtime status is unchanged/unverified.
+
+New `build/bin/Release/hlclient.exe` SHA-256:
+`F2D7A32A0B1E40C73019EDEF9E8C80A1E9E27A7A07A38BD6EB7761BA2F4F9CF7`.
+The launcher stays at SHA-256
+`636D89EE3816B7F2B330D1E68F1AB03B90D8FADD36219E252E037AF7482425FA`;
+the normal launch path needs no additional option or asset copy.
+
+## Last-weapon input and beam scene illumination (2026-10-16)
+
+Half-Life opts into physical Q through the neutral movement/input policy. The
+application forwards a focused, captured press edge through the existing typed
+inventory handoff; SDL key repeat never creates another press. The game-owned
+HUD/inventory owner remembers confirmed active/previous weapons, including
+committed switches between rendered frames. Requests, menu candidates and
+repeated clip updates do not advance this history. Life, reset and ownership
+boundaries invalidate it. The server still decides whether a requested switch
+can occur; no predicted active item, ammo or weapon effect is manufactured.
+The action works independently of visible HUD drawing. This reconstructs
+observed confirmed history rather than exposing the server's private last-item
+pointer. See the additive E29 record for source reference and coverage.
+
+Egon separately opts into a bounded numeric scene-light profile. Its logical
+main strand supplies illumination; the second strand and existing halo do not
+duplicate lights. Approved local and observer sprite materialization prepares
+at most four current-frame point lights, with symmetric endpoint-inset sampling
+and nearest-camera selection across simultaneous emitters. Successful frame
+publication is required. Deferred composition fills only remaining slots in
+the existing eight-light batch, preserving prior muzzle/impact/explosion work.
+The existing world, brush and Studio shaders consume these lights unchanged.
+No extra light lifetime, resource opener, renderer or physics owner is added.
+Release/removal and generation reset discard the candidates. The accepted
+spiral/halo geometry and camera-local viewmodel lighting remain unchanged.
+These are unshadowed point lights, not shadow-mapped lighting; long beams use
+bounded sparse samples. See E22 for the chosen visual profile and limitations.
+
+The pre-edit source/executable snapshot and this task's offline verification
+belong to `manual-artifacts/task-records/q-last-weapon-egon-light-20261016/`.
+No live game/server session, staging, commit or push is part of this task.
+New manual acceptance remains `not_run` until the user tests the new build.
+
+Final source-frozen validation uses VS2022 v143 Win32. Debug `hlclient_tests`
+(including normal client dependency) and Release `ALL_BUILD` passed. Debug
+Q/E22/E29/input/game regression passed 292 cases and 558,289 assertions, with
+five explicit resource opt-in skips; Release Q/E22/E29 passed 87 cases and
+499,478 assertions, with four such skips. The separate illumination GPU runs
+each passed four cases and 206 assertions; local and observer isolated readback
+brightens 56,644 world and 19,602 Studio pixels, and saved Debug/Release PPMs
+match byte for byte. Translated runtime-brush lighting, far/stop controls and
+existing beam/halo invariants also pass.
+
+The full Release CTest after the last production edit contains 3,733 tests:
+3,665 passed, 68 explicit capability/private-resource opt-in skips, zero
+failures (784.37 seconds). Core-only Release `ALL_BUILD` and all 44 CTests pass
+(78.67 seconds), including the architecture boundary guard. No skipped test is
+claimed as executed acceptance. ASan runtime was not rerun and remains
+unverified; these normal Debug/Release results do not change that status.
+
+The normal CLI version/help/null-renderer bootstrap, reference transport and
+orchestrator literal checks, G/H summary controls, no-stock manual-launch
+fixture, source-only and full launcher `-CheckOnly` all passed. No live game,
+Steam API session, server modification or capture was performed. Both changes
+are enabled in the normal application without extra flags or copied assets.
+The launcher retains `192.168.0.104:27016` and its settings file is unchanged.
+
+Ready Release: `build/bin/Release/hlclient.exe`, SHA-256
+`727891A4907E225663A5893751256A921C927629E26E05BEB963915EE5C0B253`.
+The rebuilt `HLClientLauncher.exe` SHA-256 is
+`636D89EE3816B7F2B330D1E68F1AB03B90D8FADD36219E252E037AF7482425FA`.
+These identify the new files, not any historical manual session. The final
+audit verifies all 1,426 preserved source copies, no missing source files,
+unchanged branch/HEAD/index and clean `git diff --check`; no stage, commit or
+push was performed. Existing task histories and unrelated edits are preserved.
+
+## Original environment/muzzle resources and beam halo (2026-10-15)
+
+The normal application copies the existing live signon sky name before its
+async asset preparation. The GoldSrc sky adapter validates a bounded basename,
+opens six `gfx/env` panels only through the selected world's exact approved
+root, and uses a separate filesystem-free bounded TGA decoder. An absent server
+name may use inert worldspawn `skyname`; a different worldspawn field is never
+inferred as a sky. Preparation is transactional and optional: missing/rejected
+panels retain the existing fallback without mixing installations. The renderer
+receives six owning RGBA images only, no names, paths or GoldSrc state. Its
+translation-free cube and sky-surface branch share depth-tested ordinary scene
+rendering; sky polygons retain their actual depth to occlude objects beyond
+the sky boundary. See `WORLD_RENDER_PACKAGE.md` for resource and orientation
+evidence and the deliberately bounded TGA-only profile.
+
+The concrete module declares compiled muzzle sprite dependencies and selects
+source-scale/frame profiles from validated weapon events. The same preparation
+worker opens these exact-root resources through the existing source capability
+and SPR importer, without inventing server model indices. The existing entity
+package supports bounded owning presentation sprite sources alongside its
+presentation Studio sources. Generic materialization supplies ordinary additive
+sprites in world and camera-local passes, preserving the original source frame
+extents, black-neutral pixels, depth and immutable GPU texture cache. No filename
+or weapon rule enters the renderer. Missing sprites do not suppress independent
+flash lights, audio or shells. Legacy procedural intents remain available to
+alternate modules; selected HL profiles use the original assets. See E4's
+additive follow-up for exact mapping and stock-parity limits.
+
+An optional bounded neutral beam-halo profile adds a second low-opacity sample
+of the same ribbon texture and exact sampled spine. Half-Life selects it for
+Egon's approved beam resource; alternate modules and other resources default
+off. Core geometry, time, endpoints and lifetime stay unchanged. Visibility
+bounds include the halo, while wall depth testing stays enabled; the halo
+does not create another effect owner, light system or postprocessing bloom.
+The local and committed observer paths share it. See E22 for the selected
+width/opacity and isolated framebuffer evidence.
+
+Coordinated evidence belongs to
+`manual-artifacts/task-records/sky-muzzle-egon-20261015/`. The source snapshot
+preserves the pre-task dirty tree; this follow-up does not rename completed
+milestones. Manual acceptance remains `not_run`: check the server-selected sky
+while turning/moving, original Glock/MP5/Python/Shotgun flashes in first person
+and as an observer, and Egon glow with the accepted spiral unchanged and hidden
+by opaque walls. No new live session or server change is part of these offline
+checks. The normal launcher and its settings remain the user's existing path.
+
+Final coordinated verification (VS2022 v143 Win32): Debug target and Release
+ALL_BUILD passed. Each focused Debug/Release run passed 29 cases and 11,915
+assertions, with 3 explicit original-resource opt-in skips. The wider Debug
+renderer/game-interface regression passed 287 cases and 1,513,056 assertions
+(12 opt-in skips). A separate read-only original-resource run passed all 6
+cases / 4,862 assertions, including the six desert panels and all four muzzle
+marker profiles on the actual OpenGL backend. Local/observer halo A/B controls
+measured 2,259/2,288 added halo pixels around 1,094/1,103 core pixels, with
+unchanged spine, repeated texture-upload count and successful wall-depth checks.
+
+After the final production edit, the complete Release CTest registration ran:
+3,723 tests, 3,655 passed, 68 explicit capability/private-resource opt-in skips,
+zero failures (808.12 seconds). The subsequent normal CLI/null-renderer,
+transport, no-stock launch fixture and SourceOnly CheckOnly gates passed.
+The separate full launcher CheckOnly passed too, without a game/server launch.
+Core-only Release ALL_BUILD and all 44 CTest entries, including the architecture
+guard, passed. ASan runtime remains unverified and was not rerun in this task.
+
+All 1,420 pre-task snapshot files were hash-verified; no source was deleted.
+Branch, HEAD and index are unchanged, as are the launcher executable and saved
+settings. No staging/commit/push, game/stock/HLDS session or managed capture.
+The current normal Release client is 4,730,880 bytes; SHA-256:
+`17D8E688EB1146645A2B5D5C5B0869680A93D1B3BD0E8A5AA3FCC6893A480604`.
+This identifies the new build, not any earlier user screenshot/manual run.
+`verification.json` and `final-audit.json` in the evidence directory retain the
+counts, explicit limitations and unchanged launcher SHA. New manual status
+remains `not_run`; offline pixels do not claim stock-binary visual parity.
+
+## E32 contact and stale-seed recovery (2026-10-15)
+
+The live owner separates validated simulation from its camera policy. A finite,
+successfully rebased but unclassified large correction now keeps the exact
+corrected history with a hard visual snap. It cannot retain an old residual,
+support predecessor or exterior-corner bridge. Failed seed occupancy, invalid
+history/suffix, life boundaries and failed simulation still suspend. The
+velocity-backed 100 ms visual profile is unchanged; no damage cause is inferred.
+
+Before ground queries, replay or movement-audio rewind, the existing owner
+checks exact immutable boundary/suffix identity, sample clocks and the existing
+64-command bound. Recovery from inactive, missing or stale accepted authority
+also requires boundary sample age and summed suffix duration within 250 ms.
+Fresh continuous authority may legitimately repeat an older transport ACK;
+that is not a stale state and retains the original bounded rebase contract.
+Expired recovery records still commit protocol, gameplay and canonical
+observations; only speculative replay is rejected. It neither drops network
+records nor fabricates jump/duck state. These are per-seed limits, not an
+aggregate CPU-time guarantee.
+
+The movement kernel validates a generated step-up endpoint before speculative
+horizontal movement. A contact rounded into the solid BSP child permits only
+one outward binary32 neighbour (at most 1/64 unit), complete-scene clearance
+and a clear hull path. An unavailable candidate leaves the valid direct route;
+provider errors remain failures. No global epsilon, map, hull or collision
+permission changes. Existing bounded scratch observations retain actual failed
+initial/ground/slide queries, with movement and support purposes distinguished.
+
+## E32 server-velocity camera correction (2026-10-15)
+
+The normal reference owner may retain a successfully rebased history for a
+bounded position correction explained by a newly observed server velocity.
+It compares the exact acknowledged movement boundary, not a guessed damage
+event. Eligibility requires continuous life/pose, fresh authority, no new
+setangle or advertised EF_NOINTERP, and clear full-hull and eye paths. As of
+the contact/stale-seed follow-up above, an unclassified correction beyond the
+16-unit visual gate keeps a valid physical rebase but snaps instead of smoothing.
+
+The existing neutral visual-correction owner carries at most 32 units of
+camera-only residual for 100 ms. Canonical origin/velocity and suffix replay
+are corrected immediately. Ordinary accepted ACKs retarget the displayed eye
+without adding its previous residual twice or extending the original deadline.
+Every sample rechecks pose/context and retains world, brush and actor-hull
+checks; this profile never uses the small exterior-corner route. Only one
+immutable pose reference is retained, cleared on cancellation/completion.
+No damage, input, command, renderer, audio, server or wire authority changes.
+The policy is local-compatible, not stock-exact damage prediction. See the
+E32 record and [visual correction](PREDICTION_VISUAL_CORRECTION.md).
+
+## E32 lift contact and bounded frame work (2026-10-15)
+
+The existing vertical-support command solver can acquire a rising brush top
+after the ordinary kernel selects a tied world floor. This is only a new
+contact witnessed between the command's start/end scenes: the grounded walking
+hull must be clear in the start scene, blocked by that exact rising brush at
+the end, and recover to its walkable plane within the derived command rise.
+The upward path retains world, other brush and entity-box blockers; complete
+end-scene occupancy is mandatory. Side/deep/descending contacts and blocked
+pushes retain failure. No unseen server stop is invented; newly observed stop
+authority replaces derived movement through the normal rebase.
+
+Runtime interpolation shares one input validator with the buffered player and
+ordinary owners. Validation-only calls no longer construct, hash and discard
+whole output observations before the real sample. Output ownership, clocks,
+lifetimes, finite-value/byte limits and canonical validation remain unchanged.
+Runtime replay reserves its configured bounded identity ledger before generation
+publication; a successful commit appends without copying past identities.
+Decoder history publication transfers ownership with the intended move, avoiding
+an accidental copy from a const temporary. Neither wire grammar nor the atomic
+publication boundary changes. See the 2026-10-15 E32 follow-up for evidence.
+
+## E32 long-session diagnostics and server-enabled crouch jump (2026-10-14)
+
+Normal keyboard sessions keep bounded rolling send/sample diagnostic histories.
+Lifetime counters and causal prediction carriers are independent of retention;
+scripted evidence modes preserve their strict full-history contract. Only typed
+failure categories reach durable external diagnostics.
+
+The negotiated clientdata physics string is bounded neutral observation data.
+The game movement policy selects an exact capability key and optional crouch-jump
+parameters; no Half-Life key or boost constant is hardcoded in the engine.
+Coherent server capability becomes immutable movement state and participates
+in prediction identities/rebase. Default/core-only policies select no boost.
+
+World glow sprites use ordinary world depth testing with additive blending and
+no depth writes. The renderer knows no RPG/Egon names; resource and effect
+ownership remain in the existing module/application paths.
+
+## E32 lift reseed and command post-think ordering (2026-10-14)
+
+The immutable neutral command retains independent bounded pre/post velocity
+deltas. Optional GameClientAPI phase selection defaults to the unchanged pre
+path; Half-Life alone selects the post path for Gauss. The normal live owner
+captures phase and delta once alongside the exact submitted sequence. History
+hashes nonzero post values separately; wire bytes remain unchanged. The ordinary
+movement and ladder solvers add post velocity after movement/friction/collision,
+without integrating it into the firing command's origin or changing ground
+evidence. Rebase reuses the saved command, never current weapon state or effects.
+
+Canonical ground derivation may witness the exact immutable reference command
+that produced an upward post delta. Matching sequence/wire fields and the
+existing generation/life gates allow the normal support query to retain the
+completed step's observed ground flag even above the ordinary upward limit;
+free occupancy and walkable support are still required. No delta is applied
+during categorization. Default/no-witness and embedded-brush recovery rules
+remain unchanged, and the next real movement step handles leaving the ground.
+
+Coherent grounded prediction seeds may recover a quantized brush top within a
+local-compatible1/8-unit vertical envelope. Full-scene occupancy, exact brush
+identity and entry/downward-support walkable-plane witnesses are required. The
+plane is solved geometrically, not by enlarging trace epsilon. World/box/ULP
+rules, airborne/deep/wall/ceiling rejection and canonical state remain unchanged.
+No renderer, camera teleport, server activation, new asset open or physics owner
+is introduced. See the additive E32/E21 follow-ups for evidence and limitations.
+
+## E31.1 native display and player appearance boundaries
+
+Versioned neutral launch settings carry requested scene MSAA and independent
+HUD scale. SDL3 reports actual logical/pixel extents and display density; it
+does not scale game HUD commands or request redundant default-framebuffer AA.
+The existing OpenGL renderer owns bounded multisampled color/depth storage,
+native-size resolve, then the existing once-only image adjustment and sharp
+HUD passes. No game policy, filesystem names or HL model/color rules enter it.
+
+Committed userinfo projects owning bounded appearance fields through the
+optional GameClientAPI. The HL module chooses safe player-model virtual names
+and supported indexed-palette regions. The approved exact-root adapter imports
+these bounded local presentation dependencies without inventing network slots.
+Supplemental immutable Studio owners feed the ordinary pose/frame builder;
+canonical modelindex, server collision/damage and prediction remain unchanged.
+Pose identity follows the selected model and corpses freeze their originating
+appearance. Core-only and alternate modules retain default optional behavior.
+See [E31.1 implementation and evidence](FULLSCREEN_HUD_MSAA_PLAYER_APPEARANCE_E31_1.md).
+
+The fullscreen timing follow-up keeps reference movement history transactional.
+While a prepared outgoing move owns its revision, the live owner progresses that
+submission before advancing sampling deadlines or consuming input edges. The
+single shared driver pump and exact send-receipt accounting remain the ownership
+boundaries. Unplanned unsent history still permits ordinary bounded sampling;
+focus/life/close cancellation and stalled-transmission deadlines remain active.
+Durable external diagnostics retain only typed command failure labels.
+
+The existing opt-in movement-session recorder also owns bounded FPS episode
+observations: contiguous known controlled/alive endpoint intervals over20ms,
+64 worst episode details, whole-session counts, and original worst-frame
+CPU/stage/delayed-GPU timings. This stays within the512KiB aggregate bound,
+independent of exhausted detailed incident slots, with no per-frame I/O,
+unbounded history or gameplay/timing mutation. Reciprocal frame-time FPS is
+explicitly distinguished from sustained FPS and root-cause inference. See the
+2026-10-13 FPS logging follow-up in `RUN_FIRE_LIFT_TOP_CORNER_E32_1.md`.
+
+## E29 screen-space HUD boundary
+
+The concrete module declares bounded immutable HUD descriptor dependencies and
+owns roles, tier selection, weapon/visibility policy, menu/history and UI cues.
+`GameClientAPI` carries descriptor metadata and ID/revision/frame/subrect draw
+values only. The generic GoldSrc HUD adapter opens the selected approved world's
+exact root through the existing locator/opener and AssetManager/SPR importer.
+Normal application materialization binds immutable sprite owners; OpenGL draws
+one bounded screen-space pass without weapon names or filesystem access.
+Menu consumption precedes command materialization and never rewrites history.
+SDL's optional Escape-input ownership is an overlay mechanism; the old default
+and focus-loss/event-limit fail-safes remain. See
+[E29 resource, authority, lifecycle and verification contract](ORIGINAL_SPRITE_HUD_INVENTORY_CROSSHAIRS_E29.md).
+
+## E27 committed sound cosmetic observation
+
+Atomic runtime replay publishes neutral `CommittedSoundObservation` through
+GameClientHost after entity/TE commit, independently of the audio queue, output
+device, focus and scene visibility. The host converts the receive clock; the
+normal app binds advertised model/sound slots without granting file access.
+Only HalfLifeClientModule interprets the exact Snark blast name, CHAN_ITEM,
+observed living-model entity continuity and the yellow cosmetic profile.
+Approved sprite materialization, depth/blending and server audio stay shared.
+Sound-derived intent provenance is distinct from actual server TE provenance;
+the fallback neither invents a TE nor replays audio or gameplay. Core-only's
+alternate module exercises the same optional seam with no Half-Life fallback.
+See the authorized sound-pop follow-up in the existing E27 task record.
+
+E27.1 adds a neutral owning768-byte palette table and compiled gfx-leaf
+preparation token. The startup asset worker resolves only the selected world's
+verified root through the existing opener. HAL interprets host palette195;
+renderer receives RGB modulation only. A compact generic sprite burst expands
+once in the existing temporary owner (16/event,128drops+32ordinary sprites,
+160output), with seeded independent velocities/lifetimes/fixed imported frames.
+No game names or damage rules enter its animation/materialization mechanisms.
+Spray and droplets use the original two approved sprite assets; numeric dynamics
+are explicitly local-compatible until stock visual comparison is available.
+Optional actual server blood-setting evidence reaches GameClientAPI through
+ordinary runner arguments. HAL suppresses sound fallback on explicit false;
+real TE retains server authority. Module generation reset clears metadata and
+receipts; app rebinds approved palette/policy with resource slots. See E27.1's
+existing task record for original-asset facts, visual artifacts and limitations.
+
+## E26 Tripmine boundary
+
+Half-Life owns ID13/no-clip/exhaustible/inventory/HUD, exact tripfire event
+mapping, validated v_tripmine roles, provisional128-unit DRAW eligibility,
+bounded receipts and retirement. `prepare_presentation` borrows a synchronous
+neutral point query only during a frame; no callback/engine handle is retained.
+The app uses the latest committed observation with the existing BSP/brush/BBOX
+union and protocol player hulls, excluding the receiving actor. Shared point,
+standing and duck sweeps execute one implementation; physics/history/replay
+are not changed by presentation queries.
+
+World v_tripmine/body3/sequence7, peer p-model, arming, ENTITY_BEAM, audio/pitch,
+removal and TE_EXPLOSION/TE_SMOKE are server-driven generic paths. A bounded
+neutral beam endpoint receipt prevents stale attachment across observed target
+slot/model/player-life boundaries. No client mine, arming/fuse, beam trigger,
+owner-death cleanup or damage authority is added. See the
+[E26 recovery/implementation contract](TRIPMINE_PLACEMENT_ARMING_LASER_E26.md).
+
+The shared packet decoder projects negotiated common entity-state members when
+a new full-packet entity reuses a signon slot under another normal/custom beam
+schema. The signon baseline remains immutable; generation, member layout,
+alternate-slot and existing-delta identity checks stay strict. This is a generic
+GoldSrc decoding mechanism, not a mine-specific renderer or fallback.
+
+## E25 Satchel boundary
+
+The E32 gib-contact correction adds at most8 owning exact virtual-model/
+movetype point-box exclusions to the immutable game movement policy. The
+generic current-frame builder applies them only to complete, finite, validated
+nonplayer BBOX observations with all six relative bound coordinates equal to
+zero. Half-Life selects its pinned SDK gib pairs; the core selects none by
+default and knows no gib names. A model slot number alone, absent movetype or
+nonzero bounds never removes a blocker. This is a narrow local-compatible
+prediction filter, not server collision/damage authority or a global degenerate
+box rule. Canonical entities and ordinary visual/audio presentation remain
+unchanged; there is no new asset open, copied physics or renderer exception.
+See the gib-contact follow-up in `RUN_FIRE_LIFT_TOP_CORNER_E32_1.md`.
+
+Half-Life owns ID14/no-clip/select-empty rules, chargeReady0/1/2 interpretation,
+validated charge/radio model roles, command-time throw/detonator presentation,
+bounded unconfirmed reservations and retirement. The two-model pair belongs to
+one weapon lifecycle: an authoritative model echo does not reset its action.
+
+GameClientAPI exposes compiled virtual model preparation tokens and at most8
+owning metadata variants. The normal app resolves these solely against its
+already approved session resource table/cache. The module retains two validated
+models; the host/renderer knows no Satchel filenames or state meaning. Reset,
+resource revision and input cancellation have explicit ownership boundaries.
+The same API is covered by the core-only project-owned alternate module.
+
+The neutral projection adds optional signed weapon iuser1 with exact current
+mask presence, and optional ordinary owner reference. It does not interpret
+chargeReady or perform owner searches. Wire grammar, canonical hashing and atomic
+publication remain unchanged. Existing packet entity/Studio interpolation,
+server svc_sound, TE_EXPLOSION/TE_SMOKE and p-model bone merge execute all world
+behavior. No client charge, physics, fuse, detonation or damage is introduced.
+See [E25 contract and evidence](SATCHEL_DEPLOY_RADIO_DETONATE_E25.md).
+
+The deployed-charge follow-up adds negotiated owning optional entity bounds.
+Half-Life explicitly selects BBOX/receiving-owner filtering through its existing
+movement policy; the generic current-frame context/query executes bounded
+axis-aligned hull sweeps alongside BSP/brush collision. Rendering/model readiness
+does not supply or remove those bounds. No charge/object physics or damage
+authority is added. The standard owner projection is used by this explicitly
+selected prediction filter, not to invent local gameplay ownership.
+
+Half-Life also selects a bounded authoritative translation transition for
+confirmed death. The application camera mechanism samples it from explicit
+presentation time and resets it at session/life boundaries. It is presentation
+only; live movement prediction and remote Studio death playback are unchanged.
+The same neutral bounds/query and camera mechanism run in core-only tests with
+no Half-Life linkage or installation. See the E25 contact/death-camera follow-up.
+
+The clustered-box follow-up keeps physics/replay unchanged and repairs H3's
+render-only step path. Between same-hull grounded endpoints with world/box
+support and a height delta within observed server `step_size`, the shared
+`sample_reference_box_step_eye` verifies the complete up/across/down hull
+route and the sampled free hull. Its eye uses the existing command-time alpha
+within that hull, with independent BSP/brush eye clearance. It does not fall
+back from a partly interpolated eye to the old endpoint because a straight
+body chord intersects the low box. Walls, ceilings, airborne/hull transitions,
+missing/invalid step limits and failed queries retain existing H3 handling.
+No Satchel class/model/owner meaning is added to this generic mechanism.
+Death-camera transitions and authority/correction/history/TX remain separate.
+
+## E24 Hand Grenade boundary
+
+The existing Half-Life weapon controller owns the validated grenade profile and
+prime/hold/release/throw/retirement presentation. It consumes immutable submitted
+commands through GameClientAPI, including optional owning command-time angles,
+observed punch and player velocity. The new neutral action kinds are `prime` and
+`throw_release`, not firearm fire events. No local grenade entity, fuse callback,
+collision simulation, damage or score authority is created.
+
+The schema decoder exposes its already parsed changed-field mask as bounded
+metadata. Optional weapon-slot auxiliary floats retain negotiated `fuser2/3`
+values and current-record presence; Half-Life alone interprets them as absolute
+StartThrow/ReleaseThrow times. These are distinct from clientdata Gauss fields.
+Wire grammar, canonical hashing and atomic publication are unchanged. Explicit
+new corrections must not be confused with reconstructed old zero values.
+
+World grenades reuse ordinary BOUNCE entity interpolation and Studio models,
+committed spatial server audio, TE_EXPLOSION/TE_SMOKE and E11 p-model merging.
+No grenade-named resource or policy is added to renderer, transport or audio
+mechanisms. See [E24 contract and evidence](HAND_GRENADE_COOK_THROW_E24.md).
+
+## E23 Hornet Gun boundary
+
+The Half-Life module owns exact Hornet Gun ID/name and no-clip semantics,
+validated v-model roles, TRACK/FAST event interpretation, local presentation
+cooldowns, deterministic launch samples/recoil and server-derived Hornets HUD.
+The existing weapon controller retains bounded presentation receipts, not an
+independent ammunition store. Biological recharge and targeting remain server
+rules: no new recharge protocol field, client projectile, homing AI, hit or
+damage computation is introduced.
+
+Ordinary packet entity model indices, transforms and Studio state use the
+existing entity pipeline; modelindex=0 hides a live entity without requiring
+its deletion. Generic TE_BEAMFOLLOW consumes per-message resource/color/width
+and maintains entity-lifetime-scoped history. An unprofiled trail's transient
+tip reaches the current interpolated entity between retained 20-ms samples;
+this adds neither physics nor history growth. RPG's smoke profile is unchanged.
+Server buzz/hit sounds remain committed svc_sound events and E13/E14 remain
+solely server-driven death/score presentation.
+
+`SoundReferenceSource::module_profile_dependency` carries an owning exact virtual
+token selected only by a compiled module's allowlist (E23: three agrunt launch
+samples). It is never selected from an untrusted server string or MDL marker.
+The shared loader validates a flat canonical directory/basename.wav, forbids
+absolute/traversing/double-sound-prefix names and opens only through the existing
+approved exact world root. Async bounds and readiness deadlines are unchanged;
+no game-specific filename, AI or recharge policy is added to lower core targets.
+See [E23 contract and evidence](HORNET_GUN_TRACKING_FAST_RECHARGE_E23.md).
+
+## E22 continuous beam boundary
+
+Half-Life's `EgonPresentation` owns primary-only/no-clip/shared-uranium semantics,
+assigned fire/stop events, lifecycle/confirmation, original sample/sequence
+profiles and verified p-model socket policy. It runs through the same module,
+host, viewmodel, scene and audio composition as the other weapons.
+
+Generic protocol projection separates custom beam coordinates/references from
+ordinary Euler/Studio fields. Checked mixed intra bases keep the selected schema
+and target defaults. Current committed beam entities are resolved against current
+owner attachments/merged sockets; the receiving override is module-handoff gated.
+Ordinary endpoint sprites retain server frame/scale/visibility. The established
+sprite renderer executes bounded absolute-time noisy/scrolling ribbons; its
+neutral sine profile winds a 64-segment helix around the beam axis while the
+secondary noise retains 32 segments. Endpoint pinning, a short-trace radius cap
+and shared conservative bounds preserve attachment and visibility. Beam sprite U
+is across ribbon width (the transverse glow profile); V scrolls/repeats along
+its length. Ordinary sprite UVs are unchanged. The renderer knows no Egon/resource
+name. Audio's stable owner can replace a finite startup with a
+loop, retain only current continuous intent through focus mute, and clear the
+exact domain on reset. No second loop, device, raw send or SDK ABI crosses G1.
+
+Normal `hlclient_game_halflife` privately uses the pure shared `studio_pose` for
+cached immutable socket planning; lower targets never depend on the game. The
+same host/API is used by the core-only alternate persistent-beam test module.
+Server ScreenShake and ScreenFade are strict transactional HL decoding with
+bounded receipt-clock presentation (2026-10-14 follow-up). The module supplies
+neutral camera offsets and RGBA/modulation; OpenGL privately adjusts the world
+camera and composites before HUD, never changing command aim/prediction/listener.
+The original E22 shake-deferred acceptance remains historical, not current.
+See [E22 contract, resources, bounds and evidence](EGON_CONTINUOUS_BEAM_E22.md).
+
+## E17 Shotgun composition
+
+The existing `hlclient_game_halflife` module owns Shotgun selection, validated
+v/p-model profiles, assigned single/double event bindings, cadence/recoil,
+server-observed special reload stages and fire/contact sample policy. It emits
+one neutral flash/light, one or two uniquely identified named shells and four
+or eight independently identified world-hit requests. No extra loop, audio
+device, physics simulator, damage authority or renderer weapon switch exists.
+
+`GameClientAPI` retains owned bounded command/event snapshots: accepted-command
+eye and direction/right/up are frozen once; committed-only local events carry
+their own exact event-time context. Effects never borrow RX or asset buffers.
+Neutral frames allow at most two shells/eight rays. The application consumes
+every entry through existing approved assets, BSP point sweeps, decal/particle
+composition, shell pool and spatial mixer. Each shell carries its virtual model
+token through the pool, so brass and shotshells materialize independently using
+the same approved Studio bindings. Pool slots are not causal action identities.
+
+The generic replay projection exposes optional unsigned `m_fInSpecialReload`
+and, only when exactly advertised, finite `m_flPumpTime`; it does not invent
+missing timers or interpret reload policy. The historical canonical hash is
+unchanged. All weapon semantics remain above the existing G1 boundary; the
+Half-Life-OFF build uses the same generic code and alternate test module.
+Reload/pump audio remains committed server sound, not a locally repeated MDL
+marker. HLDM spread, sockets, resource evidence, authority/lifecycle limits and
+verification are recorded in [E17](SHOTGUN_SINGLE_DOUBLE_RELOAD_E17.md).
+
+The camera-local Studio pass has an independent 1-unit near plane, preserving
+the world FOV/far plane without mutating world camera/depth. This neutral
+projection contract clips geometry parked at the eye (including the inspected
+Shotgun's idle reload-shell mesh) while retaining ordinary held/reload geometry.
+It does not hide a named weapon/bodypart or alter model bones, assets or game
+rules. Both ordinary renderer branches use `camera_local_first_person_camera`.
+
 ## Two-client weapon effects correction (2026-10-01)
 
 The committed scripted-event bridge now connects the bounded `svc_event` and
@@ -130,6 +694,37 @@ by casting packet bytes to host structs.
 
 ## G1 current engine/game ownership
 
+The E32 remote-player smoothing follow-up keeps the sole renderer/scene and
+the existing runtime snapshot interpolator. An owning player presentation
+history retains at most16 immutable committed observations and32 continuity
+entries. Its monotonic application-to-server clock fills a selected <=100ms
+reserve without restarting on ordinary packet arrivals. Current-list/visibility
+authority remains latest; the concrete module owns life/discontinuity decisions,
+while exact selected committed brackets feed its Studio/gait/attachment path.
+No player velocity, input or physics is guessed. The existing ordinary kinetic
+buffer retains its separate verified birth/cadence rules, sharing immutable
+observation owners rather than copying assets or introducing another renderer.
+Source socket freshness remains distinct from player render sampling. A delayed
+old p-model cannot supply an incompatible new-weapon socket; ordinary server
+event fallback remains available. See the2026-10-13 follow-up in
+`REMOTE_PLAYER_VISUAL_ANIMATION_E10.md` for bounds and acceptance.
+
+The E32 railing follow-up keeps animation-only same-time publications out of
+the position continuity floor. Real same-time position corrections still hold
+exactly; newer same-position anchors at an existing held boundary retain their
+true source identity. The Half-Life module defers discrete main/gait changes
+until the selected player endpoint and samples moving gait yaw across the
+committed interval, after backwards-facing compensation. No collision,
+locomotion prediction, server state or extrapolated player path is introduced.
+
+For a continuous delayed looping main sequence, the Half-Life module selects
+the preceding committed animation clock until the newer anchor's animtime.
+The existing raw frame/rate evaluator still owns pause, reverse and loop wrap;
+byte-frame blending and a new animation timeline are not introduced. New-clock
+corrections/restarts remain exact, and nonloop/death, gait, transition, p-model
+and lifetime policies remain independent. See the E32 looping-clock follow-up
+in `REMOTE_PLAYER_VISUAL_ANIMATION_E10.md`.
+
 D2 Use selects a narrow HL1 input/reference movement profile through the same
 module policy: physical E -> typed Use -> immutable usercmd/history -> Netchan.
 Shared input has a policy-selected capture/life action gate; the movement
@@ -163,6 +758,20 @@ game effects. Initial/reset staging uses no previous game state and resets
 the module only after validation succeeds. Repeated frames and movement replay
 do not resubmit weapon actions. Current network grammar and canonical hashes
 are unchanged.
+
+The subsequent visual-tuning profile adds neutral transient glow parameters.
+`WorldImpactPresentation` emits tracer-head lights at the computed moving
+front; `ImpactParticlePool` emits one short contact flash/light per accepted
+burst and bounded emissive sparks. Half-Life owns colors/density/spread/
+durations. The core pool stays 32 bursts, 128 identities and 256 output
+particles (16 per burst with explicit output saturation). `RenderScene`
+adds a frame-owned eight-light batch, separate from the existing primary
+muzzle light. Shared GL upload and world/brush/Studio shaders consume it;
+camera-local first-person draws use an empty world batch. Remote muzzle
+flashes retain submission priority over the added secondary flashes.
+No new assets, game logic, wire grammar or physics enters the renderer.
+These lights use the existing unshadowed point-light mechanism, not bloom
+or a shadow system. See the E15 follow-up for actual profile values/bounds.
 
 The asset provider materializes neutral model/sequence/body/frame requests;
 OpenGL draws module-composed bounded HUD primitives. Camera geometry and H3/H4
@@ -590,6 +1199,27 @@ until all renderer resources are released. See
 [OpenGL world renderer](OPENGL_WORLD_RENDERER.md).
 
 ## Protocol and safety boundary
+
+The E32 tunnel follow-up enables a bounded outer GoldSrc UDP split envelope in
+the existing normal-live `NetchanDriver` profile. It retains opaque, still
+munged parts only after exact-endpoint filtering, then passes a complete,
+validated inner datagram through the unchanged netchan/ACK/service pipeline.
+Strict bootstrap/research callers keep their special-packet boundary. This is
+transport framing, not another reliable reassembler or application decoder.
+Reference movement shares one existing-collision helper for at most one
+binary32-step BSP boundary recovery; full-scene clearance is mandatory and
+server entity boxes/real penetration are not relaxed. Canonical server seeds
+remain owning observations; a derived physical query records its actual origin.
+
+The subsequent uneven-ground fix consumes validated sweep contacts through a
+one-ULP outward endpoint only after full-scene occupancy and a clear hull path
+from the original start. It does not alter pure BSP query signs/fractions.
+Coherent grounded reference seeds may use a narrowly bounded box-boundary
+quantization repair (<=1/8 unit): every collider remains present, a reverse
+sweep must witness the exact box, and a valid support probe must exist. Raw
+clientdata remains canonical. Half-Life explicitly opts into player-schema
+SOLID_SLIDEBOX bounds in the existing neutral server-box query; no Studio model
+shape, player-intent prediction or local player damage authority is added.
 
 Network input is untrusted. Parsers must:
 
@@ -1361,6 +1991,25 @@ collision scene also supplies render-only D3 transforms at the player's
 presentation time; committed observations are untouched. See
 [vertical-lift time, ownership, bounds and tests](VERTICAL_LIFT_PREDICTION_D4_CONTINUATION.md).
 
+E32 retains that bounded support profile while preserving an unchanged pusher
+trajectory across same-svc-time updates of unrelated collision membership.
+Exact sampled command deadlines replace presentation-only reconstruction from
+command ID distance after scheduler stalls; obsolete carrier boundaries cannot
+rewind the retained prediction anchor. Canonical record publication and wire
+commands remain independent. Optional application-owned movement incident
+reports use bounded numeric observations and nonblocking identity-bound GPU
+queries, not a new telemetry/physics/network service. See
+[LAN movement/lift evidence and limits](LAN_MOVEMENT_LIFT_STABILITY_E32.md).
+
+The optional whole-session continuation aggregates accepted, sanitized frame
+observations in the same application receipt owner. A separately accounted
+512 KiB maximum heap allocation retains histograms, context-separated counts
+and 512 adaptive time bins after the detailed incident windows fill. Focus,
+capture and committed lifecycle are observations, not new movement policy.
+Delayed GPU samples retain their original frame identity and context. Normal
+close embeds this evidence in the existing bounded movement report; collection
+does no file I/O and does not change command, prediction or render timing.
+
 ### E2 local weapon audio
 
 The Half-Life B1 controller emits owning GameClientAPI audio cues; imported
@@ -1417,3 +2066,486 @@ committed anchor clocks separately from held renderer metadata. Shared Studio
 rotation channels interpolate endpoint quaternions (with controllers applied
 to both), not Euler scalars; this remains a neutral pose mechanism without a
 Half-Life dependency in lower targets.
+
+### E11 selected remote attachments and neutral impact particles
+
+Half-Life selects the committed sampled `weapon_model_index` via GameClientAPI;
+the same approved asset materializer resolves it and merges the evaluated player
+pose through a generic cached Studio correspondence. Primary/attached draw
+ordinals share the original entity ID. The renderer never chooses a weapon or
+searches bone names. Lower targets remain independently buildable.
+
+Half-Life also selects a bounded numeric Glock-impact profile. Local commands
+and committed remote events converge on the same existing validated static BSP
+impact owner and fixed-memory particle pool; neutral world billboards reuse the
+normal GL pass. No asset, audio, collision authority or new wire path is added.
+See [E11 contracts and verification](REMOTE_PMODELS_BULLET_PARTICLES_E11.md).
+
+### E12 evaluated remote weapon sockets
+
+The selected game module plans narrowly bounded numeric sockets from a
+synchronous approved immutable model view. The existing asset host evaluates
+them against the **same final merged p-model pose** and entity matrix used by
+the normal renderer, then publishes owning samples only after the scene commit.
+The game module correlates committed events with exact emitter/lifetime/weapon
+and source-order evidence and freezes one-shot outputs. Transport framing,
+server animation, trace/impact and renderer/effect execution stay unchanged.
+The generic O(1) socket helper lives in `hlclient_entity_render_api` and depends
+on neutral `hlclient_studio_pose`, never the Half-Life library; an independent
+test module uses the same seam in the core-only configuration. See
+[E12 profile, correlation and verification](REMOTE_GLOCK_PMODEL_FIRE_E12.md).
+
+### E13 server-owned player proxies and visual continuity
+
+Exact optional neutral render-effect/amount observations cross the existing
+transaction; selected-module policy classifies a server-owned entity proxy and
+selects a current approved player model slot. Generic assets/Studio/renderers
+execute the owning corpse's numeric pose/transform without a second corpse pool
+or concrete game dependency. A bounded post-commit notification gates queued
+old-life remote effects and clears numeric player presentation across observed
+inactive/re-arm or slot boundaries, never network/prediction/assets. Corpse
+sampling is stateless/current; living-player EF_NOINTERP and game-selected
+discontinuities step instead of flying between death and spawn. See
+[E13 reference, ownership, limits and verification](REMOTE_PLAYER_DEATH_CORPSE_RESPAWN_E13.md).
+
+### E14 multiplayer display state
+
+The owning protocol userinfo parser exposes only a bounded display-name
+projection and a private same-occupant comparison. Replay stages a fixed-size
+occupant cache and neutral owning display updates at the existing atomic record
+boundary; initial signon identities and pre-baseline updates follow the same
+path. Only the selected Half-Life module interprets registered ScoreInfo,
+DeathMsg and team messages, owns scores/notices, and chooses sorting/layout.
+DeathMsg is never E13 visual death authority. Existing input supplies held TAB
+and numeric viewport context; no platform handle or new wire button crosses the
+API. The generic host/GL pass share explicit neutral HUD command/glyph bounds,
+not Half-Life policy. Core-only and an independent module use the same seam.
+See [E14 contracts and verification](MULTIPLAYER_SCOREBOARD_DEATH_NOTICES_E14.md).
+
+### E15 firearm profiles and neutral tracers
+
+Half-Life extends existing weapon presentation with an MP5 primary profile,
+bounded command-driven pending actions and per-emitter tracer cadence. API
+owning sequence labels/opaque socket keys select numeric output; the asset
+host evaluates the same merged pose. Existing world-impact storage expires
+fixed-memory lines and GL renders neutral depth-tested flat or solid geometry. No gameplay
+policy moves into renderer/protocol/core. Both mp5.sc and mp52.sc bind exact
+advertised names; E16 adds secondary presentation without primary effects.
+See [E15 contracts](MP5_PRIMARY_FIRE_E15.md) and [E16 contracts](MP5_M203_SECONDARY_E16.md).
+
+The MP5 tracer profile now selects a short moving streak (48 world units,
+12,000 units/second, 78 ms maximum age), not a full muzzle-to-hit line. The
+neutral world-impact owner captures the first valid presented local muzzle
+once, or the committed remote origin, and advances a bounded segment toward
+the immutable trace endpoint. Post-launch camera/weapon movement cannot drag
+it. Endpoint clipping, fading, dedup, reset and expiry remain generic; profile
+values and cadence remain Half-Life-owned. This is presentation-only, not
+projectile physics or hit/damage authority. Zero motion fields preserve the
+stationary neutral-line mode for other callers.
+The neutral `head_taper_fraction` selects the tapered portion (90% for MP5);
+the retained flat variant tapers its leading end, while the current solid
+variant puts the taper at the rear and the rounded cap at the front. MP5 also
+selects `taper_end_diameter_fraction=.20`: its rear frustum ends at 20% of the
+body diameter, then a small four-ring rounded cap closes it within the same
+interval. The neutral default zero preserves the original sharp solid cone.
+Zero taper preserves other rectangular flat lines. This finite [0,1] value crosses
+API/owner/scene and affects only the shape in the shared GL pass. The muzzle-
+flash and particle shapes, line endpoints and render states are unchanged.
+
+MP5 now selects `WorldLineGeometry::solid_3d` in both Half-Life profile sites.
+The appended API/scene field retains `flat_billboard` as the neutral default;
+the original quad builder and shader remain unchanged and independently tested.
+`renderer/render_line_geometry.*` builds a camera-independent closed twelve-sided
+tube/frustum/caps with a fixed maximum of 648 vertices, diameter equal to selected width
+(local first-person 0.65, remote 1.30), with taper starting 10% behind the rounded
+front and continuing to the narrowed rounded rear. The existing owner alone drives flight/fade/endpoint/
+glow. GL draws outward faces additively with a mild radial emission falloff and
+restores blend/cull/front-face/depth-write state; no camera-facing geometry or
+asset/material/game logic is added. Geometry stays between the presented start
+and clipped end. Core-only tests include the same pure mesh builder. See the
+E15 3D follow-up for preservation and offline versus manual evidence.
+
+Half-Life chooses a stable per-action MP5 forward start distance in [0,16]
+world units, independently of render sampling and without global RNG. The
+owning neutral API scalar `start_offset_units` defaults to zero, is finite and
+bounded to [0,1024]. The shared owner adds it to travelled distance from the
+actual captured local muzzle or committed remote muzzle toward the original
+hit, once, without changing the wire/trace or restarting flight. A close hit
+at/before the selected start emits no line/glow, never an overshoot. Static
+neutral lines can also shift their start toward the same endpoint. Diameter
+selection and variation remain in the HL layer; renderer and retained flat
+variant share the same neutral output. Other flight/tip/glow values are unchanged.
+
+Opt-in manual `-DebugFreezeTracer` forwards through the existing launcher/runner
+and native orchestrator to `--debug-freeze-tracer` in the normal application.
+Only the shared `WorldImpactPresentation` host owner changes presentation: it
+materializes one owning solid moving-line sample at its actual first valid muzzle
+and profile offset, with unchanged diameter, clipped length, taper and opacity.
+It does not advance/fade/expire that sample; the latest valid tracer replaces it
+(submission serial handles pool wrap/delayed anchors), map/network reset clears
+it. Camera/viewmodel switches do not move it. No retained head billboard/light
+obscures the inspection mesh. Flat/static lines and normal default flight remain
+unchanged. Neither game eligibility/cadence nor wire/physics/audio authority is
+changed; no extra renderer, assets, loop, or unbounded retained effects are added.
+
+The solid-line leading end is now a smooth four-ring hemisphere within the original
+start/end interval, with the optional narrowed rounded frustum at the rear. Front cap length is the
+smaller of radius and half the existing body length; short clipped bodies use
+an axial half-ellipsoid. The equator meets the unchanged-diameter body with
+matching radial normals. The private mesh-generation axis is reversed (end to
+start), keeping the owning start-to-end flight, clipped interval and front glow
+unchanged. Historical `head_taper_fraction` still selects the pointed length
+fraction; it does not relocate the source line or change the flat variant.
+An explicit full-taper standalone cone has no body space and keeps its closed
+flat base; the MP5's 90% taper uses a rear equator diameter of 20% followed by
+a hemisphere. Rear cap length is min(rear radius, half taper length), so very
+short clipped lines use a compressed half-ellipsoid without extending flight
+endpoints. The appended owning diameter field is finite [0,1], validated by
+the host and mesh builder, copied with the existing frozen sample; flat and
+zero-taper shapes ignore it. The closed CCW mesh is bounded at 216 triangles,
+with no new pass/material or change to flight,
+fade, debug retention, flat billboards, glow, audio, or hit authority.
+
+### E16 server-owned grenade and committed temporary effects
+
+HalfLifeClientModule selects the explicit Attack2 input/movement carrier policy,
+interprets MP5 secondary ammo/timers/water and exact advertised `events/mp52.sc`,
+and owns launch animation/recoil/audio and explosion/smoke presentation profiles.
+The generic host carries Attack2 unchanged in validated command history; movement
+and replay treat it as an inert weapon bit. No client grenade simulation, contact,
+ammo decrement, explosion trace or damage authority is introduced.
+
+Strict svc_temp_entity framing publishes owning `CommittedTemporaryEffect`
+observations only after the existing atomic record commit. The optional API callback
+and bounded output batch work with alternate modules and core-only builds. Exact
+generation/record/cursor/entry identity replaces proximity or selected weapon/life
+identity. Half-Life profiles produce neutral imported-sprite, light and particle
+intents. `TemporaryEffectPresentation` executes these through the existing particle
+pool, shared scene light batch and `RuntimeReplayLocalAssets` server-slot materializer;
+OpenGL/Null consume a separate transient sprite entity batch in the same scene.
+Additive/index-alpha render-derived materials preserve immutable source pixels and
+canonical asset identity. Flag suppression is per component; main explosion audio
+remains evidence_pending rather than inventing a sample or duplicating svc_sound.
+
+Ordinary ready Studio entities with a confirmed generic kinetic movetype opt into
+the existing bounded snapshot interpolation; unknown/static ordinary entities retain
+discrete behavior. No interpolation creates a projectile between unobserved snapshots.
+Water explosion sprites use the received server index, while exact sparks/bubbles
+grammar is consumed with explicitly deferred visuals. See [E16](MP5_M203_SECONDARY_E16.md)
+for bounds, lifecycle, evidence and acceptance limitations.
+
+#### 2026-10-04 corrective presentation boundary
+
+The preceding E16 evidence-pending audio statement is historical. Half-Life now
+adds an owning optional spatial sound intent to the same committed temporary
+effect batch. Its fixed three-sample explosion profile is prepared through
+`GameClientHost::temporary_sound_preparation()` at approved asset readiness.
+The normal application delivers that batch exactly once through generic
+`goldsrc::TemporaryAudio`, the existing local-resource loader and audio mixer.
+Sprite absence and sound absence remain independent. NOSOUND suppresses only
+the main boom; existing server debris is not duplicated. Sample variation,
+gain and attenuation are explicitly local-compatible, not stock-binary parity.
+
+TemporaryAudio has a separate world voice namespace from local weapons, remote
+weapons and server entities. A neutral bounded mixer `stop_group` command clears
+only that namespace at map/session boundaries. Weapon switches and player death
+do not stop world explosions. Its 256 exact recent identities plus an evicted
+monotonic commit-ordinal floor prevent duplicate/stale playback without imposing a total
+256-event lifetime cap; pending cues retain the existing 250 ms expiry and
+own their sample reference. No file I/O occurs in the audio callback.
+
+Glock secondary now starts the existing neutral bullet-fire presentation from
+accepted Attack2 commands in the HL controller, with explicit secondary pose
+and shared .2/.3-second secondary/primary cycle selection. The same existing
+weapon audio, flash/light, shell and world-impact mechanisms execute it; an
+assigned glock2 event confirms without replaying those effects. Game rules and
+sample names remain in the concrete module; ammo and damage stay server-derived.
+
+`RuntimeOrdinarySnapshotPresentation` owns at most sixteen immutable committed
+snapshot references and bounded ordinary-entity visual lifetimes. Its stable
+application/server clock samples transforms only, after the unchanged player
+sampler. The delay is one first positive observed cadence, capped at the selected
+100 ms bound and available history (normally20 ms at50 Hz), not a fixed100 ms
+new-grenade freeze. Birth floors prevent rewinding after a latest-pose fallback;
+each ordinary lifetime also retains immutable birth server/application anchors.
+A per-life lower target bound advances after one cadence and is capped at the
+latest committed pose, so a late spawn cannot inherit session-wide clock phase
+as a prolonged frozen first pose. It never changes the global/player clock or
+extrapolates a trajectory. Repeated/backwards frames retain the monotonic target;
+intervening absence, slot reuse, model/sequence/movetype/schema changes, NOINTERP,
+teleport and clock gaps break continuity. Current removal and visibility remain
+authoritative immediately. A newer untimed publication resets that history,
+so it cannot hide an intermediate removal and bridge reused entity slots.
+Updates later than that buffer can still cause a
+brief endpoint hold: this bounded mechanism deliberately never extrapolates or
+invents grenade velocity, collision or damage.
+
+### E18 Python and neutral projection/edge-input policy
+
+Half-Life's validated `v_357` roles, WeaponList aliases/ID 3, assigned
+`events/python.sc`, MP viewmodel body 1, conventional cylinder reload,
+shot samples and recoil live only in `games/halflife`. Remote `p_357` uses
+the existing named-bone merge plus its separately validated Cylinder01
+socket; the server body sequence is never forced by a fire event. The same
+bounded audio, muzzle/light and static-world impact mechanisms execute the
+intents; Python emits neither a shell nor a tracer.
+
+Generic delta projection optionally exposes exact unsigned `clientdata.fov`.
+Half-Life owns strict one-byte SetFOV interpretation, owning source provenance,
+latest-committed-source reconciliation and reload/holster/life/map reset floors.
+It outputs a neutral optional horizontal-degree `CameraIntent`; the application
+camera adapter converts to vertical radians using the actual viewport aspect.
+Rendering has no weapon/message identity, and projection never changes
+translation, orientation, physics or command history. Missing overrides preserve
+the existing generic host camera. Normal HL FOV 0 means horizontal 90 degrees;
+Python's server-confirmed 40 is not a directly assigned vertical 40.
+
+The 2026-10-15 zoom corrective derives a neutral mouse-sensitivity multiplier
+from that same resolved FOV in the Half-Life module (default90 restores1;
+other values use FOV/90 times the pinned SDK default ratio1.2). The normal
+application composes it once into a copy of the base mouse configuration
+before immutable input construction. Shared input validates the finite (0,4]
+scalar and applies it before the existing frame cap; camera pitch bounds and
+history/replay remain unchanged. No weapon/FOV formula enters the engine,
+and default/alternate modules retain scale1. Existing source/reset floors
+therefore govern projection and sensitivity together. See the E18 corrective.
+
+The subsequent weapon-sensitivity audit of the same pinned SDK confirms that
+unzoomed weapon selection has no independent input multiplier. All 15 selected
+weapon IDs preserve the same physical mouse delta at default FOV; zoom alone
+uses the existing module policy. No new per-weapon input rule was added.
+
+The Studio-lighting corrective extends the existing retained-world RGB probe
+from player bodies to ordinary packet models, camera-local viewmodels and
+bounded transient models. The app supplies a separate world-eye probe point,
+never moves the local mesh, and caches only numeric position/RGB samples.
+No resource access or Half-Life identity enters renderer/input mechanisms.
+World lightmaps, HUD grading, fullbright flags and effect-light policy are
+unchanged. See `OPENGL_STUDIO_RENDERER.md` for scope and stock-parity limits.
+
+An optional module-selected physical edge-button mask passes through the same
+host, frame press latch and validated pre-history reference input adapter. It
+suppresses repeated held RMB only for a validated selected Python; other weapons
+retain their established hold policy. Pending presses are consumed only after
+accepted history insertion; movement replay never toggles zoom or emits effects.
+Alternate-module/core-only tests use these neutral seams without an HL fallback.
+See [E18](PYTHON_357_FIRE_ZOOM_RELOAD_E18.md) for evidence and explicit limitations.
+
+### E19 Crossbow authority and bounded fixed Studio intents
+
+Crossbow ID/catalogue/model roles, assigned crossbow1/crossbow2 event meanings,
+post-shot integer parameters, two launch cues, reload and MP FOV20 remain in
+`games/halflife`. Generic committed event projection owns optional exact signed
+integers; framing/atomic publication and canonical state contracts are unchanged.
+Normal fire creates no local projectile/trace/explosion: the existing ordinary
+packet Studio entity and generic kinetic interpolation present the server bolt.
+Generic kinetic continuity has an explicit displacement guard independent of
+remote-player teleport policy (currently 512 versus 128 units). Both paths
+retain bounded observation gaps, current-list authority and no extrapolation;
+the ordinary guard is local-compatible presentation recovery, not physics.
+Sniper static hits emit neutral sound/particle/fixed Studio intents, not network
+entities or damage. The same approved Studio materializer and transient renderer
+pass execute a 32-slot, map-scoped 5 s fixed-model pool; weapon/life changes do
+not erase published world effects. Map/session teardown does.
+TE_SPARKS uses the existing particles, TE_EXPLOSION the existing explosion path;
+exact TE_BUBBLETRAIL grammar is safe while water visualization remains deferred.
+Remote p_crossbow uses named-bone merge and server animation, never forced poses.
+The existing typed projection/RMB-edge seam now also accepts the validated
+selected Crossbow. Core-only retains these neutral APIs without the HL module.
+See [E19](CROSSBOW_PROJECTILE_ZOOM_SNIPER_E19.md) for resources, verification and
+dynamic-hit/water/local-compatible limits.
+
+### E20 RPG and generic server entity effects
+
+RPG roles, catalogue eligibility, launch cues, recoil and exact optional auxiliary
+state interpretation/reload/holster/secondary policy belong to `games/halflife`.
+Core projects negotiated `vuser2` components without their game meaning. No
+client projectile or laser trace is manufactured. Server ordinary entities and
+the existing kinetic snapshot presentation own their visible poses.
+TE_BEAMFOLLOW takes an owning bounded generic host outbox, bypassing concrete
+game semantics. The application `EntityFollowPresentation` samples presented
+poses and entity lifetimes, produces bounded textured ribbons and generic
+EF_LIGHT intents. Rendering uses neutral glow/tint/ribbon execution only.
+Glow entities persist by server presence/NODRAW; follow history decays by its
+wire lifetime after removal and never reattaches to reused slots. Positive
+audio source lifetime proof retires server loops on removal/reuse independently
+of player life or visual culling. All resources remain approved manifest opens;
+no game-specific file access occurs inside rendering/audio callbacks.
+See [E20](RPG_LASER_GUIDED_ROCKET_E20.md) for exact ownership and limits.
+
+### E21 Gauss and neutral command/voice/beam sidecars
+
+`games/halflife/GaussPresentation` owns ID9/uranium/no-clip semantics, model
+roles, fresh negotiated charge fields, charge timing, sample names, assigned
+event meanings, reflection/one-punch policy and provisional energy-to-impulse.
+The existing `HalfLifeClientModule` owns one controller per game session.
+
+The same `GameClientHost` accepts a typed submitted command and returns an
+optional finite velocity delta. The host stores that delta in the immutable
+prediction command before simulation. Wire encoding is unchanged; the tagged
+nonzero sidecar participates in the prediction history signature. Rebase uses
+the saved delta exactly once per command, never calls the game module again,
+and never emits audio, shots or TX. Zero-delta legacy signatures are unchanged.
+
+The audio outbox adds bounded owning persistent voice controls (start/change/
+source/stop); cursor-preserving pitch changes and whole-sample repeat use the
+existing mixer/device. A new charge gets a new lifetime identity, so a delayed
+old stop cannot stop it. Session reset clears pending controls/voices; the
+module explicitly stops charges on weapon/life/source boundaries.
+
+A borrowed synchronous effect-query interface exposes neutral hit data from
+the nearest world or committed solid inline BSP. The existing approved BSP
+owner and per-publication brush cache implement it. Unavailable reconstruction
+does not fall through to a farther world surface. Exact brush hits can carry
+an owning generation/lifetime/model identity plus local point and normal.
+Stationary contact sprites resolve these values through the current presented
+brush transform; removal/reuse suppresses stale attachments. Free particles
+and the shot path retain world coordinates. Game policy outputs bounded
+owning beam/glow profiles and clipped impact requests; the existing solid-line,
+textured ribbon/sprite renderer and decal owner execute them. Solid-line gain
+is a neutral bounded [0,4] RGB emission multiplier, default1 for old effects.
+An optional first-materialization clock samples immutable moving segments;
+causal action expiry and static hit publication stay unchanged. Stationary
+surface effects carry an owning unit normal, never a borrowed collision owner.
+The app derives a finite oriented transform and small outward bias. The neutral
+frame accepts an explicit surface-aligned override only for additive non-ribbon
+instances of view-parallel assets; ordinary source orientation identity remains
+strict. This override is signature-tagged and does not disable depth testing.
+Moving glows retain their existing billboard behavior. No Gauss condition enters
+renderer, collision or movement kernel. Dynamic-hit trace/damage parity is not
+claimed. Core-only uses the same seams with `TestGameClientModule`, not HL.
+See [E21](GAUSS_PRIMARY_CHARGE_BEAM_E21.md) for bounds, evidence and limitations.
+
+### Optional entity-follow smoke profile
+
+The game API accepts borrowed virtual model/sprite names and returns an optional
+owning `EntityTrailProfile`. The session host forwards only while active; default
+and alternate modules keep generic ribbons. Half-Life selects the approved RPG
+pair. The existing application follow owner latches the profile at committed
+event consumption, samples server presentation poses and retains bounded smoke
+history. Existing sprite materialization executes animation/scale/fade and the
+server-bit-gated head glow. No second physics/renderer loop or asset loader is
+introduced; lower targets still have no concrete Half-Life dependency. See the
+2026-10-06 E20 follow-up for exact lifetime, bounds and verification.
+
+The subsequent E20 exhaust correction adds an owning optional manifest sprite
+name and model-axis offset to that same neutral profile. The app resolves the
+existing approved sprite once and publishes a bounded32 attached-sprite list
+using the ordinary Studio transform. Smoke/history and head lifetimes remain
+separate; absent sprite resources do not reject smoke. Half-Life names/tuning
+stay in its module; no alternate loader or game-specific renderer is introduced.
+
+### Verified flat-sky backdrop
+
+The world package builder can retain `WorldFlatSkyBackground` for a validated
+uniform opaque special-surface sky, matching across decoded mips. Rendering
+executes that neutral RGB backdrop, with no file access or game-name test.
+Nonuniform sky textures do not receive a guessed color. Visibility uses PVS
+leaf references to authorize candidates, then surface bounds for frustum
+rejection; a marksurface need not fit inside its referring leaf's AABB.
+
+### Application preparation and connection clock
+
+`HandshakeSession` construction owns transport/coordinator setup but does not
+send a challenge or start its deadline. Its first owning `update(now)` starts
+the idle coordinator and pumps it at that same timestamp. Normal visual startup
+thus completes SDL/window/OpenGL/audio setup before the bounded protocol clock
+begins; slow device initialization cannot consume the entire challenge deadline
+without RX updates. Subsequent updates never restart the deadline. This changes
+application sequencing, not transport timing rules or the single-loop/module seam.
+Early handshake failures publish their exact state in the existing outcome/error
+fields instead of being hidden by scripted or prediction coverage. See the E25
+2026-10-07 follow-up and the no-stock normal-application startup fixture.
+
+### E27 living-projectile presentation
+
+`GameClientAPI` adds only owning optional command origin/duck pose and neutral
+two-component temporary-sprite tint. The normal host freezes the corresponding
+prediction-entry pose at immutable command submission. HalfLifeClientModule
+owns Snark ID/catalogue/exhaustible eligibility, event mapping, point feasibility
+trace20→64/duck correction, THROW/UP/recovery and bounded echo reservations.
+Transport/history/collision/Studio/audio/rendering remain generic. No client AI,
+monster timer, spawn, bite/damage or score rule crosses into those mechanisms.
+
+Strict TE_BLOODSPRITE decoding now stages both signed sprite tokens, palette
+byte, scale and committed provenance atomically. The HAL profile selects a
+bounded yellow/red tint; the application resolves approved session sprites,
+applies neutral tint and expires its existing temporary pool. No inferred
+grenade explosion, fireball or extra sound is produced. Server sounds retain
+entity/lifetime/position/channel/pitch through the existing mixer. World Snarks
+use ordinary server Studio/Bounce interpolation and current-list removal,
+independent of local weapon/thrower life. See
+`docs/SNARK_SQUEAK_LIVING_PROJECTILE_E27.md` for exact reference and limitations.
+
+The subsequent E27 pop-visibility correction keeps that same two-component
+pool. `TemporarySpriteIntent` adds bounded neutral downward acceleration and
+an independent animation-fade switch (defaults0/true preserve old effects).
+HAL alone selects the large yellow blood profile; the approved materializer
+executes `z = origin.z + velocity*t - gravity*t*t/2`, material coverage and
+animation expiry. No sprite filenames, Snark identification, local fuse,
+collision or damage rules enter the renderer/host. Alpha blending does not
+automatically require smoke fading. Pool32, committed identity, map/session
+ownership and strict generation checks remain unchanged.
+
+### E30 committed surface decals and blood-size contract
+
+The protocol adapter publishes existing decal TE subtypes only after atomic
+record commit. Neutral observations retain the exact position, server index,
+explicit world/brush target and optional brush pose from that same record.
+The host forwards the existing ResourceList index/name metadata; the concrete
+module alone maps its compiled named dependencies. SDK enums and WAD directory
+positions are not network indices, and blood sprites/sounds never infer a decal.
+
+The module exposes a bounded neutral surface-decal preparation recipe. The
+GoldSrc asset adapter opens one verified WAD in the selected world's exact root
+and converts only explicitly selected palette-tint/index-coverage dependencies.
+Generic straight-alpha materials retain tint and static surface lighting;
+ordinary masked textures and bullet modulation keep their existing contracts.
+The renderer knows no blood names, weapon identity or filesystem paths.
+
+The existing impact owner shares its bounded64-entry pool with committed marks.
+Surface selection/clipping uses the received target/position, not a camera shot
+trace. Frozen birth pose, existing brush transforms and entity lifetime/birth
+floor attach a mark without carrying it into an observed reused slot. World
+marks persist across player-life, short-sprite and HUD resets, retiring on
+map/resource change or eviction. Unsupported/ambiguous targets are typed skips.
+
+The E30 module profile supersedes the historical large-yellow/guessed-red size
+math above, while preserving E27.1 event ownership and TE/sound fallback dedup.
+Actual TE size, sprite scale, world bounds, density and lifetime stay separate;
+approved SPR/palette data remain unchanged. The renderer applies current-frame
+extents and one neutral scale only. Numeric conversion/timing are documented
+local-compatible behavior, not a claim of proprietary GoldSrc parity. See
+`docs/ORIGINAL_BLOOD_DECALS_SPRITE_SCALE_E30.md` for evidence and limits.
+
+### Bounded per-player presentation evidence
+
+The existing remote snapshot sampler emits neutral numeric decision/reason
+metadata beside its result. Logical/resolved continuity floors and actual
+position-source ordinals are distinct from the raw pose anchors. Recording
+never changes the selected position, clock, alpha or pose. The application
+optionally joins these results to immutable RX coordinates and the successfully
+published parent Studio instance transform, not a presumed rendered position.
+Unknown capture, absent actor, missing materialization and culled instance are
+different states; no pixel visibility is inferred from submission.
+
+The existing movement receipt owner hosts a separate opt-in bounded heap
+recorder. Every presented frame is analyzed, while a decimated recent ring,
+exact before/after event pairs, aggregates and independent manual captures
+limit retention. Numeric entity/lifetime/generation keys never carry names,
+asset locators or server secrets. JSON encoding happens at receipt publication,
+not during rendering; the existing external report remains the only durable
+output. Core-only builds use the same neutral diagnostic records without HL.
+Evidence describes observed motion and decisions, not causality inferred from
+healthy global timing. See the E10 per-player diagnostics follow-up.
+
+The E32 attack-pulse corrective adds exact-source animation-only effect masks
+selected by the concrete module from synchronous approved model metadata and
+committed observation clocks. The application transports a sorted numeric
+table, bounded16x32 and reused on its asset owner. Generic sampling masks only
+the qualified row for motion; raw effect fields and animation anchors remain
+immutable and visible to the pose policy. A qualified previous endpoint does
+not create a second motion floor when its flag clears. All independent position
+and lifetime discontinuities, ordinary entities and default/core behavior remain
+strict. The renderer knows no effect-bit meaning, attack label or weapon. The
+HL module retains separate gait continuity and main-animation restart handling.

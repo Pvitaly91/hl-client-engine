@@ -43,6 +43,28 @@ six-bit slot. A full, non-instanced record additionally carries an
 intra-message-baseline flag and optional six-bit backward record offset. The
 selected common delta schema then determines the exact end of that record.
 
+E13 respawn compatibility correction: an explicit full-packet intra-message
+normal base can cross the player/ordinary schema boundary. Those schemas
+describe members of the same normal entity state, not different wire record
+identities. The decoder independently reconstructs the selected destination
+object from protocol-null unadvertised members and inherited shared members
+matched by exact negotiated name, type/sign, storage size and member offset.
+Field ordering, significant bits and wire multipliers may differ: inherited
+decoded values are not re-quantized. The destination schema alone consumes its
+delta mask/value bits. Custom/normal crossing, conflicting member storage or
+types, invalid offsets and existing delta category changes still fail closed.
+No SDK ABI struct is read or copied, and no fixed member offsets are assumed.
+
+This extends the existing public-reference profile, not the stock-evidence
+gate. The previously cited declarative full-message base selection compares
+normal/custom entity type, while the receiver selects its own player/ordinary
+descriptor; see the pinned [reference writer contract](https://github.com/rehlds/ReHLDS/blob/6266cd23faee4a6e9cf3974f9605b2cadd86f0a4/rehlds/engine/sv_main.cpp#L4474-L4516).
+No external implementation function is copied. Owned fixtures cover reordered
+descriptors, differing quantization, inherited frame/Z, explicit render fields,
+null unadvertised members, normal protocol-only replay, malformed suffix and
+custom/type/storage rejection. Full stock parity for arbitrary mod-specific
+unadvertised entity members is not asserted.
+
 Sixteen zero bits terminate the entity record stream. They are consumed in
 full and the remaining bits through the next byte boundary must be zero. The
 next service opcode starts at that exact byte. No terminator/opcode scanning or
@@ -92,6 +114,18 @@ with `schema_mismatch` because mixing objects decoded under incompatible
 schema descriptors would not be a valid base selection.
 
 ## Frame identity and history
+
+E26 follow-up: a retained signon entity-number baseline can also supply common
+members to a later occupant using another normal/custom beam schema. The same
+descriptor-checked projection used for intra-message bases retains compatible
+decoded values and protocol-null absent members. Only explicit changed-mask
+evidence permits temporary defaults for otherwise unrepresentable inherited
+integers; normal delta decoding still validates the complete replacement.
+The source baseline and its provenance are not rewritten. Generation mismatch,
+alternate-slot mismatch, same-category incompatible descriptors and a silent
+category change of an existing delta entity remain errors. Owned regression
+fixtures cover slot31 reuse, a subsequent delta, reverse reuse and atomic
+malformed-tail/narrow-field rejection without installed resources.
 
 Transport sequence, eight-bit wire tag, resolved frame reference, generation,
 and ring/history position are distinct types. The current transport sequence

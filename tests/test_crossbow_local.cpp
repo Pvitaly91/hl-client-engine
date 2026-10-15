@@ -1,0 +1,188 @@
+#include "crossbow_test_fixture.hpp"
+#include <hlclient/games/halflife/firearm_profile.hpp>
+#include <hlclient/app/temporary_effect_presentation.hpp>
+#include <hlclient/input/input_state_tracker.hpp>
+#include <hlclient/app/live_visual_control.hpp>
+#include <hlclient/renderer/render_camera_math.hpp>
+#include <hlclient/goldsrc/usercmd_input_adapter.hpp>
+#include <hlclient/goldsrc/live_runtime_stage.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
+namespace f=hlclient::tests::crossbow_fixture;
+namespace api=hlclient::game_api;
+namespace hl=hlclient::games::halflife;
+namespace g=hlclient::goldsrc;
+using Catch::Approx;
+TEST_CASE("E19 exact Crossbow catalogue and model roles authorize ordinary fire without local projectile", "[e19][weapon-presentation][game-api]") {
+    for(const unsigned clients:{1U,8U}) {
+        f::Module m(clients);m.host.submit(f::command(),.02);const auto shot=m.host.sample(.02);
+        REQUIRE(shot.identity);REQUIRE(shot.visual);CHECK(shot.identity->weapon_id==6);
+        CHECK(shot.visual->sequence==4);CHECK(shot.visual->body==1);CHECK(shot.local_punch_pitch_degrees==Approx(-2));
+        CHECK(m.host.hud(m.observed,.02).clip==5);CHECK(m.host.hud(m.observed,.02).primary_reserve==10);
+        const auto v=m.host.local_visuals({{}, {}, {}, {}, {}, .02});
+        CHECK_FALSE(v.flash);CHECK_FALSE(v.light);CHECK_FALSE(v.shell);CHECK_FALSE(v.world_impact);
+        CHECK(v.extra_impact_count==0);CHECK(v.extra_shell_count==0);CHECK(m.host.drain_temporary_effects(.02).count==0);
+        const auto pose=m.host.viewmodel(m.observed,f::model(),.04,shot.visual);
+        CHECK(pose.status==api::ViewmodelStatus::ready);CHECK(pose.sequence==4);CHECK(pose.body==1);
+    }
+    for(unsigned bad=0;bad<4;++bad) {
+        f::Module m;auto model=f::model();
+        if(bad==0)m.observed.weapon_hud.catalogue[0].command_name="weapon_357";
+        if(bad==1)model.resource_name="models/v_other.mdl";
+        if(bad==2)model.sequences[4].label="reload";
+        if(bad==3)model.supported_bodies[1]=false;
+        m.host.bind_model(model);m.host.observe(m.observed,0);m.host.submit(f::command(),.02);
+        CHECK(m.host.sample(.02).actions_started==0);
+    }
+}
+TEST_CASE("E19 post-shot clip reserve select loaded empty or no new animation", "[e19][weapon-presentation][echo]") {
+    for(const auto values:{std::pair{4,10},std::pair{0,10},std::pair{0,0}}) {
+        f::Module m;(void)m.host.drain_audio();const auto before=m.host.sample(0);
+        auto e=f::event(false,1,2,.03,values.first,values.second);m.host.committed_scripted_event(e);
+        const auto shot=m.host.sample(.03);REQUIRE(shot.visual);REQUIRE(shot.identity);
+        CHECK(shot.visual->sequence==(values.first ? 4U : values.second ? 6U : before.visual->sequence));
+        if(!values.first && !values.second) CHECK(shot.visual->restart_identity==before.visual->restart_identity);
+        CHECK(m.host.drain_audio().count==2);
+        m.host.committed_scripted_event(e);(void)m.host.sample(.04);CHECK(m.host.drain_audio().count==0);
+        CHECK(m.host.sample(.04).actions_started==1);
+    }
+    for(unsigned bad=0;bad<3;++bad) {
+        f::Module m;auto e=f::event();if(bad==0)e.integer_parameter1.reset();
+        if(bad==1)e.integer_parameter1=6;if(bad==2)e.integer_parameter2=-1;
+        m.host.committed_scripted_event(e);CHECK(m.host.sample(.03).actions_started==0);
+    }
+}
+TEST_CASE("E19 accepted ordinary shot echo preserves restart and server cooldown controls repeat", "[e19][weapon-presentation][cooldown]") {
+    f::Module m;m.host.submit(f::command(),.02);const auto shot=m.host.sample(.02);REQUIRE(shot.visual);
+    m.host.committed_scripted_event(f::event());(void)m.host.sample(.03);
+    m.observed=f::state(4,3);m.observed.weapon_slots[0].next_primary_attack=.95;
+    m.host.observe(m.observed,.07);CHECK(m.host.sample(.07).visual->restart_identity==shot.visual->restart_identity);
+    m.host.submit(f::command(2,.77),.77);CHECK(m.host.sample(.77).actions_started==1);
+    m.observed=f::state(4,4);m.host.observe(m.observed,1.02);
+    m.host.submit(f::command(3,1.03),1.03);CHECK(m.host.sample(1.03).actions_started==2);
+    CHECK(m.host.hud(m.observed,1.03).clip==4); // never client ammo authority
+}
+TEST_CASE("E19 exact loaded empty deploy and holster service roles retain server ownership", "[e19][weapon-presentation][lifecycle]") {
+    for(const int clip:{5,0}) for(const bool holster:{false,true}) {
+        f::Module m;m.observed=f::state(clip,2);
+        const auto sequence=static_cast<std::uint8_t>((holster ? 10 : 8)+(clip ? 0 : 1));
+        m.observed.receiving_client->weapon_animation=sequence;
+        m.observed.weapon_hud.animation_sequence=sequence;m.observed.weapon_hud.animation_body=0;
+        m.observed.weapon_hud.animation_source=hlclient::client::RuntimeObservationSource{2,2,0,0,16};
+        m.host.observe(m.observed,.03);const auto state=m.host.sample(.03);REQUIRE(state.visual);
+        CHECK(state.visual->sequence==sequence);CHECK(state.visual->source==api::LocalWeaponAnimationSource::service_event);
+        CHECK(state.actions_started==0);const auto restart=state.visual->restart_identity;
+        m.host.observe(m.observed,.04);CHECK(m.host.sample(.04).visual->restart_identity==restart);
+        CHECK(m.host.drain_audio().count==0);CHECK(m.host.drain_temporary_effects(.04).count==0);
+    }
+}
+TEST_CASE("E19 underwater ordinary fire allowed while empty reload dead and secondary never fire", "[e19][lifecycle][weapon-presentation]") {
+    f::Module water;water.observed.receiving_client->water_level=3;water.host.observe(water.observed,0);
+    water.host.submit(f::command(),.02);CHECK(water.host.sample(.02).primary_fire_starts==1);
+    for(unsigned blocked=0;blocked<4;++blocked) {
+        f::Module m;m.observed=f::state(blocked==0 ? 0 : 5,2);
+        if(blocked==1)m.observed.weapon_slots[0].in_reload=true;
+        if(blocked==2)m.observed.receiving_client->health=0;
+        m.host.observe(m.observed,.001);(void)m.host.drain_audio();
+        m.host.submit(f::command(1,.02,blocked==3 ? g::kReferenceGoldSrcButtonAttack2 : g::kReferenceGoldSrcButtonAttack),.02);
+        CHECK(m.host.sample(.02).primary_fire_starts==0);CHECK(m.host.drain_audio().count==0);
+    }
+}
+TEST_CASE("E19 zoom FOV20 makes a single static presentation query and fixed bolt with no damage or local explosion", "[e19][composition][temporary-effects]") {
+    f::Module m;m.zoom();(void)m.host.drain_audio();m.host.submit(f::command(),.02);
+    const auto shot=m.host.sample(.02);REQUIRE(shot.identity);CHECK(shot.local_punch_pitch_degrees==0);
+    CHECK(m.host.camera(m.observed,0).horizontal_field_of_view_degrees==20);
+    const auto frame=m.host.local_visuals({{}, {}, {}, {}, {}, .02});REQUIRE(frame.world_impact);
+    CHECK(frame.world_impact->maximum_distance_units==8192);CHECK(frame.world_impact->suppress_decal);
+    CHECK_FALSE(frame.world_impact->particles);CHECK_FALSE(frame.world_impact->tracer);
+    CHECK_FALSE(frame.flash);CHECK_FALSE(frame.light);CHECK_FALSE(frame.shell);
+    const auto hit=hlclient::assets::AssetVector3{0,80,80};
+    m.host.accepted_world_impact(frame.world_impact->action,hit,.03);
+    const auto batch=m.host.drain_temporary_effects(.03);REQUIRE(batch.count==2);
+    REQUIRE(batch.effects[0].model);CHECK(batch.effects[0].model->lifetime_seconds==5);
+    CHECK(batch.effects[0].origin.x==10);CHECK(batch.effects[0].model->angles_degrees.y==Approx(180));
+    CHECK_FALSE(batch.effects[0].light);CHECK_FALSE(batch.effects[0].sound);CHECK_FALSE(batch.effects[0].sprite);
+    REQUIRE(batch.effects[1].particles);CHECK(batch.effects[1].origin.x==0);
+    hlclient::app::TemporaryEffectPresentation owner;owner.reset(1);owner.consume(batch,.03);
+    REQUIRE(owner.models().size()==1);owner.consume(batch,.03);CHECK(owner.models().size()==1);
+    hlclient::renderer::RenderScene scene;owner.present(scene,4.9);REQUIRE(owner.models().size()==1);
+    CHECK(owner.models()[0].origin.x==10);CHECK(scene.world_effect_light_count==0);
+    m.host.bind_model({});m.host.cancel_uncommitted();CHECK(m.host.drain_temporary_effects(4.9).count==0);
+    CHECK(m.host.hud(m.observed,4.9).clip==5);
+    m.observed=f::state(5,3);m.observed.receiving_client->health=0;m.host.observe(m.observed,4.9);
+    scene={};owner.present(scene,4.9);CHECK(owner.models().size()==1); // published world effect outlives local life
+    CHECK(m.host.hud(m.observed,4.9).health==0);
+    scene={};owner.present(scene,5.03);CHECK(owner.models().empty());
+    m.host.accepted_world_impact(frame.world_impact->action,hit,.04);CHECK(m.host.drain_temporary_effects(.04).count==0);
+}
+TEST_CASE("E19 confirmed zoom event is immutable once even when listener camera changes", "[e19][weapon-visuals][echo]") {
+    f::Module m;auto e=f::event(true);e.angles={30,0,0};m.host.committed_scripted_event(e);
+    const auto shot=m.host.sample(.03);REQUIRE(shot.identity);CHECK(shot.local_punch_pitch_degrees==0);
+    const auto v=m.host.local_visuals({{}, {0,1,0}, {}, {}, {}, .03});REQUIRE(v.world_impact);
+    CHECK(v.world_impact->direction.x==Approx(std::sqrt(.75)).margin(1e-6));
+    CHECK(v.world_impact->direction.z==Approx(-.5));
+    m.host.committed_scripted_event(e);(void)m.host.sample(.04);
+    CHECK_FALSE(m.host.local_visuals({{}, {}, {}, {}, {}, .04}).world_impact);
+}
+TEST_CASE("E19 late sniper echo refines provisional ordinary presentation without duplicate launch or projectile", "[e19][weapon-visuals][echo]") {
+    f::Module m;(void)m.host.drain_audio();m.host.submit(f::command(),.02);
+    const auto provisional=m.host.sample(.02);REQUIRE(provisional.visual);
+    CHECK_FALSE(m.host.local_visuals({{}, {}, {}, {}, {}, .02}).world_impact);
+    CHECK(m.host.drain_audio().count==2);
+    auto e=f::event(true);m.host.committed_scripted_event(e);const auto refined=m.host.sample(.03);
+    REQUIRE(refined.visual);CHECK(refined.visual->restart_identity==provisional.visual->restart_identity);
+    CHECK(refined.local_punch_pitch_degrees==0);CHECK(m.host.drain_audio().count==0);
+    const auto frame=m.host.local_visuals({{}, {}, {}, {}, {}, .03});REQUIRE(frame.world_impact);
+    CHECK_FALSE(frame.shell);CHECK_FALSE(frame.flash);CHECK_FALSE(frame.world_impact->tracer);
+    m.host.committed_scripted_event(e);(void)m.host.sample(.04);
+    CHECK_FALSE(m.host.local_visuals({{}, {}, {}, {}, {}, .04}).world_impact);
+    CHECK(m.host.drain_audio().count==0);CHECK(m.host.drain_temporary_effects(.04).count==0);
+}
+TEST_CASE("E19 conventional reload resets zoom retains server ammo and creates no fabricated marker audio", "[e19][reload][camera][weapon-audio]") {
+    f::Module m;m.zoom();m.observed=f::state(2,3);m.observed.receiving_client->field_of_view=20;
+    m.host.observe(m.observed,.01);(void)m.host.drain_audio();
+    m.host.submit(f::command(1,.02,g::kReferenceGoldSrcButtonReload),.02);
+    const auto reload=m.host.sample(.02);REQUIRE(reload.visual);CHECK(reload.visual->sequence==7);
+    CHECK(m.host.camera(m.observed,0).horizontal_field_of_view_degrees==90);
+    m.observed=f::state(2,4);m.observed.weapon_slots[0].in_reload=true;m.host.observe(m.observed,.05);
+    CHECK(m.host.sample(.05).reload_confirmed==1);(void)m.host.sample(2.4);CHECK(m.host.drain_audio().count==0);
+    CHECK(m.host.hud(m.observed,2.4).clip==2);m.observed=f::state(5,5,7);m.host.observe(m.observed,4.52);
+    CHECK(m.host.hud(m.observed,4.52).clip==5);CHECK(m.host.hud(m.observed,4.52).primary_reserve==7);
+}
+TEST_CASE("E19 zoom resets on holster death map and never becomes a secondary attack effect", "[e19][camera][lifecycle]") {
+    for(unsigned reason=0;reason<3;++reason) {
+        f::Module m;m.zoom();CHECK(m.host.camera(m.observed,0).horizontal_field_of_view_degrees==20);
+        m.observed.publication_revision=3;
+        if(reason==0)m.observed.weapon_hud.active_weapon_id=2;
+        if(reason==1)m.observed.receiving_client->health=0;
+        if(reason==2){m.host.reset({2,2,1});m.observed.generation=2;}
+        m.host.observe(m.observed,.03);CHECK(m.host.camera(m.observed,0).horizontal_field_of_view_degrees==90);
+    }
+    f::Module m;CHECK(m.host.edge_triggered_buttons(m.observed)!=0);
+    m.observed.weapon_hud.catalogue[0].command_name="weapon_wrong";CHECK(m.host.edge_triggered_buttons(m.observed)==0);
+}
+TEST_CASE("E19 confirmed horizontal 20 FOV uses actual aspect while RMB hold commits one edge to wire history", "[e19][camera][input-adapter][game-api]") {
+    namespace input=hlclient::input;namespace gameplay=hlclient::gameplay_input;
+    for(const double aspect:{4.0/3,16.0/9,16.0/10}) {
+        f::Module m;m.zoom();input::InputStateTracker tracker;tracker.begin_frame();const auto snapshot=tracker.publish_snapshot();tracker.end_frame();
+        const auto bindings=gameplay::GameplayInputBindings::project_default_v1();REQUIRE(bindings);
+        const auto intent=gameplay::GameplayInputIntentBuilder{}.build(snapshot,*bindings.bindings,{},.02);REQUIRE(intent);
+        hlclient::app::LiveVisualCameraController camera;hlclient::client::ClientWorldState world;
+        REQUIRE(camera.update(&m.observed,*intent.intent,world,m.host.camera(m.observed,0),false,{},aspect));
+        CHECK(world.camera().vertical_field_of_view_radians==Approx(2*std::atan(std::tan(10*.01745329251994329577)/aspect)));
+    }
+    f::Module m;const auto mask=m.host.edge_triggered_buttons(m.observed);input::InputStateTracker tracker;tracker.begin_frame();
+    tracker.apply_event(input::InputEvent::focus_gained());tracker.apply_event(input::InputEvent::capture_acquired());
+    tracker.apply_event(input::InputEvent::mouse_button_pressed(input::PhysicalMouseButton::right));
+    const auto snapshot=tracker.publish_snapshot();tracker.end_frame();const auto bindings=gameplay::GameplayInputBindings::project_default_v1();REQUIRE(bindings);
+    const auto intent=gameplay::GameplayInputIntentBuilder{}.build(snapshot,*bindings.bindings,{},.02);REQUIRE(intent);
+    const auto camera=hlclient::gameplay_camera::GameplayCameraState::create({});REQUIRE(camera);
+    g::GoldSrcUserCmdBuildContext context;context.command_sequence=*g::GoldSrcUserCmdSequence::create(1);context.command_msec=20;
+    context.command_sample_duration_nanoseconds=20'000'000;context.reference_button_policy=m.host.movement_policy().button_policy;
+    context.edge_triggered_buttons=mask;context.one_shot_buttons=mask;g::LiveVisualButtonLatch latch;latch.observe(mask,true,mask);
+    auto first=g::GoldSrcUserCmdInputAdapter{}.build_reference_wire(*intent.intent,*camera.state,context);REQUIRE(first);REQUIRE(first.one_shot_plan);
+    CHECK(first.command->buttons==g::kReferenceGoldSrcButtonAttack2);CHECK(latch.pending()==mask);
+    REQUIRE(first.one_shot_plan->commit_after_history_insert(context.command_sequence));latch.consume_after_history_insert(first.one_shot_plan->consumes_buttons());
+    context.one_shot_buttons=latch.pending();const auto held=g::GoldSrcUserCmdInputAdapter{}.build_reference_wire(*intent.intent,*camera.state,context);REQUIRE(held);
+    CHECK(held.command->buttons==0);CHECK(first.command->buttons==2048);
+}

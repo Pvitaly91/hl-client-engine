@@ -353,6 +353,31 @@ struct StudioPosedBoundsResult {
     [[nodiscard]] explicit operator bool() const noexcept { return bounds.has_value(); }
 };
 
+// Immutable model-pair correspondence, ASCII case-insensitive like the pinned
+// reference. Numeric ownership only; no borrowed models or evaluated poses.
+struct StudioBoneMergeMapping final {
+    StudioPoseModelIdentity parent_identity, child_identity;
+    std::vector<std::int32_t> parent_bones, child_parents;
+    std::vector<std::uint32_t> evaluation_order;
+    std::size_t parent_bone_count{}, matched_bones{};
+};
+struct StudioBoneMergeMappingResult final {
+    std::shared_ptr<const StudioBoneMergeMapping> mapping;
+    std::optional<StudioPoseError> error;
+    explicit operator bool() const noexcept { return static_cast<bool>(mapping); }
+};
+class StudioBoneMergeCache final {
+public:
+    void reset() noexcept { entries_.fill({}); next_=0U; hits_=0U; }
+    [[nodiscard]] StudioBoneMergeMappingResult prepare(
+        const StudioPoseModelIdentity&, const assets::SkeletalModelAssetData&,
+        const StudioPoseModelIdentity&, const assets::SkeletalModelAssetData&);
+    [[nodiscard]] std::size_t hits() const noexcept { return hits_; }
+private:
+    std::array<std::shared_ptr<const StudioBoneMergeMapping>,64U> entries_{};
+    std::size_t next_{}, hits_{};
+};
+
 class StudioPoseEvaluator final {
   public:
     [[nodiscard]] StudioPoseEvaluationResult
@@ -364,6 +389,10 @@ class StudioPoseEvaluator final {
         const StudioPoseModelIdentity& model_identity,
         const assets::SkeletalModelAssetData& model,
         const StudioPoseCompositionInput& input,
+        const StudioPoseEvaluationLimits& limits = {}) const;
+    [[nodiscard]] StudioPoseEvaluationResult merge(
+        const StudioPoseState& parent, const assets::SkeletalModelAssetData& child,
+        const StudioBoneMergeMapping&, const StudioPoseInput& child_input,
         const StudioPoseEvaluationLimits& limits = {}) const;
     // Model-space bounds of actual selected skinned vertices, not sequence
     // endpoint boxes. Pure CPU operation; caller applies its entity transform.

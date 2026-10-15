@@ -99,11 +99,9 @@ private:
     case assets::SpriteTextureFormat::alpha_test:
         return SpriteRenderTextureSupportStatus::supported_alpha_test_masked;
     case assets::SpriteTextureFormat::additive:
-        return SpriteRenderTextureSupportStatus::
-            unsupported_additive_evidence_pending;
+        return SpriteRenderTextureSupportStatus::supported_additive;
     case assets::SpriteTextureFormat::index_alpha:
-        return SpriteRenderTextureSupportStatus::
-            unsupported_index_alpha_evidence_pending;
+        return SpriteRenderTextureSupportStatus::supported_index_alpha_local_compatible;
     }
     return SpriteRenderTextureSupportStatus::
         unsupported_index_alpha_evidence_pending;
@@ -115,7 +113,9 @@ private:
     return status ==
             SpriteRenderTextureSupportStatus::supported_normal_opaque ||
         status ==
-            SpriteRenderTextureSupportStatus::supported_alpha_test_masked;
+            SpriteRenderTextureSupportStatus::supported_alpha_test_masked ||
+        status == SpriteRenderTextureSupportStatus::supported_additive ||
+        status == SpriteRenderTextureSupportStatus::supported_index_alpha_local_compatible;
 }
 
 } // namespace
@@ -280,6 +280,10 @@ SpriteRenderAssetBuildResult SpriteRenderAssetBuilder::build(
             ? SpriteRenderTextureProfile::unsupported
             : metadata.texture_format == assets::SpriteTextureFormat::alpha_test
             ? SpriteRenderTextureProfile::alpha_test_masked
+            : metadata.texture_format == assets::SpriteTextureFormat::additive
+            ? SpriteRenderTextureProfile::additive
+            : metadata.texture_format == assets::SpriteTextureFormat::index_alpha
+            ? SpriteRenderTextureProfile::index_alpha
             : SpriteRenderTextureProfile::opaque;
 
         std::vector<SpriteRenderFrame> frames;
@@ -297,8 +301,9 @@ SpriteRenderAssetBuildResult SpriteRenderAssetBuilder::build(
                 frame.indexed_pixels.size() != pixel_count ||
                 (!frame.derived_rgba8.empty() &&
                     frame.derived_rgba8.size() != expected_bytes) ||
-                (is_renderable && frame.derived_rgba8.size() != expected_bytes) ||
-                !add_size(rgba_bytes, frame.derived_rgba8.size(), rgba_bytes)) {
+                (is_renderable && metadata.texture_format != assets::SpriteTextureFormat::index_alpha &&
+                    frame.derived_rgba8.size() != expected_bytes) ||
+                !add_size(rgba_bytes, is_renderable ? expected_bytes : frame.derived_rgba8.size(), rgba_bytes)) {
                 return fail(SpriteRenderAssetErrorCode::invalid_frame,
                     index,
                     "Sprite frame dimensions or owned pixel byte counts are invalid");
@@ -322,6 +327,19 @@ SpriteRenderAssetBuildResult SpriteRenderAssetBuilder::build(
                 {{{left, down}, {right, down}, {right, up}, {left, up}}},
             };
             output.rgba8 = frame.derived_rgba8;
+            if (metadata.texture_format == assets::SpriteTextureFormat::index_alpha) {
+                // Explicit local-compatible index coverage. Keep the imported
+                // palette/index facts unchanged: index is alpha, palette[255]
+                // is the tint. This is not a global texture color-key.
+                output.rgba8.resize(expected_bytes);
+                const auto color = metadata.palette.colors[255U];
+                for (std::size_t pixel = 0U; pixel < pixel_count; ++pixel) {
+                    output.rgba8[pixel * 4U] = std::byte{color.red};
+                    output.rgba8[pixel * 4U + 1U] = std::byte{color.green};
+                    output.rgba8[pixel * 4U + 2U] = std::byte{color.blue};
+                    output.rgba8[pixel * 4U + 3U] = frame.indexed_pixels[pixel];
+                }
+            }
             output.source_top_level_entry = frame.source_top_level_entry;
             output.source_group_ordinal = frame.source_group_ordinal;
             output.source_group_frame_ordinal =

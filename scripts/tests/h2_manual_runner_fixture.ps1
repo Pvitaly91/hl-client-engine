@@ -6,7 +6,9 @@ param(
     [string]$ProjectClientStop, [string]$ProjectClientLiveInput,
     [string]$ProjectClientPrediction, [string]$ConfirmFunctionalSmoke,
     [switch]$ProjectClientMuteGlockFireSound,
+    [switch]$ProjectClientDebugFreezeTracer,
     [switch]$RemoteAudioPeer,
+    [switch]$ExternalManualMap,
     [int]$ProjectClientDurationSeconds,
     [switch]$ProjectClientNoTimeLimit,
     [string]$SteamApiRuntimePath, [string]$AppManifestPath,
@@ -26,9 +28,9 @@ $expected = @{
     ConfirmFunctionalSmoke = 'HLCLIENT_LOCAL_RESEARCH_COPY_SMOKE_V1'
     SteamApiRuntimePath = Join-Path $root 'Steam apps\common\Half-Life\steam_api.dll'
     AppManifestPath = Join-Path $root 'Steam apps\appmanifest_70.acf'
-    ResearchHalfLifeRoot = Join-Path $root 'research game'
+    ResearchHalfLifeRoot = $env:HLCLIENT_MANUAL_TEST_RESEARCH_ROOT
     ClientPath = Join-Path $release 'hlclient.exe'
-    HldsPath = Join-Path $root 'research game\hlds.exe'
+    HldsPath = Join-Path $env:HLCLIENT_MANUAL_TEST_RESEARCH_ROOT 'hlds.exe'
     CaptureToolPath = Join-Path $release 'hlclient_stock_runtime_capture.exe'
     NetworkIsolationGuardPath = Join-Path $release 'hlclient_stock_runtime_isolation_guard.exe'
     OutputRoot = Join-Path $root 'manual-artifacts\research-copy-smoke'
@@ -44,7 +46,9 @@ if ($ValidationMode -notin @('Fast','Strict')) { throw 'ValidationMode argv lost
 if ($ValidationMode -cne $env:HLCLIENT_MANUAL_TEST_VALIDATION) { throw 'wrong ValidationMode forwarded' }
 if ($TestStartHealth -ne [int]$env:HLCLIENT_MANUAL_TEST_START_HEALTH) { throw 'TestStartHealth argv lost' }
 if ($ProjectClientMuteGlockFireSound.IsPresent -ne ($env:HLCLIENT_MANUAL_TEST_MUTE_FIRE -eq 'true')) { throw 'MuteGlockFireSound argv lost' }
+if ($ProjectClientDebugFreezeTracer.IsPresent -ne ($env:HLCLIENT_MANUAL_TEST_FREEZE_TRACER -eq 'true')) { throw 'DebugFreezeTracer argv lost' }
 if ($RemoteAudioPeer.IsPresent -ne ($env:HLCLIENT_MANUAL_TEST_REMOTE_PEER -eq 'true')) { throw 'RemoteAudioPeer argv lost' }
+if ($ExternalManualMap.IsPresent -ne ($env:HLCLIENT_MANUAL_TEST_EXTERNAL_MAP -eq 'true')) { throw 'ExternalManualMap argv lost' }
 if ($ProjectClientDurationSeconds -ne [int]$env:HLCLIENT_MANUAL_TEST_DURATION) { throw 'Duration argv lost' }
 if ($ProjectClientNoTimeLimit.IsPresent -ne ($env:HLCLIENT_MANUAL_TEST_UNLIMITED -eq 'true')) { throw 'NoTimeLimit argv lost' }
 if ($TestStartHealth -eq 50 -and ($Map -ne 'crossfire' -or $ProjectClientPrediction -ne 'reference' -or $ProjectClientLiveInput -ne 'keyboard-mouse')) { throw 'Incompatible test health argv' }
@@ -63,7 +67,7 @@ $reportPath = Join-Path $reportDirectory $reportName
 $unrelated = Join-Path $OutputRoot 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 [void][IO.Directory]::CreateDirectory($unrelated)
 [IO.File]::WriteAllText((Join-Path $unrelated 'functional-smoke-wrapper.json'), '{}')
-Write-Output "fixture arguments verified: prediction=$ProjectClientPrediction map=$Map input=$ProjectClientLiveInput mute-fire=$($ProjectClientMuteGlockFireSound.IsPresent)"
+Write-Output "fixture arguments verified: prediction=$ProjectClientPrediction map=$Map input=$ProjectClientLiveInput mute-fire=$($ProjectClientMuteGlockFireSound.IsPresent) freeze-tracer=$($ProjectClientDebugFreezeTracer.IsPresent) peer=$($RemoteAudioPeer.IsPresent) external=$($ExternalManualMap.IsPresent)"
 Write-Output "fixture timing verified: seconds=$ProjectClientDurationSeconds unlimited=$($ProjectClientNoTimeLimit.IsPresent)"
 Write-Output "[research-copy-smoke] run_id=$runId"
 Write-Output ("[research-copy-smoke] report_path={0}" -f $(if (

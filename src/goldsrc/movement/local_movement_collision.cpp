@@ -2,10 +2,28 @@
 
 #include <bit>
 #include <cmath>
+#include <limits>
 #include <type_traits>
 #include <utility>
 
 namespace hlclient::goldsrc::movement {
+bool valid_server_point_box_exclusion_rules(
+    const std::span<const ServerPointBoxExclusionRule> rules) noexcept
+{
+    if (rules.size()>kMaximumServerPointBoxExclusionRules) return false;
+    for (std::size_t i=0; i<rules.size(); ++i) {
+        const auto& rule=rules[i];
+        // Opaque virtual tokens, not native path capabilities. No file is
+        // opened here; only an exact current-session resource name may match.
+        if (rule.model_name.empty() || rule.model_name.size()>128U ||
+            rule.model_name.find('\0')!=std::string::npos || rule.move_type>255U)
+            return false;
+        for (std::size_t j=0; j<i; ++j)
+            if (rules[j].model_name==rule.model_name && rules[j].move_type==rule.move_type)
+                return false;
+    }
+    return true;
+}
 namespace {
 
 namespace core_collision = hlclient::collision;
@@ -806,9 +824,22 @@ LocalMovementTraceQueryResult WorldOnlyMovementCollision::trace_hull(
 }
 
 BrushSceneMovementCollision::BrushSceneMovementCollision(
-    std::shared_ptr<const brush_collision::BrushCollisionScene> scene) noexcept
+    std::shared_ptr<const brush_collision::BrushCollisionScene> scene,
+    const std::span<const ServerEntityCollisionBox> boxes)
     : scene_{std::move(scene)}
 {
+    boxes_valid_=boxes.size()<=kMaximumServerEntityCollisionBoxes;
+    if (!boxes_valid_) return;
+    for (const auto& box:boxes) {
+        const auto valid_axis=[](float low,float high) {
+            return std::isfinite(low) && std::isfinite(high) && low<=high &&
+                std::abs(low)<=1'000'000.F && std::abs(high)<=1'000'000.F && high-low<=8192.F;
+        };
+        if (!box.entity || !valid_axis(box.bounds.minimum.x,box.bounds.maximum.x) ||
+            !valid_axis(box.bounds.minimum.y,box.bounds.maximum.y) ||
+            !valid_axis(box.bounds.minimum.z,box.bounds.maximum.z)) boxes_valid_=false;
+    }
+    if (boxes_valid_) boxes_.assign(boxes.begin(),boxes.end());
 }
 
 LocalMovementCollisionProfile BrushSceneMovementCollision::profile()
@@ -823,7 +854,7 @@ LocalMovementCollisionProfile BrushSceneMovementCollision::profile()
 
 bool BrushSceneMovementCollision::valid() const noexcept
 {
-    return !synthetic_scene_error(scene_).has_value();
+    return boxes_valid_ && !synthetic_scene_error(scene_).has_value();
 }
 
 std::optional<LocalMovementCollisionSessionIdentity>
@@ -835,12 +866,18 @@ BrushSceneMovementCollision::session_identity() const noexcept
     }
     const auto& source = package->identity();
     const auto fingerprint = collision_world_fingerprint(*package);
+    auto signature=scene_identity_signature(*scene_);
+    if (!boxes_.empty()) {
+        StableIdentityHash box_hash; box_hash.mix(signature);
+        for(const auto& box:boxes_) { box_hash.mix(box.entity); box_hash.mix(box.bounds); }
+        signature=box_hash.finish().primary;
+    }
     return LocalMovementCollisionSessionIdentity{
         profile(),
         fingerprint.primary,
         fingerprint.secondary,
         source.source_revision,
-        scene_identity_signature(*scene_),
+        signature,
     };
 }
 
@@ -907,6 +944,22 @@ LocalMovementTraceQueryResult BrushSceneMovementCollision::trace_hull(
     core_collision::CollisionQueryScratch& scratch,
     const LocalMovementCollisionQueryConfig& config) const
 {
+    return trace_shape(start,end,local_movement_collision_hull(hull),scratch,config);
+}
+LocalMovementTraceQueryResult BrushSceneMovementCollision::trace_point(
+    const assets::AssetVector3& start, const assets::AssetVector3& end,
+    core_collision::CollisionQueryScratch& scratch,
+    const LocalMovementCollisionQueryConfig& config) const
+{
+    return trace_shape(start,end,core_collision::CollisionHullOrdinal::point,scratch,config);
+}
+LocalMovementTraceQueryResult BrushSceneMovementCollision::trace_shape(
+    const assets::AssetVector3& start, const assets::AssetVector3& end,
+    const std::optional<core_collision::CollisionHullOrdinal> ordinal,
+    core_collision::CollisionQueryScratch& scratch,
+    const LocalMovementCollisionQueryConfig& config) const
+{
+    if (!boxes_valid_) return failure<LocalMovementTrace>(LocalMovementCollisionErrorCode::invalid_configuration);
     if (!valid_local_movement_collision_query_config(config)) {
         return failure<LocalMovementTrace>(
             LocalMovementCollisionErrorCode::invalid_configuration);
@@ -915,7 +968,6 @@ LocalMovementTraceQueryResult BrushSceneMovementCollision::trace_hull(
         return failure<LocalMovementTrace>(
             LocalMovementCollisionErrorCode::invalid_segment);
     }
-    const auto ordinal = local_movement_collision_hull(hull);
     if (!ordinal) {
         return failure<LocalMovementTrace>(
             LocalMovementCollisionErrorCode::invalid_hull);
@@ -941,7 +993,116 @@ LocalMovementTraceQueryResult BrushSceneMovementCollision::trace_hull(
         return failure<LocalMovementTrace>(
             LocalMovementCollisionErrorCode::non_finite_result);
     }
+    // Axis-aligned server box Minkowski-expanded by the existing player hull.
+    // This is a query against one immutable committed frame, not object physics.
+    const auto hull_profile=core_collision::standard_collision_hull_profile(*ordinal);
+    if (!hull_profile) return failure<LocalMovementTrace>(LocalMovementCollisionErrorCode::invalid_hull);
+    for (const auto& box:boxes_) {
+        const std::array<double,3> low{box.bounds.minimum.x-hull_profile->clip_maxs.x,
+            box.bounds.minimum.y-hull_profile->clip_maxs.y,box.bounds.minimum.z-hull_profile->clip_maxs.z};
+        const std::array<double,3> high{box.bounds.maximum.x-hull_profile->clip_mins.x,
+            box.bounds.maximum.y-hull_profile->clip_mins.y,box.bounds.maximum.z-hull_profile->clip_mins.z};
+        const std::array<double,3> from{start.x,start.y,start.z}, to{end.x,end.y,end.z};
+        bool inside_from=true,inside_to=true,miss=false;
+        double enter=0.0,leave=1.0; int enter_axis=-1; double normal_sign=0.0;
+        for (std::size_t axis=0;axis<3;++axis) {
+            inside_from=inside_from && from[axis]>low[axis] && from[axis]<high[axis];
+            inside_to=inside_to && to[axis]>low[axis] && to[axis]<high[axis];
+            const auto delta=to[axis]-from[axis];
+            if (delta==0.0) { if (from[axis]<=low[axis] || from[axis]>=high[axis]) miss=true; continue; }
+            const auto near=(delta>0.0 ? low[axis] : high[axis]);
+            const auto far=(delta>0.0 ? high[axis] : low[axis]);
+            const auto first=(near-from[axis])/delta,last=(far-from[axis])/delta;
+            if (first>=enter) { enter=first;enter_axis=static_cast<int>(axis);normal_sign=delta>0.0 ? -1.0 : 1.0; }
+            leave=std::min(leave,last);
+        }
+        normalized->traversal_statistics.traversal_steps+=6U;
+        if (inside_from) {
+            normalized->start_solid=true;
+            normalized->start_contents={player_movement::PlayerMovementContents::solid,-2};
+            if (inside_to) {
+                normalized->all_solid=true;normalized->fraction=0;normalized->end_position=start;
+                normalized->end_contents={player_movement::PlayerMovementContents::solid,-2};
+                normalized->blocking_contents=normalized->start_contents;
+                normalized->hit=player_movement::PlayerMovementHitIdentity{
+                    player_movement::PlayerMovementHitKind::server_entity_box,0,box.entity,box.entity};
+                normalized->collision_plane.reset();
+            }
+            continue;
+        }
+        // Occupancy above is strictly interior. An entry and exit at the
+        // same instant only touch a free corner/edge; clipping that tangent
+        // invents a wall or floor during a jump. Real penetration/support
+        // retains a positive interval, including boundary-to-interior t=0.
+        if (miss || enter_axis<0 || enter>=leave || enter<0.0 || enter>=1.0 || leave<0.0) continue;
+        const auto axis=static_cast<std::size_t>(enter_axis);
+        // Match this query's declared plane tolerance; no new gameplay epsilon.
+        const auto fraction=std::max(0.0,enter-config.trace_tolerance.plane_distance_epsilon/
+            std::abs(to[axis]-from[axis]));
+        if (fraction>=normalized->fraction) continue;
+        assets::AssetVector3 normal{};
+        if (axis==0) normal.x=static_cast<float>(normal_sign);
+        else if(axis==1) normal.y=static_cast<float>(normal_sign); else normal.z=static_cast<float>(normal_sign);
+        normalized->fraction=fraction;
+        normalized->end_position={static_cast<float>(start.x+(end.x-start.x)*fraction),
+            static_cast<float>(start.y+(end.y-start.y)*fraction),static_cast<float>(start.z+(end.z-start.z)*fraction)};
+        normalized->collision_plane=player_movement::PlayerMovementPlane{
+            normal,normal_sign*(normal_sign<0.0 ? low[axis] : high[axis]),{}};
+        normalized->hit=player_movement::PlayerMovementHitIdentity{
+            player_movement::PlayerMovementHitKind::server_entity_box,0,box.entity,box.entity};
+        normalized->blocking_contents=LocalMovementCollisionContents{player_movement::PlayerMovementContents::solid,-2};
+    }
     return {std::move(*normalized), std::nullopt};
+}
+
+std::optional<assets::AssetVector3> resolve_movement_boundary_position(
+    const assets::AssetVector3& origin, const player_movement::PlayerMovementHull hull,
+    const ILocalMovementCollision& collision,
+    core_collision::CollisionQueryScratch& scratch,
+    const LocalMovementCollisionQueryConfig& config)
+{
+    if (!finite_vector(origin) || !collision.valid()) return std::nullopt;
+    const auto original = collision.test_position(origin, hull, scratch, config);
+    if (!original || !original.result) return std::nullopt;
+    if (original.result->status == LocalMovementPositionStatus::free)
+        return original.result->contents.category == player_movement::PlayerMovementContents::empty && !original.result->hit
+            ? std::optional{origin} : std::nullopt;
+    if (original.result->status != LocalMovementPositionStatus::blocking ||
+        original.result->contents.category != player_movement::PlayerMovementContents::solid) return std::nullopt;
+    // The world-only adapter has no per-object hit metadata: its validated
+    // profile already proves that this query contains only BSP model zero.
+    if (collision.profile() != LocalMovementCollisionProfile::world_only_v1 &&
+        (!original.result->hit ||
+        (original.result->hit->kind != player_movement::PlayerMovementHitKind::world &&
+         original.result->hit->kind != player_movement::PlayerMovementHitKind::brush_entity &&
+         original.result->hit->kind != player_movement::PlayerMovementHitKind::explicit_synthetic_brush)))
+        return std::nullopt;
+    std::optional<assets::AssetVector3> best;
+    double best_distance = std::numeric_limits<double>::infinity();
+    const auto step = [](const float value, const int direction) {
+        return direction == 0 ? value : std::nextafter(value,
+            direction < 0 ? -std::numeric_limits<float>::infinity()
+                          : std::numeric_limits<float>::infinity());
+    };
+    for (int x = -1; x <= 1; ++x) for (int y = -1; y <= 1; ++y)
+        for (int z = -1; z <= 1; ++z) {
+            if (x == 0 && y == 0 && z == 0) continue;
+            const assets::AssetVector3 candidate{step(origin.x, x), step(origin.y, y), step(origin.z, z)};
+            if (!finite_vector(candidate)) continue;
+            const double dx = static_cast<double>(candidate.x) - origin.x;
+            const double dy = static_cast<double>(candidate.y) - origin.y;
+            const double dz = static_cast<double>(candidate.z) - origin.z;
+            const double distance = dx * dx + dy * dy + dz * dz;
+            if (distance >= best_distance || distance > (1.0 / 64.0) * (1.0 / 64.0)) continue;
+            const auto clear = collision.test_position(candidate, hull, scratch, config);
+            if (!clear || !clear.result) return std::nullopt;
+            if (clear.result->status != LocalMovementPositionStatus::free ||
+                clear.result->hit ||
+                clear.result->contents.category != player_movement::PlayerMovementContents::empty) continue;
+            best = candidate;
+            best_distance = distance;
+        }
+    return best;
 }
 
 } // namespace hlclient::goldsrc::movement

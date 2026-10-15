@@ -1,5 +1,27 @@
 # E5 — local Glock impacts on static BSP world
 
+## Additive bunker-door feedback — 2026-10-15
+
+`attribution=user_report`: bullet decals are visible on the bunker doors;
+Gauss decals/effects remain absent. The missing Gauss path was its earlier
+world-only beam query, before the already integrated brush-decal submitter.
+The shared query/contact-glow correction and its verification are recorded in
+[E21's bunker-door follow-up](GAUSS_PRIMARY_CHARGE_BEAM_E21.md).
+
+## Verified brush impact follow-up — 2026-10-14
+
+`attribution=user_report`: bunker doors have no decals or hit effects. The old
+static-only trace returned `unsupported_blocker` for the nearest brush before
+material audio/particles were delivered. Normal local, remote and beam callers
+now supply the committed brush library and matching entity/model/lifetime.
+Verified opaque inline surfaces use the same clipping and E30 attached-decal
+pool, with local vertices transformed as the door moves. Material audio and
+particles use the actual world contact. Missing mapping still fails closed;
+sky/liquid/masked eligibility, bounded pools and 20-second local lifetime remain.
+`[brush-weapon-impacts]` checks clipping, moving attachment, slot reuse, GPU
+background/depth and isolated impact PCM. This extends the historical static-only
+scope below; it does not rewrite its original acceptance. New `manual=not_run`.
+
 Status: integrated in the normal `hlclient.exe` path; deterministic offline
 checks and optional read-only asset controls are separate from manual play.
 This ID was not occupied by an existing local E5 task document. The user's

@@ -82,7 +82,8 @@ namespace {
     const std::uint16_t actions = kGoldSrcButtonDirections |
         kSyntheticGoldSrcButtonAttack |
         kSyntheticGoldSrcButtonJump | kSyntheticGoldSrcButtonDuck |
-        kSyntheticGoldSrcButtonReload | (use ? kSyntheticGoldSrcButtonUse : 0U);
+        kSyntheticGoldSrcButtonReload |
+        (use ? kSyntheticGoldSrcButtonUse | kSyntheticGoldSrcButtonAttack2 : 0U);
     return (use || info.compatibility_profile == GoldSrcUserCmdCompatibilityProfile::
                public_goldsrc48_jump_duck_weapon_prediction_v3) &&
            info.input_mapping_profile == GoldSrcUserCmdInputMappingProfile::
@@ -144,6 +145,12 @@ GoldSrcUserCmdState::CreationResult GoldSrcUserCmdState::create(
     const GoldSrcUserCmdCreateInfo& create_info,
     const GoldSrcUserCmdLimits& limits) noexcept
 {
+    if(!std::ranges::all_of(create_info.velocity_impulse,[](float v){return std::isfinite(v);}) ||
+        std::hypot(create_info.velocity_impulse[0],create_info.velocity_impulse[1],create_info.velocity_impulse[2])>2000)
+        return failure(GoldSrcUserCmdErrorCode::movement_out_of_range,"Invalid bounded simulation impulse");
+    if(!std::ranges::all_of(create_info.post_velocity_impulse,[](float v){return std::isfinite(v);}) ||
+        std::hypot(create_info.post_velocity_impulse[0],create_info.post_velocity_impulse[1],create_info.post_velocity_impulse[2])>2000)
+        return failure(GoldSrcUserCmdErrorCode::movement_out_of_range,"Invalid bounded post-movement impulse");
     if (!valid_goldsrc_usercmd_limits(limits)) {
         return failure(
             GoldSrcUserCmdErrorCode::invalid_limits,
@@ -239,6 +246,18 @@ GoldSrcUserCmdState::GoldSrcUserCmdState(
     const GoldSrcUserCmdCreateInfo& create_info) noexcept
     : values_{create_info}
 {
+}
+GoldSrcUserCmdState::CreationResult GoldSrcUserCmdState::with_velocity_impulse(std::array<float,3> delta) const noexcept {
+    auto info=values_;info.velocity_impulse=delta;
+    for(const auto v:delta) if(!std::isfinite(v) || std::abs(v)>2000)
+        return failure(GoldSrcUserCmdErrorCode::non_finite_value,"Invalid simulation velocity impulse");
+    if(std::hypot(delta[0],delta[1],delta[2])>2000)
+        return failure(GoldSrcUserCmdErrorCode::movement_out_of_range,"Simulation velocity impulse exceeds bound");
+    return create(info);
+}
+GoldSrcUserCmdState::CreationResult GoldSrcUserCmdState::with_post_velocity_impulse(std::array<float,3> delta) const noexcept {
+    auto info=values_;info.post_velocity_impulse=delta;
+    return create(info);
 }
 
 std::uint16_t GoldSrcUserCmdState::lerp_msec() const noexcept

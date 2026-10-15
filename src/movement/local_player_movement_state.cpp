@@ -68,6 +68,9 @@ namespace {
     case PlayerMovementHitKind::brush_entity:
         return hit.source_model_index != 0U &&
             hit.stable_instance_ordinal.has_value();
+    case PlayerMovementHitKind::server_entity_box:
+        return hit.source_model_index == 0U && hit.stable_instance_ordinal &&
+            hit.source_entity_index && *hit.source_entity_index > 0U;
     }
     return false;
 }
@@ -219,6 +222,7 @@ LocalPlayerMovementState::LocalPlayerMovementState(
       old_buttons_{create_info.old_buttons},
       duck_time_milliseconds_{create_info.duck_time_milliseconds},
       in_duck_transition_{create_info.in_duck_transition},
+      crouch_jump_enabled_{create_info.crouch_jump_enabled},
       source_command_sequence_{create_info.source_command_sequence},
       simulation_time_nanoseconds_{create_info.simulation_time_nanoseconds},
       last_valid_contents_{create_info.last_valid_contents},
@@ -363,6 +367,8 @@ std::uint32_t LocalPlayerMovementState::duck_time_milliseconds() const noexcept
 { return duck_time_milliseconds_; }
 bool LocalPlayerMovementState::in_duck_transition() const noexcept
 { return in_duck_transition_; }
+bool LocalPlayerMovementState::crouch_jump_enabled() const noexcept
+{ return crouch_jump_enabled_; }
 std::uint32_t LocalPlayerMovementState::source_command_sequence() const noexcept
 { return source_command_sequence_; }
 std::uint64_t LocalPlayerMovementState::simulation_time_nanoseconds() const noexcept
@@ -421,6 +427,8 @@ std::uint64_t local_player_movement_state_signature(
     hash_integral(hash, state.compatibility_profile());
     hash_integral(hash, state.evidence_profile());
     hash_integral(hash, state.command_profile());
+    // Preserve legacy signatures for the default unavailable capability.
+    if (state.crouch_jump_enabled()) hash_integral(hash, std::uint32_t{0x434A5031U});
     if (state.ground_state().hit()) {
         hash_integral(hash, true);
         hash_integral(hash, state.ground_state().hit()->kind);
@@ -465,6 +473,7 @@ LocalPlayerMovementStateCreateInfo local_player_movement_state_create_info(
     result.old_buttons = state.old_buttons();
     result.duck_time_milliseconds = state.duck_time_milliseconds();
     result.in_duck_transition = state.in_duck_transition();
+    result.crouch_jump_enabled = state.crouch_jump_enabled();
     result.source_command_sequence = state.source_command_sequence();
     result.simulation_time_nanoseconds = state.simulation_time_nanoseconds();
     result.last_valid_contents = state.last_valid_contents();

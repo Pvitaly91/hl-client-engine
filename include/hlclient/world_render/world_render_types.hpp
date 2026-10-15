@@ -5,6 +5,7 @@
 #include <hlclient/assets/world_texture_types.hpp>
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -45,6 +46,8 @@ struct WorldRenderMaterial {
         WorldRenderCompatibilityProfile::goldsrc_static_world_v1};
     WorldRenderEvidenceProfile evidence_profile{
         WorldRenderEvidenceProfile::validated_geometry_texture_and_lightmap_bindings};
+    // Derived once by the format-facing world builder; renderer sees no names.
+    bool sky_surface{false};
 };
 
 struct WorldDrawBatch {
@@ -119,6 +122,15 @@ struct WorldRendererResourceIdentity {
         const WorldRendererResourceIdentity&) = default;
 };
 
+// Finite BSP sky polygons can leave gaps after visibility selection. A verified
+// uniform opaque sky miptex can also supply an infinite neutral background.
+// Nonuniform/cubemap sky assets are intentionally outside this flat profile.
+struct WorldFlatSkyBackground {
+    std::array<std::uint8_t, 3U> rgb{};
+    [[nodiscard]] friend bool operator==(
+        const WorldFlatSkyBackground&, const WorldFlatSkyBackground&) = default;
+};
+
 class WorldRenderPackageBuilder;
 
 // Immutable owning renderer input. The nested world/texture/lightmap snapshots
@@ -142,6 +154,8 @@ public:
     [[nodiscard]] const assets::WorldBounds& bounds() const noexcept;
     [[nodiscard]] const WorldRenderCoordinateMetadata& coordinate_metadata() const noexcept;
     [[nodiscard]] const WorldRenderStatistics& statistics() const noexcept;
+    [[nodiscard]] const std::optional<WorldFlatSkyBackground>& flat_sky_background()
+        const noexcept;
     [[nodiscard]] WorldRendererResourceIdentity resource_identity() const noexcept;
     [[nodiscard]] std::uint64_t resource_id() const noexcept;
     [[nodiscard]] std::uint64_t resource_revision() const noexcept;
@@ -160,6 +174,7 @@ private:
         assets::WorldBounds bounds,
         WorldRenderCoordinateMetadata coordinate_metadata,
         WorldRenderStatistics statistics,
+        std::optional<WorldFlatSkyBackground> flat_sky_background,
         WorldRendererResourceIdentity resource_identity) noexcept;
 
     assets::TexturedWorldAsset textured_world_;
@@ -172,6 +187,7 @@ private:
     assets::WorldBounds bounds_{};
     WorldRenderCoordinateMetadata coordinate_metadata_{};
     WorldRenderStatistics statistics_{};
+    std::optional<WorldFlatSkyBackground> flat_sky_background_;
     WorldRendererResourceIdentity resource_identity_{};
 };
 

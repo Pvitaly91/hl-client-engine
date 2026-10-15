@@ -5,7 +5,11 @@
 #include <optional>
 #include <string_view>
 namespace hlclient::game_api {
-enum class SoundReferenceSource { server_precache_reference, validated_local_model_event, pinned_halflife_client_sound_profile };
+enum class SoundReferenceSource { server_precache_reference, validated_local_model_event, pinned_halflife_client_sound_profile,
+    // Only compiled game profiles may declare these exact dependencies. Never
+    // populated from a server string or model event. The host still validates
+    // a flat virtual dirname/sample.wav and opens only the approved world root.
+    module_profile_dependency };
 // Owning virtual sample token, never an OS path. Local references have no wire index.
 struct LocalSoundReference {
     SoundReferenceSource source{SoundReferenceSource::validated_local_model_event};
@@ -16,7 +20,7 @@ struct LocalSoundReference {
     }
     bool operator==(const LocalSoundReference&) const = default;
 };
-enum class LocalSoundKind { fire, reload, deploy, swing, footstep, ladder, landing, fall_pain, impact, shell_contact };
+enum class LocalSoundKind { fire, reload, deploy, swing, footstep, ladder, landing, fall_pain, impact, shell_contact, secondary_launch, world_effect, hud_menu };
 enum class LocalSoundChannel { automatic, weapon, body, voice };
 struct LocalSoundCue {
     LocalSoundReference reference;
@@ -46,12 +50,27 @@ struct MovementAudioDiagnostic {
 };
 struct LocalAudioStatistics {
     std::uint64_t actions{},fire{},reload{},deploy{},swing{},markers{},duplicates{},late{},invalid{},cancelled{};
+    std::uint64_t secondary_launch{};
     std::uint64_t timeline_corrections{}; // ownership retained; not itself a duplicate marker
     std::uint64_t footstep{},ladder{},landing{},movement_suppressed{},
         movement_replay{},movement_material_unavailable{},movement_history_gaps{};
     std::uint64_t movement_observations{},movement_clock_dropped{},movement_invalid_time{};
     std::uint64_t movement_quiet{},movement_movevars_missing{},movement_movevars_disabled{},
         movement_unsupported{},movement_duplicates{},movement_outbox_limit{};
+};
+// Stable owner-selected, session-local persistent voice. Changes preserve the
+// mixer cursor; stop also cancels pending readiness. No emitter/weapon semantics.
+struct LocalVoiceControl {
+    enum class Operation : std::uint8_t { start, change, stop, source, replace };
+    Operation operation{};
+    std::uint64_t identity{}, serial{};
+    LocalSoundReference reference;
+    std::optional<assets::AssetVector3> world_origin;
+    float volume{1}, pitch{1}, attenuation{.8F};
+    double scheduled_seconds{};
+    // Finite startup and loop replacement share a stable owner. Replacement
+    // restarts that voice's cursor without allocating another emitter.
+    bool repeat_sample{true};
 };
 // Fixed owning outbox drained on the session thread after presentation sampling.
 // Scope changes cancel pending local cues, never world audio. Lifetime is independent
@@ -66,5 +85,7 @@ struct LocalAudioBatch {
     LocalAudioStatistics statistics;
     std::uint64_t movement_epoch{}; // life-local queue ownership, independent of weapon scope
     std::optional<MovementAudioDiagnostic> movement_diagnostic;
+    std::array<LocalVoiceControl,32> controls{};
+    std::size_t control_count{};
 };
 }

@@ -30,11 +30,14 @@ void trace(
     const SteamAuthenticationTraceCallback& callback,
     const SteamAuthenticationTraceStatus status,
     const std::optional<auth::AuthenticationErrorCode> code = std::nullopt,
-    const std::size_t material_size = 0U)
+    const std::size_t material_size = 0U,
+    const std::optional<SteamAuthenticationPhase> phase = std::nullopt,
+    const std::chrono::milliseconds elapsed = std::chrono::milliseconds::zero())
 {
     if (callback) {
         try {
-            callback(SteamAuthenticationTraceEvent{status, code, material_size});
+            callback(SteamAuthenticationTraceEvent{
+                status, code, material_size, phase, elapsed});
         } catch (...) {
             // Diagnostics are observational only. In particular, an injected
             // callback must not interrupt ticket/session termination or API
@@ -306,11 +309,13 @@ public:
         auth::AuthenticationRequestContext context,
         const std::uint32_t required_app_id,
         const std::chrono::milliseconds timeout,
+        const std::chrono::milliseconds initialization_timeout,
         SteamAuthenticationNow now)
         : state_{std::move(state)},
           context_{std::move(context)},
           required_app_id_{required_app_id},
           timeout_{timeout},
+          initialization_timeout_{initialization_timeout},
           now_{std::move(now)},
           started_at_{now_()}
     {
@@ -337,30 +342,48 @@ public:
                 auth::AuthenticationErrorCode::cancelled,
                 "Steam authentication operation was cancelled"));
         }
-        if (now_() - started_at_ >= timeout_) {
-            complete_ = true;
-            trace(
-                state_->trace_,
-                SteamAuthenticationTraceStatus::failed,
-                auth::AuthenticationErrorCode::timed_out);
-            return auth::AuthenticationUpdateResult::failed(error(
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now_() - (material_started_at_ ? *material_started_at_ : started_at_));
+        if (elapsed >= (material_started_at_ ? timeout_ : initialization_timeout_)) {
+            return fail(
                 auth::AuthenticationErrorCode::timed_out,
-                "Steam authentication material acquisition timed out"));
+                material_started_at_
+                    ? "Steam authentication material acquisition timed out"
+                    : "Steam authentication API initialization timed out",
+                material_started_at_ ? SteamAuthenticationPhase::material_acquisition
+                                     : SteamAuthenticationPhase::initialization,
+                elapsed);
         }
 
         if (!state_->initialized_) {
             trace(
                 state_->trace_,
                 SteamAuthenticationTraceStatus::api_initializing);
-            if (!state_->api_ || !state_->api_->initialize()) {
+            const bool initialized = state_->api_ && state_->api_->initialize();
+            if (initialized) {
+                state_->initialized_ = true;
+                trace(
+                    state_->trace_,
+                    SteamAuthenticationTraceStatus::api_initialized,
+                    std::nullopt, 0U, SteamAuthenticationPhase::initialization,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now_() - started_at_));
+            }
+            const auto initialization_elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now_() - started_at_);
+            if (initialization_elapsed >= initialization_timeout_) {
+                return fail(
+                    auth::AuthenticationErrorCode::timed_out,
+                    "Steam authentication API initialization timed out",
+                    SteamAuthenticationPhase::initialization,
+                    initialization_elapsed);
+            }
+            if (!initialized) {
                 return fail(
                     auth::AuthenticationErrorCode::unavailable,
                     "Steam API runtime or required legacy interface is unavailable");
             }
-            state_->initialized_ = true;
-            trace(
-                state_->trace_,
-                SteamAuthenticationTraceStatus::api_initialized);
         }
         if (!readiness_reported_) {
             if (state_->api_->app_id() != required_app_id_) {
@@ -373,10 +396,24 @@ public:
                     auth::AuthenticationErrorCode::unavailable,
                     "Steam user session is not logged on");
             }
+            const auto ready_at = now_();
+            const auto initialization_elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    ready_at - started_at_);
+            if (initialization_elapsed >= initialization_timeout_) {
+                return fail(
+                    auth::AuthenticationErrorCode::timed_out,
+                    "Steam authentication API initialization timed out",
+                    SteamAuthenticationPhase::initialization,
+                    initialization_elapsed);
+            }
             readiness_reported_ = true;
+            material_started_at_ = ready_at;
             trace(
                 state_->trace_,
-                SteamAuthenticationTraceStatus::material_pending);
+                SteamAuthenticationTraceStatus::material_pending,
+                std::nullopt, 0U, SteamAuthenticationPhase::initialization,
+                initialization_elapsed);
             return auth::AuthenticationUpdateResult::pending();
         }
 
@@ -386,6 +423,16 @@ public:
                 auth::AuthenticationErrorCode::unavailable,
                 "Steam user session became unavailable");
         }
+        const auto callback_elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now_() - *material_started_at_);
+        if (callback_elapsed >= timeout_) {
+            return fail(
+                auth::AuthenticationErrorCode::timed_out,
+                "Steam authentication material acquisition timed out",
+                SteamAuthenticationPhase::material_acquisition,
+                callback_elapsed);
+        }
 
         std::array<std::byte, kSteamInitiateGameConnectionBufferSize> output{};
         const int length = state_->api_->initiate_game_connection(
@@ -394,6 +441,21 @@ public:
             context_.remote_endpoint.ipv4_host_order(),
             context_.remote_endpoint.port(),
             *context_.game_server_secure);
+        const auto material_elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now_() - *material_started_at_);
+        if (material_elapsed >= timeout_) {
+            if (length > 0) {
+                state_->api_->terminate_game_connection(
+                    context_.remote_endpoint.ipv4_host_order(),
+                    context_.remote_endpoint.port());
+            }
+            return fail(
+                auth::AuthenticationErrorCode::timed_out,
+                "Steam authentication material acquisition timed out",
+                SteamAuthenticationPhase::material_acquisition,
+                material_elapsed);
+        }
         if (length <= 0) {
             return fail(
                 auth::AuthenticationErrorCode::provider_error,
@@ -437,7 +499,8 @@ public:
             state_->trace_,
             SteamAuthenticationTraceStatus::material_acquired,
             std::nullopt,
-            material_size);
+            material_size, SteamAuthenticationPhase::material_acquisition,
+            material_elapsed);
         return auth::AuthenticationUpdateResult::succeeded(
             auth::AuthenticationSession{
                 std::move(*material.value),
@@ -455,10 +518,13 @@ public:
 private:
     [[nodiscard]] auth::AuthenticationUpdateResult fail(
         const auth::AuthenticationErrorCode code,
-        std::string context)
+        std::string context,
+        const std::optional<SteamAuthenticationPhase> phase = std::nullopt,
+        const std::chrono::milliseconds elapsed = std::chrono::milliseconds::zero())
     {
         complete_ = true;
-        trace(state_->trace_, SteamAuthenticationTraceStatus::failed, code);
+        trace(state_->trace_, SteamAuthenticationTraceStatus::failed,
+              code, 0U, phase, elapsed);
         return auth::AuthenticationUpdateResult::failed(
             error(code, std::move(context)));
     }
@@ -467,8 +533,10 @@ private:
     auth::AuthenticationRequestContext context_;
     std::uint32_t required_app_id_{kHalfLifeSteamAppId};
     std::chrono::milliseconds timeout_{};
+    std::chrono::milliseconds initialization_timeout_{};
     SteamAuthenticationNow now_;
     SteamAuthenticationClock::time_point started_at_{};
+    std::optional<SteamAuthenticationClock::time_point> material_started_at_;
     bool complete_{false};
     bool cancelled_{false};
     bool readiness_reported_{false};
@@ -512,6 +580,7 @@ auth::AuthenticationBeginResult SteamAuthenticationProvider::begin(
             "Steam legacy client API is unavailable on this platform"));
     }
     if (config_.timeout <= std::chrono::milliseconds::zero() ||
+        config_.initialization_timeout <= std::chrono::milliseconds::zero() ||
         config_.required_app_id != kHalfLifeSteamAppId ||
         context.protocol != goldsrc::ProtocolVersion::goldsrc_48 ||
         !context.challenge || !context.game_server_steam_id ||
@@ -530,6 +599,7 @@ auth::AuthenticationBeginResult SteamAuthenticationProvider::begin(
             context,
             config_.required_app_id,
             config_.timeout,
+            config_.initialization_timeout,
             config_.now));
 }
 

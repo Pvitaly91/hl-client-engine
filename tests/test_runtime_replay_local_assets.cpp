@@ -1,11 +1,20 @@
 #include <hlclient/app/runtime_replay_local_assets.hpp>
+#include <hlclient/app/movement_diagnostics.hpp>
 #if HLCLIENT_HAS_GAME_HALFLIFE
 #include <hlclient/games/halflife/presentation.hpp>
 #include <hlclient/games/halflife/client_module.hpp>
+#include <hlclient/games/halflife/firearm_profile.hpp>
 #endif
 #include <hlclient/game_api/game_client_host.hpp>
 #include <hlclient/gameplay_camera/first_person_camera.hpp>
 #include <hlclient/app/world_impact_presentation.hpp>
+#include <hlclient/app/temporary_effect_presentation.hpp>
+#include <hlclient/app/remote_effect_presentation.hpp>
+#include <hlclient/audio/mixer.hpp>
+#include <hlclient/renderer/render_camera_math.hpp>
+#include <hlclient/renderer/transient_visuals.hpp>
+#include <hlclient/goldsrc/sound_assets.hpp>
+#include <thread>
 #include <hlclient/client/client_scene_source.hpp>
 #include <hlclient/core/command_line.hpp>
 #include <hlclient/renderer/null/null_renderer.hpp>
@@ -13,6 +22,7 @@
 #include <hlclient/goldsrc/runtime_replay_fixture.hpp>
 #include <hlclient/goldsrc/entity_baseline_decoder.hpp>
 #include <hlclient/goldsrc/reference_brush_collision.hpp>
+#include <hlclient/goldsrc/reference_client_move.hpp>
 #include <hlclient/goldsrc/studio/goldsrc_studio_pose.hpp>
 #include <hlclient/world_spatial/world_spatial_query.hpp>
 #include <hlclient/world_visibility/world_view_frustum.hpp>
@@ -20,11 +30,14 @@
 #include "entity_visual/entity_visual_test_fixture.hpp"
 #include "entity_render/entity_opengl_test_support.hpp"
 #include "goldsrc_studio_test_fixture.hpp"
+#include "goldsrc_sprite_test_fixture.hpp"
 #include "synthetic_goldsrc_bsp_fixture.hpp"
 #include "synthetic_goldsrc_wad3_fixture.hpp"
 #include "collision_brush_test_fixture.hpp"
 #include "world_render_test_fixture.hpp"
 #include "player_origin_test_fixture.hpp"
+#include "user_info_test_fixture.hpp"
+#include <hlclient/goldsrc/user_info_update.hpp>
 #include <algorithm>
 #include <array>
 #include <catch2/catch_approx.hpp>
@@ -51,9 +64,10 @@ struct LocalContext {
   std::vector<std::byte> map;
   std::vector<std::byte> model = fixture::literal_minimal_goldsrc_studio_v10();
   LocalContext(bool brushes = false, std::string_view brush_name = "BRUSH_ONLY", bool alternate = false,
-               std::optional<std::uint8_t> world_light = {}) {
+               std::optional<std::uint8_t> world_light = {}, std::string_view wad_names = "test.wad") {
     fixture::SyntheticBspBuilder builder;
-    const std::string text = "{\n\"classname\" \"worldspawn\"\n\"wad\" \"test.wad\"\n}\n";
+    const std::string text = "{\n\"classname\" \"worldspawn\"\n\"wad\" \"" +
+        std::string{wad_names} + "\"\n}\n";
     const auto bytes = std::as_bytes(std::span{text});
     builder.lump(fixture::SyntheticBspLumpId::entities)
         .assign(bytes.begin(), bytes.end());
@@ -136,6 +150,299 @@ struct LocalContext {
   }
 };
 
+namespace {
+std::vector<std::byte> muzzle_fixture_sprite() {
+  namespace sf=fixture::sprite_fixture;
+  auto bytes=sf::literal_header_and_palette(2,1,2,0,64,64);
+  for(std::size_t i=0;i<256*3;++i)bytes[sf::kPaletteOffset+i]=std::byte{0};
+  bytes[sf::kPaletteOffset+3]=std::byte{240};bytes[sf::kPaletteOffset+4]=std::byte{128};
+  bytes[sf::kPaletteOffset+5]=std::byte{32};
+  for(unsigned frame=0;frame<2;++frame) {
+    sf::FrameSpec spec{-32,32,64,64,std::vector<std::byte>(64U*64U)};
+    for(std::size_t y=20;y<44;++y)for(std::size_t x=20;x<44;++x)
+      if(frame==0 || x<32)spec.pixels[y*64+x]=std::byte{1};
+    sf::append_single_entry(bytes,spec);
+  }
+  return bytes;
+}
+app::ReplayLocalAssetsCreateResult create_muzzle_fixture(LocalContext& context) {
+  context.root.write("valve","sprites/fixture_muzzle.spr",muzzle_fixture_sprite());
+  const std::array<std::string,1> dependencies{"sprites/fixture_muzzle.spr"};
+  return app::RuntimeReplayLocalAssets::create(context.resources(),readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::offline_spectator,{},dependencies);
+}
+app::RuntimeReplayLocalAssets::MuzzleSpriteFrame muzzle_request(hlclient::assets::AssetVector3 origin={0,0,0}) {
+  app::RuntimeReplayLocalAssets::MuzzleSpriteFrame value;value.origin=origin;
+  constexpr std::string_view name="sprites/fixture_muzzle.spr";
+  std::copy(name.begin(),name.end(),value.sprite.virtual_name.begin());value.sprite.scale=.1F;
+  return value;
+}
+}
+
+TEST_CASE("Approved muzzle sprites preload exact source pixels with bounded optional dependencies",
+          "[muzzle-sprites][local-capture-assets][no-stock]") {
+  LocalContext context;auto created=create_muzzle_fixture(context);REQUIRE(created.projection);
+  auto& resources=*created.projection;
+  CHECK(resources.muzzle_sprite_statistics().ready==1);
+  auto request=muzzle_request({8,0,0});
+  const auto first=resources.materialize_muzzle_sprites(std::span{&request,1U},0);REQUIRE(first);
+  REQUIRE(first->frame->sprite_instances().size()==1);
+  const auto& instance=first->frame->sprite_instances()[0];
+  CHECK(instance.transform.origin.x==8);CHECK(instance.transform.uniform_scale==Catch::Approx(.1F));
+  CHECK(instance.blend_mode==hlclient::entity_render::SpriteBlendMode::additive);
+  CHECK(instance.selected_frame_index==0);
+  const auto& sprite=*first->package->sprite_assets()[instance.sprite_asset_index];
+  REQUIRE(sprite.frames().size()==2);CHECK(sprite.frames()[0].geometry.source_origin.x==-32);
+  const auto& pixels=sprite.frames()[0].rgba8;
+  CHECK(pixels[0]==std::byte{0});CHECK(pixels[1]==std::byte{0});CHECK(pixels[3]==std::byte{255});
+  const auto at=(32U*64U+32U)*4U;
+  CHECK(pixels[at]==std::byte{240});CHECK(pixels[at+1]==std::byte{128});CHECK(pixels[at+2]==std::byte{32});
+  CHECK(first->package->presentation_sprite_sources().size()==1);
+  // Immutable prepared pixels do not reopen even if source disappears/changes.
+  context.root.write("valve","sprites/fixture_muzzle.spr","invalid now");
+  request.sprite.frame_seed=1;
+  const auto next=resources.materialize_muzzle_sprites(std::span{&request,1U},.01);REQUIRE(next);
+  CHECK(next->package==first->package);CHECK(next->frame->sprite_instances()[0].selected_frame_index==1);
+  request.sprite.scale=std::numeric_limits<float>::quiet_NaN();
+  CHECK_FALSE(resources.materialize_muzzle_sprites(std::span{&request,1U},.01));
+  CHECK_FALSE(resources.materialize_muzzle_sprites({},.01));
+  const std::array<std::string,4> invalid{"../bad.spr","sprites/missing.spr","sprites/fixture_muzzle.spr","sprites/nested/a.spr"};
+  auto failed=app::RuntimeReplayLocalAssets::create(context.resources(),readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::offline_spectator,{},invalid);
+  REQUIRE(failed.projection);CHECK(failed.projection->muzzle_sprite_statistics().ready==0);
+  CHECK(failed.projection->muzzle_sprite_statistics().missing==1);
+  CHECK(failed.projection->muzzle_sprite_statistics().rejected==3);
+  request=muzzle_request();CHECK_FALSE(failed.projection->materialize_muzzle_sprites(std::span{&request,1U},0));
+  // Supplemental sources cannot bypass exact ownership validation.
+  hlclient::entity_render::EntitySceneRenderPackageCreateInfo package;
+  package.asset_library=first->package->asset_library();package.asset_library_identity=first->package->asset_library_identity();
+  package.resource_id=first->package->resource_id();
+  package.studio_assets.assign(first->package->studio_assets().begin(),first->package->studio_assets().end());
+  package.sprite_assets.assign(first->package->sprite_assets().begin(),first->package->sprite_assets().end());
+  CHECK_FALSE(hlclient::entity_render::EntitySceneRenderPackageBuilder{}.build(package));
+  package.presentation_sprite_sources.assign(first->package->presentation_sprite_sources().begin(),first->package->presentation_sprite_sources().end());
+  CHECK(hlclient::entity_render::EntitySceneRenderPackageBuilder{}.build(package));
+  package.presentation_sprite_sources.push_back(package.presentation_sprite_sources.front());
+  CHECK_FALSE(hlclient::entity_render::EntitySceneRenderPackageBuilder{}.build(package));
+}
+
+TEST_CASE("Original muzzle sprite GPU passes preserve black neutrality local projection world depth and frames",
+          "[muzzle-sprites][local-capture-assets][actual-context]") {
+  LocalContext context;auto created=create_muzzle_fixture(context);REQUIRE(created.projection);
+  auto gl=fixture::entity_opengl_fixture::try_context();
+  if(!gl || !fixture::entity_opengl_fixture::capable_context())SKIP("OpenGL 3.3 Core unavailable");
+  gl->initialize_renderer();
+  hlclient::renderer::RenderScene baseline;baseline.clear_color={.05F,.1F,.15F,1};
+  baseline.camera={{0,0,0},{1,0,0},{0,0,1}};
+  const auto draw=[&](const auto& scene) {
+    gl->renderer().render(scene,{96,96});CHECK(glGetError()==GL_NO_ERROR);
+    return fixture::entity_opengl_fixture::framebuffer();
+  };
+  const auto original=draw(baseline);auto request=muzzle_request({8,0,0});
+  auto scene=baseline;scene.world_muzzle_entities=created.projection->materialize_muzzle_sprites(std::span{&request,1U},0);
+  REQUIRE(scene.world_muzzle_entities);const auto visible=draw(scene);CHECK(visible!=original);
+  const auto uploads=gl->renderer().entity_statistics().sprite_asset_upload_count;
+  CHECK(draw(scene)==visible);CHECK(gl->renderer().entity_statistics().sprite_asset_upload_count==uploads);
+  const auto center=(48U*96U+48U)*4U;
+  CHECK(std::to_integer<unsigned>(visible[center])>std::to_integer<unsigned>(original[center]));
+  // Black source edges and outside pixels preserve underlying surface exactly.
+  for(const auto pixel:{0U,(48U*96U+24U)*4U})for(unsigned c=0;c<3;++c)CHECK(visible[pixel+c]==original[pixel+c]);
+  request.sprite.frame_seed=1;scene.world_muzzle_entities=created.projection->materialize_muzzle_sprites(std::span{&request,1U},.01);
+  CHECK(draw(scene)!=visible);CHECK(gl->renderer().entity_statistics().sprite_asset_upload_count==uploads);
+  namespace wf=fixture::world_render_fixture;
+  auto wall=wf::make_world();
+  for(auto& vertex:wall.vertices) {vertex.position={4,vertex.position.x-8,vertex.position.y-8};vertex.normal={-1,0,0};}
+  wall.bounds={{4,-8,-8},{4,8,8}};wall.surfaces[0].bounds=wall.bounds;
+  auto wall_package=hlclient::world_render::WorldRenderPackageBuilder{}.build(
+      {std::move(wall),wf::make_texture_set(false)},wf::make_lightmap_set({}));REQUIRE(wall_package);
+  auto blocked=baseline;blocked.static_world=hlclient::renderer::RenderStaticWorld{
+      std::make_shared<const hlclient::world_render::WorldRenderPackage>(std::move(*wall_package.package))};
+  const auto opaque=draw(blocked);blocked.world_muzzle_entities=scene.world_muzzle_entities;
+  CHECK(draw(blocked)==opaque); // original sprite behind real world depth
+  // A camera-local pass uses the existing first-person projection despite
+  // arbitrary world camera origin/orientation, and doesn't become a HUD overlay.
+  auto state=observation();client::ClientWorldState world;
+  REQUIRE(created.projection->reset_generation(state,world));
+  hlclient::game_api::ViewmodelIntent intent;intent.status=hlclient::game_api::ViewmodelStatus::ready;
+  intent.generation=1;intent.publication_revision=1;intent.model_index=7;
+  scene=baseline;scene.camera={{100,100,100},{100,101,100},{0,0,1}};
+  scene.first_person_entities=created.projection->materialize_viewmodel(intent);REQUIRE(scene.first_person_entities);
+  const auto local_base=draw(scene);request=muzzle_request({8,0,4});
+  scene.first_person_muzzle_entities=created.projection->materialize_muzzle_sprites(std::span{&request,1U},.02);
+  REQUIRE(scene.first_person_muzzle_entities);const auto local_flash=draw(scene);CHECK(local_flash!=local_base);
+  scene.camera={{-100,-100,-100},{-99,-100,-100},{0,0,1}};CHECK(draw(scene)==local_flash);
+  scene.first_person_muzzle_entities.reset();CHECK(draw(scene)==local_base);
+  GLboolean depth{};glGetBooleanv(GL_DEPTH_WRITEMASK,&depth);CHECK(depth==GL_TRUE);
+  CHECK(glIsEnabled(GL_BLEND)==GL_FALSE);
+}
+
+#if HLCLIENT_HAS_GAME_HALFLIFE
+TEST_CASE("Original muzzle profile covers eligible firearms and remote owner retains dedup expiry lights",
+          "[muzzle-sprites][weapon-visuals][remote-effects][no-stock]") {
+  using namespace hlclient;
+  for(const auto [marker,scale]:std::array<std::pair<unsigned,float>,4>{{{11,.1F},{20,.2F},{31,.3F},{41,.4F}}}) {
+    const auto profile=games::halflife::muzzle_sprite_profile(marker,123);REQUIRE(profile);
+    CHECK(profile->scale==Catch::Approx(scale));CHECK(profile->frame_seed==123);
+    CHECK(std::string_view{profile->virtual_name.data()}==(marker==20 ? "sprites/muzzleflash1.spr":"sprites/muzzleflash2.spr"));
+  }
+  for(unsigned invalid:{0U,10U,99U,5001U})CHECK_FALSE(games::halflife::muzzle_sprite_profile(invalid,0));
+  LocalContext context;auto created=create_muzzle_fixture(context);REQUIRE(created.projection);
+  game_api::GameClientHost host{games::halflife::make_half_life_client_module()};host.reset({1,1,1});
+  app::RemoteEffectPresentation owner;renderer::TransientVisuals shells;app::WorldImpactPresentation impacts;
+  game_api::RemoteWeaponEffectsBatch batch;batch.count=1;auto& effect=batch.effects[0];
+  effect.action.generation=1;effect.action.command_sequence=1;effect.action.emitter_entity=2;effect.action.started_at_seconds=1;
+  effect.muzzle_origin={8,0,0};effect.flash=game_api::RemoteMuzzleFlash{{8,0,0},3,{1,1,1,1},1,1.075};
+  effect.flash->sprite=muzzle_request().sprite;
+  effect.light=game_api::LocalMuzzleLight{effect.action,96,.8F,{1,.62F,.28F},1,1.075};
+  owner.consume(batch,host,shells,impacts,{},nullptr,{},false,false,1,created.projection.get());
+  renderer::RenderScene scene;owner.present(scene,1.01,created.projection.get());
+  REQUIRE(scene.world_muzzle_entities);CHECK(scene.world_muzzle_entities->frame->sprite_instances().size()==1);
+  CHECK(scene.world_flash_count==0);REQUIRE(scene.transient_world_light);
+  CHECK(scene.world_muzzle_entities->frame->sprite_instances()[0].transform.origin.x==8);
+  owner.consume(batch,host,shells,impacts,{},nullptr,{},false,false,1.01,created.projection.get());
+  renderer::RenderScene repeated;owner.present(repeated,1.02,created.projection.get());
+  REQUIRE(repeated.world_muzzle_entities);CHECK(repeated.world_muzzle_entities->frame->sprite_instances().size()==1);
+  CHECK(owner.statistics().consumed==1);CHECK(shells.statistics().shells_created==0);
+  renderer::RenderScene expired;owner.present(expired,1.08,created.projection.get());
+  CHECK_FALSE(expired.world_muzzle_entities);CHECK_FALSE(expired.transient_world_light);
+  owner.reset();renderer::RenderScene reset;owner.present(reset,1.01,created.projection.get());CHECK_FALSE(reset.world_muzzle_entities);
+  // Missing optional dependency remains a bounded skip, not the old generated
+  // glow. Independent fire lighting still works in the normal resource path.
+  auto missing=context.create();REQUIRE(missing.projection);
+  owner.consume(batch,host,shells,impacts,{},nullptr,{},false,false,1,missing.projection.get());
+  renderer::RenderScene absent;owner.present(absent,1.01,missing.projection.get());
+  CHECK_FALSE(absent.world_muzzle_entities);CHECK(absent.world_flash_count==0);CHECK(absent.transient_world_light);
+  CHECK(missing.projection->muzzle_sprite_statistics().unavailable==1);
+}
+
+TEST_CASE("Original installed muzzle sprites prepare through exact world root and reach GPU read-only",
+          "[muzzle-sprites][muzzle-installed-assets][local-assets][actual-context]") {
+  using namespace hlclient;
+  const auto* root=SDL_getenv("HLCLIENT_LOCAL_GAME_ROOT");
+  if(!root)SKIP("No opt-in local Half-Life root supplied");
+  const std::filesystem::path base{root};
+  const std::array<std::string,2> dependencies{"sprites/muzzleflash1.spr","sprites/muzzleflash2.spr"};
+  std::array<std::filesystem::file_time_type,2> before;
+  for(std::size_t i=0;i<dependencies.size();++i) {
+    const auto path=base/"valve"/dependencies[i];
+    if(!std::filesystem::is_regular_file(path))SKIP("Optional original muzzle sprite absent");
+    before[i]=std::filesystem::last_write_time(path);
+  }
+  const auto resources=readiness::parse_resource_list({{2U,"maps/crossfire.bsp",9U,0U,0U}});
+  auto prepared=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/crossfire.bsp"),
+      base,"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client,{},dependencies);
+  REQUIRE(prepared.projection);CHECK(prepared.projection->muzzle_sprite_statistics().ready==2);
+  CHECK(prepared.projection->muzzle_sprite_statistics().missing==0);
+  CHECK(prepared.projection->muzzle_sprite_statistics().rejected==0);
+  auto gl=fixture::entity_opengl_fixture::try_context();
+  const bool gpu=gl && fixture::entity_opengl_fixture::capable_context();
+  if(gpu)gl->initialize_renderer();else WARN("OpenGL unavailable: original approved CPU controls still checked");
+  for(unsigned marker:{11U,20U,31U,41U}) {
+    app::RuntimeReplayLocalAssets::MuzzleSpriteFrame request{{24,0,0},*games::halflife::muzzle_sprite_profile(marker,1)};
+    const auto frame=prepared.projection->materialize_muzzle_sprites(std::span{&request,1U},0);REQUIRE(frame);
+    const auto& instance=frame->frame->sprite_instances()[0];
+    const auto& asset=*frame->package->sprite_assets()[instance.sprite_asset_index];
+    CHECK(asset.frames().size()==2);CHECK(asset.render_profile()==entity_render::SpriteRenderTextureProfile::additive);
+    CHECK(asset.orientation()==assets::SpriteOrientation::view_parallel);
+    CHECK(asset.frames()[0].geometry.width==64);CHECK(asset.frames()[0].geometry.height==64);
+    CHECK(std::ranges::any_of(asset.frames()[0].rgba8,[](std::byte v){return v!=std::byte{0};}));
+    if(gpu) {
+      renderer::RenderScene scene;scene.clear_color={0,0,0,1};scene.camera={{0,0,0},{1,0,0},{0,0,1}};
+      gl->renderer().render(scene,{96,96});const auto baseline=fixture::entity_opengl_fixture::framebuffer();
+      scene.world_muzzle_entities=frame;gl->renderer().render(scene,{96,96});
+      const auto pixels=fixture::entity_opengl_fixture::framebuffer();CHECK(pixels!=baseline);
+      const auto count=gl->renderer().entity_statistics().sprite_asset_upload_count;
+      gl->renderer().render(scene,{96,96});CHECK(gl->renderer().entity_statistics().sprite_asset_upload_count==count);
+      CHECK(glGetError()==GL_NO_ERROR);
+      std::cout<<"muzzle_original_gpu marker="<<marker<<" scale="<<request.sprite.scale
+          <<" frames="<<asset.frames().size()<<" changed="<<(pixels!=baseline)<<'\n';
+    }
+  }
+  for(std::size_t i=0;i<dependencies.size();++i)CHECK(std::filesystem::last_write_time(base/"valve"/dependencies[i])==before[i]);
+}
+#endif
+
+TEST_CASE("E31 missing resource report preserves safe virtual names and concrete map reason",
+          "[e31][local-assets][no-stock]") {
+  LocalContext context;
+  auto ready=context.create();REQUIRE(ready.projection);
+  const auto& issues=ready.projection->summary().resource_issues;
+  const auto missing=std::ranges::find_if(issues,[](const auto& issue) {
+    return issue.virtual_name=="models/missing.mdl";
+  });
+  REQUIRE(missing!=issues.end());CHECK(missing->reason=="missing");
+  CHECK(missing->resource_index==20U);CHECK(missing->resource_type==2U);
+  CHECK(issues.size()<=32U);
+  for(const auto& issue:issues) {
+    CHECK(issue.virtual_name.find(':')==std::string::npos);
+    CHECK(issue.virtual_name.find('\\')==std::string::npos);
+  }
+  fixture::ScopedLocalResourceTestRoot empty;
+  auto absent=app::RuntimeReplayLocalAssets::create(context.resources(),
+      readiness::parse_server_info("maps/test_map.bsp"),empty.path(),"valve");
+  REQUIRE_FALSE(absent.projection);REQUIRE(absent.error);
+  CHECK(absent.error->context.find("map_resource_not_ready")!=std::string::npos);
+  CHECK(absent.error->context.find("maps/test_map.bsp")!=std::string::npos);
+  CHECK(absent.error->context.find("status=")!=std::string::npos);
+  CHECK(absent.error->context.find(empty.path().string())==std::string::npos);
+}
+
+TEST_CASE("E31 failed world preparation preserves the actual missing WAD dependency",
+          "[e31][local-assets][world-textures][no-stock]") {
+  LocalContext source;
+  fixture::ScopedLocalResourceTestRoot root;
+  root.write("valve","maps/test_map.bsp",source.map);
+  root.write("valve","models/shared.mdl",source.model);
+  root.write("valve","sound/shared.wav","sound");
+  auto failed=app::RuntimeReplayLocalAssets::create(source.resources(),
+      readiness::parse_server_info("maps/test_map.bsp"),root.path(),"valve");
+  REQUIRE_FALSE(failed.projection);REQUIRE(failed.error);
+  const auto issue=std::ranges::find_if(failed.resource_issues,[](const auto& candidate) {
+    return candidate.virtual_name=="test.wad" && candidate.reason=="wad_missing";
+  });
+  REQUIRE(issue!=failed.resource_issues.end());
+  CHECK(issue->resource_type==255U);CHECK(issue->resource_index==0U);
+  CHECK(failed.resource_issues.size()<=32U);
+  CHECK(failed.error->context.find("incomplete")!=std::string::npos);
+  for(const auto& candidate:failed.resource_issues) {
+    CHECK(candidate.virtual_name.find(':')==std::string::npos);
+    CHECK(candidate.virtual_name.find('\\')==std::string::npos);
+  }
+}
+
+TEST_CASE("E31 malformed WAD reports its safe basename and typed catalog failure",
+          "[e31][local-assets][world-textures][no-stock]") {
+  LocalContext context;
+  context.root.write("valve","test.wad",std::array<std::byte,4>{});
+  auto failed=context.create();REQUIRE_FALSE(failed.projection);REQUIRE(failed.error);
+  const auto issue=std::ranges::find_if(failed.resource_issues,[](const auto& candidate) {
+    return candidate.virtual_name=="test.wad" && candidate.reason=="wad_catalog_failed";
+  });
+  REQUIRE(issue!=failed.resource_issues.end());
+  CHECK(issue->resource_type==255U);CHECK(issue->resource_index==0U);
+  CHECK(failed.resource_issues.size()<=32U);
+}
+
+TEST_CASE("E31 brush-only missing WAD keeps its own declaration identity on failure",
+          "[e31][local-assets][world-textures][no-stock]") {
+  LocalContext context{true,"BRUSH_ONLY",false,{},"test.wad;missing.wad"};
+  fixture::SyntheticWad3Entry world_texture;
+  world_texture.name="TEST_QUAD";
+  world_texture.payload=fixture::synthetic_goldsrc_miptex("TEST_QUAD",64U,64U);
+  context.root.write("valve","test.wad",fixture::synthetic_wad3({world_texture}).bytes);
+  auto failed=context.create();REQUIRE_FALSE(failed.projection);REQUIRE(failed.error);
+  CHECK(failed.error->context.starts_with("brush geometry preparation:"));
+  const auto issue=std::ranges::find_if(failed.resource_issues,[](const auto& candidate) {
+    return candidate.virtual_name=="missing.wad" && candidate.reason=="wad_missing";
+  });
+  REQUIRE(issue!=failed.resource_issues.end());
+  CHECK(issue->resource_type==255U);CHECK(issue->resource_index==1U);
+  CHECK(std::ranges::none_of(failed.resource_issues,[](const auto& candidate) {
+    return candidate.virtual_name=="test.wad";
+  }));
+  CHECK(failed.resource_issues.size()<=32U);
+}
+
 // Independent neutral presentation only, deliberately no concrete game factory.
 // It exercises the very same production host/materializer as normal hlclient.
 class E10TestGameClientModule final : public hlclient::game_api::IGameClientModule {
@@ -191,9 +498,29 @@ public:
     result.transform_angles = {input.entity.angles.x.value_or(0.0),
         input.entity.angles.y.value_or(0.0), input.entity.angles.z.value_or(0.0)};
     result.bone_count = input.model.bones.size();
+    if(attachments && input.entity.weapon_model_index && *input.entity.weapon_model_index)
+      result.attachment_model_index=input.entity.weapon_model_index;
     return result;
   }
   std::int32_t selected_body{1};
+  bool attachments{};
+  bool sockets_enabled{};
+  std::array<hlclient::game_api::RemoteWeaponPoseSample,32> sockets{};
+  std::size_t socket_count{};
+  hlclient::game_api::RemoteWeaponSocketPlan remote_weapon_socket_plan(
+      const hlclient::game_api::RemoteWeaponModelContext&) noexcept override {
+    if(!sockets_enabled) return {};
+    // Independent project-owned policy, deliberately not a Half-Life socket.
+    hlclient::game_api::RemoteWeaponSocketPlan result;
+    result.semantic_match=true;
+    result.source=hlclient::game_api::RemoteSocketSource::validated_pmodel_socket;
+    result.muzzle={0,{0,3,4}};result.shell={0,{0,-3,4}};
+    return result;
+  }
+  void remote_weapon_poses(std::span<const hlclient::game_api::RemoteWeaponPoseSample> input) noexcept override {
+    socket_count=std::min(input.size(),sockets.size());
+    std::copy_n(input.begin(),socket_count,sockets.begin());
+  }
   std::size_t requests{};
   double previous_server_seconds{};
   double current_server_seconds{};
@@ -254,6 +581,286 @@ e10_instance(const client::ClientWorldState& world, const std::uint32_t number) 
   return result;
 }
 
+TEST_CASE("E32 opt-in actor diagnostics join actual presentation without changing it",
+    "[e32-remote-diagnostics][e10][runtime-presentation][local-capture-assets]") {
+  LocalContext context;
+  auto on=context.create(),off=context.create();
+  REQUIRE(on.projection);REQUIRE(off.projection);
+  hlclient::game_api::GameClientHost on_host{std::make_unique<E10TestGameClientModule>()};
+  hlclient::game_api::GameClientHost off_host{std::make_unique<E10TestGameClientModule>()};
+  on_host.reset({1,1,1});off_host.reset({1,1,1});
+  client::ClientWorldState on_world,off_world;
+  app::MovementIncidentRecorder receipt{true};
+  std::uint64_t frame_number{};
+  const auto first=e10_observation(1,1.0,0,40,0);
+  const auto second=e10_observation(2,1.02,20,140,0);
+  REQUIRE(on.projection->reset_generation(first,on_world));
+  REQUIRE(off.projection->reset_generation(first,off_world));
+  REQUIRE(on.projection->project_entities(second,on_world));
+  REQUIRE(off.projection->project_entities(second,off_world));
+  const auto captured=[&](std::uint32_t number) {
+    const auto rows=on.projection->remote_movement_observations();REQUIRE(rows);
+    const auto found=std::ranges::find(*rows,number,&app::RemoteMovementObservation::entity_index);
+    REQUIRE(found!=rows->end());return *found;
+  };
+  for(const auto time:{100.0,100.005}) {
+    REQUIRE(on.projection->present_entities(on_host,time,1,on_world,{640,480},true));
+    REQUIRE(off.projection->present_entities(off_host,time,1,off_world,{640,480}));
+    CHECK_FALSE(off.projection->remote_movement_observations());
+    const auto& a=e10_instance(on_world,2);const auto& b=e10_instance(off_world,2);
+    CHECK(a.transform.origin.x==b.transform.origin.x);
+    CHECK(on_world.entity_frame()->studio_poses()[a.pose_index].bone_matrices==
+        off_world.entity_frame()->studio_poses()[b.pose_index].bone_matrices);
+    // This asset-materialization fixture does not publish a network world
+    // observation. Preserve that absence instead of inventing an RX update.
+    CHECK_FALSE(on_world.runtime_observation());CHECK_FALSE(off_world.runtime_observation());
+    CHECK(client::runtime_observation_canonical_hash(second)==second.canonical_state_hash);
+    const auto row=captured(2);
+    REQUIRE(row.previous_raw_origin);REQUIRE(row.current_raw_origin);REQUIRE(row.latest_raw_origin);
+    REQUIRE(row.sampled_origin);REQUIRE(row.rendered_origin);
+    CHECK((*row.previous_raw_origin)[0]==0);CHECK((*row.current_raw_origin)[0]==20);
+    CHECK((*row.latest_raw_origin)[0]==20);
+    CHECK((*row.sampled_origin)[0]==Catch::Approx(a.transform.origin.x).margin(.002));
+    CHECK((*row.rendered_origin)[0]==a.transform.origin.x);
+    CHECK(row.previous_source_ordinal==1);CHECK(row.current_source_ordinal==2);
+    CHECK(row.latest_source_ordinal==2);CHECK(row.pose_submitted==true);
+    CHECK(row.visible==(a.visibility_status==hlclient::entity_render::RuntimeEntityVisibilityStatus::visible));
+    CHECK(row.lifetime!=0);
+    app::MovementFrameRecord frame;frame.frame_number=++frame_number;
+    frame.monotonic_us=frame_number*5'000;frame.network_generation=frame.map_generation=1;
+    REQUIRE(receipt.observe(frame));
+    REQUIRE(receipt.observe_remote(frame,*on.projection->remote_movement_observations()));
+  }
+  REQUIRE(receipt.mark(app::MovementIncidentTrigger::manual,10'000));
+  const auto report=receipt.encode({"0123456789abcdef0123456789abcdef",app::SessionReceiptRole::A,123,456});
+  REQUIRE(report);CHECK(report->find("\"remote_players\":{\"schema\":\"hlclient.remote-players.v1\"")!=std::string::npos);
+  CHECK(report->find("\"rendered_origin\":[5,")!=std::string::npos);
+  // A per-actor same-time boundary must disclose the position source actually
+  // selected, not the still-bracketed global or raw pose interpolation pair.
+  auto correction=e10_observation(3,1.02,30,140,0);
+  REQUIRE(on.projection->project_entities(correction,on_world));
+  REQUIRE(on.projection->present_entities(on_host,100.01,1,on_world,{640,480},true));
+  const auto corrected=captured(2);
+  CHECK(corrected.presentation.decision==hlclient::entity_visual::PlayerPresentationDecision::held_floor);
+  CHECK(corrected.previous_source_ordinal==3);CHECK(corrected.current_source_ordinal==3);
+  REQUIRE(corrected.rendered_origin);CHECK((*corrected.rendered_origin)[0]==30);
+  // Hidden/missing materialization is not a rendered coordinate; absence is
+  // distinct from both and is reported by the recorder, not invented here.
+  auto hidden=e10_observation(4,1.04,30,140,0,false);
+  hidden.packet_entities[1].effects=128U;
+  hidden.canonical_state_hash=client::runtime_observation_canonical_hash(hidden);
+  REQUIRE(on.projection->project_entities(hidden,on_world));
+  REQUIRE(on.projection->present_entities(on_host,100.04,1,on_world,{640,480},true));
+  const auto hidden_row=captured(2);
+  CHECK(hidden_row.pose_submitted==false);CHECK_FALSE(hidden_row.rendered_origin);
+  REQUIRE(on.projection->remote_movement_observations()->size()==1);
+  REQUIRE_FALSE(on.projection->present_entities(on_host,std::numeric_limits<double>::quiet_NaN(),1,on_world,{640,480},true));
+  CHECK_FALSE(on.projection->remote_movement_observations());
+  REQUIRE(on.projection->present_entities(on_host,100.05,1,on_world,{640,480},true));
+  on.projection->invalidate_player_continuity();
+  CHECK_FALSE(on.projection->remote_movement_observations());
+}
+
+#if HLCLIENT_HAS_GAME_HALFLIFE
+TEST_CASE("E13 normal materializer binds server corpse proxy independently and body queue reuse is immediate",
+    "[e13][corpse][local-capture-assets][actual-context]") {
+  LocalContext context(false,"BRUSH_ONLY",false,std::uint8_t{80});
+  // Owned triangle must face the +X test camera, not be edge-on in the XY plane.
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset,0,-2,-4);
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+12U,0,2,-4);
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+24U,0,0,4);
+  for(std::size_t i=0;i<3U;++i)
+    fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioNormalsOffset+i*12U,1,0,0);
+  context.root.write("valve","models/shared.mdl",context.model);
+  auto created=context.create();REQUIRE(created.projection);
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({1,1,1});client::ClientWorldState world;
+  std::unique_ptr<fixture::entity_opengl_fixture::HiddenContext> gl;
+  try { gl=std::make_unique<fixture::entity_opengl_fixture::HiddenContext>(320,240); }
+  catch(const std::exception& e) {WARN(e.what());}
+  if(gl && fixture::entity_opengl_fixture::capable_context()) gl->initialize_renderer();
+  else {gl.reset();WARN("E13 GPU subcheck unavailable; CPU corpse binding still checked");}
+  std::uint64_t previous_pixels=0;
+  for(std::uint64_t cycle=1;cycle<=3;++cycle) {
+    auto state=e10_observation(cycle,static_cast<double>(cycle),500,0,0,false);
+    state.packet_entities.resize(3); // receiving player1, remote2, body queue40
+    auto& corpse=state.packet_entities.back();
+    corpse.render_effect=17;corpse.render_amount=cycle==2 ? 1U : 2U;
+    corpse.model_index=999; // Never resolved from corpse model slot or filename.
+    corpse.origin={0.0,static_cast<double>(cycle-1)*5.0,24.0};corpse.effects=32;
+    corpse.animation_time_seconds=static_cast<double>(cycle);corpse.frame_rate=0.0;
+    corpse.controllers.fill(17U);corpse.blending.fill(0U);
+    corpse.frame=cycle==2 ? 128.0 : 256.0;
+    state.packet_entities[1].effects=32;state.packet_entities[1].weapon_model_index=21;
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    if(cycle==1) REQUIRE(created.projection->reset_generation(state,world));
+    else REQUIRE(created.projection->project_entities(state,world));
+    world.set_camera({{40,0,24},{0,0,24},{0,0,1}});
+    REQUIRE(e10_present(*created.projection,host,100+static_cast<double>(cycle),1,world,{320,240}));
+    const auto& instance=e10_instance(world,40);
+    CHECK(instance.transform.origin.y==Catch::Approx(static_cast<float>((cycle-1)*5)));
+    CHECK(instance.body_value==0);CHECK(instance.skin_family_index==0);
+    REQUIRE(world.entity_frame()->studio_instances().size()==1);
+    CHECK(instance.static_light_rgb.has_value());
+    CHECK(created.projection->remote_weapon_poses().empty());
+    CHECK(world.entity_frame()->studio_poses()[instance.pose_index].bone_matrices.size()==1);
+    CHECK(state.canonical_state_hash==client::runtime_observation_canonical_hash(state));
+    if(gl) {
+      auto scene=client::build_render_scene(world);scene.static_world.reset();
+      gl->renderer().render(scene,{320,240});
+      const auto actual=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(actual);
+      CHECK(actual.non_clear_pixel_count>0);
+      if(previous_pixels) CHECK(actual.color_signature!=previous_pixels);
+      previous_pixels=actual.color_signature;
+      CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==1);
+    }
+  }
+  auto invalid=e10_observation(4,4,500,0,0,false);invalid.packet_entities.resize(3);
+  invalid.packet_entities.back().render_effect=17;invalid.packet_entities.back().render_amount=9;
+  invalid.canonical_state_hash=client::runtime_observation_canonical_hash(invalid);
+  REQUIRE(created.projection->project_entities(invalid,world));
+  REQUIRE(e10_present(*created.projection,host,104,1,world,{320,240}));
+  CHECK(world.entity_frame()->studio_instances().empty());
+  if(gl) gl->release_renderer();
+}
+#endif
+
+TEST_CASE("E11 same production host attaches exact slots and renders weapon-only pixels",
+          "[e11][e12][game-api][local-capture-assets][actual-context]") {
+  LocalContext context;
+  const auto geometry=[](std::vector<std::byte>& bytes,float y,float scale) {
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset,0,y-2*scale,-4*scale);
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset+12U,0,y+2*scale,-4*scale);
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset+24U,0,y,4*scale);
+    for(unsigned i=0;i<3U;++i)
+      fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioNormalsOffset+i*12U,1,0,0);
+  };
+  geometry(context.model,0,1);context.root.write("valve","models/shared.mdl",context.model);
+  auto first_weapon=context.model,second_weapon=context.model;
+  geometry(first_weapon,7,0.5F);geometry(second_weapon,-7,0.75F);
+  context.root.write("valve","models/project_weapon_a.mdl",first_weapon);
+  context.root.write("valve","models/project_weapon_b.mdl",second_weapon);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/shared.mdl",7U,static_cast<std::uint32_t>(context.model.size()),0U},
+      {2U,"models/project_weapon_a.mdl",21U,static_cast<std::uint32_t>(first_weapon.size()),0U},
+      {2U,"models/project_weapon_b.mdl",22U,static_cast<std::uint32_t>(second_weapon.size()),0U},
+      {2U,"models/missing.mdl",20U,4U,0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,
+      readiness::parse_server_info("maps/test_map.bsp"),context.root.path(),"valve");
+  REQUIRE(created.projection);
+  auto module=std::make_unique<E10TestGameClientModule>();auto* selected=module.get();
+  selected->attachments=true;
+  selected->sockets_enabled=true;
+  hlclient::game_api::GameClientHost host{std::move(module)};host.reset({1,1,1});
+  client::ClientWorldState world;
+  world.set_camera({{32,0,16},{0,0,16},{0,0,1}});
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  if(gl && fixture::entity_opengl_fixture::capable_context()) gl->initialize_renderer();
+  else {gl.reset();WARN("E11 GPU subcheck unavailable; production CPU frame assertions still run");}
+  std::uint64_t previous_signature{},previous_image{};
+  const auto stable_signature=[&]() {
+    const auto scene=client::build_render_scene(world);REQUIRE(scene.dynamic_entities);
+    hlclient::entity_render::EntityRenderFrameBuildInput input;
+    input.resource_id=1U;input.resource_revision=1U;
+    input.interpolation={0.0,0.0,1.0,0.0F,1U,2U,
+        hlclient::entity_render::EntityRenderInterpolationProfile::synthetic_seconds_v1};
+    const auto& frame=*scene.dynamic_entities->frame;
+    input.studio_poses.assign(frame.studio_poses().begin(),frame.studio_poses().end());
+    input.studio_instances.assign(frame.studio_instances().begin(),frame.studio_instances().end());
+    const auto built=hlclient::entity_render::EntityRenderFrameBuilder{}.build(*scene.dynamic_entities->package,std::move(input));
+    REQUIRE(built);return built.frame->frame_signature();
+  };
+  std::uint64_t record=1;
+  for(const auto slot:{21U,22U,21U,0U,999U,20U}) {
+    const auto step=record-1U;
+    const auto anchor=100.0+static_cast<double>(step)*0.2;
+    const auto clock=anchor+0.11;
+    auto state=e10_observation(record++,1.0+static_cast<double>(step)*0.1,0,0,0,false);state.packet_entities.resize(2U);
+    state.packet_entities[1].origin={0.0,0.0,16.0};state.packet_entities[1].weapon_model_index=slot;
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    const auto canonical=state.canonical_state_hash;
+    if(step==0U) REQUIRE(created.projection->reset_generation(state,world));
+    else REQUIRE(created.projection->project_entities(state,world));
+    // First sample anchors this record's existing E10 interpolation clock.
+    // Only after its bounded pair delay should a discrete weapon switch appear.
+    REQUIRE(e10_present(*created.projection,host,anchor,1U,world,{320,240}));
+    REQUIRE(e10_present(*created.projection,host,clock,1U,world,{320,240}));
+    const auto frame=world.entity_frame();REQUIRE(frame);
+    const bool ready=slot==21U||slot==22U;
+    REQUIRE(frame->studio_instances().size()==(ready?2U:1U));
+    CHECK(frame->studio_instances()[0].entity_number==2U);
+    CHECK(frame->studio_instances()[0].subinstance_ordinal==0U);
+    if(ready) {
+      const auto& body=frame->studio_instances()[0];const auto& child=frame->studio_instances()[1];
+      CHECK(child.entity_number==body.entity_number);CHECK(child.subinstance_ordinal==1U);
+      CHECK(child.studio_asset_index!=body.studio_asset_index);CHECK(child.pose_index!=body.pose_index);
+      CHECK(child.transform.origin.x==body.transform.origin.x);CHECK(child.transform.origin.y==body.transform.origin.y);
+      CHECK(child.transform.origin.z==body.transform.origin.z);
+      CHECK(child.transform.rotation_degrees.x==body.transform.rotation_degrees.x);
+      CHECK(child.transform.rotation_degrees.y==body.transform.rotation_degrees.y);
+      CHECK(child.transform.rotation_degrees.z==body.transform.rotation_degrees.z);
+      CHECK(child.transform.uniform_scale==body.transform.uniform_scale);CHECK(child.static_light_rgb==body.static_light_rgb);
+      CHECK(frame->studio_poses()[child.pose_index].bone_matrices==frame->studio_poses()[body.pose_index].bone_matrices);
+      CHECK(frame->draw_commands()[0].instance_index==0U);CHECK(frame->draw_commands()[1].instance_index==1U);
+      REQUIRE(selected->socket_count==1U);
+      const auto& socket=selected->sockets[0];
+      CHECK(socket.entity==child.entity_number);CHECK(socket.model_slot==slot);
+      CHECK(socket.source==hlclient::game_api::RemoteSocketSource::validated_pmodel_socket);
+      REQUIRE(frame->studio_poses()[child.pose_index].bone_matrices.size()==1U);
+      const auto& bone=frame->studio_poses()[child.pose_index].bone_matrices[0];
+      const auto matrix=hlclient::entity_render::entity_render_model_matrix(child.transform);
+      // Independent vertex-style transform from the exact published render palette.
+      const float x=bone[4]*3+bone[8]*4+bone[12];
+      const float y=bone[5]*3+bone[9]*4+bone[13];
+      const float z=bone[6]*3+bone[10]*4+bone[14];
+      CHECK(socket.muzzle.origin.x==Catch::Approx(matrix[0]*x+matrix[4]*y+matrix[8]*z+matrix[12]));
+      CHECK(socket.muzzle.origin.y==Catch::Approx(matrix[1]*x+matrix[5]*y+matrix[9]*z+matrix[13]));
+      CHECK(socket.muzzle.origin.z==Catch::Approx(matrix[2]*x+matrix[6]*y+matrix[10]*z+matrix[14]));
+      const auto signature=stable_signature();
+      if(previous_signature) CHECK(signature!=previous_signature);previous_signature=signature;
+      REQUIRE(e10_present(*created.projection,host,clock,1U,world,{320,240}));
+      CHECK(stable_signature()==signature); // Remove per-publication revision, not the actual pose/instance identity.
+      if(gl) {
+        auto scene=client::build_render_scene(world);scene.static_world.reset();
+        gl->renderer().render(scene,{320,240});
+        const auto with_weapon=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(with_weapon);
+        const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;
+        if(previous_image) CHECK(with_weapon.color_signature!=previous_image);previous_image=with_weapon.color_signature;
+        selected->attachments=false;REQUIRE(e10_present(*created.projection,host,clock,1U,world,{320,240}));
+        scene=client::build_render_scene(world);scene.static_world.reset();
+        gl->renderer().render(scene,{320,240});
+        const auto body_only=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(body_only);
+        std::size_t changed=0U,body_preserved=0U;
+        for(std::size_t pixel=0;pixel<body_only.rgba8.size()/4U;++pixel) {
+          const auto at=pixel*4U;
+          const bool equal=std::equal(body_only.rgba8.begin()+at,body_only.rgba8.begin()+at+3U,with_weapon.rgba8.begin()+at);
+          if(!equal) ++changed;
+          const auto clear=scene.clear_color;
+          const bool body_pixel=std::abs(int(body_only.rgba8[at])-int(std::lround(clear.red*255)))>2 ||
+              std::abs(int(body_only.rgba8[at+1U])-int(std::lround(clear.green*255)))>2 ||
+              std::abs(int(body_only.rgba8[at+2U])-int(std::lround(clear.blue*255)))>2;
+          if(body_pixel) {CHECK(equal);if(equal) ++body_preserved;}
+        }
+        CHECK(changed>10U);CHECK(changed<320U*240U/8U);CHECK(body_preserved>10U);
+        CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+        selected->attachments=true;
+        CHECK(glGetError()==GL_NO_ERROR);
+      }
+    }
+    CHECK(state.canonical_state_hash==canonical);
+    CHECK(std::ranges::none_of(frame->studio_instances(),[](const auto& value){return value.entity_number==1U;}));
+  }
+  auto reciprocal=e10_observation(99U,2.0,0,0,0,false);reciprocal.packet_entities.resize(2U);
+  reciprocal.packet_entities[0].origin={0.0,0.0,16.0};reciprocal.packet_entities[0].weapon_model_index=21U;
+  reciprocal.packet_entities[1].weapon_model_index=22U;
+  reciprocal.canonical_state_hash=client::runtime_observation_canonical_hash(reciprocal);
+  REQUIRE(created.projection->reset_generation(reciprocal,world));
+  REQUIRE(e10_present(*created.projection,host,200,2U,world,{320,240}));
+  REQUIRE(world.entity_frame()->studio_instances().size()==2U);
+  for(const auto& instance:world.entity_frame()->studio_instances()) CHECK(instance.entity_number==1U);
+  if(gl) gl->release_renderer();host.teardown();
+}
 TEST_CASE("E10 decoded equal-height peers keep world position and actual pixels during approach",
           "[e10-origin][e10][runtime-replay][actual-context]") {
   namespace p=hlclient::test::player_origin_fixture;
@@ -342,6 +949,8 @@ TEST_CASE("E10 normal local materializer advances 20ms players at 5ms render cad
   REQUIRE(client::valid_runtime_observation(current));
   REQUIRE(created.projection->project_entities(current, world));
   REQUIRE(e10_present(*created.projection, host, 100.0, 1U, world, {640, 480}));
+  REQUIRE(created.projection->summary().remote_snapshot_mode);
+  CHECK(app::remote_snapshot_mode_name(*created.projection->summary().remote_snapshot_mode)=="exact_previous");
   CHECK(e10_instance(world, 2U).transform.origin.x == Catch::Approx(0.0F));
   const auto frame0 = world.entity_frame();
   CHECK(e10_instance(world, 2U).body_value == static_cast<std::uint32_t>(module->selected_body));
@@ -363,6 +972,8 @@ TEST_CASE("E10 normal local materializer advances 20ms players at 5ms render cad
     CHECK(e10_instance(world, 40U).transform.origin.x == 140.0F);
     CHECK(world.runtime_brushes()->instances[0U].transformed_bounds.minimum.z == 20.0F);
     CHECK(world.entity_scene() == package);
+    REQUIRE(created.projection->summary().remote_snapshot_mode);
+    if(elapsed<.020)CHECK(app::remote_snapshot_mode_name(*created.projection->summary().remote_snapshot_mode)=="bracketed");
   }
   CHECK(frame0->studio_instances()[0U].transform.origin.x == Catch::Approx(0.0F));
   CHECK(current.packet_entities[1U].origin.x == 20.0);
@@ -371,6 +982,75 @@ TEST_CASE("E10 normal local materializer advances 20ms players at 5ms render cad
   CHECK(host.drain_audio().count == 0U);
   REQUIRE(e10_present(*created.projection, host, 100.0 + 0.050, 1U, world, {640, 480}));
   CHECK(e10_instance(world, 2U).transform.origin.x == Catch::Approx(20.0F));
+  REQUIRE(created.projection->summary().remote_snapshot_mode);
+  CHECK(app::remote_snapshot_mode_name(*created.projection->summary().remote_snapshot_mode)=="exact_current");
+}
+
+TEST_CASE("E32 normal materializer uses buffered committed player brackets without packet-phase jumps",
+    "[e32-remote-buffer][e10][local-capture-assets][runtime-presentation]") {
+  LocalContext context(true);auto created=context.create();REQUIRE(created.projection);
+  auto module=std::make_unique<E10TestGameClientModule>();auto* seen=module.get();
+  hlclient::game_api::GameClientHost host{std::move(module)};host.reset({1,1,1});
+  client::ClientWorldState world;
+  world.set_camera({{250,-1000,100},{0,1,0},{0,0,1}});
+  const auto first=e10_observation(1,1,0,40,0,false);
+  REQUIRE(created.projection->reset_generation(first,world));
+  auto current=e10_observation(2,1.04,12.8,140,20,false);
+  REQUIRE(created.projection->project_entities(current,world));
+  REQUIRE(e10_present(*created.projection,host,10,1,world,{640,480}));
+  double last=created.projection->summary().remote_sample_seconds;
+  std::size_t next=3;constexpr std::array jitter{.012,-.008,.006,-.005,0.0};
+  for(std::size_t frame=1;frame<=180;++frame) {
+    const double now=10+static_cast<double>(frame)*.005;
+    while(next<40 && now>=10+(static_cast<double>(next)-2)*.04+jitter[next%jitter.size()]) {
+      const double time=1+(static_cast<double>(next)-1)*.04;
+      current=e10_observation(next++,time,320*(time-1),140,20,false);
+      REQUIRE(created.projection->project_entities(current,world));
+    }
+    const auto immutable=current;
+    REQUIRE(e10_present(*created.projection,host,now,1,world,{640,480}));
+    const auto& summary=created.projection->summary();
+    CHECK(summary.remote_sample_seconds>=last-1e-9);
+    if(frame>100)CHECK(summary.remote_sample_seconds-last<=.005001);
+    CHECK(e10_instance(world,2).transform.origin.x==Catch::Approx(320*(summary.remote_sample_seconds-1)).margin(.001));
+    CHECK(seen->previous_server_seconds<=summary.remote_sample_seconds+1e-8);
+    CHECK(seen->current_server_seconds>=summary.remote_sample_seconds-1e-8);
+    CHECK(current==immutable);CHECK(e10_instance(world,40).transform.origin.x==140);
+    REQUIRE(world.runtime_brushes());CHECK(world.runtime_brushes()->instances[0].transformed_bounds.minimum.z==20);
+    CHECK(host.drain_audio().count==0);last=summary.remote_sample_seconds;
+  }
+}
+
+TEST_CASE("E32 buffered old pmodel cannot suppress a new weapon event with a mismatching socket",
+    "[e32-remote-buffer][e11][e12][local-capture-assets][runtime-presentation]") {
+  LocalContext context;
+  context.root.write("valve","models/project_weapon_a.mdl",context.model);
+  context.root.write("valve","models/project_weapon_b.mdl",context.model);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/shared.mdl",7U,static_cast<std::uint32_t>(context.model.size()),0U},
+      {2U,"models/project_weapon_a.mdl",21U,static_cast<std::uint32_t>(context.model.size()),0U},
+      {2U,"models/project_weapon_b.mdl",22U,static_cast<std::uint32_t>(context.model.size()),0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,
+      readiness::parse_server_info("maps/test_map.bsp"),context.root.path(),"valve");REQUIRE(created.projection);
+  auto module=std::make_unique<E10TestGameClientModule>();auto* seen=module.get();
+  seen->attachments=true;seen->sockets_enabled=true;
+  hlclient::game_api::GameClientHost host{std::move(module)};host.reset({1,1,1});client::ClientWorldState world;
+  world.set_camera({{32,0,16},{0,0,16},{0,0,1}});
+  auto first=e10_observation(1,1,0,0,0,false);first.packet_entities.resize(2);
+  first.packet_entities[1].origin.z=16;first.packet_entities[1].weapon_model_index=21;
+  first.canonical_state_hash=client::runtime_observation_canonical_hash(first);
+  REQUIRE(created.projection->reset_generation(first,world));
+  auto second=first;second.publication_revision=2;second.server_time_seconds=1.04;
+  second.entity_metadata.source->record_identity=2;second.entity_metadata.source->record_ordinal=2;
+  second.server_time_metadata=second.entity_metadata;second.packet_entities[1].weapon_model_index=22;
+  second.canonical_state_hash=client::runtime_observation_canonical_hash(second);
+  REQUIRE(created.projection->project_entities(second,world));
+  REQUIRE(e10_present(*created.projection,host,10,1,world,{320,240}));
+  REQUIRE(world.entity_frame()->studio_instances().size()==2);
+  CHECK(seen->socket_count==0); // Existing server-event fallback stays available.
+  REQUIRE(e10_present(*created.projection,host,10.041,1,world,{320,240}));
+  REQUIRE(seen->socket_count==1);CHECK(seen->sockets[0].model_slot==22);
 }
 
 TEST_CASE("E10 local materializer reset discards previous anchors without resurrecting players",
@@ -416,7 +1096,7 @@ TEST_CASE("E10 normal local materializer samples retained floor light and preser
     state.packet_entities[1U].origin = {32.0, 32.0, 24.0};
     state.canonical_state_hash = client::runtime_observation_canonical_hash(state);
     REQUIRE(created.projection->reset_generation(state, world));
-    CHECK_FALSE(e10_instance(world, 2U).static_light_rgb); // No hidden default in committed frames.
+    CHECK(e10_instance(world, 2U).static_light_rgb.has_value() == lit);
     REQUIRE(e10_present(*created.projection, host, 100.0, 1U, world, {640,480}));
     const auto& instance = e10_instance(world, 2U);
     CHECK(instance.static_light_rgb.has_value() == lit);
@@ -425,7 +1105,9 @@ TEST_CASE("E10 normal local materializer samples retained floor light and preser
       for (const auto component : *instance.static_light_rgb)
         CHECK(component == Catch::Approx(80.0F / 255.0F).margin(0.0001F));
     }
-    CHECK_FALSE(e10_instance(world, 40U).static_light_rgb); // Non-player owner unchanged.
+    // Ordinary models now share the same lighting; the materializer no longer
+    // reserves static light for the player-policy path.
+    CHECK(e10_instance(world, 40U).static_light_rgb.has_value() == lit);
     const auto floor_time = std::filesystem::last_write_time(
         context.root.game_path("valve") / "maps/test_map.bsp");
     // Moving beyond the bounded lighting-cache distance reprobes existing CPU
@@ -446,6 +1128,134 @@ TEST_CASE("E10 normal local materializer samples retained floor light and preser
       CHECK(component == Catch::Approx(80.0F / 255.0F).margin(0.0001F));
     CHECK(std::filesystem::last_write_time(context.root.game_path("valve") /
         "maps/test_map.bsp") == floor_time);
+  }
+}
+
+TEST_CASE("Ordinary Studio pickups receive retained world light without player classification",
+          "[studio-world-light][local-capture-assets][lighting]") {
+  for (const auto level : {std::uint8_t{0}, std::uint8_t{48}, std::uint8_t{192}}) {
+    CAPTURE(level);
+    LocalContext context(false,"BRUSH_ONLY",false,level);
+    auto created=context.create();REQUIRE(created.projection);
+    client::ClientWorldState world;
+    auto state=observation();
+    const auto canonical=state.canonical_state_hash;
+    REQUIRE(created.projection->reset_generation(state,world));
+    for (const auto& instance:world.entity_frame()->studio_instances()) {
+      REQUIRE(instance.static_light_rgb);
+      for (const auto component:*instance.static_light_rgb)
+        CHECK(component==Catch::Approx(float(level)/255.0F).margin(.0001F));
+    }
+    CHECK(client::runtime_observation_canonical_hash(state)==canonical);
+    CHECK(world.entity_frame()->studio_instances().size()==2U);
+  }
+}
+
+TEST_CASE("Studio viewmodel and transient models sample world light without moving local geometry",
+          "[studio-world-light][local-capture-assets][first-person][lighting]") {
+  for (const bool lit:{true,false}) {
+    LocalContext context(false,"BRUSH_ONLY",false,lit ? std::optional<std::uint8_t>{64} : std::nullopt);
+    auto created=context.create();REQUIRE(created.projection);
+    auto& assets=*created.projection;
+    client::ClientWorldState world;
+    REQUIRE(assets.reset_generation(observation(),world));
+    hlclient::game_api::ViewmodelIntent intent;
+    intent.status=hlclient::game_api::ViewmodelStatus::ready;
+    intent.generation=1;intent.publication_revision=1;intent.model_index=7;
+    const auto baseline=assets.materialize_viewmodel(intent);REQUIRE(baseline);
+    CHECK_FALSE(baseline->frame->studio_instances()[0].static_light_rgb);
+    const auto local_transform=baseline->frame->studio_instances()[0].transform;
+    const auto check=[&](const auto& entities) {
+      REQUIRE(entities);REQUIRE(entities->frame->studio_instances().size()==1);
+      const auto& instance=entities->frame->studio_instances()[0];
+      CHECK(instance.static_light_rgb.has_value()==lit);
+      if(lit) for(const auto c:*instance.static_light_rgb) CHECK(c==Catch::Approx(64.0F/255.0F));
+    };
+    for(const auto origin:std::array{hlclient::assets::AssetVector3{16,32,24},
+        hlclient::assets::AssetVector3{48,32,40}}) {
+      const auto viewmodel=assets.materialize_viewmodel(intent,origin);check(viewmodel);
+      const auto& transform=viewmodel->frame->studio_instances()[0].transform;
+      CHECK(transform.origin.x==local_transform.origin.x);
+      CHECK(transform.origin.y==local_transform.origin.y);
+      CHECK(transform.origin.z==local_transform.origin.z);
+      CHECK(transform.rotation_degrees.x==local_transform.rotation_degrees.x);
+      CHECK(transform.rotation_degrees.y==local_transform.rotation_degrees.y);
+      CHECK(transform.rotation_degrees.z==local_transform.rotation_degrees.z);
+      CHECK(transform.uniform_scale==local_transform.uniform_scale);
+      CHECK(std::ranges::equal(viewmodel->frame->studio_poses()[0].bone_matrices,
+          baseline->frame->studio_poses()[0].bone_matrices));
+      hlclient::renderer::TransientShellState shell;shell.position=origin;
+      constexpr std::string_view name="models/shared.mdl";
+      std::copy(name.begin(),name.end(),shell.model_name.begin());
+      check(assets.materialize_shells(std::span{&shell,1U},0));
+    }
+    const auto outside=assets.materialize_viewmodel(intent,hlclient::assets::AssetVector3{256,256,24});
+    REQUIRE(outside);CHECK_FALSE(outside->frame->studio_instances()[0].static_light_rgb);
+    const auto invalid=assets.materialize_viewmodel(intent,hlclient::assets::AssetVector3{
+        std::numeric_limits<float>::quiet_NaN(),32,24});
+    REQUIRE(invalid);CHECK_FALSE(invalid->frame->studio_instances()[0].static_light_rgb);
+    check(assets.materialize_viewmodel(intent,hlclient::assets::AssetVector3{32,32,24}));
+    REQUIRE(assets.reset_generation(observation(),world));
+    check(assets.materialize_viewmodel(intent,hlclient::assets::AssetVector3{32,32,24}));
+  }
+}
+
+TEST_CASE("Normal Studio materialization reaches GPU with dark room light fullbright and muzzle response",
+          "[studio-world-light][local-capture-assets][lighting][actual-context]") {
+  auto gl=fixture::entity_opengl_fixture::try_context();
+  if(!gl || !fixture::entity_opengl_fixture::capable_context()) SKIP("OpenGL 3.3 Core unavailable");
+  gl->initialize_renderer();
+  for(const bool fullbright:{false,true}) {
+    CAPTURE(fullbright);
+    LocalContext context(false,"BRUSH_ONLY",false,std::uint8_t{48});
+    fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset,8,-4,-4);
+    fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+12,8,4,-4);
+    fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+24,8,0,4);
+    fixture::studio_write_i32le(context.model,fixture::kSyntheticStudioTextureOffset+64,fullbright ? 4:0);
+    const auto palette=fixture::kSyntheticStudioTextureDataOffset+1;
+    context.model[palette]=std::byte{200};context.model[palette+1]=std::byte{160};
+    context.model[palette+2]=std::byte{100};
+    context.root.write("valve","models/shared.mdl",context.model);
+    auto created=context.create();REQUIRE(created.projection);
+    client::ClientWorldState world;auto state=observation();state.packet_entities.resize(1);
+    state.packet_entities[0].origin={32,32,24};state.packet_entities[0].angles={0,0,0};
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    REQUIRE(created.projection->reset_generation(state,world));
+    world.set_camera({{16,32,24},{32,32,24},{0,0,1}});
+    auto scene=client::build_render_scene(world);scene.static_world.reset();
+    scene.clear_color={0,0,0,1};
+    const auto draw=[&](const auto& value) {
+      gl->renderer().render(value,{96,96});
+      const auto pixels=fixture::entity_opengl_fixture::framebuffer();
+      std::array<unsigned,3> maxima{};
+      for(std::size_t i=0;i<pixels.size();i+=4) for(std::size_t c=0;c<3;++c)
+        maxima[c]=std::max(maxima[c],unsigned(std::to_integer<std::uint8_t>(pixels[i+c])));
+      CHECK(glGetError()==GL_NO_ERROR);
+      return maxima;
+    };
+    const auto verify=[&](const auto& rgb) {
+      const double factor=fullbright ? 1.0:48.0/255.0;
+      for(std::size_t c=0;c<3;++c) {
+        const double base=std::array{200,160,100}[c];
+        CHECK(double(rgb[c])==Catch::Approx(base*factor).margin(2));
+      }
+    };
+    verify(draw(scene));
+    const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;
+    hlclient::game_api::ViewmodelIntent intent;
+    intent.status=hlclient::game_api::ViewmodelStatus::ready;
+    intent.generation=1;intent.publication_revision=1;intent.model_index=7;
+    scene.dynamic_entities.reset();
+    scene.first_person_entities=created.projection->materialize_viewmodel(intent,
+        hlclient::assets::AssetVector3{32,32,24});
+    const auto dark=draw(scene);verify(dark);
+    scene.transient_first_person_light=hlclient::renderer::RenderPointLight{{8,0,0},64,0.5F,{1,1,1}};
+    const auto flash=draw(scene);
+    CHECK(flash[0]>dark[0]);
+    scene.transient_first_person_light.reset();verify(draw(scene));
+    CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+    std::cout << "studio_light_gpu fullbright=" << fullbright << " rgb=" << dark[0] << ',' << dark[1]
+        << ',' << dark[2] << " flash_rgb=" << flash[0] << ',' << flash[1] << ',' << flash[2] << '\n';
   }
 }
 
@@ -693,6 +1503,148 @@ TEST_CASE("E10 normal host retains close-range upright player through camera-onl
 }
 
 #if HLCLIENT_HAS_GAME_HALFLIFE
+TEST_CASE("E11 approved installed player and p-model slots use normal merge and OpenGL",
+          "[e11][e12][installed-pmodels][local-capture-assets][actual-context]") {
+  std::filesystem::path root;
+  wchar_t* value=nullptr;std::size_t size=0U;
+  if(_wdupenv_s(&value,&size,L"HLCLIENT_LOCAL_GAME_ROOT")==0 && value) root=value;
+  std::free(value);
+  if(root.empty()) SKIP("No opt-in read-only local game root");
+  if(root.lexically_normal()!=std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life"}.lexically_normal())
+    SKIP("Only exact prepared research root authorized for optional p-model control");
+  const std::array tokens{"maps/crossfire.bsp","models/player.mdl","models/p_9mmhandgun.mdl","models/p_crowbar.mdl"};
+  std::array<std::filesystem::file_time_type,4U> times;
+  for(std::size_t i=0;i<tokens.size();++i) {
+    const auto file=root/"valve"/tokens[i];
+    if(!std::filesystem::is_regular_file(file)) SKIP("Required optional approved p-model/map absent");
+    times[i]=std::filesystem::last_write_time(file);
+  }
+  const auto resources=readiness::parse_resource_list({
+      {2U,tokens[0],9U,0U,0U},{2U,tokens[1],7U,0U,0U},{2U,tokens[2],21U,0U,0U},{2U,tokens[3],22U,0U,0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info(tokens[0]),root,"valve",
+      app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  if(!created.projection) SKIP("Optional approved production provider did not reach readiness");
+  const auto body=created.projection->studio_model_data(7U);REQUIRE(body);
+  const auto& map=*created.projection->surface_scene()->world_package();
+  hlclient::assets::AssetVector3 origin{};bool floor_found=false;
+  for(const auto& surface:map.surface_ranges()) {
+    for(std::size_t at=surface.first_index;at+2U<surface.first_index+surface.index_count;at+=3U) {
+      const auto& a=map.vertices()[map.indices()[at]];
+      if(a.normal.z<0.9F) continue;
+      const auto b=map.vertices()[map.indices()[at+1U]].position,c=map.vertices()[map.indices()[at+2U]].position;
+      origin={(a.position.x+b.x+c.x)/3.0F,(a.position.y+b.y+c.y)/3.0F,(a.position.z+b.z+c.z)/3.0F+36.0F};
+      floor_found=true;break;
+    }
+    if(floor_found) break;
+  }
+  REQUIRE(floor_found);
+  auto gl=fixture::entity_opengl_fixture::try_context(640,480);
+  if(gl && fixture::entity_opengl_fixture::capable_context()) gl->initialize_renderer();
+  else {gl.reset();WARN("Optional installed p-model GPU unavailable; approved merge assertions still run");}
+  client::ClientWorldState world;
+  world.set_camera({{origin.x+160.0F,origin.y,origin.z+12.0F},{origin.x,origin.y,origin.z+12.0F},{0,0,1}});
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};host.reset({1,1,1});
+  hlclient::game_api::ScriptedEventBinding glock_binding;glock_binding.index=71;
+  host.set_movement_audio_time_origin(0);
+  constexpr char glock_event_name[]="events/glock1.sc";
+  std::copy_n(glock_event_name,sizeof(glock_event_name),glock_binding.name.begin());
+  host.configure_scripted_events(std::span{&glock_binding,1});
+  std::uint64_t record=1U;
+  for(const auto slot:{21U,22U}) {
+    REQUIRE(created.projection->studio_model_data(slot));
+    const auto inspected=created.projection->studio_model_data(slot);
+    std::cout << "e12_asset_inspection virtual_resource=" << tokens[slot==21U?2U:3U]
+      << " attachments=" << inspected->attachments.size() << " bones=" << inspected->bones.size() << '\n';
+    for(std::size_t at=0;at<inspected->attachments.size();++at) {
+      const auto& a=inspected->attachments[at];
+      std::cout << "attachment=" << at << " name=" << a.name << " type=" << a.source_type
+        << " bone=" << a.bone_index << " origin=" << a.local_origin.x << ',' << a.local_origin.y << ',' << a.local_origin.z << '\n';
+    }
+    for(std::size_t at=0;at<inspected->bones.size();++at) {
+      const auto& b=inspected->bones[at];
+      hlclient::assets::AssetVector3 lo{1e9F,1e9F,1e9F},hi{-1e9F,-1e9F,-1e9F};std::size_t count=0;
+      for(const auto& sub:inspected->submodels) for(const auto& v:sub.vertices) if(v.position_bone_index==at) {
+        ++count;lo.x=std::min(lo.x,v.source_position.x);lo.y=std::min(lo.y,v.source_position.y);lo.z=std::min(lo.z,v.source_position.z);
+        hi.x=std::max(hi.x,v.source_position.x);hi.y=std::max(hi.y,v.source_position.y);hi.z=std::max(hi.z,v.source_position.z);
+      }
+      std::cout << "bone=" << at << " name=" << b.name << " parent=" << b.parent_index
+        << " translation=" << b.default_translation.x << ',' << b.default_translation.y << ',' << b.default_translation.z
+        << " rotation=" << b.default_rotation_radians.x << ',' << b.default_rotation_radians.y << ',' << b.default_rotation_radians.z
+        << " vertices=" << count << " local_bounds=" << lo.x << ',' << lo.y << ',' << lo.z << ':' << hi.x << ',' << hi.y << ',' << hi.z << '\n';
+    }
+    if(slot==21U) for(const auto& sub:inspected->submodels) for(const auto& v:sub.vertices)
+      if(v.source_position.x>3.7F || v.source_position.x<-3.7F)
+        std::cout << "glock_end_vertex=" << v.source_position.x << ',' << v.source_position.y << ',' << v.source_position.z << '\n';
+    auto state=e10_observation(record++,1.0,origin.x,0,0,false);state.packet_entities.resize(2U);
+    auto& player=state.packet_entities[1];player.origin={origin.x,origin.y,origin.z};player.weapon_model_index=slot;
+    player.animation_time_seconds=1.0;player.frame_rate=1.0;player.gait_sequence=1U;
+    for(auto& c:player.controllers) c=127U;for(auto& b:player.blending) b=127U;
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    REQUIRE(created.projection->reset_generation(state,world));
+    REQUIRE(e10_present(*created.projection,host,100,1U,world,{640,480}));
+    REQUIRE(world.entity_frame()->studio_instances().size()==2U);
+    const auto& child=world.entity_frame()->studio_instances()[1];
+    CHECK(child.entity_number==2U);CHECK(child.subinstance_ordinal==1U);
+    const auto& diagnostic=created.projection->summary().remote_players[0];
+    CHECK(diagnostic.attachment_matched_bones>0U);
+    const auto sockets=created.projection->remote_weapon_poses();
+    REQUIRE(sockets.size()==1U);CHECK(sockets[0].entity==2U);CHECK(sockets[0].model_slot==slot);
+    if(slot==21U) {
+      CHECK(sockets[0].source==hlclient::game_api::RemoteSocketSource::validated_pmodel_socket);
+      CHECK(sockets[0].muzzle_bone==11U);CHECK(sockets[0].shell_bone==11U);
+      CHECK(std::isfinite(sockets[0].muzzle.origin.x));CHECK(std::isfinite(sockets[0].shell.origin.z));
+      CHECK(sockets[0].muzzle.origin.x!=sockets[0].shell.origin.x);
+    } else {
+      CHECK_FALSE(sockets[0].semantic_match);
+      CHECK(sockets[0].source==hlclient::game_api::RemoteSocketSource::unavailable);
+    }
+    // The actual approved pose goes through the same committed module event seam.
+    hlclient::game_api::CommittedScriptedEvent event;
+    event.generation=1;event.record=state.entity_metadata.source->record_identity;
+    event.record_ordinal=state.entity_metadata.source->record_ordinal;
+    event.emitter_entity=2;event.event_index=71;event.weapon_model_index=slot;
+    event.origin=origin;event.received_at_seconds=100;
+    host.committed_scripted_event(event);
+    const auto shot=host.drain_remote_effects(100);REQUIRE(shot.count==1U);
+    if(slot==21U) {
+      CHECK(shot.effects[0].pose.status==hlclient::game_api::RemotePoseResolution::resolved);
+      REQUIRE(shot.effects[0].flash);REQUIRE(shot.effects[0].shell);
+      CHECK(shot.effects[0].flash->origin.x==sockets[0].muzzle.origin.x);
+      CHECK(shot.effects[0].flash->origin.z==sockets[0].muzzle.origin.z);
+      CHECK(shot.effects[0].shell->origin.y==sockets[0].shell.origin.y);
+    } else {
+      CHECK(shot.effects[0].pose.status==hlclient::game_api::RemotePoseResolution::weapon_mismatch);
+      CHECK_FALSE(shot.effects[0].flash);CHECK_FALSE(shot.effects[0].shell);
+    }
+    if(gl) {
+      auto scene=client::build_render_scene(world);scene.static_world.reset();
+      gl->renderer().render(scene,{640,480});
+      const auto pixels=gl->renderer().observe_framebuffer({640,480},scene.clear_color);REQUIRE(pixels);
+      CHECK(pixels.non_clear_pixel_count>0U);CHECK(gl->renderer().entity_statistics().studio_draw_count>=2U);
+      const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;
+      // Same normal package and evaluated body pose; remove only the child
+      // instance for an independent A/B, never a second gameplay runtime.
+      hlclient::entity_render::EntityRenderFrameBuildInput input;
+      input.resource_id=1U;input.resource_revision=1U;input.interpolation=world.entity_frame()->interpolation();
+      input.studio_poses.assign(world.entity_frame()->studio_poses().begin(),world.entity_frame()->studio_poses().end());
+      input.studio_instances.push_back(world.entity_frame()->studio_instances()[0]);
+      auto body_only=hlclient::entity_render::EntityRenderFrameBuilder{}.build(*scene.dynamic_entities->package,std::move(input));
+      REQUIRE(body_only);
+      scene.dynamic_entities->frame=std::make_shared<const hlclient::entity_render::EntityRenderFrame>(std::move(*body_only.frame));
+      gl->renderer().render(scene,{640,480});
+      const auto without=gl->renderer().observe_framebuffer({640,480},scene.clear_color);REQUIRE(without);
+      CHECK(pixels.color_signature!=without.color_signature);
+      CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+      CHECK(glGetError()==GL_NO_ERROR);
+    }
+    std::cout << "offline_pmodel_control virtual_resource=" << tokens[slot==21U?2U:3U]
+      << " exact_slot=" << slot << " matched=" << diagnostic.attachment_matched_bones
+      << " unmatched=" << diagnostic.attachment_bone_count-diagnostic.attachment_matched_bones
+      << " merge=ready live_state=false\n";
+  }
+  for(std::size_t i=0;i<tokens.size();++i) CHECK(std::filesystem::last_write_time(root/"valve"/tokens[i])==times[i]);
+  if(gl) gl->release_renderer();host.teardown();
+}
 TEST_CASE("Opt-in exact-root player traverses normal approved bundle and Half-Life presentation",
           "[e10][e10-near][installed-player-production][local-capture-assets][game-api]") {
   std::filesystem::path root;
@@ -1993,6 +2945,1115 @@ TEST_CASE("Live local assets leave the receiving-client camera under app ownersh
 }
 
 #if HLCLIENT_HAS_GAME_HALFLIFE
+// Project-owned geometry/animation bytes, imported by the approved provider.
+// Only the eight public MP5 role labels are shared with the HL profile.
+std::vector<std::byte> e16_owned_mp5_viewmodel() {
+  auto model = fixture::synthetic_weapon_presentation_studio();
+  constexpr std::array<std::string_view,8U> labels{
+      "longidle","idle1","grenade","reload","deploy","shoot","shoot","shoot"};
+  fixture::studio_write_i32le(model,164U,static_cast<std::int32_t>(labels.size()));
+  for (std::size_t i=0U; i<labels.size(); ++i) {
+    const auto sequence=fixture::kSyntheticStudioSourceSize+i*176U;
+    fixture::studio_write_fixed_string(model,sequence,32U,labels[i]);
+    fixture::studio_write_i32le(model,sequence+36U,i<2U ? 1 : 0);
+  }
+  return model;
+}
+
+client::RuntimeClientObservationState e16_mp5_viewmodel_state() {
+  auto state=observation();
+  state.packet_entities.clear();
+  state.client_metadata={1U,client::RuntimeObservationFreshness::observed_in_record,
+      client::RuntimeObservationCompleteness::complete_reconstruction,
+      client::RuntimeObservationSource{1U,1U,42U,0U,8U}};
+  state.receiving_client.emplace();
+  state.receiving_client->health=100.0;
+  state.receiving_client->viewmodel_index=21U;
+  state.receiving_client->owned_weapon_bits=1U<<4U;
+  state.receiving_client->weapon_animation=0U; // Retained server idle must not mask a local action.
+  state.receiving_client->water_level=0U;
+  state.weapon_hud.active_weapon_id=std::uint8_t{4U};
+  state.weapon_hud.clips[4U]=50;
+  state.weapon_hud.reserve_ammo[1U]=100;
+  state.weapon_hud.reserve_ammo[3U]=3;
+  state.weapon_hud.catalogue.push_back({.id=4U,.command_name="weapon_9mmAR",
+      .primary_ammo_type=1,.secondary_ammo_type=3,.slot=2,
+      .source={.record_identity=1U,.record_ordinal=1U}});
+  state.weapon_slots.push_back({.wire_slot=4U,.clip=50,.in_reload=false,
+      .next_primary_attack=0.0,.weapon_id=4U,.next_secondary_attack=0.0,.time_weapon_idle=0.0});
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  return state;
+}
+
+std::pair<hlclient::renderer::RenderDynamicEntities,hlclient::renderer::RenderDynamicEntities>
+e16_materialized_mp5_action(app::RuntimeReplayLocalAssets& assets,
+    const client::RuntimeClientObservationState& state,std::uint16_t buttons) {
+  namespace api=hlclient::game_api;
+  const auto metadata=assets.presentation_model(state.generation,21U);
+  REQUIRE(metadata);
+  REQUIRE(hlclient::games::halflife::mp5_sequences(*metadata));
+  CHECK(metadata->supported_bodies[0U]);CHECK(metadata->supported_bodies[2U]);
+  CHECK(metadata->selectable_bodies[0U]);CHECK(metadata->selectable_bodies[2U]);
+  const auto canonical=state.canonical_state_hash;
+  api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({state.generation,1U,1U});host.set_movement_audio_time_origin(0.0);
+  host.bind_model(metadata);host.observe(state,0.0);(void)host.drain_audio();
+  const auto idle=host.viewmodel(state,metadata,0.0);
+  REQUIRE(idle.status==api::ViewmodelStatus::ready);CHECK(idle.sequence==0U);
+
+  const api::LocalWeaponSubmittedCommand accepted{state.generation,1U,buttons,.02};
+  host.submit(accepted,.02);
+  const auto started=host.sample(.02);REQUIRE(started.visual);REQUIRE(started.identity);
+  const auto intent=host.viewmodel(state,metadata,.02,started.visual);
+  REQUIRE(intent.status==api::ViewmodelStatus::ready);
+  CHECK(intent.sequence==started.visual->sequence);CHECK(intent.body==2U);
+  CHECK(intent.sequence!=idle.sequence); // Fails with the former Glock/crowbar-only viewmodel gate.
+  CHECK(intent.frame_coordinate==0.0);
+  if (buttons==hlclient::goldsrc::kReferenceGoldSrcButtonAttack2) {
+    CHECK(intent.sequence==2U);CHECK(started.action==api::LocalWeaponAction::secondary_launch);
+  } else {
+    CHECK(intent.sequence>=5U);CHECK(intent.sequence<=7U);
+    CHECK(started.action==api::LocalWeaponAction::primary_fire);
+  }
+  const auto first=assets.materialize_viewmodel(intent);REQUIRE(first);REQUIRE(first->frame);
+  REQUIRE(first->frame->studio_instances().size()==1U);
+  CHECK(first->frame->studio_instances().front().body_value==2U);
+  const auto& first_instance=first->frame->studio_instances().front();
+  CHECK(first_instance.transform.origin.x==0.0F);CHECK(first_instance.transform.origin.y==0.0F);
+  CHECK(first_instance.transform.origin.z==0.0F);
+
+  const auto later=host.sample(.08);REQUIRE(later.visual);
+  CHECK(later.visual->restart_identity==started.visual->restart_identity);
+  const auto advanced=host.viewmodel(state,metadata,.08,later.visual);
+  CHECK(advanced.sequence==intent.sequence);CHECK(advanced.body==2U);
+  CHECK(advanced.frame_coordinate==Catch::Approx(.06*metadata->sequences[intent.sequence].fps));
+  REQUIRE(advanced.frame_coordinate>0.0);
+  const auto second=assets.materialize_viewmodel(advanced);REQUIRE(second);REQUIRE(second->frame);
+  REQUIRE(second->frame->studio_instances().size()==1U);
+  const auto& second_instance=second->frame->studio_instances().front();
+  CHECK(second_instance.studio_asset_index==first_instance.studio_asset_index);
+  CHECK(second_instance.body_value==2U);CHECK(second->package==first->package);
+  const auto& first_palette=first->frame->studio_poses()[first_instance.pose_index].bone_matrices;
+  const auto& second_palette=second->frame->studio_poses()[second_instance.pose_index].bone_matrices;
+  REQUIRE_FALSE(first_palette.empty());CHECK_FALSE(std::ranges::equal(first_palette,second_palette));
+  host.submit(accepted,.08);const auto repeated=host.sample(.08);REQUIRE(repeated.visual);
+  CHECK(repeated.visual->restart_identity==started.visual->restart_identity);
+  CHECK(host.viewmodel(state,metadata,.08,repeated.visual)==advanced);
+  const auto repeated_frame=assets.materialize_viewmodel(advanced);REQUIRE(repeated_frame);
+  const auto& repeated_instance=repeated_frame->frame->studio_instances().front();
+  CHECK(std::ranges::equal(second_palette,
+      repeated_frame->frame->studio_poses()[repeated_instance.pose_index].bone_matrices));
+  CHECK(client::runtime_observation_canonical_hash(state)==canonical);
+  CHECK(state.weapon_slots.front().clip==50);CHECK(state.weapon_hud.reserve_ammo[3U]==3U);
+  return {*first,*second};
+}
+
+TEST_CASE("E16 approved project-owned MP5 primary and secondary flow from normal host into animated Studio frames",
+          "[e16][e15][local-capture-assets][first-person][game-api]") {
+  LocalContext context;const auto model=e16_owned_mp5_viewmodel();
+  context.root.write("valve","models/v_9mmAR.mdl",model);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/v_9mmAR.mdl",21U,static_cast<std::uint32_t>(model.size()),0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  INFO((created.error ? created.error->context : "ready"));REQUIRE(created.projection);
+  const auto state=e16_mp5_viewmodel_state();client::ClientWorldState world;
+  REQUIRE(created.projection->reset_generation(state,world));
+  for (const auto buttons:{hlclient::goldsrc::kReferenceGoldSrcButtonAttack,
+                           hlclient::goldsrc::kReferenceGoldSrcButtonAttack2}) {
+    CAPTURE(buttons);(void)e16_materialized_mp5_action(*created.projection,state,buttons);
+  }
+}
+
+TEST_CASE("E16 normal MP5 primary and secondary animation changes first-person GPU pixels without reupload",
+          "[e16][e15][local-capture-assets][first-person][opengl][actual-context]") {
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  if (!gl || !fixture::entity_opengl_fixture::capable_context()) SKIP("OpenGL 3.3 unavailable");
+  gl->initialize_renderer();
+  LocalContext context;const auto model=e16_owned_mp5_viewmodel();
+  context.root.write("valve","models/v_9mmAR.mdl",model);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/v_9mmAR.mdl",21U,static_cast<std::uint32_t>(model.size()),0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(created.projection);
+  const auto state=e16_mp5_viewmodel_state();client::ClientWorldState world;
+  REQUIRE(created.projection->reset_generation(state,world));
+  hlclient::renderer::RenderScene scene;
+  const auto draw=[&] {
+    gl->renderer().render(scene,{320,240});CHECK(glGetError()==GL_NO_ERROR);
+    return gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);
+  };
+  const auto empty=draw();REQUIRE(empty);
+  for (const auto buttons:{hlclient::goldsrc::kReferenceGoldSrcButtonAttack,
+                           hlclient::goldsrc::kReferenceGoldSrcButtonAttack2}) {
+    CAPTURE(buttons);
+    const auto [first,second]=e16_materialized_mp5_action(*created.projection,state,buttons);
+    scene.first_person_entities=first;const auto initial=draw();REQUIRE(initial);
+    REQUIRE(initial.non_clear_pixel_count>0U);
+    CHECK_FALSE(std::ranges::equal(initial.rgba8,empty.rgba8));
+    const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;REQUIRE(uploads==1U);
+    scene.first_person_entities=second;const auto animated=draw();REQUIRE(animated);
+    REQUIRE(animated.non_clear_pixel_count>0U);
+    CHECK_FALSE(std::ranges::equal(initial.rgba8,animated.rgba8));
+    scene.camera.position={123.0F,-77.0F,28.0F};scene.camera.target={123.0F,-76.5F,28.866F};
+    const auto turned=draw();REQUIRE(turned);
+    CHECK(std::ranges::equal(animated.rgba8,turned.rgba8));
+    CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+  }
+  gl->release_renderer();
+}
+
+// Independently authored fixture geometry/animation; only public role labels
+// and marker contracts are shared. No installed model bytes enter this fixture.
+std::vector<std::byte> e17_owned_shotgun_viewmodel() {
+  auto model=fixture::synthetic_weapon_presentation_studio();
+  constexpr std::array<std::string_view,10U> labels{
+      "sm_idle","shoot","shoot_big","reload","pump","start_reload","draw","reholster","idle4","deepidle"};
+  for(std::size_t i=0;i<labels.size();++i) {
+    const auto sequence=fixture::kSyntheticStudioSourceSize+i*176U;
+    fixture::studio_write_fixed_string(model,sequence,32U,labels[i]);
+    fixture::studio_write_i32le(model,sequence+36U,i==0U || i>=8U ? 1 : 0);
+  }
+  const auto events=model.size();model.resize(events+2U*76U);
+  fixture::studio_write_i32le(model,72U,static_cast<std::int32_t>(model.size()));
+  for(std::size_t i=0;i<2U;++i) {
+    const auto sequence=fixture::kSyntheticStudioSourceSize+(i+1U)*176U;
+    const auto event=events+i*76U;
+    fixture::studio_write_i32le(model,sequence+48U,1);
+    fixture::studio_write_i32le(model,sequence+52U,static_cast<std::int32_t>(event));
+    fixture::studio_write_i32le(model,event,0);
+    fixture::studio_write_i32le(model,event+4U,5001);
+    fixture::studio_write_fixed_string(model,event+12U,64U,i ? "41" : "31");
+  }
+  return model;
+}
+
+// Small independently authored MDL files exercise the approved importer and
+// real HL module, not a forged pre-merged palette. Only the bounded validated
+// p-model profile's public names/numeric geometry contract is reproduced.
+std::vector<std::byte> e17_owned_remote_model(bool weapon) {
+  auto bytes=fixture::literal_minimal_goldsrc_studio_v10();
+  constexpr std::array<std::string_view,12U> names{"Bip01","Bip01 Pelvis","Bip01 Spine",
+      "Bip01 Spine1","Bip01 Spine2","Bip01 Spine3","Bip01 Neck","Bip01 R Arm",
+      "Bip01 R Arm1","Bip01 R Arm2","Bip01 R Hand","Box01"};
+  const auto bones=bytes.size();bytes.resize(bones+names.size()*112U);
+  fixture::studio_write_i32le(bytes,140U,static_cast<std::int32_t>(names.size()));
+  fixture::studio_write_i32le(bytes,144U,static_cast<std::int32_t>(bones));
+  fixture::studio_write_i32le(bytes,212U,0);fixture::studio_write_i32le(bytes,216U,0);
+  for(std::size_t i=0;i<names.size();++i) {
+    const auto at=bones+i*112U;
+    fixture::studio_write_fixed_string(bytes,at,32U,!weapon && i==11U ? "project_body" : names[i]);
+    fixture::studio_write_i32le(bytes,at+32U,static_cast<std::int32_t>(i)-1);
+    for(std::size_t axis=0;axis<6U;++axis) {
+      fixture::studio_write_i32le(bytes,at+40U+axis*4U,-1);
+      fixture::studio_write_f32le(bytes,at+88U+axis*4U,1.0F);
+    }
+  }
+  if(weapon) {
+    fixture::studio_write_vector3(bytes,bones+11U*112U+64U,12.295609F,1.386845F,1.667124F);
+    fixture::studio_write_vector3(bytes,bones+11U*112U+76U,1.598449F,-.010846F,.096108F);
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset,-12.26F,-4.01F,-1.57F);
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset+12U,12.26F,4.01F,-1.57F);
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset+24U,0,0,1.57F);
+    for(std::size_t i=0;i<3U;++i) {
+      bytes[fixture::kSyntheticStudioVertexBonesOffset+i]=std::byte{11};
+      bytes[fixture::kSyntheticStudioNormalBonesOffset+i]=std::byte{11};
+      fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioNormalsOffset+i*12U,0,0,1);
+    }
+  } else {
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset,0,-5,-12);
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset+12U,0,5,-12);
+    fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset+24U,0,0,12);
+    for(std::size_t i=0;i<3U;++i)
+      fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioNormalsOffset+i*12U,1,0,0);
+    const auto controllers=bytes.size();bytes.resize(controllers+4U*24U);
+    fixture::studio_write_i32le(bytes,148U,4);
+    fixture::studio_write_i32le(bytes,152U,static_cast<std::int32_t>(controllers));
+    for(std::size_t i=0;i<4U;++i) {
+      const auto at=controllers+i*24U;
+      fixture::studio_write_i32le(bytes,at,static_cast<std::int32_t>(i+3U));
+      fixture::studio_write_i32le(bytes,at+4U,0x0008);
+      fixture::studio_write_f32le(bytes,at+8U,-45);
+      fixture::studio_write_f32le(bytes,at+12U,45);
+      fixture::studio_write_i32le(bytes,at+20U,static_cast<std::int32_t>(i));
+      fixture::studio_write_i32le(bytes,bones+(i+3U)*112U+40U+3U*4U,static_cast<std::int32_t>(i));
+    }
+  }
+  constexpr std::array<std::string_view,5U> labels{"idle","walk","crouch","shootshotgun","die"};
+  const auto count=weapon ? 1U : labels.size();
+  const auto sequences=bytes.size();bytes.resize(sequences+count*176U);
+  fixture::studio_write_i32le(bytes,164U,static_cast<std::int32_t>(count));
+  fixture::studio_write_i32le(bytes,168U,static_cast<std::int32_t>(sequences));
+  for(std::size_t i=0;i<count;++i) {
+    const auto at=sequences+i*176U;
+    const auto animation=bytes.size();bytes.resize(animation+12U*12U+10U);
+    fixture::studio_write_fixed_string(bytes,at,32U,labels[i]);
+    fixture::studio_write_f32le(bytes,at+32U,10);
+    fixture::studio_write_i32le(bytes,at+36U,i<3U ? 1 : 0);
+    fixture::studio_write_i32le(bytes,at+56U,4);
+    fixture::studio_write_vector3(bytes,at+96U,-32,-32,-32);
+    fixture::studio_write_vector3(bytes,at+108U,32,32,32);
+    fixture::studio_write_i32le(bytes,at+120U,1);
+    fixture::studio_write_i32le(bytes,at+124U,static_cast<std::int32_t>(animation));
+    fixture::studio_write_i32le(bytes,at+152U,-1);
+    if(!weapon) {
+      // Server sequence changes move the hand differently. The child must
+      // inherit this track through production named-bone merge, not its idle.
+      const auto track=animation+10U*12U,stream=animation+12U*12U;
+      fixture::studio_write_u16le(bytes,track+2U,static_cast<std::uint16_t>(stream-track));
+      bytes[stream]=std::byte{4};bytes[stream+1U]=std::byte{4};
+      for(std::size_t frame=0;frame<4U;++frame)
+        fixture::studio_write_i16le(bytes,stream+2U+frame*2U,
+            static_cast<std::int16_t>(i*6U+frame));
+    }
+  }
+  fixture::studio_write_i32le(bytes,72U,static_cast<std::int32_t>(bytes.size()));
+  return bytes;
+}
+
+void e17_remote_socket_fire(hlclient::game_api::GameClientHost& host,
+    const hlclient::game_api::RemoteWeaponPoseSample& socket,
+    std::uint64_t record,double now,bool twice,bool expect_attachment=true) {
+  namespace api=hlclient::game_api;
+  api::CommittedScriptedEvent event;
+  event.generation=1;event.record=event.record_ordinal=record;event.emitter_entity=2;
+  event.event_index=twice ? 77U : 901U;event.message_bit_offset=24;
+  event.received_at_seconds=now;event.weapon_model_index=22U;
+  event.origin={0,0,16};event.angles={0,0,0};
+  host.committed_scripted_event(event);
+  // Only one large fixed production batch exists in this short-lived frame.
+  const auto effects=host.drain_remote_effects(now);REQUIRE(effects.count==1U);
+  const auto& shot=effects.effects[0U];
+  if(!expect_attachment) {
+    CHECK(shot.pose.status==api::RemotePoseResolution::weapon_mismatch);
+    CHECK(shot.pose.source==api::RemoteSocketSource::unavailable);
+    CHECK_FALSE(shot.flash);CHECK_FALSE(shot.light);CHECK_FALSE(shot.shell);
+    CHECK(shot.extra_shell_count==0U);
+    CHECK(host.drain_remote_audio().count==1U);
+    return;
+  }
+  REQUIRE(shot.pose.status==api::RemotePoseResolution::resolved);
+  REQUIRE(shot.flash);REQUIRE(shot.shell);REQUIRE(shot.light);
+  CHECK(shot.pose.server_sequence==socket.server_sequence);
+  CHECK(shot.flash->origin.x==Catch::Approx(socket.muzzle.origin.x));
+  CHECK(shot.flash->origin.y==Catch::Approx(socket.muzzle.origin.y));
+  CHECK(shot.flash->origin.z==Catch::Approx(socket.muzzle.origin.z));
+  CHECK(shot.shell->origin.x==Catch::Approx(socket.shell.origin.x));
+  CHECK(shot.shell->origin.y==Catch::Approx(socket.shell.origin.y));
+  CHECK(shot.shell->origin.z==Catch::Approx(socket.shell.origin.z));
+  CHECK(shot.extra_shell_count==(twice ? 1U : 0U));
+  CHECK(shot.extra_impact_count==(twice ? 7U : 3U));
+  CHECK(host.drain_remote_audio().count==1U);
+}
+
+void e17_remote_shotgun_merge_control(app::RuntimeReplayLocalAssets& assets,
+    hlclient::assets::AssetVector3 origin,const std::array<std::uint32_t,4U>& sequences,
+    bool installed) {
+  namespace api=hlclient::game_api;
+  const auto player=assets.studio_model_data(7U),weapon=assets.studio_model_data(22U);
+  REQUIRE(player);REQUIRE(weapon);REQUIRE(weapon->bones.size()==12U);
+  auto gl=fixture::entity_opengl_fixture::try_context(640,480);
+  if(gl && fixture::entity_opengl_fixture::capable_context()) gl->initialize_renderer();
+  else {gl.reset();WARN("E17 remote p_shotgun GPU subcheck unavailable; approved merge/socket/lifecycle CPU assertions still run");}
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({1,1,1});host.set_movement_audio_time_origin(0);
+  std::array<api::ScriptedEventBinding,2U> bindings;
+  bindings[0U].index=901;bindings[1U].index=77;
+  constexpr std::array<std::string_view,2U> tokens{"events/shotgun1.sc","events/shotgun2.sc"};
+  for(std::size_t i=0;i<bindings.size();++i) std::copy(tokens[i].begin(),tokens[i].end(),bindings[i].name.begin());
+  host.configure_scripted_events(bindings);
+  client::ClientWorldState world;
+  world.set_camera({{origin.x+96,origin.y-64,origin.z+36},{origin.x,origin.y,origin.z+4},{0,0,1}});
+  std::optional<hlclient::assets::AssetVector3> previous_socket;
+  std::size_t gpu_checks=0;
+  // Server movement, crouch and fire sequences are inputs; death removes the
+  // attachment, re-arm restores it, then weapon slot zero removes it again.
+  for(std::size_t step=0;step<6U;++step) {
+    CAPTURE(installed,step);
+    const auto record=static_cast<std::uint64_t>(step+1U);
+    const auto server=1.0+static_cast<double>(step)*.2;
+    const auto anchor=100.0+static_cast<double>(step)*.3,now=anchor+.21;
+    auto state=e10_observation(record,server,origin.x,0,0,false);state.packet_entities.resize(2U);
+    auto& entity=state.packet_entities[1U];
+    entity.origin={origin.x+static_cast<double>(step)*2,origin.y,origin.z};
+    entity.angles={0,0,0};entity.sequence=sequences[step==3U ? 3U : step<3U ? step : 0U];
+    entity.gait_sequence=0U;entity.weapon_model_index=step==3U || step==5U ? 0U : 22U;
+    entity.frame=64.0;entity.animation_time_seconds=server;entity.frame_rate=1.0;
+    entity.controllers.fill(127U);entity.blending.fill(127U);
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    const auto canonical=state.canonical_state_hash;
+    if(step==0U) REQUIRE(assets.reset_generation(state,world));
+    else REQUIRE(assets.project_entities(state,world));
+    REQUIRE(e10_present(assets,host,anchor,1U,world,{640,480}));
+    REQUIRE(e10_present(assets,host,now,1U,world,{640,480}));
+    const auto frame=world.entity_frame();REQUIRE(frame);
+    const bool attached=step!=3U && step!=5U;
+    REQUIRE(frame->studio_instances().size()==(attached ? 2U : 1U));
+    const auto& body=frame->studio_instances()[0U];
+    REQUIRE(assets.summary().remote_player_count==1U);
+    const auto& diagnostic=assets.summary().remote_players[0U];
+    REQUIRE(diagnostic.status==api::RemotePlayerPresentationStatus::ready);
+    CHECK(diagnostic.intent.sample.sequence==entity.sequence);
+    CHECK(body.entity_number==2U);CHECK(body.subinstance_ordinal==0U);
+    if(attached) {
+      const auto& child=frame->studio_instances()[1U];
+      CHECK(child.entity_number==2U);CHECK(child.subinstance_ordinal==1U);
+      REQUIRE(diagnostic.attachment_matched_bones>=11U);
+      const auto& parent_pose=frame->studio_poses()[body.pose_index].bone_matrices;
+      const auto& child_pose=frame->studio_poses()[child.pose_index].bone_matrices;
+      REQUIRE(child_pose.size()==12U);
+      for(std::size_t bone=0;bone<11U;++bone) {
+        const auto match=std::ranges::find(player->bones,weapon->bones[bone].name,&hlclient::assets::ModelBone::name);
+        REQUIRE(match!=player->bones.end());
+        const auto index=static_cast<std::size_t>(match-player->bones.begin());
+        CHECK(child_pose[bone]==parent_pose[index]);
+      }
+      const auto sockets=assets.remote_weapon_poses();REQUIRE(sockets.size()==1U);
+      const auto& socket=sockets[0U];
+      CHECK(socket.model_slot==22U);CHECK(socket.semantic_key==7U);
+      CHECK(socket.source==api::RemoteSocketSource::validated_pmodel_socket);
+      CHECK(socket.server_sequence==entity.sequence);CHECK(socket.muzzle_bone==11U);CHECK(socket.shell_bone==11U);
+      const auto matrix=hlclient::entity_render::entity_render_model_matrix(child.transform);
+      const auto verify_socket=[&](const hlclient::assets::EvaluatedModelSocket& value,hlclient::assets::AssetVector3 point) {
+        const auto& bone=child_pose[11U];
+        const float x=bone[0]*point.x+bone[4]*point.y+bone[8]*point.z+bone[12];
+        const float y=bone[1]*point.x+bone[5]*point.y+bone[9]*point.z+bone[13];
+        const float z=bone[2]*point.x+bone[6]*point.y+bone[10]*point.z+bone[14];
+        CHECK(value.origin.x==Catch::Approx(matrix[0]*x+matrix[4]*y+matrix[8]*z+matrix[12]));
+        CHECK(value.origin.y==Catch::Approx(matrix[1]*x+matrix[5]*y+matrix[9]*z+matrix[13]));
+        CHECK(value.origin.z==Catch::Approx(matrix[2]*x+matrix[6]*y+matrix[10]*z+matrix[14]));
+      };
+      verify_socket(socket.muzzle,{12.35F,2.77F,0});verify_socket(socket.shell,{2,2.77F,-1.65F});
+      if(previous_socket) CHECK_FALSE((socket.muzzle.origin.x==previous_socket->x &&
+          socket.muzzle.origin.y==previous_socket->y && socket.muzzle.origin.z==previous_socket->z));
+      previous_socket=socket.muzzle.origin;
+      if(step==1U || step==2U) {
+        const auto server_pose=parent_pose;
+        e17_remote_socket_fire(host,socket,record,now,step==2U);
+        REQUIRE(e10_present(assets,host,now,1U,world,{640,480}));
+        CHECK(assets.summary().remote_players[0U].intent.sample.sequence==entity.sequence);
+        CHECK(world.entity_frame()->studio_poses()[e10_instance(world,2U).pose_index].bone_matrices==server_pose);
+      }
+      if(gl) {
+        auto scene=client::build_render_scene(world);scene.static_world.reset();
+        gl->renderer().render(scene,{640,480});
+        const auto full=gl->renderer().observe_framebuffer({640,480},scene.clear_color,true);REQUIRE(full);
+        REQUIRE(full.non_clear_pixel_count>0U);
+        REQUIRE(gl->renderer().entity_statistics().studio_draw_count>=2U);
+        const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;
+        hlclient::entity_render::EntityRenderFrameBuildInput input;
+        input.resource_id=1;input.resource_revision=1;input.interpolation=scene.dynamic_entities->frame->interpolation();
+        input.studio_poses.assign(scene.dynamic_entities->frame->studio_poses().begin(),scene.dynamic_entities->frame->studio_poses().end());
+        input.studio_instances.push_back(scene.dynamic_entities->frame->studio_instances()[0U]);
+        auto built=hlclient::entity_render::EntityRenderFrameBuilder{}.build(*scene.dynamic_entities->package,std::move(input));
+        REQUIRE(built);scene.dynamic_entities->frame=std::make_shared<const hlclient::entity_render::EntityRenderFrame>(std::move(*built.frame));
+        gl->renderer().render(scene,{640,480});
+        const auto body_only=gl->renderer().observe_framebuffer({640,480},scene.clear_color,true);REQUIRE(body_only);
+        CHECK_FALSE(std::ranges::equal(full.rgba8,body_only.rgba8));
+        CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+        CHECK(glGetError()==GL_NO_ERROR);++gpu_checks;
+      }
+    } else {
+      // The existing host publishes an explicit per-entity unavailable sample
+      // to invalidate the prior weapon, not an empty all-player pose view.
+      // Also prove that a late named Shotgun event cannot reuse its old socket.
+      const auto sockets=assets.remote_weapon_poses();REQUIRE(sockets.size()==1U);
+      CHECK(sockets[0U].entity==2U);CHECK(sockets[0U].model_slot==0U);
+      REQUIRE(sockets[0U].current_model_slot);CHECK(*sockets[0U].current_model_slot==0U);
+      CHECK(sockets[0U].source==api::RemoteSocketSource::unavailable);
+      CHECK_FALSE(sockets[0U].semantic_match);CHECK(sockets[0U].resource_id==0U);
+      e17_remote_socket_fire(host,sockets[0U],record,now,false,false);
+      REQUIRE(world.entity_frame()->studio_instances().size()==1U);
+    }
+    CHECK(state.canonical_state_hash==canonical);
+  }
+  if(gl) {CHECK(gpu_checks==4U);gl->release_renderer();}
+  std::cout << "offline_shotgun_remote_control profile=" << (installed ? "approved_installed" : "project_owned")
+      << " merge=ready sockets=ready server_body_authority=preserved lifecycle=checked gpu="
+      << (gl ? "passed" : "skipped_opengl_3_3_core_unavailable") << " live_state=false\n";
+  host.teardown();
+}
+
+TEST_CASE("E32 normal approved materializer keeps firing players continuous on rising and falling lifts",
+    "[e32-nointerp-motion][runtime-presentation][actual-context][local-capture-assets]") {
+  for(const double vertical_speed:{120.0,-120.0}) {
+    LocalContext local;
+    auto bytes=e17_owned_remote_model(false);
+    std::uint32_t sequences{};
+    for(std::size_t i=0;i<4;++i)sequences|=std::to_integer<std::uint32_t>(bytes[168U+i])<<(i*8U);
+    fixture::studio_write_fixed_string(bytes,sequences+3U*176U,32U,"ref_shoot_onehanded");
+    local.model=bytes;local.root.write("valve","models/shared.mdl",bytes);
+    auto created=local.create();REQUIRE(created.projection);
+    hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+    host.reset({1,1,1});client::ClientWorldState world;
+    world.set_camera({{400,0,256},{0,0,0},{0,0,1}});
+    std::size_t ordinal=1;
+    const auto observation_for=[&](std::size_t record) {
+      const double t=.04*static_cast<double>(record-1);
+      auto state=e10_observation(record,1+t,160*t,0,0,false);
+      state.packet_entities.resize(2);
+      auto& player=state.packet_entities[1];player.origin.z=48+vertical_speed*t;
+      player.sequence=3;player.gait_sequence=1;player.weapon_model_index=22;
+      player.effects=(record==17 || record==18) ? 34U : 0U;
+      player.animation_time_seconds=1+t;player.frame_rate=1;player.frame=0;
+      player.controllers.fill(127);player.blending.fill(127);
+      state.canonical_state_hash=client::runtime_observation_canonical_hash(state);return state;
+    };
+    auto latest=observation_for(ordinal);
+    REQUIRE(created.projection->reset_generation(latest,world));
+    std::optional<double> last_x,last_z;
+    for(std::size_t frame=0;frame<=220;++frame) {
+      const double now=100+.005*static_cast<double>(frame);
+      while(now+1e-9>=100+.04*static_cast<double>(ordinal)) {
+        latest=observation_for(++ordinal);REQUIRE(created.projection->project_entities(latest,world));
+      }
+      const auto canonical=latest.canonical_state_hash;
+      REQUIRE(created.projection->present_entities(host,now,1,world,{640,480},true));
+      const auto observed=created.projection->remote_movement_observations();REQUIRE(observed);REQUIRE(observed->size()==1);
+      const auto& row=observed->front();REQUIRE(row.sample_server_s);REQUIRE(row.rendered_origin);
+      const double selected=*row.sample_server_s-1;
+      CHECK((*row.rendered_origin)[0]==Catch::Approx(160*selected).margin(.001));
+      CHECK((*row.rendered_origin)[2]==Catch::Approx(48+vertical_speed*selected).margin(.001));
+      if(frame>110 && last_x && last_z) {
+        CHECK(std::abs((*row.rendered_origin)[0]-*last_x)<=.801);
+        CHECK(std::abs((*row.rendered_origin)[2]-*last_z)<=.601);
+        CHECK((row.presentation.new_boundary_reasons&static_cast<std::uint32_t>(
+            hlclient::entity_visual::PlayerContinuityReason::nointerp_effect))==0);
+      }
+      CHECK(latest.canonical_state_hash==canonical);
+      last_x=(*row.rendered_origin)[0];last_z=(*row.rendered_origin)[2];
+    }
+    host.teardown();
+  }
+}
+
+TEST_CASE("E32 optional approved installed player metadata qualifies the observed firing pulse",
+    "[e32-nointerp-approved][e32-nointerp-motion][installed-player-production][local-capture-assets]") {
+  std::filesystem::path root;
+#ifdef _WIN32
+  wchar_t* value=nullptr;std::size_t count{};
+  if(_wdupenv_s(&value,&count,L"HLCLIENT_LOCAL_GAME_ROOT")==0 && value)root=value;
+  std::free(value);
+#else
+  if(const char* value=std::getenv("HLCLIENT_LOCAL_GAME_ROOT"))root=value;
+#endif
+  if(root.empty())SKIP("No opt-in read-only local game root");
+  if(root.lexically_normal()!=std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life"}.lexically_normal())
+    SKIP("Only the existing exact prepared research root is authorized");
+  const auto resources=readiness::parse_resource_list({
+      {2,"maps/crossfire.bsp",9,0,0},{2,"models/player.mdl",7,0,0},
+      {2,"models/player/zombie/zombie.mdl",8,0,0}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/crossfire.bsp"),
+      root,"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  if(!created.projection)SKIP("Approved optional asset preparation unavailable");
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};host.reset({1,1,1});
+  for(const auto slot:{7U,8U}) {
+    const auto model=created.projection->studio_model_data(slot);
+    REQUIRE(model);REQUIRE(model->sequences.size()>34);
+    auto before=e10_observation(1,25785.3828125,-872.34375,0,0,false).packet_entities[1];
+    before.model_index=slot;before.sequence=34;before.gait_sequence=4;before.weapon_model_index=91;
+    before.effects=0;before.origin={-872.34375,1246.3125,-1659.96875};
+    auto now=before;now.effects=34;now.origin={-870.25,1240.40625,-1659.96875};
+    const auto intent=host.world_entity({now,&before,{},12,model.get(),25785.3828125,25785.42578125});
+    INFO("approved_slot=" << slot << " sequence=" << model->sequences[34].label
+        << " loop=" << (model->sequences[34].source_flags&1U));
+    CHECK(intent.animation_only_effect_mask==32);
+    std::cout << "[e32-nointerp-approved] slot=" << slot << " sequence=" << model->sequences[34].label
+        << " loop=" << (model->sequences[34].source_flags&1U) << " motion_mask=" << intent.animation_only_effect_mask
+        << " source=approved_read_only live=false\n";
+  }
+  host.teardown();
+}
+
+struct E31AppearanceFixture {
+  LocalContext local;
+  std::unique_ptr<app::RuntimeReplayLocalAssets> assets;
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  client::ClientWorldState world;
+  client::RuntimeClientObservationState state;
+  std::uint64_t ordinal{1};
+  bool committed{};
+  E31AppearanceFixture() {
+    auto base=e17_owned_remote_model(false),red=base,green=base,weapon=e17_owned_remote_model(true);
+    const auto color=[](auto& bytes,std::array<std::uint8_t,3> rgb,float half_width) {
+      fixture::studio_write_fixed_string(bytes,fixture::kSyntheticStudioTextureOffset,64,"DM_Base.bmp");
+      bytes[fixture::kSyntheticStudioTextureDataOffset]=std::byte{160};
+      for(std::size_t c=0;c<3;++c)bytes[fixture::kSyntheticStudioTextureDataOffset+1+160*3+c]=std::byte{rgb[c]};
+      fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset,0,-half_width,-12);
+      fixture::studio_write_vector3(bytes,fixture::kSyntheticStudioVerticesOffset+12,0,half_width,-12);
+    };
+    color(base,{200,40,20},5);color(red,{200,40,20},7);color(green,{20,200,40},11);
+    local.root.write("valve","models/player.mdl",base);
+    local.root.write("valve","models/player/fixture_red/fixture_red.mdl",red);
+    local.root.write("valve","models/player/fixture_green/fixture_green.mdl",green);
+    local.root.write("valve","models/player/incompatible/incompatible.mdl",fixture::literal_minimal_goldsrc_studio_v10());
+    local.root.write("valve","models/p_shotgun.mdl",weapon);
+    const auto resources=readiness::parse_resource_list({
+        {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(local.map.size()),0U},
+        {2U,"models/player.mdl",7U,static_cast<std::uint32_t>(base.size()),0U},
+        {2U,"models/p_shotgun.mdl",22U,static_cast<std::uint32_t>(weapon.size()),0U}});
+    auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+        local.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);REQUIRE(created.projection);
+    assets=std::move(created.projection);host.reset({1,1,1});host.set_movement_audio_time_origin(0);
+    state=e10_observation(1,1,0,0,0,true);state.packet_entities.resize(3);
+    for(std::size_t i=1;i<3;++i) {
+      auto& entity=state.packet_entities[i];entity.origin={0,static_cast<double>(i==1 ? -20 : 20),16};
+      entity.gait_sequence=0;entity.weapon_model_index=22;entity.animation_time_seconds=1;entity.frame_rate=1;
+      entity.controllers.fill(127);entity.blending.fill(127);
+    }
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+    REQUIRE(assets->reset_generation(state,world));world.set_camera({{110,0,30},{0,0,16},{0,0,1}});
+    present();
+  }
+  void identity(std::uint32_t slot,std::string_view info,bool replacement=false,bool present=true) {
+    namespace api=hlclient::game_api;
+    const auto bytes=hlclient::test::user_info_fixture::make_message(static_cast<std::uint8_t>(slot-1),static_cast<std::int32_t>(42+slot),info);
+    const auto decoded=hlclient::goldsrc::UserInfoUpdateParser{}.parse(bytes);REQUIRE(decoded);
+    api::PlayerDisplayUpdate update{slot,present,replacement,"Fixture",decoded.state->player_appearance()};
+    api::GameMessageView message{api::GameMessageKind::player_display,{}, {},
+        {ordinal,static_cast<std::size_t>(ordinal),static_cast<std::uint32_t>(ordinal),0,512},std::nullopt,update};
+    ++ordinal;
+    auto staged=host.stage_record({committed ? &state : nullptr,state,std::span{&message,1U},1U,8U});REQUIRE(staged);
+    host.commit_record(std::move(*staged.state));committed=true;
+  }
+  void present() {REQUIRE(e10_present(*assets,host,100,1U,world,{640,480}));}
+  const app::ReplayLocalVisualSummary::RemotePlayer& diagnostic(std::uint32_t slot) {
+    const auto& summary=assets->summary();
+    const auto values=std::span{summary.remote_players}.first(summary.remote_player_count);
+    const auto found=std::ranges::find(values,slot,&app::ReplayLocalVisualSummary::RemotePlayer::entity);
+    REQUIRE(found!=values.end());return *found;
+  }
+  void ready(std::uint32_t slot,hlclient::game_api::PlayerAppearanceStatus status) {
+    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+    do {present();if(diagnostic(slot).appearance.status==status)return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }while(std::chrono::steady_clock::now()<until);
+    REQUIRE(diagnostic(slot).appearance.status==status);
+  }
+};
+TEST_CASE("E31 normal approved materializer selects two userinfo models and freezes corpse appearance",
+    "[e31][appearance][local-capture-assets]") {
+  namespace api=hlclient::game_api;
+  E31AppearanceFixture fixture;
+  const auto base_index=e10_instance(fixture.world,2).studio_asset_index;
+  fixture.identity(2,"\\model\\fixture_red\\topcolor\\30",true);
+  fixture.identity(3,"\\model\\fixture_green\\topcolor\\120",true);
+  fixture.ready(2,api::PlayerAppearanceStatus::selected_model_ready);fixture.ready(3,api::PlayerAppearanceStatus::selected_model_ready);
+  const auto index2=e10_instance(fixture.world,2).studio_asset_index,index3=e10_instance(fixture.world,3).studio_asset_index;
+  CHECK(index2!=base_index);CHECK(index3!=base_index);CHECK(index2!=index3);
+  CHECK(fixture.diagnostic(2).resolved_visual_model=="models/player/fixture_red/fixture_red.mdl");
+  CHECK(fixture.diagnostic(3).resolved_visual_model=="models/player/fixture_green/fixture_green.mdl");
+  REQUIRE(fixture.world.entity_frame()->studio_instances().size()==4U);
+  CHECK(fixture.diagnostic(2).attachment_matched_bones>=11U);
+  CHECK(fixture.diagnostic(3).attachment_matched_bones>=11U);
+  const auto scene=client::build_render_scene(fixture.world);REQUIRE(scene.dynamic_entities);
+  const auto sources=scene.dynamic_entities->package->presentation_studio_sources();REQUIRE(sources.size()==2U);
+  CHECK(sources[0].model->skeletal_data->textures[0].rgba8_level_zero!=sources[1].model->skeletal_data->textures[0].rgba8_level_zero);
+  for(int i=0;i<10;++i)fixture.present();
+  CHECK(client::build_render_scene(fixture.world).dynamic_entities->package->presentation_studio_sources().size()==2U);
+  auto corpse=fixture.state.packet_entities[1];corpse.entity_number=40;corpse.player_movement_schema=false;
+  corpse.render_effect=17;corpse.render_amount=2;corpse.model_index=999;corpse.effects=32;corpse.sequence=4;
+  corpse.frame=255;corpse.weapon_model_index=0;corpse.frame_rate=0;corpse.origin={0,0,16};
+  fixture.state.packet_entities.push_back(corpse);++fixture.state.publication_revision;
+  fixture.state.entity_metadata.source->record_ordinal=10;fixture.state.entity_metadata.source->record_identity=10;
+  fixture.state.canonical_state_hash=client::runtime_observation_canonical_hash(fixture.state);
+  REQUIRE(fixture.assets->project_entities(fixture.state,fixture.world));fixture.present();
+  const auto corpse_index=e10_instance(fixture.world,40).studio_asset_index;CHECK(corpse_index==index2);
+  fixture.identity(2,"\\model\\fixture_green\\topcolor\\240",true);fixture.assets->player_slot_boundary(2);
+  // Slot boundaries deliberately reject pre-boundary entity snapshots. Publish
+  // the replacement occupant's next committed snapshot before presenting it.
+  fixture.state.entity_metadata.source->record_ordinal=11;fixture.state.entity_metadata.source->record_identity=11;
+  ++fixture.state.publication_revision;fixture.state.canonical_state_hash=client::runtime_observation_canonical_hash(fixture.state);
+  REQUIRE(fixture.assets->project_entities(fixture.state,fixture.world));
+  fixture.ready(2,api::PlayerAppearanceStatus::selected_model_ready);
+  CHECK(e10_instance(fixture.world,2).studio_asset_index!=index2);
+  CHECK(e10_instance(fixture.world,40).studio_asset_index==corpse_index);
+  // Original body queues are MOVETYPE_TOSS, not frozen positions. A retained
+  // body's physics motion must not adopt the respawned/reused source slot.
+  auto& moving_corpse=fixture.state.packet_entities.back();moving_corpse.origin.z=12;moving_corpse.brush_move_type=6U;
+  fixture.state.entity_metadata.source->record_ordinal=12;fixture.state.entity_metadata.source->record_identity=12;
+  ++fixture.state.publication_revision;fixture.state.canonical_state_hash=client::runtime_observation_canonical_hash(fixture.state);
+  REQUIRE(fixture.assets->project_entities(fixture.state,fixture.world));fixture.present();
+  CHECK(e10_instance(fixture.world,40).studio_asset_index==corpse_index);
+  fixture.identity(2,"\\model\\missing",false);fixture.ready(2,api::PlayerAppearanceStatus::approved_asset_missing);
+  CHECK(e10_instance(fixture.world,2).studio_asset_index==base_index);
+  fixture.identity(2,"\\model\\incompatible",false);fixture.ready(2,api::PlayerAppearanceStatus::pose_incompatible);
+  CHECK(e10_instance(fixture.world,2).studio_asset_index==base_index);
+  fixture.identity(2,"\\model\\../bad",false);fixture.present();
+  CHECK(fixture.diagnostic(2).appearance.status==api::PlayerAppearanceStatus::model_token_rejected);
+  CHECK(e10_instance(fixture.world,2).studio_asset_index==base_index);
+  CHECK(e10_instance(fixture.world,40).studio_asset_index==corpse_index);
+  CHECK(fixture.state.packet_entities[1].model_index==7);
+  CHECK(fixture.state.packet_entities[2].model_index==7);
+  CHECK(fixture.state.canonical_state_hash==client::runtime_observation_canonical_hash(fixture.state));
+}
+TEST_CASE("E31 approved player model cache attests distinct source content and bounds requests",
+    "[e31][appearance][local-capture-assets]") {
+  E31AppearanceFixture fixture;
+  hlclient::goldsrc::ApprovedPlayerModelAssets loader{fixture.assets->sound_resources()};
+  const auto wait=[&](std::string_view name) {
+    auto model=loader.request(name);
+    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+    while(model.status==hlclient::game_api::PlayerAppearanceStatus::asset_pending && std::chrono::steady_clock::now()<until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));model=loader.request(name);
+    }
+    return model;
+  };
+  const auto red=wait("models/player/fixture_red/fixture_red.mdl"),green=wait("models/player/fixture_green/fixture_green.mdl");
+  REQUIRE(red.model);REQUIRE(green.model);CHECK(red.revision!=green.revision);
+  CHECK(loader.request("models/player/fixture_red/fixture_red.mdl").model==red.model);
+  CHECK(loader.request("models/player/../evil.mdl").status==hlclient::game_api::PlayerAppearanceStatus::not_authorized);
+  for(std::size_t i=2;i<hlclient::goldsrc::kMaximumPlayerModelRequests;++i) {
+    const auto name="models/player/missing"+std::to_string(i)+"/missing"+std::to_string(i)+".mdl";
+    CHECK(loader.request(name).status==hlclient::game_api::PlayerAppearanceStatus::asset_pending);
+  }
+  CHECK(loader.request("models/player/overflow/overflow.mdl").status==hlclient::game_api::PlayerAppearanceStatus::resource_limit);
+}
+TEST_CASE("E31 late userinfo remaps one shared model independently and rejects incomplete assets without partial publication",
+    "[e31][appearance][local-capture-assets]") {
+  namespace api=hlclient::game_api;
+  E31AppearanceFixture fixture;
+  const auto base_index=e10_instance(fixture.world,2).studio_asset_index;
+  CHECK(e10_instance(fixture.world,3).studio_asset_index==base_index);
+  // The first normal frame already rendered the shared server base model.
+  // Userinfo arriving later supplies two independent color variants of one MDL.
+  fixture.identity(2,"\\model\\fixture_red\\topcolor\\30\\bottomcolor\\240",true);
+  fixture.identity(3,"\\model\\fixture_red\\topcolor\\120\\bottomcolor\\60",true);
+  fixture.ready(2,api::PlayerAppearanceStatus::selected_model_ready);
+  fixture.ready(3,api::PlayerAppearanceStatus::selected_model_ready);
+  const auto first_index=e10_instance(fixture.world,2).studio_asset_index;
+  const auto peer_index=e10_instance(fixture.world,3).studio_asset_index;
+  CHECK(first_index!=peer_index);CHECK(first_index!=base_index);CHECK(peer_index!=base_index);
+  const auto scene=client::build_render_scene(fixture.world);REQUIRE(scene.dynamic_entities);
+  const auto sources=scene.dynamic_entities->package->presentation_studio_sources();REQUIRE(sources.size()==2U);
+  CHECK(sources[0].model->skeletal_data->textures[0].rgba8_level_zero!=sources[1].model->skeletal_data->textures[0].rgba8_level_zero);
+  CHECK(fixture.diagnostic(2).palette_remapped);CHECK(fixture.diagnostic(3).palette_remapped);
+  CHECK(fixture.diagnostic(2).attachment_matched_bones>=11U);CHECK(fixture.diagnostic(3).attachment_matched_bones>=11U);
+  const auto epoch=fixture.diagnostic(2).appearance.occupant_epoch;
+  fixture.identity(2,"\\model\\fixture_green\\topcolor\\240",false);
+  fixture.ready(2,api::PlayerAppearanceStatus::selected_model_ready);
+  CHECK(fixture.diagnostic(2).appearance.occupant_epoch==epoch);
+  CHECK(e10_instance(fixture.world,2).studio_asset_index!=first_index);
+  CHECK(e10_instance(fixture.world,3).studio_asset_index==peer_index);
+
+  auto malformed=e17_owned_remote_model(false);malformed[0]=std::byte{0};
+  fixture.local.root.write("valve","models/player/malformed/malformed.mdl",malformed);
+  fixture.local.root.write("valve","models/player/incomplete/incomplete.mdl",fixture::synthetic_split_texture_main());
+  const auto retained=client::build_render_scene(fixture.world).dynamic_entities->package->presentation_studio_sources().size();
+  for(const auto model:{"malformed","incomplete"}) {
+    fixture.identity(2,std::string("\\model\\")+model,false);
+    fixture.ready(2,api::PlayerAppearanceStatus::asset_import_failed);
+    CHECK(e10_instance(fixture.world,2).studio_asset_index==base_index);
+    CHECK(e10_instance(fixture.world,3).studio_asset_index==peer_index);
+    CHECK(client::build_render_scene(fixture.world).dynamic_entities->package->presentation_studio_sources().size()==retained);
+  }
+  CHECK(fixture.state.packet_entities[1].model_index==7);
+  CHECK(fixture.state.packet_entities[2].model_index==7);
+  CHECK(fixture.state.canonical_state_hash==client::runtime_observation_canonical_hash(fixture.state));
+}
+TEST_CASE("E31 selected player models retain server walk crouch fire pose and named pmodel merge",
+    "[e31][appearance][local-capture-assets]") {
+  E31AppearanceFixture fixture;
+  fixture.identity(2,"\\model\\fixture_red",true);
+  fixture.identity(3,"\\model\\fixture_green",true);
+  fixture.ready(2,hlclient::game_api::PlayerAppearanceStatus::selected_model_ready);
+  fixture.ready(3,hlclient::game_api::PlayerAppearanceStatus::selected_model_ready);
+  for(std::uint32_t sequence=1;sequence<=3;++sequence) {
+    auto& entity=fixture.state.packet_entities[1];entity.sequence=sequence;
+    entity.animation_time_seconds=1.0+sequence*.2;entity.frame=64;
+    fixture.state.server_time_seconds=entity.animation_time_seconds;
+    fixture.state.publication_revision=sequence+1;
+    fixture.state.entity_metadata.source->record_identity=sequence+1;
+    fixture.state.entity_metadata.source->record_ordinal=sequence+1;
+    fixture.state.canonical_state_hash=client::runtime_observation_canonical_hash(fixture.state);
+    REQUIRE(fixture.assets->project_entities(fixture.state,fixture.world));
+    REQUIRE(e10_present(*fixture.assets,fixture.host,100.0+sequence*.3,1,fixture.world,{640,480}));
+    REQUIRE(e10_present(*fixture.assets,fixture.host,100.21+sequence*.3,1,fixture.world,{640,480}));
+    CHECK(fixture.diagnostic(2).intent.sample.sequence==sequence);
+    CHECK(fixture.diagnostic(2).attachment_matched_bones>=11U);
+    CHECK(fixture.diagnostic(2).appearance.status==hlclient::game_api::PlayerAppearanceStatus::selected_model_ready);
+    const auto frame=fixture.world.entity_frame();REQUIRE(frame);
+    const auto body=e10_instance(fixture.world,2);
+    const auto child=std::ranges::find_if(frame->studio_instances(),[](const auto& instance){
+      return instance.entity_number==2U && instance.subinstance_ordinal==1U;
+    });REQUIRE(child!=frame->studio_instances().end());
+    const auto& parent_pose=frame->studio_poses()[body.pose_index].bone_matrices;
+    const auto& child_pose=frame->studio_poses()[child->pose_index].bone_matrices;
+    REQUIRE(parent_pose.size()>=11U);REQUIRE(child_pose.size()>=11U);
+    for(std::size_t bone=0;bone<11;++bone)CHECK(child_pose[bone]==parent_pose[bone]);
+    CHECK(fixture.state.packet_entities[1].model_index==7);
+  }
+}
+TEST_CASE("E31 actual OpenGL two simultaneous appearances differ after approved userinfo selection",
+    "[e31][appearance][local-capture-assets][actual-context]") {
+  auto gl=fixture::entity_opengl_fixture::try_context(640,480);
+  if(!gl || !fixture::entity_opengl_fixture::capable_context())SKIP("OpenGL3.3 context unavailable; separate mandatory CPU fixture remains");
+  gl->initialize_renderer();E31AppearanceFixture fixture;
+  const auto draw=[&] {
+    auto scene=client::build_render_scene(fixture.world);scene.static_world.reset();
+    gl->renderer().render(scene,{640,480});
+    const auto pixels=gl->renderer().observe_framebuffer({640,480},scene.clear_color,true);REQUIRE(pixels);
+    REQUIRE(pixels.non_clear_pixel_count>0U);CHECK(glGetError()==GL_NO_ERROR);return pixels;
+  };
+  const auto baseline=draw();
+  fixture.identity(2,"\\model\\fixture_red\\topcolor\\30",true);
+  fixture.identity(3,"\\model\\fixture_green\\topcolor\\120",true);
+  fixture.ready(2,hlclient::game_api::PlayerAppearanceStatus::selected_model_ready);
+  fixture.ready(3,hlclient::game_api::PlayerAppearanceStatus::selected_model_ready);
+  const auto selected=draw();CHECK_FALSE(std::ranges::equal(baseline.rgba8,selected.rgba8));
+  REQUIRE(gl->renderer().entity_statistics().studio_draw_count>=4U);
+  std::size_t warm=0,green=0;
+  for(std::size_t i=0;i+3<selected.rgba8.size();i+=4) {
+    const auto r=static_cast<unsigned>(selected.rgba8[i]),g=static_cast<unsigned>(selected.rgba8[i+1]);
+    if(r>g*3/2 && r>20)++warm;if(g>r*3/2 && g>20)++green;
+  }
+  CHECK(warm>20U);CHECK(green>20U);
+  const auto count=gl->renderer().entity_statistics().studio_asset_upload_count;
+  for(int i=0;i<3;++i){fixture.present();draw();}
+  CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==count);
+  std::string output_directory;
+#ifdef _WIN32
+  char* output=nullptr;std::size_t output_size=0;
+  if(_dupenv_s(&output,&output_size,"HLCLIENT_E31_APPEARANCE_OUTPUT_DIR")==0 && output)output_directory=output;
+  std::free(output);
+#else
+  if(const char* output=std::getenv("HLCLIENT_E31_APPEARANCE_OUTPUT_DIR"))output_directory=output;
+#endif
+  if(!output_directory.empty()) {
+    const std::filesystem::path directory{output_directory};
+    const auto save=[&](std::string_view name,const auto& pixels) {
+      std::ofstream file(directory/std::string(name),std::ios::binary);REQUIRE(file.good());
+      file<<"P6\n640 480\n255\n";
+      for(std::size_t y=480;y>0;--y)for(std::size_t x=0;x<640;++x)
+        file.write(reinterpret_cast<const char*>(pixels.rgba8.data()+((y-1)*640+x)*4),3);
+      REQUIRE(file.good());
+    };
+    save("appearance-before.ppm",baseline);save("appearance-after.ppm",selected);
+  }
+  std::cout<<"e31_appearance_gpu=passed project_owned=true simultaneous=2 warm_pixels="<<warm
+      <<" green_pixels="<<green<<" live_state=false\n";
+  gl->release_renderer();
+}
+
+TEST_CASE("E31 optional approved Gordon and Barney use canonical model importer and isolated palettes read only",
+    "[e31][appearance][installed-player-appearance][local-capture-assets]") {
+  std::filesystem::path root;
+#ifdef _WIN32
+  wchar_t* value=nullptr;std::size_t count=0;
+  if(_wdupenv_s(&value,&count,L"HLCLIENT_LOCAL_GAME_ROOT")==0 && value)root=value;
+  std::free(value);
+#else
+  if(const char* value=std::getenv("HLCLIENT_LOCAL_GAME_ROOT"))root=value;
+#endif
+  if(root.lexically_normal()!=std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life"}.lexically_normal())
+    SKIP("Exact opt-in approved research root not provided");
+  constexpr std::array<std::string_view,3> names{"maps/crossfire.bsp","models/player/gordon/gordon.mdl","models/player/barney/barney.mdl"};
+  std::array<std::filesystem::file_time_type,3> times;
+  for(std::size_t i=0;i<names.size();++i) {
+    if(!std::filesystem::is_regular_file(root/"valve"/names[i]))SKIP("Optional player appearance resource absent");
+    times[i]=std::filesystem::last_write_time(root/"valve"/names[i]);
+  }
+  const auto resources=readiness::parse_resource_list({{2U,"maps/crossfire.bsp",9U,0U,0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info(names[0]),root,"valve");
+  REQUIRE(created.projection);
+  hlclient::goldsrc::ApprovedPlayerModelAssets loader{created.projection->sound_resources()};
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};host.reset({1,1,1});
+  std::array<hlclient::goldsrc::PreparedPlayerModel,2> prepared;
+  for(std::size_t i=0;i<prepared.size();++i) {
+    auto result=loader.request(names[i+1]);const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(result.status==hlclient::game_api::PlayerAppearanceStatus::asset_pending && std::chrono::steady_clock::now()<until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));result=loader.request(names[i+1]);
+    }
+    INFO(hlclient::game_api::to_string(result.status));REQUIRE(result.model);REQUIRE(result.model->skeletal_data);
+    CHECK(host.player_model_compatible(*result.model->skeletal_data));
+    hlclient::game_api::PlayerAppearanceFields fields;fields.top_color=120;fields.bottom_color=240;
+    const auto ranges=host.player_palette(fields,*result.model->skeletal_data);REQUIRE(ranges.size()==2U);
+    const auto remapped=hlclient::goldsrc::remap_player_model_palette(*result.model,ranges);REQUIRE(remapped);
+    const auto index=ranges.front().texture;
+    CHECK(remapped->skeletal_data->textures[index].rgba8_level_zero!=result.model->skeletal_data->textures[index].rgba8_level_zero);
+    for(std::size_t texture=0;texture<result.model->skeletal_data->textures.size();++texture)
+      if(texture!=index)CHECK(remapped->skeletal_data->textures[texture].rgba8_level_zero==result.model->skeletal_data->textures[texture].rgba8_level_zero);
+    prepared[i]=std::move(result);
+  }
+  CHECK(prepared[0].revision!=prepared[1].revision);
+  for(std::size_t i=0;i<names.size();++i)CHECK(times[i]==std::filesystem::last_write_time(root/"valve"/names[i]));
+  std::cout<<"e31_appearance_original_import=passed models=gordon,barney palette=isolated read_only=true live_state=false\n";
+}
+
+TEST_CASE("E17 owned approved remote Shotgun merges server movement crouch fire and life boundaries",
+          "[e17][shotgun-pmodel][game-api][local-capture-assets][actual-context]") {
+  LocalContext context;
+  const auto player=e17_owned_remote_model(false),weapon=e17_owned_remote_model(true);
+  context.root.write("valve","models/project_player.mdl",player);
+  context.root.write("valve","models/p_shotgun.mdl",weapon);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/project_player.mdl",7U,static_cast<std::uint32_t>(player.size()),0U},
+      {2U,"models/p_shotgun.mdl",22U,static_cast<std::uint32_t>(weapon.size()),0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(created.projection);
+  e17_remote_shotgun_merge_control(*created.projection,{0,0,16},{1U,2U,3U,4U},false);
+}
+
+client::RuntimeClientObservationState e17_shotgun_viewmodel_state() {
+  auto state=e16_mp5_viewmodel_state();
+  state.receiving_client->owned_weapon_bits=1U<<7U;
+  state.weapon_hud.active_weapon_id=std::uint8_t{7U};
+  state.weapon_hud.clips.fill(std::nullopt);state.weapon_hud.clips[7U]=8;
+  state.weapon_hud.reserve_ammo.fill(std::nullopt);state.weapon_hud.reserve_ammo[2U]=16;
+  state.weapon_hud.catalogue.clear();
+  state.weapon_hud.catalogue.push_back({.id=7U,.command_name="weapon_shotgun",.primary_ammo_type=2,
+      .secondary_ammo_type=-1,.slot=2,.source={.record_identity=1U,.record_ordinal=1U}});
+  state.weapon_slots.clear();
+  state.weapon_slots.push_back({.wire_slot=7U,.clip=8,.in_reload=false,.next_primary_attack=0.0,
+      .weapon_id=7U,.next_secondary_attack=0.0,.time_weapon_idle=0.0,.special_reload_state=0});
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  return state;
+}
+
+std::pair<hlclient::renderer::RenderDynamicEntities,hlclient::renderer::RenderDynamicEntities>
+e17_materialized_shotgun_action(app::RuntimeReplayLocalAssets& assets,
+    const client::RuntimeClientObservationState& state,std::uint16_t buttons,
+    bool interior_animation=false) {
+  namespace api=hlclient::game_api;
+  const auto metadata=assets.presentation_model(state.generation,21U);REQUIRE(metadata);
+  REQUIRE(hlclient::games::halflife::shotgun_sequences(*metadata));
+  const bool double_shot=buttons==hlclient::goldsrc::kReferenceGoldSrcButtonAttack2;
+  const auto expected_sequence=double_shot ? 2U : 1U;
+  REQUIRE(metadata->sequences[expected_sequence].events.size()==1U);
+  CHECK(metadata->sequences[expected_sequence].events[0U].event_number==5001);
+  CHECK(metadata->sequences[expected_sequence].events[0U].frame==0);
+  const auto canonical=client::runtime_observation_canonical_hash(state);
+  api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({state.generation,1U,1U});host.set_movement_audio_time_origin(0.0);
+  host.bind_model(metadata);host.observe(state,0.0);(void)host.drain_audio();
+  api::LocalWeaponSubmittedCommand accepted{state.generation,1U,buttons,.02};
+  accepted.shot_context=api::LocalWeaponSubmittedCommand::ShotContext{
+      {100,200,64},{1,0,0},{0,-1,0},{0,0,1}};
+  host.submit(accepted,.02);
+  const auto started=host.sample(.02);REQUIRE(started.visual);REQUIRE(started.identity);
+  CHECK(started.action==(double_shot ? api::LocalWeaponAction::secondary_fire : api::LocalWeaponAction::primary_fire));
+  const auto intent=host.viewmodel(state,metadata,.02,started.visual);
+  REQUIRE(intent.status==api::ViewmodelStatus::ready);
+  CHECK(intent.sequence==expected_sequence);CHECK(intent.body==2U);CHECK(intent.frame_coordinate==0.0);
+  const auto first=assets.materialize_viewmodel(intent);REQUIRE(first);REQUIRE(first->frame);
+  REQUIRE(first->frame->studio_instances().size()==1U);
+  CHECK(first->frame->studio_instances()[0U].body_value==2U);
+  REQUIRE(assets.viewmodel_attachment_at_frame(intent,0U,0.0));
+
+  // A changed render-camera context must not relocate the accepted-shot origin.
+  api::LocalVisualContext view{{999,888,777},{0,1,0},{1,0,0},{0,0,1},{},.02};
+  const auto effects=host.local_visuals(view);
+  REQUIRE(effects.flash);REQUIRE(effects.light);REQUIRE(effects.shell);REQUIRE(effects.world_impact);
+  CHECK(effects.flash->sequence==expected_sequence);
+  CHECK(effects.flash->variant==(double_shot ? 41U : 31U));
+  CHECK(effects.extra_shell_count==(double_shot ? 1U : 0U));
+  CHECK(effects.extra_impact_count==(double_shot ? 7U : 3U));
+  CHECK(effects.world_impact->maximum_distance_units==2048.0F);CHECK_FALSE(effects.world_impact->tracer);
+  CHECK(effects.world_impact->origin.x==100.0F);CHECK(effects.world_impact->origin.y==200.0F);
+  CHECK(effects.shell->origin.x==132.0F);CHECK(effects.shell->origin.y==194.0F);
+  CHECK(effects.shell->origin.z==52.0F);
+  CHECK(effects.shell->expires_at_seconds-effects.shell->starts_at_seconds==Catch::Approx(2.5));
+  const auto shell_name=[](const auto& shell) {
+    return std::string_view{shell.model_name.data(),
+        static_cast<std::size_t>(std::find(shell.model_name.begin(),shell.model_name.end(),'\0')-shell.model_name.begin())};
+  };
+  CHECK(shell_name(*effects.shell)=="models/shotgunshell.mdl");
+  hlclient::renderer::TransientVisuals shells;
+  REQUIRE(shells.spawn(*effects.shell,.02));
+  for(std::size_t i=0;i<effects.extra_shell_count;++i) {
+    CHECK(shell_name(effects.extra_shells[i])=="models/shotgunshell.mdl");
+    CHECK(effects.extra_shells[i].action!=effects.shell->action);
+    REQUIRE(shells.spawn(effects.extra_shells[i],.02));
+  }
+  CHECK_FALSE(shells.spawn(*effects.shell,.02));shells.update(.02);
+  REQUIRE(shells.shells().size()==(double_shot ? 2U : 1U));
+  REQUIRE(assets.has_shell_model("models/shotgunshell.mdl"));
+  const auto rendered_shells=assets.materialize_shells(shells.shells(),.02);
+  REQUIRE(rendered_shells);REQUIRE(rendered_shells->frame);
+  REQUIRE(rendered_shells->frame->studio_instances().size()==shells.shells().size());
+  const auto shell_asset=rendered_shells->frame->studio_instances()[0U].studio_asset_index;
+  for(const auto& shell:rendered_shells->frame->studio_instances()) CHECK(shell.studio_asset_index==shell_asset);
+  // Both resources are ready: a named shotshell must not silently use brass.
+  if(assets.has_shell_model("models/shell.mdl")) {
+    auto brass=shells.shells()[0U];brass.model_name.fill('\0');
+    constexpr std::string_view name="models/shell.mdl";std::copy(name.begin(),name.end(),brass.model_name.begin());
+    const auto other=assets.materialize_shells(std::span{&brass,1U},.02);REQUIRE(other);REQUIRE(other->frame);
+    CHECK(other->frame->studio_instances()[0U].studio_asset_index!=shell_asset);
+  }
+  auto bad=shells.shells()[0U];bad.model_name.fill('\0');
+  constexpr std::string_view absent="models/not_authorized.mdl";
+  std::copy(absent.begin(),absent.end(),bad.model_name.begin());
+  CHECK_FALSE(assets.materialize_shells(std::span{&bad,1U},.02));
+  const auto audio=host.drain_audio();REQUIRE(audio.count==1U);
+  CHECK(audio.cues[0U].reference.name()==(double_shot ? "weapons/dbarrel1.wav" : "weapons/sbarrel1.wav"));
+  CHECK(audio.cues[0U].kind==api::LocalSoundKind::fire);
+
+  // Installed animation may move only hidden parts during its first fraction
+  // of a frame. The optional visual control uses an interior metadata-derived
+  // point; fixed early sampling remains the mandatory authored-fixture test.
+  const auto elapsed=interior_animation ?
+      0.25*static_cast<double>(metadata->sequences[expected_sequence].frame_count-1U)/
+          metadata->sequences[expected_sequence].fps : .06;
+  const auto later_time=.02+elapsed;
+  const auto later=host.sample(later_time);REQUIRE(later.visual);
+  const auto advanced=host.viewmodel(state,metadata,later_time,later.visual);
+  CHECK(advanced.sequence==expected_sequence);CHECK(advanced.body==2U);
+  CHECK(advanced.frame_coordinate==Catch::Approx(elapsed*metadata->sequences[expected_sequence].fps));
+  CHECK(later.visual->restart_identity==started.visual->restart_identity);
+  const auto second=assets.materialize_viewmodel(advanced);REQUIRE(second);REQUIRE(second->frame);
+  const auto& a=first->frame->studio_instances()[0U];const auto& b=second->frame->studio_instances()[0U];
+  CHECK(a.studio_asset_index==b.studio_asset_index);CHECK(first->package==second->package);
+  CHECK_FALSE(std::ranges::equal(first->frame->studio_poses()[a.pose_index].bone_matrices,
+      second->frame->studio_poses()[b.pose_index].bone_matrices));
+  host.submit(accepted,later_time);const auto repeated=host.sample(later_time);REQUIRE(repeated.visual);
+  CHECK(repeated.visual->restart_identity==started.visual->restart_identity);
+  view.now_seconds=later_time;const auto duplicate=host.local_visuals(view);
+  CHECK_FALSE(duplicate.shell);CHECK(duplicate.extra_shell_count==0U);
+  CHECK_FALSE(duplicate.world_impact);CHECK(duplicate.extra_impact_count==0U);
+  CHECK(host.drain_audio().count==0U);
+  shells.update(2.6);CHECK(shells.shells().empty());
+  CHECK(client::runtime_observation_canonical_hash(state)==canonical);
+  CHECK(state.weapon_slots[0U].clip==8);CHECK(state.weapon_hud.reserve_ammo[2U]==16U);
+  return {*first,*second};
+}
+
+using E17FramePair=std::pair<hlclient::renderer::RenderDynamicEntities,hlclient::renderer::RenderDynamicEntities>;
+std::array<E17FramePair,3U> e17_materialized_reload(app::RuntimeReplayLocalAssets& assets,
+    const client::RuntimeClientObservationState& initial,bool interior_animation=false) {
+  namespace api=hlclient::game_api;
+  auto state=initial;state.weapon_slots[0U].clip=2;state.weapon_hud.clips[7U]=2;
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  const auto metadata=assets.presentation_model(state.generation,21U);REQUIRE(metadata);
+  api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({state.generation,1U,1U});host.set_movement_audio_time_origin(0.0);
+  host.bind_model(metadata);host.observe(state,0.0);(void)host.drain_audio();
+  host.submit({state.generation,1U,hlclient::goldsrc::kReferenceGoldSrcButtonReload,.02},.02);
+  const auto elapsed=[&](std::uint32_t sequence) {
+    // Inspected installed insert frame2.25 moves the left hand/shell below
+    // the 60-degree view frustum, while weapon bones29/30 stay unchanged
+    // through frame4. At frame6 the shell enters the frustum and weapon
+    // bone29 also moves. Observe that actual visible insert phase, not only
+    // a hidden CPU-palette change; authored-fixture sampling stays 40ms.
+    const auto fraction=sequence==3U ? 2.0/3.0 : 0.25;
+    return interior_animation ? fraction*static_cast<double>(metadata->sequences[sequence].frame_count-1U)/
+        metadata->sequences[sequence].fps : .04;
+  };
+  const auto materialize=[&](std::uint32_t sequence,double now) -> E17FramePair {
+    const auto start=host.sample(now);REQUIRE(start.visual);CHECK(start.visual->sequence==sequence);
+    const auto intent=host.viewmodel(state,metadata,now,start.visual);
+    REQUIRE(intent.status==api::ViewmodelStatus::ready);CHECK(intent.body==0U);
+    const auto first=assets.materialize_viewmodel(intent);REQUIRE(first);REQUIRE(first->frame);
+    const auto later_time=now+elapsed(sequence);
+    const auto advanced=host.sample(later_time);REQUIRE(advanced.visual);
+    CHECK(advanced.visual->restart_identity==start.visual->restart_identity);
+    const auto later=host.viewmodel(state,metadata,later_time,advanced.visual);
+    CHECK(later.sequence==sequence);CHECK(later.frame_coordinate>intent.frame_coordinate);
+    const auto second=assets.materialize_viewmodel(later);REQUIRE(second);REQUIRE(second->frame);
+    const auto& a=first->frame->studio_instances()[0U];const auto& b=second->frame->studio_instances()[0U];
+    CHECK_FALSE(std::ranges::equal(first->frame->studio_poses()[a.pose_index].bone_matrices,
+        second->frame->studio_poses()[b.pose_index].bone_matrices));
+    CHECK(host.drain_audio().count==0U); // Pump/reload audio remains server-authoritative.
+    api::LocalVisualContext context{{0,0,64},{1,0,0},{0,-1,0},{0,0,1},{},later_time};
+    const auto effects=host.local_visuals(context);CHECK_FALSE(effects.flash);CHECK_FALSE(effects.shell);
+    CHECK_FALSE(effects.world_impact);CHECK(effects.extra_shell_count==0U);CHECK(effects.extra_impact_count==0U);
+    return {*first,*second};
+  };
+  const auto fresh=[&](std::int32_t stage,std::int16_t clip,std::uint8_t reserve,double now) {
+    ++state.publication_revision;state.client_metadata.source->record_identity=state.publication_revision;
+    REQUIRE(state.publication_revision<=std::numeric_limits<std::size_t>::max());
+    state.client_metadata.source->record_ordinal=static_cast<std::size_t>(state.publication_revision);
+    state.weapon_slots[0U].special_reload_state=stage;state.weapon_slots[0U].clip=clip;
+    state.weapon_hud.clips[7U]=clip;state.weapon_hud.reserve_ammo[2U]=reserve;
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);host.observe(state,now);
+  };
+  const auto start=materialize(5U,.02);
+  CHECK(state.weapon_slots[0U].clip==2);CHECK(state.weapon_hud.reserve_ammo[2U]==16U);
+  fresh(1,2,16,std::max(.08,.04+elapsed(5U)));fresh(2,2,16,.64);
+  const auto insert=materialize(3U,.64);
+  const auto insert_sample_time=.64+elapsed(3U);
+  const auto insert_identity=host.sample(insert_sample_time).visual->restart_identity;
+  const auto repeat_time=std::max(.70,insert_sample_time+.02);
+  host.observe(state,repeat_time);CHECK(host.sample(repeat_time).visual->restart_identity==insert_identity);
+  fresh(1,3,15,1.16);CHECK(host.sample(1.16).visual->sequence==3U);
+  CHECK(host.sample(1.16).visual->restart_identity==insert_identity);
+  fresh(2,3,15,1.18);CHECK(host.sample(1.18).visual->restart_identity!=insert_identity);
+  fresh(0,8,10,1.75);const auto finish=materialize(4U,1.75);
+  CHECK(state.weapon_slots[0U].clip==8);CHECK(state.weapon_hud.reserve_ammo[2U]==10U);
+  CHECK(client::runtime_observation_canonical_hash(state)==state.canonical_state_hash);
+  return {start,insert,finish};
+}
+
+TEST_CASE("E17 approved project-owned Shotgun host animates single double reload and materializes named shotshells",
+          "[e17][local-capture-assets][first-person][game-api][shotshell]") {
+  LocalContext context;const auto model=e17_owned_shotgun_viewmodel();
+  context.root.write("valve","models/v_shotgun.mdl",model);
+  context.root.write("valve","models/shell.mdl",context.model);
+  auto shotshell=context.model;fixture::studio_write_fixed_string(shotshell,8U,64U,"owned_shotshell.mdl");
+  context.root.write("valve","models/shotgunshell.mdl",shotshell);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/v_shotgun.mdl",21U,static_cast<std::uint32_t>(model.size()),0U},
+      {2U,"models/shell.mdl",22U,static_cast<std::uint32_t>(context.model.size()),0U},
+      {2U,"models/shotgunshell.mdl",23U,static_cast<std::uint32_t>(shotshell.size()),0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  INFO((created.error ? created.error->context : "ready"));REQUIRE(created.projection);
+  const auto state=e17_shotgun_viewmodel_state();client::ClientWorldState world;
+  REQUIRE(created.projection->reset_generation(state,world));
+  for(const auto buttons:{hlclient::goldsrc::kReferenceGoldSrcButtonAttack,
+                         hlclient::goldsrc::kReferenceGoldSrcButtonAttack2}) {
+    CAPTURE(buttons);(void)e17_materialized_shotgun_action(*created.projection,state,buttons);
+  }
+  (void)e17_materialized_reload(*created.projection,state);
+}
+
+TEST_CASE("E17 normal Shotgun single double and reload alter GPU pixels and stay camera local",
+          "[e17][local-capture-assets][first-person][opengl][actual-context]") {
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  if(!gl || !fixture::entity_opengl_fixture::capable_context()) SKIP("OpenGL 3.3 unavailable");
+  gl->initialize_renderer();
+  LocalContext context;const auto model=e17_owned_shotgun_viewmodel();
+  context.root.write("valve","models/v_shotgun.mdl",model);
+  context.root.write("valve","models/shotgunshell.mdl",context.model);
+  const auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/v_shotgun.mdl",21U,static_cast<std::uint32_t>(model.size()),0U},
+      {2U,"models/shotgunshell.mdl",23U,static_cast<std::uint32_t>(context.model.size()),0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(created.projection);const auto state=e17_shotgun_viewmodel_state();client::ClientWorldState world;
+  REQUIRE(created.projection->reset_generation(state,world));
+  std::vector<E17FramePair> pairs;
+  for(const auto buttons:{hlclient::goldsrc::kReferenceGoldSrcButtonAttack,
+                         hlclient::goldsrc::kReferenceGoldSrcButtonAttack2})
+    pairs.push_back(e17_materialized_shotgun_action(*created.projection,state,buttons));
+  for(const auto& pair:e17_materialized_reload(*created.projection,state)) pairs.push_back(pair);
+  hlclient::renderer::RenderScene scene;
+  const auto draw=[&] {
+    gl->renderer().render(scene,{320,240});CHECK(glGetError()==GL_NO_ERROR);
+    return gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);
+  };
+  const auto baseline=draw();REQUIRE(baseline);
+  for(std::size_t i=0;i<pairs.size();++i) {
+    CAPTURE(i);const auto& [first,second]=pairs[i];
+    scene.first_person_entities=first;const auto initial=draw();REQUIRE(initial);
+    CHECK(initial.non_clear_pixel_count>0U);CHECK_FALSE(std::ranges::equal(initial.rgba8,baseline.rgba8));
+    const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;
+    scene.first_person_entities=second;const auto animated=draw();REQUIRE(animated);
+    CHECK(animated.non_clear_pixel_count>0U);CHECK_FALSE(std::ranges::equal(initial.rgba8,animated.rgba8));
+    scene.camera.position={123,-77,28};scene.camera.target={123,-76.5F,28.866F};
+    const auto turned=draw();REQUIRE(turned);CHECK(std::ranges::equal(animated.rgba8,turned.rgba8));
+    CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+  }
+  scene.first_person_entities.reset();CHECK(std::ranges::equal(draw().rgba8,baseline.rgba8));
+  gl->release_renderer();
+}
+
 // The same independent asset provider now consumes the concrete module's
 // neutral selection, rather than interpreting weapon state itself.
 struct HalfLifeViewmodelFixture {
@@ -2612,6 +4673,230 @@ TEST_CASE("Brush cutout and server texture state preserve depth without a Studio
   gl->release_renderer();
 }
 
+TEST_CASE("E15 optional approved MP5 models expose imported sequence and socket metadata",
+          "[e15][e16][installed-mp5][local-capture-assets]") {
+  std::filesystem::path root;
+  wchar_t* value=nullptr;std::size_t count=0;
+  if(_wdupenv_s(&value,&count,L"HLCLIENT_LOCAL_GAME_ROOT")==0 && value) root=value;
+  std::free(value);
+  if(root.lexically_normal()!=std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life"}.lexically_normal())
+    SKIP("No exact opt-in approved research root");
+  const std::array tokens{"maps/crossfire.bsp","models/v_9mmAR.mdl","models/p_9mmAR.mdl","models/shell.mdl"};
+  std::array<std::filesystem::file_time_type,4> times;
+  for(std::size_t i=0;i<tokens.size();++i) {
+    if(!std::filesystem::is_regular_file(root/"valve"/tokens[i])) SKIP("Optional MP5 asset absent");
+    times[i]=std::filesystem::last_write_time(root/"valve"/tokens[i]);
+  }
+  const auto resources=readiness::parse_resource_list({{2U,tokens[0],9U,0U,0U},
+      {2U,tokens[1],21U,0U,0U},{2U,tokens[2],22U,0U,0U},{2U,tokens[3],23U,0U,0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info(tokens[0]),root,"valve",
+      app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(created.projection);
+  for(const auto slot:{21U,22U,23U}) {
+    const auto model=created.projection->studio_model_data(slot); REQUIRE(model);
+    std::cout << "e15_asset virtual=" << tokens[slot-20U] << " bones=" << model->bones.size()
+      << " attachments=" << model->attachments.size() << " sequences=" << model->sequences.size()
+      << " bodyparts=" << model->bodyparts.size() << " skins=" << model->skin_families.size()
+      << " materials=" << model->textures.size() << '\n';
+    for(std::size_t i=0;i<model->sequences.size();++i) {
+      const auto& s=model->sequences[i];
+      std::cout << "sequence=" << i << " label=" << s.label << " frames=" << s.frame_count
+        << " fps=" << s.frames_per_second << '\n';
+      for(const auto& e:s.events) std::cout << "marker=" << e.event_number << " frame=" << e.frame << '\n';
+    }
+    for(const auto& a:model->attachments) std::cout << "attachment=" << a.name << " bone=" << a.bone_index
+      << " origin=" << a.local_origin.x << ',' << a.local_origin.y << ',' << a.local_origin.z << '\n';
+    for(std::size_t i=0;i<model->bones.size();++i) {
+      const auto& b=model->bones[i]; hlclient::assets::AssetVector3 lo{1e9F,1e9F,1e9F},hi{-1e9F,-1e9F,-1e9F};
+      std::size_t n=0;
+      for(const auto& sub:model->submodels) for(const auto& v:sub.vertices) if(v.position_bone_index==i) {
+        ++n;const auto p=v.source_position;
+        lo.x=std::min(lo.x,p.x);lo.y=std::min(lo.y,p.y);lo.z=std::min(lo.z,p.z);
+        hi.x=std::max(hi.x,p.x);hi.y=std::max(hi.y,p.y);hi.z=std::max(hi.z,p.z);
+      }
+      std::cout << "bone=" << i << " name=" << b.name << " parent=" << b.parent_index
+        << " translation=" << b.default_translation.x << ',' << b.default_translation.y << ',' << b.default_translation.z
+        << " rotation=" << b.default_rotation_radians.x << ',' << b.default_rotation_radians.y << ',' << b.default_rotation_radians.z
+        << " vertices=" << n << " bounds=" << lo.x << ',' << lo.y << ',' << lo.z << ':' << hi.x << ',' << hi.y << ',' << hi.z << '\n';
+    }
+  }
+#if HLCLIENT_HAS_GAME_HALFLIFE
+  // Actual imported metadata must pass the same gate and normal-host path as
+  // the project-owned regression above; no copied or fabricated local pose.
+  const auto state=e16_mp5_viewmodel_state();client::ClientWorldState world;
+  REQUIRE(created.projection->reset_generation(state,world));
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  const bool gpu_available=gl && fixture::entity_opengl_fixture::capable_context();
+  if (gpu_available) gl->initialize_renderer();
+  else WARN("Optional MP5 device control unavailable; approved importer/host/Studio proof still runs");
+  for (const auto buttons:{hlclient::goldsrc::kReferenceGoldSrcButtonAttack,
+                           hlclient::goldsrc::kReferenceGoldSrcButtonAttack2}) {
+    CAPTURE(buttons);
+    const auto [first,second]=e16_materialized_mp5_action(*created.projection,state,buttons);
+    if (gpu_available) {
+      hlclient::renderer::RenderScene scene;scene.first_person_entities=first;
+      gl->renderer().render(scene,{320,240});CHECK(glGetError()==GL_NO_ERROR);
+      const auto initial=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);
+      REQUIRE(initial);REQUIRE(initial.non_clear_pixel_count>0U);
+      const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;
+      scene.first_person_entities=second;
+      gl->renderer().render(scene,{320,240});CHECK(glGetError()==GL_NO_ERROR);
+      const auto animated=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);
+      REQUIRE(animated);REQUIRE(animated.non_clear_pixel_count>0U);
+      CHECK_FALSE(std::ranges::equal(initial.rgba8,animated.rgba8));
+      CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+    }
+  }
+  if (gpu_available) gl->release_renderer();
+#endif
+  for(std::size_t i=0;i<tokens.size();++i) CHECK(times[i]==std::filesystem::last_write_time(root/"valve"/tokens[i]));
+  hlclient::goldsrc::ApprovedSoundAssets sounds{created.projection->sound_resources()};
+  for(const std::string_view sample:{"weapons/hks1.wav","weapons/hks2.wav"}) {
+    hlclient::game_api::LocalSoundReference reference;
+    reference.source=hlclient::game_api::SoundReferenceSource::pinned_halflife_client_sound_profile;
+    std::copy(sample.begin(),sample.end(),reference.sample.begin());
+    auto result=sounds.request_local(reference);
+    for(unsigned retry=0;retry<1000 && result.status==hlclient::goldsrc::SoundAssetStatus::pending;++retry) {
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});result=sounds.request_local(reference);
+    }
+    REQUIRE(result.status==hlclient::goldsrc::SoundAssetStatus::ready);REQUIRE(result.asset);
+    CHECK(std::any_of(result.asset->interleaved_samples.begin(),result.asset->interleaved_samples.end(),
+        [](float x){return std::isfinite(x)&&x!=0;}));
+  }
+}
+
+#if HLCLIENT_HAS_GAME_HALFLIFE
+TEST_CASE("E17 optional approved Shotgun models and sounds pass normal importer host and Studio path read only",
+          "[e17][installed-shotgun][shotgun-pmodel][local-capture-assets][first-person]") {
+  std::filesystem::path root;
+  wchar_t* value=nullptr;std::size_t count=0;
+  if(_wdupenv_s(&value,&count,L"HLCLIENT_LOCAL_GAME_ROOT")==0 && value) root=value;
+  std::free(value);
+  if(root.lexically_normal()!=std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life"}.lexically_normal())
+    SKIP("No exact opt-in approved research root");
+  constexpr std::array<std::string_view,11U> tokens{
+      "maps/crossfire.bsp","models/v_shotgun.mdl","models/p_shotgun.mdl","models/shotgunshell.mdl",
+      "models/shell.mdl","sound/weapons/sbarrel1.wav","sound/weapons/dbarrel1.wav",
+      "sound/weapons/reload1.wav","sound/weapons/scock1.wav","sound/weapons/sshell1.wav","models/player.mdl"};
+  std::array<std::filesystem::file_time_type,tokens.size()> times;
+  for(std::size_t i=0;i<tokens.size();++i) {
+    if(!std::filesystem::is_regular_file(root/"valve"/tokens[i])) SKIP("Optional Shotgun resource absent");
+    times[i]=std::filesystem::last_write_time(root/"valve"/tokens[i]);
+  }
+  const auto resources=readiness::parse_resource_list({
+      {2U,std::string{tokens[0U]},9U,0U,0U},{2U,std::string{tokens[1U]},21U,0U,0U},
+      {2U,std::string{tokens[2U]},22U,0U,0U},{2U,std::string{tokens[3U]},23U,0U,0U},
+      {2U,std::string{tokens[4U]},24U,0U,0U},
+      {2U,std::string{tokens[10U]},7U,0U,0U},
+      {0U,"weapons/reload1.wav",31U,0U,0U},{0U,"weapons/scock1.wav",32U,0U,0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info(tokens[0U]),
+      root,"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  INFO((created.error ? created.error->context : "ready"));REQUIRE(created.projection);
+  const auto v=created.projection->studio_model_data(21U);
+  const auto p=created.projection->studio_model_data(22U);
+  const auto shell=created.projection->studio_model_data(23U);
+  REQUIRE(v);REQUIRE(p);REQUIRE(shell);
+  CHECK(v->bones.size()==32U);CHECK(v->attachments.size()==1U);REQUIRE(v->sequences.size()==10U);
+  CHECK(v->bodyparts.size()==2U);CHECK(v->skin_families.size()==1U);
+  CHECK(p->bones.size()==12U);CHECK(p->attachments.empty());CHECK(p->sequences.size()==1U);
+  CHECK(shell->bones.size()==1U);CHECK(shell->attachments.empty());CHECK(shell->sequences.size()==1U);
+  constexpr std::array<std::string_view,10U> labels{
+      "sm_idle","shoot","shoot_big","reload","pump","start_reload","draw","reholster","idle4","deepidle"};
+  constexpr std::array<std::uint32_t,10U> frames{21U,21U,21U,10U,11U,9U,13U,11U,21U,61U};
+  constexpr std::array<double,10U> fps{9,20,13,16,13,12,24,30,9,12};
+  for(std::size_t i=0;i<labels.size();++i) {
+    CAPTURE(i);CHECK(v->sequences[i].label==labels[i]);CHECK(v->sequences[i].frame_count==frames[i]);
+    CHECK(v->sequences[i].frames_per_second==Catch::Approx(fps[i]));
+  }
+  const auto state=e17_shotgun_viewmodel_state();client::ClientWorldState world;
+  REQUIRE(created.projection->reset_generation(state,world));
+  std::vector<E17FramePair> pairs;
+  for(const auto buttons:{hlclient::goldsrc::kReferenceGoldSrcButtonAttack,
+                         hlclient::goldsrc::kReferenceGoldSrcButtonAttack2})
+    pairs.push_back(e17_materialized_shotgun_action(*created.projection,state,buttons,true));
+  for(const auto& pair:e17_materialized_reload(*created.projection,state,true)) pairs.push_back(pair);
+  auto gl=fixture::entity_opengl_fixture::try_context(640,480);
+  if(gl && fixture::entity_opengl_fixture::capable_context()) {
+    gl->initialize_renderer();hlclient::renderer::RenderScene scene;
+    const auto draw=[&] {
+      gl->renderer().render(scene,{640,480});CHECK(glGetError()==GL_NO_ERROR);
+      return gl->renderer().observe_framebuffer({640,480},scene.clear_color,true);
+    };
+    const auto baseline=draw();REQUIRE(baseline);
+    for(std::size_t i=0;i<pairs.size();++i) {
+      CAPTURE(i);const auto& [first,second]=pairs[i];scene.first_person_entities=first;
+      if(i==3U) {
+        const auto& a=first.frame->studio_instances()[0U];const auto& b=second.frame->studio_instances()[0U];
+        const auto& before=first.frame->studio_poses()[a.pose_index].bone_matrices;
+        const auto& after=second.frame->studio_poses()[b.pose_index].bone_matrices;
+        REQUIRE(before.size()==32U);REQUIRE(after.size()==32U);
+        CHECK(before[29U]!=after[29U]); // Visible weapon-owning bone, not just hidden fingers/shell.
+      }
+      const auto initial=draw();REQUIRE(initial);REQUIRE(initial.non_clear_pixel_count>0U);
+      CHECK_FALSE(std::ranges::equal(initial.rgba8,baseline.rgba8));
+      const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;
+      scene.first_person_entities=second;const auto animated=draw();REQUIRE(animated);
+      CHECK_FALSE(std::ranges::equal(initial.rgba8,animated.rgba8));
+      scene.camera.position={-30,84,105};scene.camera.target={-30.5F,84.5F,105.707F};
+      CHECK(std::ranges::equal(draw().rgba8,animated.rgba8));
+      CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+    }
+    gl->release_renderer();
+  } else WARN("Optional actual Shotgun GPU control unavailable; approved importer/host/Studio proof still runs");
+  gl.reset(); // The remote control owns its own normal context below.
+  const auto approved_player=created.projection->studio_model_data(7U);REQUIRE(approved_player);
+  const auto select_sequence=[&](std::string_view first,std::string_view second={}) {
+    const auto found=std::ranges::find_if(approved_player->sequences,[&](const auto& sequence) {
+      return sequence.label.find(first)!=std::string::npos &&
+          (second.empty() || sequence.label.find(second)!=std::string::npos);
+    });
+    REQUIRE(found!=approved_player->sequences.end());
+    return static_cast<std::uint32_t>(found-approved_player->sequences.begin());
+  };
+  const std::array<std::uint32_t,4U> remote_sequences{
+      select_sequence("walk"),select_sequence("crouch"),select_sequence("shoot","shotgun"),select_sequence("die")};
+  const auto& map=*created.projection->surface_scene()->world_package();
+  hlclient::assets::AssetVector3 remote_origin{};bool floor_found=false;
+  for(const auto& surface:map.surface_ranges()) {
+    for(std::size_t at=surface.first_index;at+2U<static_cast<std::size_t>(surface.first_index)+surface.index_count;at+=3U) {
+      const auto& a=map.vertices()[map.indices()[at]];
+      if(a.normal.z<.9F) continue;
+      const auto b=map.vertices()[map.indices()[at+1U]].position,c=map.vertices()[map.indices()[at+2U]].position;
+      remote_origin={(a.position.x+b.x+c.x)/3,(a.position.y+b.y+c.y)/3,(a.position.z+b.z+c.z)/3+36};
+      floor_found=true;break;
+    }
+    if(floor_found) break;
+  }
+  REQUIRE(floor_found);
+  e17_remote_shotgun_merge_control(*created.projection,remote_origin,remote_sequences,true);
+  hlclient::goldsrc::ApprovedSoundAssets sounds{created.projection->sound_resources()};
+  for(const std::string_view sample:{"weapons/sbarrel1.wav","weapons/dbarrel1.wav","weapons/sshell1.wav"}) {
+    hlclient::game_api::LocalSoundReference reference;
+    reference.source=hlclient::game_api::SoundReferenceSource::pinned_halflife_client_sound_profile;
+    std::copy(sample.begin(),sample.end(),reference.sample.begin());
+    auto result=sounds.request_local(reference);
+    for(unsigned retry=0;retry<1000U && result.status==hlclient::goldsrc::SoundAssetStatus::pending;++retry) {
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});result=sounds.request_local(reference);
+    }
+    REQUIRE(result.status==hlclient::goldsrc::SoundAssetStatus::ready);REQUIRE(result.asset);
+    REQUIRE_FALSE(result.asset->interleaved_samples.empty());
+    CHECK(std::ranges::all_of(result.asset->interleaved_samples,[](float x){return std::isfinite(x);}));
+    CHECK(std::ranges::any_of(result.asset->interleaved_samples,[](float x){return x!=0.0F;}));
+  }
+  for(const auto slot:{std::uint16_t{31U},std::uint16_t{32U}}) {
+    auto result=sounds.request(slot);
+    for(unsigned retry=0;retry<1000U && result.status==hlclient::goldsrc::SoundAssetStatus::pending;++retry) {
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});result=sounds.request(slot);
+    }
+    REQUIRE(result.status==hlclient::goldsrc::SoundAssetStatus::ready);REQUIRE(result.asset);
+    CHECK(std::ranges::all_of(result.asset->interleaved_samples,[](float x){return std::isfinite(x);}));
+    CHECK(std::ranges::any_of(result.asset->interleaved_samples,[](float x){return x!=0.0F;}));
+  }
+  for(std::size_t i=0;i<tokens.size();++i)
+    CHECK(times[i]==std::filesystem::last_write_time(root/"valve"/tokens[i]));
+}
+#endif
+
 TEST_CASE("Opt-in crossfire inspected brushes traverse the live provider and produce pixels",
           "[live-brush][local-brush-control][opengl]") {
   std::filesystem::path root;
@@ -2625,6 +4910,8 @@ TEST_CASE("Opt-in crossfire inspected brushes traverse the live provider and pro
   auto resources=readiness::parse_resource_list({
       {2U,"maps/crossfire.bsp",9U,0U,0U}, {2U,"*1",101U,0U,0U},
       {2U,"*12",112U,0U,0U}, {2U,"*21",121U,0U,0U}, {2U,"*38",138U,0U,0U},
+      {2U,"*5",105U,0U,0U}, {2U,"*44",144U,0U,0U}, {2U,"*46",146U,0U,0U},
+      {2U,"*47",147U,0U,0U}, {2U,"*66",166U,0U,0U},
       {2U,"models/w_medkit.mdl",200U,0U,0U}, {2U,"models/w_battery.mdl",201U,0U,0U}});
   auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/crossfire.bsp"),
       root,"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
@@ -2633,11 +4920,11 @@ TEST_CASE("Opt-in crossfire inspected brushes traverse the live provider and pro
   auto gl=fixture::entity_opengl_fixture::try_context(320,240);
   if (!gl || !fixture::entity_opengl_fixture::capable_context()) SKIP("OpenGL 3.3 unavailable");
   gl->initialize_renderer();
-  auto state=observation(); state.packet_entities.resize(1);
+  auto state=observation(); state.packet_entities.resize(1);state.packet_entities.reserve(2);
   auto& entity=state.packet_entities[0];
   entity.origin={0.0,0.0,0.0}; entity.angles={0.0,0.0,0.0};
   client::ClientWorldState world;
-  for (const auto model_index : {1U,12U,21U,38U}) {
+  for (const auto model_index : {1U,12U,21U,38U,5U,44U,46U,47U,66U}) {
     entity.model_index=100U+model_index; entity.render_mode=model_index==12U ? 4U : 0U;
     ++state.publication_revision; state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
     if (!world.world_scene()) REQUIRE(created.projection->reset_generation(state,world));
@@ -2667,6 +4954,19 @@ TEST_CASE("Opt-in crossfire inspected brushes traverse the live provider and pro
     const auto& package=*library.render_package();
     const auto model=std::ranges::find_if(library.models(),[&](const auto& value){ return value.source_model_index()==model_index; });
     REQUIRE(model!=library.models().end());
+    if(model_index==66U) {
+      bool button_texture=false;
+      for(const auto& surface:model->surfaces()) {
+        const auto& material=package.materials()[surface.render_material_index];
+        const auto& texture=package.textured_world().textures.textures()[material.base_texture_asset_index];
+        if(texture.name=="+abutton2" || texture.name=="+Abutton2") {
+          button_texture=true;
+          CHECK(texture.alpha_mode==hlclient::assets::WorldTextureAlphaMode::opaque);
+          CHECK_FALSE(texture.mip_levels[0].rgba_pixels.empty());
+        }
+      }
+      CHECK(button_texture);
+    }
     bool pixels=false;
     for (const auto& surface : model->surfaces()) {
       const auto& vertex=package.vertices()[package.indices()[surface.first_index]];
@@ -2694,6 +4994,67 @@ TEST_CASE("Opt-in crossfire inspected brushes traverse the live provider and pro
       }
     }
     INFO("offline inspected submodel=" << model_index); CHECK(pixels);
+    if(model_index==66U) {
+      // The earlier any-face control can pass on a side face. Exercise the
+      // actual visible button face, its alternate bank and real console behind
+      // it through production depth/PVS, without inventing a live server entity.
+      const auto face=std::ranges::find_if(model->surfaces(),[&](const auto& surface){
+        const auto& material=package.materials()[surface.render_material_index];
+        const auto& texture=package.textured_world().textures.textures()[material.base_texture_asset_index];
+        return texture.name=="+abutton2" || texture.name=="+Abutton2";
+      });
+      REQUIRE(face!=model->surfaces().end());
+      REQUIRE(library.alternate_by_material()[face->render_material_index]);
+      const auto center=hlclient::assets::AssetVector3{
+          (face->bounds.minimum.x+face->bounds.maximum.x)*.5F,
+          (face->bounds.minimum.y+face->bounds.maximum.y)*.5F,
+          (face->bounds.minimum.z+face->bounds.maximum.z)*.5F};
+      const auto normal=package.vertices()[package.indices()[face->first_index]].normal;
+      std::cout<<"offline_crossfire_button_front center="<<center.x<<','<<center.y<<','<<center.z
+          <<" normal="<<normal.x<<','<<normal.y<<','<<normal.z<<'\n';
+      auto console=entity;console.entity_number=entity.entity_number+1U;console.model_index=144U;
+      console.frame=0.0;console.solid=4U;console.brush_move_type=7U;state.packet_entities.push_back(console);
+      // The real strike_ready_door covers this face at its initial origin.
+      // Observe both test-owned server poses; never force the map's ready state.
+      for(const auto console_z:{0.0,-62.0}) for(const auto distance:{48.0F,96.0F}) for(const auto offset:{0.0F,20.0F}) {
+        state.packet_entities[1].origin.z=console_z;
+        std::vector<std::uint8_t> first_bank;
+        for(const auto bank:{0U,1U}) {
+          CAPTURE(console_z,distance,offset,bank);entity.frame=static_cast<double>(bank);
+          ++state.publication_revision;state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+          REQUIRE(created.projection->project_entities(state,world));
+          REQUIRE(world.runtime_brushes()->instances.size()==2U);
+          world.set_camera({{center.x+normal.x*distance+offset,center.y+normal.y*distance,
+              center.z+normal.z*distance},center,{0,0,1}});
+          auto scene=client::build_render_scene(world);
+          const auto submitted_before=gl->renderer().statistics().runtime_brush_submitted_count;
+          gl->renderer().render(scene,{320,240});
+          const auto visible=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);
+          REQUIRE(visible);CHECK(glGetError()==GL_NO_ERROR);
+          CHECK(gl->renderer().statistics().runtime_brush_submitted_count>=submitted_before+1U);
+          auto without_button=std::make_shared<hlclient::world_scene_render::RuntimeBrushRenderFrame>(*scene.static_world->runtime_brushes);
+          std::erase_if(without_button->instances,[](const auto& instance){return instance.source_model_index==66U;});
+          REQUIRE(without_button->instances.size()==1U);
+          scene.static_world->runtime_brushes=without_button;
+          gl->renderer().render(scene,{320,240});
+          const auto baseline=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);
+          REQUIRE(baseline);CHECK(glGetError()==GL_NO_ERROR);
+          std::size_t changed=0;
+          for(std::size_t pixel=0;pixel<visible.rgba8.size();pixel+=4U)
+            if(!std::equal(visible.rgba8.begin()+pixel,visible.rgba8.begin()+pixel+4U,baseline.rgba8.begin()+pixel))++changed;
+          if(console_z==0.0)CHECK(changed==0U);
+          else CHECK(changed>32U);
+          std::cout<<"offline_crossfire_button bank="<<bank<<" distance="<<distance<<" offset="<<offset
+              <<" changed_pixels="<<changed<<" console_z="<<console_z<<" live_state=false\n";
+          if(bank==0U)first_bank=visible.rgba8;
+          else {
+            const bool banks_differ=first_bank!=visible.rgba8;
+            CHECK(banks_differ==(console_z!=0.0));
+          }
+        }
+      }
+      state.packet_entities.pop_back();entity.frame=0.0;
+    }
   }
   CHECK(gl->renderer().statistics().brush_upload_count==1U);
   REQUIRE(world.world_scene()->brush_library().alternate_textures());
@@ -2764,4 +5125,593 @@ TEST_CASE("Decoded brush delta retention client-only and malformed suffix use on
     }
   }
 }
+// E16 fixtures deliberately use no Half-Life asset names. Resource slots are
+// sparse and independently assigned; only approved session bindings select them.
+[[nodiscard]] std::vector<std::byte> e16_animated_sprite(const bool index_alpha) {
+  namespace sf = fixture::sprite_fixture;
+  auto bytes=sf::literal_header_and_palette(4,index_alpha ? 2 : 1,index_alpha ? 4 : 2,0,8,8);
+  const auto color=[&](std::size_t index,std::array<unsigned char,3> rgb) {
+    for(std::size_t c=0;c<3;++c) bytes[sf::kPaletteOffset+index*3+c]=std::byte{rgb[c]};
+  };
+  color(0,{0,0,0});color(1,{180,90,30});color(2,{30,90,180});color(255,{180,160,140});
+  for(unsigned frame=0;frame<4;++frame) {
+    sf::FrameSpec image{-4,4,8,8,std::vector<std::byte>(64,std::byte{0})};
+    for(unsigned y=2;y<6;++y) for(unsigned x=2;x<6;++x)
+      image.pixels[y*8+x]=index_alpha ? std::byte{128} : std::byte{static_cast<unsigned char>(1+frame%2)};
+    sf::append_single_entry(bytes,image);
+  }
+  return bytes;
+}
+
+[[nodiscard]] client::RuntimeClientObservationState e16_projectiles(
+    std::uint64_t record,double server_seconds,double offset=0.0) {
+  auto state=e10_observation(record,server_seconds,0,0,0,false);
+  state.packet_entities.clear();
+  for(const auto number:{40U,41U}) {
+    client::RuntimePacketEntityObservation entity;
+    entity.entity_number=number;entity.ordinary_visual_schema=true;
+    entity.model_index=number==40 ? 7U : 15U;
+    entity.brush_move_type=10U; // Pinned public MOVETYPE_BOUNCE; never simulated here.
+    entity.origin={0.0,(number==40 ? -5.0 : 5.0)+offset,24.0};
+    entity.angles={0.0,0.0,0.0};entity.body=0U;entity.skin=0;entity.sequence=0U;entity.frame=0.0;
+    state.packet_entities.push_back(entity);
+  }
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  return state;
+}
+
+TEST_CASE("E16 approved ordinary kinetic Studio entities interpolate without game event or physics",
+    "[e16][projectile][local-capture-assets][game-api][runtime-presentation]") {
+  LocalContext context;
+  auto other=context.model;
+  fixture::studio_write_fixed_string(other,8U,64U,"independent_projectile.mdl");
+  context.root.write("valve","models/independent.mdl",other);
+  auto resources=readiness::parse_resource_list({
+      {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(context.map.size()),0U},
+      {2U,"models/shared.mdl",7U,static_cast<std::uint32_t>(context.model.size()),0U},
+      {2U,"models/independent.mdl",15U,static_cast<std::uint32_t>(other.size()),0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(created.projection);
+  hlclient::game_api::GameClientHost host{std::make_unique<E10TestGameClientModule>()};host.reset({1,1,1});
+  client::ClientWorldState world;world.set_camera({{40,0,24},{0,0,24},{0,0,1}});
+  const auto first=e16_projectiles(1,1.0);
+  REQUIRE(created.projection->reset_generation(first,world));
+  REQUIRE(e10_present(*created.projection,host,99.0,1,world,{320,240}));
+  CHECK(e10_instance(world,40).transform.origin.y==Catch::Approx(-5.0F)); // Single sample.
+  auto current=e16_projectiles(2,1.1,8.0);
+  REQUIRE(created.projection->project_entities(current,world));
+  const auto canonical=current.canonical_state_hash;
+  REQUIRE(e10_present(*created.projection,host,99.1,1,world,{320,240}));
+  CHECK(e10_instance(world,40).transform.origin.y==Catch::Approx(-5.0F));
+  REQUIRE(e10_present(*created.projection,host,99.15,1,world,{320,240}));
+  CHECK(e10_instance(world,40).transform.origin.y==Catch::Approx(-1.0F).margin(0.002F));
+  CHECK(e10_instance(world,41).transform.origin.y==Catch::Approx(9.0F).margin(0.002F));
+  CHECK(e10_instance(world,40).studio_asset_index!=e10_instance(world,41).studio_asset_index);
+  CHECK(current.canonical_state_hash==canonical);
+  CHECK(current.packet_entities[0].origin.y==3.0);
+  REQUIRE(e10_present(*created.projection,host,99.6,1,world,{320,240}));
+  CHECK(e10_instance(world,40).transform.origin.y==Catch::Approx(3.0F)); // No extrapolation.
+  CHECK(host.drain_audio().count==0U); // No matching launch event is required.
+
+  // Unknown movement stays the established discrete generic ordinary path.
+  auto unknown=e16_projectiles(3,1.2,12.0);unknown.packet_entities[0].brush_move_type.reset();
+  unknown.canonical_state_hash=client::runtime_observation_canonical_hash(unknown);
+  REQUIRE(created.projection->project_entities(unknown,world));
+  REQUIRE(e10_present(*created.projection,host,101.0,1,world,{320,240}));
+  CHECK(e10_instance(world,40).transform.origin.y==Catch::Approx(7.0F));
+
+  auto removed=e16_projectiles(4,1.3,12.0);removed.packet_entities.erase(removed.packet_entities.begin());
+  removed.canonical_state_hash=client::runtime_observation_canonical_hash(removed);
+  REQUIRE(created.projection->project_entities(removed,world));
+  REQUIRE(e10_present(*created.projection,host,102.0,1,world,{320,240}));
+  REQUIRE(world.entity_frame()->studio_instances().size()==1U);
+  CHECK(world.entity_frame()->studio_instances()[0].entity_number==41U);
+  auto reused=e16_projectiles(5,1.4,20.0);reused.packet_entities[0].model_index=15U;
+  reused.canonical_state_hash=client::runtime_observation_canonical_hash(reused);
+  REQUIRE(created.projection->project_entities(reused,world));
+  REQUIRE(e10_present(*created.projection,host,103.0,1,world,{320,240}));
+  CHECK(e10_instance(world,40).transform.origin.y==Catch::Approx(15.0F));
+  CHECK(e10_instance(world,40).studio_asset_index==e10_instance(world,41).studio_asset_index);
+
+  // New network/map generation discards old positions even with the same slot.
+  auto generation=e16_projectiles(1,0.5,40.0);generation.generation=2;
+  generation.entity_metadata.generation=2;generation.server_time_metadata.generation=2;
+  generation.client_metadata.generation=2;
+  generation.canonical_state_hash=client::runtime_observation_canonical_hash(generation);
+  // Approved resource bindings cannot be reused for an unrelated capture.
+  CHECK_FALSE(created.projection->reset_generation(generation,world));
+  auto fresh=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+      context.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  REQUIRE(fresh.projection);
+  host.reset({2,2,1});REQUIRE(fresh.projection->reset_generation(generation,world));
+  REQUIRE(e10_present(*fresh.projection,host,200.0,1,world,{320,240}));
+  CHECK(e10_instance(world,40).transform.origin.y==Catch::Approx(35.0F));
+  CHECK(world.entity_frame()->interpolation().previous_state_identity==
+      world.entity_frame()->interpolation().current_state_identity);
+}
+
+TEST_CASE("E16 ordinary server projectile produces localized OpenGL pixels and immediate removal",
+    "[e16][projectile][local-capture-assets][opengl][actual-context]") {
+  LocalContext context;
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset,0,-2,-2);
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+12U,0,2,-2);
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+24U,0,0,2);
+  for(std::size_t i=0;i<3;++i)
+    fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioNormalsOffset+i*12U,1,0,0);
+  context.root.write("valve","models/shared.mdl",context.model);
+  auto created=context.create();REQUIRE(created.projection);
+  hlclient::game_api::GameClientHost host{std::make_unique<E10TestGameClientModule>()};host.reset({1,1,1});
+  client::ClientWorldState world;
+  auto state=e16_projectiles(1,1.0);state.packet_entities.resize(1);
+  state.packet_entities[0].origin={0.0,0.0,24.0};
+  // Missing frame/sequence remain a valid static pose, not client animation.
+  state.packet_entities[0].frame.reset();state.packet_entities[0].sequence.reset();
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  REQUIRE(created.projection->reset_generation(state,world));
+  world.set_camera({{40,0,24},{0,0,24},{0,0,1}});
+  REQUIRE(e10_present(*created.projection,host,100,1,world,{320,240}));
+  REQUIRE(world.entity_frame()->studio_instances().size()==1U);
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  if(!gl || !fixture::entity_opengl_fixture::capable_context()) SKIP("OpenGL 3.3 unavailable");
+  gl->initialize_renderer();
+  auto scene=client::build_render_scene(world);scene.static_world.reset();
+  auto baseline=scene;baseline.dynamic_entities.reset();
+  gl->renderer().render(baseline,{320,240});
+  const auto empty=gl->renderer().observe_framebuffer({320,240},baseline.clear_color,true);REQUIRE(empty);
+  gl->renderer().render(scene,{320,240});
+  const auto present=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(present);
+  CHECK_FALSE(std::ranges::equal(present.rgba8,empty.rgba8));CHECK(present.non_clear_pixel_count>20U);
+  CHECK(present.non_clear_pixel_count<320U*240U/8U);
+  const auto uploads=gl->renderer().entity_statistics().studio_asset_upload_count;
+  state=e16_projectiles(2,1.02);state.packet_entities.clear();
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  REQUIRE(created.projection->project_entities(state,world));
+  REQUIRE(e10_present(*created.projection,host,100.02,1,world,{320,240}));
+  scene=client::build_render_scene(world);scene.static_world.reset();
+  gl->renderer().render(scene,{320,240});
+  const auto removed=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(removed);
+  REQUIRE(world.entity_frame()->studio_instances().empty());
+  CHECK(std::ranges::equal(removed.rgba8,empty.rgba8));CHECK(glGetError()==GL_NO_ERROR);
+  CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==uploads);
+  gl->release_renderer();
+}
+
+TEST_CASE("E16 ordinary projectile normal materializer keeps a continuous clock across irregular RX",
+    "[e16][grenade-smoothing][projectile][local-capture-assets][game-api][runtime-presentation][opengl]") {
+  LocalContext context;
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset,0,-2,-2);
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+12U,0,2,-2);
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+24U,0,0,2);
+  for(std::size_t i=0U;i<3U;++i)
+    fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioNormalsOffset+i*12U,1,0,0);
+  context.root.write("valve","models/shared.mdl",context.model);
+  auto created=context.create();REQUIRE(created.projection);
+  hlclient::game_api::GameClientHost host{std::make_unique<E10TestGameClientModule>()};host.reset({1,1,1});
+  client::ClientWorldState world;world.set_camera({{40,0,24},{0,0,24},{0,0,1}});
+  auto current=e16_projectiles(1U,1.0);current.packet_entities.resize(1U);
+  current.packet_entities.front().origin={0.0,-5.0,24.0};
+  current.canonical_state_hash=client::runtime_observation_canonical_hash(current);
+  REQUIRE(created.projection->reset_generation(current,world));
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  const bool gpu=gl && fixture::entity_opengl_fixture::capable_context();
+  if(gpu) gl->initialize_renderer();else WARN("OpenGL unavailable; normal approved CPU materializer proof still runs");
+  std::optional<std::uint64_t> previous_pixels;
+  std::size_t pixel_changes{};
+  const std::array arrivals{0.0,.025,.045,.055};std::size_t next=1U;
+  double before=-5.0;
+  for(unsigned frame=0U;frame<=16U;++frame) {
+    const double app=static_cast<double>(frame)*.005;
+    while(next<arrivals.size() && arrivals[next]<=app+1e-9) {
+      current=e16_projectiles(next+1U,1.0+static_cast<double>(next)*.02,
+          static_cast<double>(next)*1.6);
+      current.packet_entities.resize(1U);current.packet_entities.front().origin.x=0.0;
+      current.packet_entities.front().origin.z=24.0;
+      current.canonical_state_hash=client::runtime_observation_canonical_hash(current);
+      REQUIRE(created.projection->project_entities(current,world));++next;
+    }
+    const auto canonical=current.canonical_state_hash;
+    REQUIRE(e10_present(*created.projection,host,100.0+app,1U,world,{320,240}));
+    const auto& instance=e10_instance(world,40U);
+    const double expected=-5.0+std::min(static_cast<double>(next-1U)*1.6,std::max(0.0,app-.02)*80.0);
+    CHECK(instance.transform.origin.y==Catch::Approx(expected).margin(.0001));
+    CHECK(instance.transform.origin.y>=before-.0001);CHECK(instance.transform.origin.y-before<=.4001);
+    CHECK(current.canonical_state_hash==canonical);
+    const auto palette=world.entity_frame()->studio_poses()[instance.pose_index].bone_matrices;
+    REQUIRE(palette.size()==1U);
+    const auto position=instance.transform.origin.y;
+    REQUIRE(e10_present(*created.projection,host,100.0+app,1U,world,{320,240}));
+    CHECK(e10_instance(world,40U).transform.origin.y==position);
+    if(gpu) {
+      auto scene=client::build_render_scene(world);scene.static_world.reset();
+      gl->renderer().render(scene,{320,240});CHECK(glGetError()==GL_NO_ERROR);
+      const auto pixels=gl->renderer().observe_framebuffer({320,240},scene.clear_color);REQUIRE(pixels);
+      REQUIRE(pixels.non_clear_pixel_count>0U);
+      if(previous_pixels && *previous_pixels!=pixels.color_signature) ++pixel_changes;
+      previous_pixels=pixels.color_signature;
+      CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==1U);
+    }
+    before=position;
+  }
+  CHECK(before> -5.0); // Short80ms lifetime visibly moves, with no100ms hold.
+  current=e16_projectiles(5U,1.08);current.packet_entities.clear();
+  current.canonical_state_hash=client::runtime_observation_canonical_hash(current);
+  REQUIRE(created.projection->project_entities(current,world));
+  REQUIRE(e10_present(*created.projection,host,100.08,1U,world,{320,240}));
+  CHECK(world.entity_frame()->studio_instances().empty());CHECK(host.drain_audio().count==0U);
+  if(gpu) {
+    CHECK(pixel_changes>3U);
+    auto scene=client::build_render_scene(world);scene.static_world.reset();
+    gl->renderer().render(scene,{320,240});CHECK(glGetError()==GL_NO_ERROR);
+    const auto removed=gl->renderer().observe_framebuffer({320,240},scene.clear_color);REQUIRE(removed);
+    CHECK(removed.non_clear_pixel_count==0U);gl->release_renderer();
+  }
+}
+
+#if HLCLIENT_HAS_GAME_HALFLIFE
+TEST_CASE("E16 late server projectile birth moves through the normal HalfLife materializer and GPU after one cadence",
+    "[e16][grenade-smoothing][grenade-first-frame][projectile][local-capture-assets][game-api][runtime-presentation][opengl]") {
+  LocalContext context;
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset,0,-2,-2);
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+12U,0,2,-2);
+  fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioVerticesOffset+24U,0,0,2);
+  for(std::size_t i=0U;i<3U;++i)
+    fixture::studio_write_vector3(context.model,fixture::kSyntheticStudioNormalsOffset+i*12U,1,0,0);
+  context.root.write("valve","models/shared.mdl",context.model);
+  auto created=context.create();REQUIRE(created.projection);
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({1,1,1});CHECK(host.remote_player_policy().maximum_observation_gap_seconds==.25);
+  client::ClientWorldState world;world.set_camera({{40,0,24},{0,0,24},{0,0,1}});
+  constexpr unsigned warm_steps=48U;
+  constexpr double birth_server=1.0+warm_steps*.02,birth_application=100.0+warm_steps*.015;
+  auto initial=e16_projectiles(1U,1.0);initial.packet_entities.clear();
+  initial.canonical_state_hash=client::runtime_observation_canonical_hash(initial);
+  REQUIRE(created.projection->reset_generation(initial,world));
+  for(unsigned i=0U;i<warm_steps;++i) {
+    auto empty=e16_projectiles(i+1U,1.0+i*.02);empty.packet_entities.clear();
+    empty.canonical_state_hash=client::runtime_observation_canonical_hash(empty);
+    REQUIRE(created.projection->project_entities(empty,world));
+    REQUIRE(e10_present(*created.projection,host,100.0+i*.015,1U,world,{320,240}));
+    REQUIRE(world.entity_frame()->studio_instances().empty());
+  }
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  const bool gpu=gl && fixture::entity_opengl_fixture::capable_context();
+  if(gpu) gl->initialize_renderer();else WARN("OpenGL unavailable; normal HalfLife approved CPU birth-clock proof still runs");
+  const auto pixels=[&]() {
+    auto scene=client::build_render_scene(world);scene.static_world.reset();
+    gl->renderer().render(scene,{320,240});CHECK(glGetError()==GL_NO_ERROR);
+    const auto observed=gl->renderer().observe_framebuffer({320,240},scene.clear_color);REQUIRE(observed);
+    CHECK(gl->renderer().entity_statistics().studio_asset_upload_count==1U);
+    return observed;
+  };
+  const auto sample=[](std::uint64_t record,double server,double y) {
+    auto state=e16_projectiles(record,server);state.packet_entities.resize(1U);
+    state.packet_entities.front().origin={0.0,y,24.0};
+    state.canonical_state_hash=client::runtime_observation_canonical_hash(state);return state;
+  };
+  auto current=sample(warm_steps+1U,birth_server,0.0);
+  REQUIRE(created.projection->project_entities(current,world));
+  REQUIRE(e10_present(*created.projection,host,birth_application,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==0.0);
+  std::optional<std::uint64_t> initial_pixels;
+  if(gpu) {const auto image=pixels();REQUIRE(image.non_clear_pixel_count>0U);initial_pixels=image.color_signature;}
+  current=sample(warm_steps+2U,birth_server+.02,1.6);
+  REQUIRE(created.projection->project_entities(current,world));
+  REQUIRE(e10_present(*created.projection,host,birth_application+.02,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==Catch::Approx(0.0).margin(.0001));
+  const auto canonical=current.canonical_state_hash;
+  REQUIRE(e10_present(*created.projection,host,birth_application+.03,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==Catch::Approx(.8).margin(.0001));
+  CHECK(current.canonical_state_hash==canonical);
+  std::optional<std::uint64_t> moving_pixels;
+  if(gpu) {const auto image=pixels();REQUIRE(image.non_clear_pixel_count>0U);
+    CHECK(image.color_signature!=*initial_pixels);moving_pixels=image.color_signature;}
+  const auto position=e10_instance(world,40U).transform.origin.y;
+  REQUIRE(e10_present(*created.projection,host,birth_application+.03,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==position);
+  REQUIRE(e10_present(*created.projection,host,birth_application+.029,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==position);
+  if(gpu) CHECK(pixels().color_signature==*moving_pixels);
+  for(unsigned i=2U;i<=3U;++i) {
+    current=sample(warm_steps+i+1U,birth_server+i*.02,i*1.6);
+    REQUIRE(created.projection->project_entities(current,world));
+    REQUIRE(e10_present(*created.projection,host,birth_application+i*.02,1U,world,{320,240}));
+    CHECK(e10_instance(world,40U).transform.origin.y==Catch::Approx((i-1U)*1.6).margin(.0001));
+  }
+  // An80ms authoritative flight ends immediately despite its delayed visual clock.
+  current=sample(warm_steps+5U,birth_server+.08,6.4);current.packet_entities.clear();
+  current.canonical_state_hash=client::runtime_observation_canonical_hash(current);
+  REQUIRE(created.projection->project_entities(current,world));
+  REQUIRE(e10_present(*created.projection,host,birth_application+.08,1U,world,{320,240}));
+  CHECK(world.entity_frame()->studio_instances().empty());
+  CHECK(host.drain_audio().count==0U);CHECK(host.drain_remote_audio().count==0U);
+  if(gpu) {CHECK(pixels().non_clear_pixel_count==0U);gl->release_renderer();}
+  current=sample(warm_steps+6U,birth_server+.1,-3.0);
+  REQUIRE(created.projection->reset_generation(current,world));
+  REQUIRE(e10_present(*created.projection,host,birth_application+.1,1U,world,{320,240}));
+  CHECK(e10_instance(world,40U).transform.origin.y==-3.0);
+}
+
+struct E16TemporarySpriteContext {
+  LocalContext local;
+  std::vector<std::byte> explosion=e16_animated_sprite(false),smoke=e16_animated_sprite(true);
+  E16TemporarySpriteContext() {
+    local.root.write("valve","sprites/owned_explosion.spr",explosion);
+    local.root.write("valve","sprites/owned_smoke.spr",smoke);
+  }
+  auto create() const {
+    const auto resources=readiness::parse_resource_list({
+        {2U,"maps/test_map.bsp",9U,static_cast<std::uint32_t>(local.map.size()),0U},
+        {2U,"sprites/owned_explosion.spr",19U,static_cast<std::uint32_t>(explosion.size()),0U},
+        {2U,"sprites/owned_smoke.spr",73U,static_cast<std::uint32_t>(smoke.size()),0U}});
+    return app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info("maps/test_map.bsp"),
+        local.root.path(),"valve",app::ReplayLocalCameraPolicy::external_live_receiving_client);
+  }
+};
+
+[[nodiscard]] client::CommittedTemporaryEffect e16_effect(const bool smoke=false) {
+  client::CommittedTemporaryEffect event;
+  event.generation=1;event.record=smoke ? 2 : 1;
+  event.record_ordinal=static_cast<std::size_t>(event.record);
+  event.message_bit_offset=24;event.received_at_seconds=smoke ? 10.25 : 10.0;
+  event.kind=smoke ? client::TemporaryEffectKind::smoke : client::TemporaryEffectKind::explosion;
+  event.sprite_index=smoke ? 73 : 19;event.scale_tenths=10;event.framerate=10;
+  event.flags=2U|8U; // Sprite A/B intentionally isolates away light and particles.
+  return event;
+}
+
+TEST_CASE("E16 committed HalfLife effects use approved animated sparse sprite slots and bounded owner",
+    "[e16][temporary-effects][local-capture-assets][game-api][transaction]") {
+  E16TemporarySpriteContext context;auto created=context.create();REQUIRE(created.projection);
+  client::ClientWorldState world;auto state=observation();state.packet_entities.clear();
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  REQUIRE(created.projection->reset_generation(state,world));
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({1,1,1});host.set_movement_audio_time_origin(10.0);
+  app::TemporaryEffectPresentation owner;owner.reset(1);
+  const auto event=e16_effect();host.committed_temporary_effect(event);
+  const auto batch=host.drain_temporary_effects(0.0);REQUIRE(batch.count==1U);
+  owner.consume(batch,0.0);hlclient::renderer::RenderScene scene;owner.present(scene,0.0);
+  REQUIRE(owner.sprites().size()==1U);
+  const auto first=created.projection->materialize_temporary_sprites(owner.sprites(),0.0);REQUIRE(first);
+  REQUIRE(first->frame->sprite_instances().size()==1U);
+  const auto& first_instance=first->frame->sprite_instances()[0];
+  CHECK(first_instance.selected_frame_index==0U);
+  CHECK(first_instance.blend_mode==hlclient::entity_render::SpriteBlendMode::additive);
+  CHECK(first->package->sprite_assets()[first_instance.sprite_asset_index]->frames().size()==4U);
+  CHECK(first->package->sprite_assets()[first_instance.sprite_asset_index]->render_profile()==
+      hlclient::entity_render::SpriteRenderTextureProfile::additive);
+  owner.present(scene,0.15);
+  const auto advanced=created.projection->materialize_temporary_sprites(owner.sprites(),0.15);REQUIRE(advanced);
+  CHECK(advanced->frame->sprite_instances()[0].selected_frame_index==1U);
+  CHECK(advanced->frame->sprite_instances()[0].transform.origin.z==Catch::Approx(1.2F));
+  CHECK(advanced->package==first->package);
+  // A viewmodel switch/death notification is not a world-effect lifetime reset.
+  state.weapon_hud.active_weapon_id=4;
+  state.lifecycle.life_epoch=1;state.lifecycle.state=client::LocalPlayerLifeState::dead;
+  state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  host.observe(state,0.18);owner.present(scene,0.18);
+  REQUIRE(owner.sprites().size()==1U);
+  CHECK(owner.sprites()[0].identity==batch.effects[0].identity);
+  const auto after_life_change=created.projection->materialize_temporary_sprites(owner.sprites(),0.18);
+  REQUIRE(after_life_change);CHECK(after_life_change->frame->sprite_instances()[0].selected_frame_index==1U);
+  host.committed_temporary_effect(event);CHECK(host.drain_temporary_effects(0.15).count==0U);
+  owner.consume(batch,0.15);CHECK(owner.statistics().accepted==1U);CHECK(owner.statistics().duplicate==1U);
+  owner.present(scene,0.4);CHECK_FALSE(created.projection->materialize_temporary_sprites(owner.sprites(),0.4));
+  CHECK(created.projection->temporary_sprite_statistics().expired>=1U);
+  // A second server event at the same position uses its own resource/identity.
+  host.committed_temporary_effect(e16_effect(true));
+  const auto smoke_batch=host.drain_temporary_effects(0.25);REQUIRE(smoke_batch.count==1U);
+  owner.reset(1);owner.consume(smoke_batch,0.25);owner.present(scene,0.25);
+  const auto smoke=created.projection->materialize_temporary_sprites(owner.sprites(),0.25);REQUIRE(smoke);
+  const auto& smoke_instance=smoke->frame->sprite_instances()[0];
+  CHECK(smoke_instance.sprite_asset_index!=first_instance.sprite_asset_index);
+  CHECK(smoke_instance.orientation==hlclient::assets::SpriteOrientation::view_parallel_oriented);
+  CHECK(smoke_instance.blend_mode==hlclient::entity_render::SpriteBlendMode::alpha_blended);
+  CHECK(smoke_instance.opacity==Catch::Approx(0.65F));
+  CHECK(smoke->package->sprite_assets()[smoke_instance.sprite_asset_index]->render_profile()==
+      hlclient::entity_render::SpriteRenderTextureProfile::index_alpha);
+  const auto& pixels=smoke->package->sprite_assets()[smoke_instance.sprite_asset_index]->frames()[0].rgba8;
+  REQUIRE(pixels.size()==8U*8U*4U);CHECK(pixels[3]==std::byte{0});CHECK(pixels[(3U*8U+3U)*4U+3U]==std::byte{128});
+  owner.present(scene,4.4);CHECK(owner.sprites().empty());
+  owner.reset(2);owner.consume(batch,0.0);owner.present(scene,0.0);CHECK(owner.sprites().empty());
+  CHECK(owner.statistics().stale==1U);host.teardown();CHECK(host.drain_temporary_effects(5.0).count==0U);
+}
+
+[[nodiscard]] std::shared_ptr<const hlclient::world_render::WorldRenderPackage> e16_dark_wall() {
+  namespace wf=fixture::world_render_fixture;
+  auto world=wf::make_world();
+  for(auto& vertex:world.vertices) {
+    vertex.position={vertex.position.x-8.0F,3.0F,vertex.position.y-8.0F};vertex.normal={0,-1,0};
+  }
+  world.bounds={{-8,3,-8},{8,3,8}};world.surfaces[0].bounds=world.bounds;
+  auto texture=wf::make_texture(false);
+  for(auto& mip:texture.mip_levels) for(std::size_t y=0;y<mip.height;++y) for(std::size_t x=0;x<mip.width;++x) {
+    const auto value=static_cast<unsigned char>((x+y)%2 ? 32 : 48);
+    for(std::size_t c=0;c<3;++c) mip.rgba_pixels[(y*mip.width+x)*4+c]=std::byte{value};
+  }
+  hlclient::assets::WorldMaterialTextureBinding binding;
+  binding.material_index=0;binding.texture_asset_index=0;binding.source_bsp_texture_index=0;
+  binding.status=hlclient::assets::WorldMaterialTextureBindingStatus::resolved_embedded;
+  auto textures=hlclient::assets::WorldTextureSet::create({texture},{binding},{},1U);REQUIRE(textures);
+  auto package=hlclient::world_render::WorldRenderPackageBuilder{}.build(
+      {std::move(world),std::move(*textures.texture_set)},wf::make_lightmap_set({}));REQUIRE(package);
+  return std::make_shared<const hlclient::world_render::WorldRenderPackage>(std::move(*package.package));
+}
+
+[[nodiscard]] std::size_t e16_pixel_at(const hlclient::renderer::RenderCamera& camera,
+    hlclient::assets::AssetVector3 point) {
+  const auto matrix=hlclient::renderer::camera_view_projection(camera,{320,240});REQUIRE(matrix);
+  const auto& m=matrix.matrix->values;
+  const auto x=m[0]*point.x+m[4]*point.y+m[8]*point.z+m[12];
+  const auto y=m[1]*point.x+m[5]*point.y+m[9]*point.z+m[13];
+  const auto w=m[3]*point.x+m[7]*point.y+m[11]*point.z+m[15];REQUIRE(w>0);
+  const auto px=static_cast<std::size_t>((x/w*0.5F+0.5F)*320);
+  const auto py=static_cast<std::size_t>((y/w*0.5F+0.5F)*240);
+  REQUIRE(px<320);REQUIRE(py<240);return (py*320+px)*4;
+}
+
+TEST_CASE("E16 actual HalfLife temporary sprite GL preserves dark wall coverage depth and expiry",
+    "[e16][temporary-effects][local-capture-assets][opengl][actual-context]") {
+  E16TemporarySpriteContext context;auto created=context.create();REQUIRE(created.projection);
+  auto state=observation();state.packet_entities.clear();state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  client::ClientWorldState world;REQUIRE(created.projection->reset_generation(state,world));
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  if(!gl || !fixture::entity_opengl_fixture::capable_context()) SKIP("OpenGL 3.3 unavailable");
+  gl->initialize_renderer();
+  hlclient::game_api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
+  host.reset({1,1,1});host.set_movement_audio_time_origin(10);
+  app::TemporaryEffectPresentation owner;owner.reset(1);
+  hlclient::renderer::RenderScene baseline;
+  baseline.camera={{0,-24,0},{0,0,0},{0,0,1}};
+  baseline.static_world=hlclient::renderer::RenderStaticWorld{e16_dark_wall()};
+  gl->renderer().render(baseline,{320,240});
+  const auto before=gl->renderer().observe_framebuffer({320,240},baseline.clear_color,true);REQUIRE(before);
+  const auto center=e16_pixel_at(baseline.camera,{0,0,0});
+  const auto neutral=e16_pixel_at(baseline.camera,{-3,0,0});
+  const auto outside=e16_pixel_at(baseline.camera,{-6,0,0});
+  const auto equal_pixel=[](const auto& a,const auto& b,std::size_t at) {
+    return std::equal(a.rgba8.begin()+at,a.rgba8.begin()+at+3,b.rgba8.begin()+at);
+  };
+  for(const bool smoke:{false,true}) {
+    host.reset({1,1,1});host.set_movement_audio_time_origin(10);owner.reset(1);
+    const auto event=e16_effect(smoke);host.committed_temporary_effect(event);
+    const double now=smoke ? 0.25 : 0.0;
+    const auto batch=host.drain_temporary_effects(now);REQUIRE(batch.count==1U);
+    owner.consume(batch,now);auto scene=baseline;owner.present(scene,now);
+    scene.transient_sprite_entities=created.projection->materialize_temporary_sprites(owner.sprites(),now);
+    REQUIRE(scene.transient_sprite_entities);
+    gl->renderer().render(scene,{320,240});
+    const auto visible=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(visible);
+    CHECK_FALSE(equal_pixel(visible,before,center));
+    CHECK(equal_pixel(visible,before,neutral));CHECK(equal_pixel(visible,before,outside));
+    std::size_t changed=0;
+    for(std::size_t i=0;i<before.rgba8.size();i+=4) if(!equal_pixel(visible,before,i)) ++changed;
+    CHECK(changed>20);CHECK(changed<320U*240U/4U);
+    const auto uploads=gl->renderer().entity_statistics().sprite_asset_upload_count;
+    owner.present(scene,now+0.15);
+    scene.transient_sprite_entities=created.projection->materialize_temporary_sprites(owner.sprites(),now+0.15);
+    REQUIRE(scene.transient_sprite_entities);
+    CHECK(scene.transient_sprite_entities->frame->sprite_instances()[0].selected_frame_index==1U);
+    gl->renderer().render(scene,{320,240});
+    const auto advanced=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(advanced);
+    CHECK_FALSE(std::ranges::equal(advanced.rgba8,visible.rgba8));
+    CHECK(gl->renderer().entity_statistics().sprite_asset_upload_count==uploads);
+    GLboolean depth{};glGetBooleanv(GL_DEPTH_WRITEMASK,&depth);CHECK(depth==GL_TRUE);
+    CHECK(glIsEnabled(GL_BLEND)==GL_FALSE);CHECK(glGetError()==GL_NO_ERROR);
+    // Server position behind the wall must be occluded, including blend formats.
+    auto behind=owner.sprites()[0];behind.origin.y=6;behind.age_seconds=0;
+    scene=baseline;scene.transient_sprite_entities=created.projection->materialize_temporary_sprites(std::span{&behind,1U},now+0.15);
+    gl->renderer().render(scene,{320,240});
+    const auto occluded=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(occluded);
+    CHECK(std::ranges::equal(occluded.rgba8,before.rgba8));
+    scene=baseline;owner.present(scene,now+0.5);
+    scene.transient_sprite_entities=created.projection->materialize_temporary_sprites(owner.sprites(),now+0.5);
+    CHECK_FALSE(scene.transient_sprite_entities);
+    gl->renderer().render(scene,{320,240});
+    const auto expired=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(expired);
+    CHECK(std::ranges::equal(expired.rgba8,before.rgba8));
+  }
+  owner.reset(2);host.teardown();gl->release_renderer();
+}
+
+TEST_CASE("E16 opt-in approved installed projectile explosion smoke and launch PCM are read-only",
+    "[e16][local-m203-control][local-capture-assets]") {
+  std::filesystem::path root;
+#ifdef _WIN32
+  wchar_t* value=nullptr;std::size_t count=0;
+  if(_wdupenv_s(&value,&count,L"HLCLIENT_LOCAL_GAME_ROOT")==0 && value) root=value;
+  std::free(value);
+#endif
+  if(root.lexically_normal()!=std::filesystem::path{"D:/DEV/HLCLIENT-RESEARCH/Half-Life"}.lexically_normal())
+    SKIP("No exact opt-in approved research root");
+  const std::array tokens{"maps/crossfire.bsp","models/grenade.mdl","sprites/zerogxplode.spr",
+      "sprites/WXplo1.spr","sprites/steam1.spr","sound/weapons/glauncher.wav","sound/weapons/glauncher2.wav"};
+  std::array<std::filesystem::file_time_type,tokens.size()> times;
+  for(std::size_t i=0;i<tokens.size();++i) {
+    if(!std::filesystem::is_regular_file(root/"valve"/tokens[i])) SKIP("Optional M203 asset absent");
+    times[i]=std::filesystem::last_write_time(root/"valve"/tokens[i]);
+  }
+  const auto resources=readiness::parse_resource_list({{2U,tokens[0],9U,0U,0U},{2U,tokens[1],7U,0U,0U},
+      {2U,tokens[2],19U,0U,0U},{2U,tokens[3],20U,0U,0U},{2U,tokens[4],73U,0U,0U},
+      {0U,"weapons/glauncher.wav",1U,0U,0U},{0U,"weapons/glauncher2.wav",2U,0U,0U}});
+  auto created=app::RuntimeReplayLocalAssets::create(resources,readiness::parse_server_info(tokens[0]),root,"valve",
+      app::ReplayLocalCameraPolicy::external_live_receiving_client);REQUIRE(created.projection);
+  const auto grenade=created.projection->studio_model_data(7);REQUIRE(grenade);CHECK_FALSE(grenade->submodels.empty());
+  auto state=observation();state.packet_entities.clear();state.canonical_state_hash=client::runtime_observation_canonical_hash(state);
+  client::ClientWorldState world;REQUIRE(created.projection->reset_generation(state,world));
+  for(const auto slot:{19U,20U,73U}) {
+    app::TemporarySpriteFrame sprite;
+    sprite.identity={1,1,24,slot};sprite.sprite.model_slot=static_cast<std::uint16_t>(slot);
+    sprite.sprite.scale=1;sprite.sprite.frames_per_second=10;
+    sprite.sprite.blend=slot==73 ? hlclient::game_api::TemporarySpriteBlend::alpha_blended :
+        hlclient::game_api::TemporarySpriteBlend::additive;
+    const auto first=created.projection->materialize_temporary_sprites(std::span{&sprite,1U},0.0);REQUIRE(first);
+    const auto& instance=first->frame->sprite_instances()[0];
+    const auto& asset=*first->package->sprite_assets()[instance.sprite_asset_index];
+    CHECK(asset.frames().size()==(slot==73 ? 16U : 15U));
+    CHECK(asset.render_profile()==(slot==73 ? hlclient::entity_render::SpriteRenderTextureProfile::index_alpha :
+        hlclient::entity_render::SpriteRenderTextureProfile::additive));
+    sprite.age_seconds=.25;
+    const auto advanced=created.projection->materialize_temporary_sprites(std::span{&sprite,1U},.25);REQUIRE(advanced);
+    CHECK(advanced->frame->sprite_instances()[0].selected_frame_index==2U);
+    CHECK(advanced->package==first->package);
+  }
+  // Optional installed controls retain source assets and use the same actual
+  // sprite/Studio backend as the project-owned mandatory GL A/B above.
+  auto gl=fixture::entity_opengl_fixture::try_context(320,240);
+  if(gl && fixture::entity_opengl_fixture::capable_context()) {
+    gl->initialize_renderer();
+    hlclient::renderer::RenderScene baseline;baseline.camera={{0,-80,0},{0,0,0},{0,0,1}};
+    gl->renderer().render(baseline,{320,240});
+    const auto empty=gl->renderer().observe_framebuffer({320,240},baseline.clear_color,true);REQUIRE(empty);
+    for(const auto slot:{19U,20U,73U}) {
+      app::TemporarySpriteFrame sprite;
+      sprite.identity={1,1,24,slot};sprite.sprite.model_slot=static_cast<std::uint16_t>(slot);
+      sprite.sprite.scale=.5F;sprite.sprite.frames_per_second=10;sprite.age_seconds=.25;
+      sprite.sprite.blend=slot==73 ? hlclient::game_api::TemporarySpriteBlend::alpha_blended :
+          hlclient::game_api::TemporarySpriteBlend::additive;
+      auto scene=baseline;
+      scene.transient_sprite_entities=created.projection->materialize_temporary_sprites(std::span{&sprite,1U},.25);
+      REQUIRE(scene.transient_sprite_entities);
+      gl->renderer().render(scene,{320,240});
+      const auto pixels=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(pixels);
+      CHECK_FALSE(std::ranges::equal(pixels.rgba8,empty.rgba8));CHECK(pixels.non_clear_pixel_count>0);
+      const auto uploads=gl->renderer().entity_statistics().sprite_asset_upload_count;
+      gl->renderer().render(scene,{320,240});
+      CHECK(gl->renderer().entity_statistics().sprite_asset_upload_count==uploads);
+      CHECK(glGetError()==GL_NO_ERROR);
+    }
+    auto projectile=e16_projectiles(2,1.0);projectile.packet_entities.resize(1);
+    projectile.packet_entities[0].origin={0.0,0.0,24.0};
+    projectile.canonical_state_hash=client::runtime_observation_canonical_hash(projectile);
+    REQUIRE(created.projection->project_entities(projectile,world));
+    world.set_camera({{40,0,24},{0,0,24},{0,0,1}});
+    REQUIRE(world.entity_frame()->studio_instances().size()==1);
+    auto scene=client::build_render_scene(world);scene.static_world.reset();
+    gl->renderer().render(scene,{320,240});
+    const auto pixels=gl->renderer().observe_framebuffer({320,240},scene.clear_color,true);REQUIRE(pixels);
+    CHECK(pixels.non_clear_pixel_count>0);CHECK(glGetError()==GL_NO_ERROR);
+    gl->release_renderer();
+  } else WARN("Optional installed asset GPU control unavailable; approved CPU imports/PCM still checked");
+  hlclient::goldsrc::ApprovedSoundAssets sounds{created.projection->sound_resources()};
+  for(const auto slot:{1U,2U}) {
+    auto sample=sounds.request(static_cast<std::uint16_t>(slot));
+    for(unsigned retry=0;retry<1000 && sample.status==hlclient::goldsrc::SoundAssetStatus::pending;++retry) {
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});sample=sounds.request(static_cast<std::uint16_t>(slot));
+    }
+    REQUIRE(sample.status==hlclient::goldsrc::SoundAssetStatus::ready);REQUIRE(sample.asset);
+    CHECK(std::ranges::all_of(sample.asset->interleaved_samples,[](float x){return std::isfinite(x);}));
+    CHECK(std::ranges::any_of(sample.asset->interleaved_samples,[](float x){return x!=0;}));
+    hlclient::audio::Mixer mixer;mixer.listener({{0,0,0},{0,-1,0},1.0F,false});
+    hlclient::audio::Command command;command.operation=hlclient::audio::Operation::start;command.voice=1;
+    command.asset=sample.asset;command.local=true;command.volume=1;command.attenuation=0;command.loop_enabled=false;
+    mixer.command(command);std::vector<float> pcm(48000U*2U);mixer.render(pcm);
+    CHECK(mixer.statistics().started==1U);
+    CHECK(std::ranges::all_of(pcm,[](float x){return std::isfinite(x);}));
+    CHECK(std::ranges::any_of(pcm,[](float x){return x!=0;}));
+  }
+  for(std::size_t i=0;i<tokens.size();++i) CHECK(times[i]==std::filesystem::last_write_time(root/"valve"/tokens[i]));
+}
+#endif
 } // namespace

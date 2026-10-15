@@ -16,8 +16,10 @@
 #include <hlclient/platform/sdl_runtime.hpp>
 #include <hlclient/platform/sdl_window.hpp>
 #include <hlclient/client/client_scene_source.hpp>
+#include <hlclient/app/entity_follow_presentation.hpp>
 #include <hlclient/renderer/opengl/opengl_renderer.hpp>
 #include <hlclient/renderer/render_scene.hpp>
+#include <hlclient/renderer/render_camera_math.hpp>
 #include <hlclient/world_render/world_render_package_builder.hpp>
 #include <hlclient/world_preview/world_preview_scene_source.hpp>
 #include <hlclient/world_scene_render/world_scene_render_types.hpp>
@@ -244,9 +246,11 @@ private:
 
 [[nodiscard]] assets::WorldTextureSet make_frame_texture_set(
     const bool masked,
-    const std::uint8_t red)
+    const std::uint8_t red,
+    const bool flat_sky = false)
 {
     auto texture = fixture::make_texture(masked);
+    if (flat_sky) texture.name = "sky";
     for (auto& mip : texture.mip_levels) {
         for (std::uint32_t y = 0U; y < mip.height; ++y) {
             for (std::uint32_t x = 0U; x < mip.width; ++x) {
@@ -358,10 +362,15 @@ make_frame_package(
     const bool unlit,
     const std::size_t page_count,
     const std::size_t selected_page,
-    const std::uint8_t red)
+    const std::uint8_t red,
+    const bool flat_sky = false)
 {
     auto world = make_vertical_world();
     world.materials[0].texture_name = masked ? "{MASKED" : "STONE";
+    if (flat_sky) {
+        world.materials[0].texture_name = "sky";
+        world.surfaces[0].special_surface = true;
+    }
     const auto surface_count = unlit ? 1U : page_count;
     const auto template_vertices = world.vertices;
     const auto template_surface = world.surfaces[0U];
@@ -392,7 +401,7 @@ make_frame_package(
     world.statistics.emitted_vertex_count = world.vertices.size();
     world.statistics.emitted_triangle_count = world.indices.size() / 3U;
     world.statistics.emitted_surface_count = world.surfaces.size();
-    auto textures = make_frame_texture_set(masked, red);
+    auto textures = make_frame_texture_set(masked, red, flat_sky);
     auto lightmaps = make_frame_lightmap_set(unlit, page_count, selected_page);
     world_render::WorldRenderPackageBuilder builder;
     auto built = builder.build(
@@ -792,6 +801,125 @@ make_full_pipeline_package()
     return scene;
 }
 
+[[nodiscard]] std::shared_ptr<const world_render::WorldRenderPackage>
+make_boundary_junction_package(const float boundary_offset)
+{
+    // One pentagon meets two quads along A-M and M-B. Both neighboring
+    // faces reference the same BSP edges, not independently rounded copies.
+    // M is a compiler-style boundary split, even when it is collinear.
+    goldsrc_fixture::SyntheticBspBuilder builder;
+    const std::array vertices{
+        goldsrc_fixture::SyntheticBspVector3{992.0F, -32.0F, 0.0F},
+        goldsrc_fixture::SyntheticBspVector3{1024.0F, -32.0F, 0.0F}, // A
+        goldsrc_fixture::SyntheticBspVector3{
+            1024.0F + boundary_offset, 0.0F, 0.0F}, // M
+        goldsrc_fixture::SyntheticBspVector3{1024.0F, 32.0F, 0.0F}, // B
+        goldsrc_fixture::SyntheticBspVector3{992.0F, 32.0F, 0.0F},
+        goldsrc_fixture::SyntheticBspVector3{1056.0F, -32.0F, 0.0F},
+        goldsrc_fixture::SyntheticBspVector3{1056.0F, 0.0F, 0.0F},
+        goldsrc_fixture::SyntheticBspVector3{1056.0F, 32.0F, 0.0F},
+    };
+    constexpr std::array edges{
+        goldsrc_fixture::SyntheticBspEdge{0U, 0U},
+        goldsrc_fixture::SyntheticBspEdge{0U, 4U},
+        goldsrc_fixture::SyntheticBspEdge{4U, 3U},
+        goldsrc_fixture::SyntheticBspEdge{3U, 2U},
+        goldsrc_fixture::SyntheticBspEdge{2U, 1U},
+        goldsrc_fixture::SyntheticBspEdge{1U, 0U},
+        goldsrc_fixture::SyntheticBspEdge{2U, 6U},
+        goldsrc_fixture::SyntheticBspEdge{6U, 5U},
+        goldsrc_fixture::SyntheticBspEdge{5U, 1U},
+        goldsrc_fixture::SyntheticBspEdge{3U, 7U},
+        goldsrc_fixture::SyntheticBspEdge{7U, 6U},
+    };
+    // Valve-clockwise loops. Negative surfedges give the neighbors the
+    // identical shared segment with the opposite traversal direction.
+    constexpr std::array<std::int32_t, 13U> surfedges{
+        1, 2, 3, 4, 5, -4, 6, 7, 8, -3, 9, 10, -6};
+    std::array faces{
+        goldsrc_fixture::SyntheticBspFace{},
+        goldsrc_fixture::SyntheticBspFace{},
+        goldsrc_fixture::SyntheticBspFace{},
+    };
+    faces[0U].surfedge_count = 5;
+    faces[1U].first_surfedge = 5;
+    faces[2U].first_surfedge = 9;
+
+    auto node = goldsrc_fixture::SyntheticBspNode{};
+    node.minimum = {991, -33, -1};
+    node.maximum = {1057, 33, 1};
+    node.face_count = 3U;
+    std::array leaves{
+        goldsrc_fixture::SyntheticBspLeaf{},
+        goldsrc_fixture::SyntheticBspLeaf{},
+    };
+    leaves[0U].contents = -2;
+    leaves[0U].marksurface_count = 0U;
+    leaves[1U].minimum = node.minimum;
+    leaves[1U].maximum = node.maximum;
+    leaves[1U].marksurface_count = 3U;
+    constexpr std::array<std::uint16_t, 3U> marksurfaces{0U, 1U, 2U};
+    auto model = goldsrc_fixture::SyntheticBspModel{};
+    model.minimum = {991.0F, -33.0F, -1.0F};
+    model.maximum = {1057.0F, 33.0F, 1.0F};
+    model.face_count = 3;
+
+    auto embedded = goldsrc_fixture::synthetic_embedded_texture(
+        "STONE", 16U, 16U);
+    constexpr std::size_t pixel_byte_count = 256U + 64U + 16U + 4U;
+    embedded.trailing_byte_count = pixel_byte_count + 2U + (256U * 3U);
+    const std::array<std::optional<goldsrc_fixture::SyntheticBspMipTexture>, 1U>
+        textures{embedded};
+    builder.set_vertices(vertices)
+        .set_edges(edges)
+        .set_surfedges(surfedges)
+        .set_faces(faces)
+        .set_nodes(std::span{&node, 1U})
+        .set_leaves(leaves)
+        .set_marksurfaces(marksurfaces)
+        .set_models(std::span{&model, 1U})
+        .set_texture_directory(textures);
+    auto bytes = builder.build();
+    const auto texture_lump = static_cast<std::size_t>(
+        goldsrc_fixture::synthetic_read_i32le(bytes,
+            goldsrc_fixture::synthetic_lump_descriptor_offset(
+                goldsrc_fixture::SyntheticBspLumpId::textures)));
+    const auto texture_record = texture_lump + static_cast<std::size_t>(
+        goldsrc_fixture::synthetic_read_i32le(bytes, texture_lump + 4U));
+    goldsrc_fixture::synthetic_write_u16le(
+        bytes, texture_record + 40U + pixel_byte_count, 256U);
+
+    assets::AssetSourceMetadata metadata;
+    metadata.content_size = bytes.size();
+    auto source = assets::AssetSource::create(
+        std::filesystem::path{"maps/opengl_boundary_junction.bsp"},
+        std::move(bytes), std::move(metadata));
+    if (!source || !source.source) {
+        throw std::runtime_error{"Unable to retain the boundary-junction BSP"};
+    }
+    const bsp::GoldSrcBspWorldImporter importer;
+    auto imported = importer.import(*source.source);
+    if (!imported) {
+        throw std::runtime_error{imported.error().context};
+    }
+    auto world = std::move(imported).value();
+    auto imported_lightmaps = lightmaps::GoldSrcWorldLightmapImporter::import(
+        world, source.source->bytes());
+    if (!imported_lightmaps || !imported_lightmaps.lightmap_set) {
+        throw std::runtime_error{"Unable to import boundary-junction lightmaps"};
+    }
+    world_render::WorldRenderPackageBuilder package_builder;
+    auto built = package_builder.build(
+        assets::TexturedWorldAsset{
+            std::move(world), make_frame_texture_set(false, 0x30U)},
+        std::move(*imported_lightmaps.lightmap_set));
+    if (!built || !built.package) {
+        throw std::runtime_error{"Unable to build the boundary-junction package"};
+    }
+    return std::make_shared<const world_render::WorldRenderPackage>(
+        std::move(*built.package));
+}
+
 [[nodiscard]] world_spatial::WorldSpatialPackage make_visibility_spatial(
     const std::size_t world_surface_count)
 {
@@ -1134,6 +1262,61 @@ TEST_CASE("OpenGL actual context capability requires a Core profile",
     CHECK(glGetError() == GL_NO_ERROR);
 }
 
+TEST_CASE("E32 optional GPU timing preserves pixels and never waits for pending results",
+          "[e32][renderer][opengl][movement-diagnostics]")
+{
+    auto context=try_create_context();
+    if(!context)SKIP("OpenGL 3.3 Core context unavailable on this host");
+    const auto version=current_actual_open_gl_version();
+    REQUIRE(version);
+    if(!supports_required_open_gl_version(*version))SKIP("OpenGL 3.3 Core context unavailable on this host");
+    const auto profile=current_actual_open_gl_profile_mask();REQUIRE(profile);
+    if(!supports_required_open_gl_profile(*profile))SKIP("OpenGL Core profile unavailable");
+    context->initialize_renderer();auto& gpu=context->renderer();
+    constexpr renderer::RenderExtent extent{96,96};
+    auto scene=make_scene(make_frame_package(false,false,1U,0U,0xE0U));
+    gpu.render(scene,extent);
+    const auto baseline=gpu.observe_framebuffer(extent,scene.clear_color,true);
+    CHECK(gpu.gpu_timing_statistics().allocated_queries==0U);
+    CHECK_FALSE(gpu.poll_gpu_timing());
+    gpu.render_with_gpu_timing(scene,extent,42U);
+    // A test-only framebuffer observation completes the pixels. Production
+    // uses availability polling only and introduces no readback or glFinish.
+    const auto timed=gpu.observe_framebuffer(extent,scene.clear_color,true);
+    CHECK(timed.color_signature==baseline.color_signature);
+    CHECK(gpu.gpu_timing_statistics().allocated_queries==8U);
+    const auto first=gpu.poll_gpu_timing();
+    if(first) {CHECK(first->frame_number==42U);CHECK(std::isfinite(first->elapsed_ms));CHECK(first->elapsed_ms>=0.0);}
+    std::size_t observations=first ? 1U:0U;
+    for(std::uint64_t id=43U;id<60U;++id) {
+        gpu.render_with_gpu_timing(scene,extent,id);
+        context->window().swap_buffers();
+        for(std::size_t poll=0;poll<8U;++poll) {
+            const auto result=gpu.poll_gpu_timing();if(!result)break;
+            ++observations;CHECK(result->frame_number>=42U);CHECK(result->frame_number<=id);
+            CHECK(std::isfinite(result->elapsed_ms));CHECK(result->elapsed_ms>=0.0);
+        }
+        CHECK(gpu.gpu_timing_statistics().pending<=8U);
+    }
+    CHECK(observations>0U);
+    CHECK(gpu.gpu_timing_statistics().allocated_queries==8U);
+    CHECK(gpu.statistics().upload_count==1U);
+    // A caller's active timer is not nested, ended, replaced or deleted.
+    GLuint foreign{};glGenQueries(1,&foreign);REQUIRE(foreign!=0U);
+    glBeginQuery(GL_TIME_ELAPSED,foreign);
+    const auto unavailable=gpu.gpu_timing_statistics().unavailable;
+    gpu.render_with_gpu_timing(scene,extent,100U);
+    GLint still_foreign{};glGetQueryiv(GL_TIME_ELAPSED,GL_CURRENT_QUERY,&still_foreign);
+    CHECK(static_cast<GLuint>(still_foreign)==foreign);
+    CHECK(gpu.gpu_timing_statistics().unavailable==unavailable+1U);
+    glEndQuery(GL_TIME_ELAPSED);glDeleteQueries(1,&foreign);
+    auto invalid=scene;invalid.requested_msaa_samples=3;
+    CHECK_THROWS_AS(gpu.render_with_gpu_timing(invalid,extent,101U),std::invalid_argument);
+    GLint active{};glGetQueryiv(GL_TIME_ELAPSED,GL_CURRENT_QUERY,&active);CHECK(active==0);
+    gpu.render(scene,extent);
+    CHECK(glGetError()==GL_NO_ERROR);
+}
+
 TEST_CASE("OpenGL renderer uploads, caches and draws a synthetic static world",
           "[renderer][opengl][world-frame]")
 {
@@ -1281,6 +1464,147 @@ TEST_CASE("OpenGL renderer uploads, caches and draws a synthetic static world",
     CHECK(glGetError() == GL_NO_ERROR);
 }
 
+TEST_CASE("OpenGL uniform sky fills finite polygon gaps without replacing world depth",
+          "[renderer][opengl][sky-background][no-stock]")
+{
+    auto context = try_create_context();
+    if (!context) SKIP("OpenGL 3.3 Core context unavailable on this host");
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version);
+    if (!supports_required_open_gl_version(*actual_version))
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    const auto actual_profile = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile);
+    if (!supports_required_open_gl_profile(*actual_profile))
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    auto& gl_renderer = context->renderer();
+    constexpr renderer::RenderExtent extent{96,96};
+    const auto sky = make_frame_package(false,true,0U,0U,0xe0U,true);
+    REQUIRE(sky->flat_sky_background());
+    auto scene = make_scene(sky);
+    scene.clear_color = {.035F,.055F,.14F,1.0F};
+    gl_renderer.render(scene,extent);
+    const auto sky_pixel = read_pixel(48,48);
+    REQUIRE(sky_pixel == std::array<std::uint8_t,4>{224,96,40,255});
+    // Corners are outside the finite BSP polygon: before this fix they exposed
+    // the connected client's navy clear color instead of the same sky.
+    CHECK(read_pixel(0,0) == sky_pixel);
+    CHECK(read_pixel(95,95) == sky_pixel);
+    float surface_depth = 1.0F, background_depth = 0.0F;
+    glReadPixels(48,48,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&surface_depth);
+    glReadPixels(0,0,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&background_depth);
+    CHECK(surface_depth < 1.0F);
+    CHECK(background_depth == 1.0F);
+
+    // Finite sky clipping is permitted; the environment remains behind it.
+    scene.camera.far_plane = 1.5F;
+    gl_renderer.render(scene,extent);
+    CHECK(read_pixel(48,48) == sky_pixel);
+    glReadPixels(48,48,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&background_depth);
+    CHECK(background_depth == 1.0F);
+
+    const auto opaque = make_frame_package(false,true,0U,0U,0x30U);
+    std::array<BrushSceneFixtureInstance,1U> instances;
+    instances[0U].model_transform = make_brush_fixture_transform(0,-.25F,0);
+    auto mixed = make_profiled_brush_scene(sky,opaque,instances);
+    auto mixed_options = visibility_options(
+        hlclient::world_visibility::WorldVisibilityMode::all,true);
+    // Keep the near opaque quad well inside the frame. At y=-2 its projected
+    // edge nearly reaches the corner pixel, which is not a background probe.
+    mixed_options.spawn_camera->position.y = -3.0F;
+    world_preview::WorldPreviewSceneSource source{mixed,mixed_options};
+    auto mixed_scene = hlclient::client::build_render_scene(source.world_state());
+    gl_renderer.render(mixed_scene,extent);
+    CHECK(read_pixel(48,48) == std::array<std::uint8_t,4>{48,96,40,255});
+    CHECK(read_pixel(0,0) == sky_pixel);
+
+    // A non-sky package and teardown keep their explicitly requested backdrop.
+    auto ordinary = make_scene(opaque);
+    gl_renderer.render(ordinary,extent);
+    CHECK(approximately_clear(read_pixel(0,0),ordinary.clear_color));
+    renderer::RenderScene empty;
+    gl_renderer.render(empty,extent);
+    CHECK(approximately_clear(read_pixel(48,48),empty.clear_color));
+    CHECK(glGetError() == GL_NO_ERROR);
+    context->release_renderer();
+}
+
+TEST_CASE("Original six-face environment has stable direction depth portals and seamless cube edges",
+    "[skybox][opengl][actual-context][no-stock]") {
+    auto context=try_create_context();if(!context)SKIP("OpenGL 3.3 Core unavailable");
+    context->initialize_renderer();auto& backend=context->renderer();
+    constexpr renderer::RenderExtent extent{96,96};
+    auto cube=std::make_shared<assets::SkyboxAsset>();
+    constexpr std::array<std::array<std::uint8_t,4>,6> colors{{
+        {220,20,30,255},{30,210,40,255},{40,50,200,255},
+        {200,190,60,255},{180,70,190,255},{60,170,180,255}}};
+    for(std::size_t f=0;f<6;++f) {
+        auto& face=cube->faces[f];face.width=face.height=4;face.pixels.resize(64);
+        for(std::size_t p=0;p<16;++p)for(std::size_t c=0;c<4;++c)
+            face.pixels[p*4+c]=static_cast<std::byte>(colors[f][c]);
+    }
+    renderer::RenderScene scene;scene.skybox=cube;scene.camera.position={0,0,0};
+    constexpr std::array<assets::AssetVector3,6> directions{{{1,0,0},{-1,0,0},{0,0,1},{0,0,-1},{0,1,0},{0,-1,0}}};
+    for(std::size_t face=0;face<6;++face) {
+        scene.camera.target=directions[face];scene.camera.up=face==2 || face==3 ? assets::AssetVector3{0,1,0} : assets::AssetVector3{0,0,1};
+        backend.render(scene,extent);CHECK(read_pixel(48,48)==colors[face]);
+        // Infinite backdrop has no parallax and writes no scene depth.
+        scene.camera.position={143,-79,200};scene.camera.target={143+directions[face].x,-79+directions[face].y,200+directions[face].z};
+        backend.render(scene,extent);CHECK(read_pixel(48,48)==colors[face]);
+        float depth=0;glReadPixels(48,48,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&depth);CHECK(depth==1.0F);
+        scene.camera.position={0,0,0};
+    }
+    auto gradient=std::make_shared<assets::SkyboxAsset>(*cube);
+    for(auto& face:gradient->faces)for(unsigned y=0;y<4;++y)for(unsigned x=0;x<4;++x) {
+        face.pixels[(y*4+x)*4]=static_cast<std::byte>(x*80);
+        face.pixels[(y*4+x)*4+1]=static_cast<std::byte>(y*80);
+    }
+    scene.skybox=gradient;scene.camera.target={1,0,0};scene.camera.up={0,0,1};
+    backend.render(scene,extent);
+    CHECK(read_pixel(80,48)[0]>read_pixel(16,48)[0]); // Side panel not mirrored.
+    CHECK(read_pixel(48,80)[1]<read_pixel(48,16)[1]); // Top-left source rows applied once.
+    const auto unit_up_center=read_pixel(48,48);
+    // Canonical camera accepts a scaled, almost forward up vector. Its
+    // normalized side is valid even though the raw cross is below1e-6.
+    scene.camera.up={0.001F,0,0.0000001F};
+    REQUIRE(renderer::is_valid(scene.camera));
+    backend.render(scene,extent);CHECK(read_pixel(48,48)==unit_up_center);
+    scene.camera.up={0,0,1};
+    auto seamless=std::make_shared<assets::SkyboxAsset>(*cube);
+    for(auto& face:seamless->faces)for(std::size_t p=0;p<16;++p)for(std::size_t c=0;c<4;++c)
+        face.pixels[p*4+c]=static_cast<std::byte>(colors[0][c]);
+    scene.skybox=seamless;scene.camera.target={1,1,1};
+    backend.render(scene,extent);
+    for(int y=4;y<96;y+=8)for(int x=4;x<96;x+=8)CHECK(read_pixel(x,y)==colors[0]);
+    const auto sky=make_frame_package(false,true,0U,0U,0xe0U,true);
+    REQUIRE(sky->materials()[0].sky_surface);
+    auto portal=make_scene(sky);portal.skybox=cube;
+    backend.render(portal,extent);
+    CHECK(read_pixel(48,48)==colors[4]);CHECK(read_pixel(0,0)==colors[4]);
+    float portal_depth=1;glReadPixels(48,48,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&portal_depth);CHECK(portal_depth<1);
+    const auto opaque=make_frame_package(false,true,0U,0U,0x30U);
+    std::array<BrushSceneFixtureInstance,1> instances;
+    instances[0].model_transform=make_brush_fixture_transform(0,-.25F,0);
+    auto mixed=make_profiled_brush_scene(sky,opaque,instances);
+    auto options=visibility_options(hlclient::world_visibility::WorldVisibilityMode::all,true);
+    options.spawn_camera->position.y=-3;
+    world_preview::WorldPreviewSceneSource source{mixed,options};
+    auto mixed_scene=hlclient::client::build_render_scene(source.world_state());mixed_scene.skybox=cube;
+    backend.render(mixed_scene,extent);
+    CHECK(read_pixel(48,48)==std::array<std::uint8_t,4>{48,96,40,255});
+    CHECK(read_pixel(0,0)==colors[4]);
+    // An opaque object behind a sky portal cannot bleed through its finite depth.
+    instances[0].model_transform=make_brush_fixture_transform(0,.25F,0);
+    auto behind=make_profiled_brush_scene(sky,opaque,instances);
+    world_preview::WorldPreviewSceneSource behind_source{behind,options};
+    auto behind_scene=hlclient::client::build_render_scene(behind_source.world_state());behind_scene.skybox=cube;
+    backend.render(behind_scene,extent);CHECK(read_pixel(48,48)==colors[4]);
+    renderer::RenderScene reset;backend.render(reset,extent);
+    CHECK(approximately_clear(read_pixel(48,48),reset.clear_color));CHECK(glGetError()==GL_NO_ERROR);
+    context->release_renderer();
+}
+
 TEST_CASE("Production OpenGL draws a typed missing-texture image without hiding later world passes",
     "[renderer][opengl][world-textures][external-map-compat]")
 {
@@ -1348,6 +1672,83 @@ TEST_CASE("E4.1 transient light changes nearby wall pixels without changing a di
     context->renderer().render(scene,extent);
     CHECK(read_pixel(48,48)==baseline_near);
     context->release_renderer();
+}
+
+TEST_CASE("E20 committed EF_LIGHT changes actual wall pixels and clears without a local timer",
+          "[e20][opengl][actual-context][renderer]") {
+    auto context=try_create_context();if(!context) SKIP("OpenGL 3.3 Core unavailable");
+    context->initialize_renderer();constexpr renderer::RenderExtent extent{96,96};
+    auto baseline_scene=make_scene(make_frame_package(false,false,1U,0U,0x50U));
+    context->renderer().render(baseline_scene,extent);const auto baseline=read_pixel(48,48);
+    hlclient::client::RuntimeClientObservationState s;s.generation=1;
+    s.entity_metadata={1,hlclient::client::RuntimeObservationFreshness::observed_in_record,
+        hlclient::client::RuntimeObservationCompleteness::complete_reconstruction,
+        hlclient::client::RuntimeObservationSource{1,1,1,0,8}};
+    hlclient::client::RuntimePacketEntityObservation entity;entity.entity_number=40;entity.model_index=74;
+    entity.origin={0.0,-.05,0.0};entity.effects=64;s.packet_entities.push_back(entity);
+    hlclient::app::EntityFollowPresentation effects;effects.observe(s);
+    auto scene=baseline_scene;effects.present(s.packet_entities,scene,0);
+    REQUIRE(scene.world_effect_light_count==1);context->renderer().render(scene,extent);
+    CHECK(read_pixel(48,48)[0]>baseline[0]);
+    s.packet_entities[0].origin.x=500.0;s.entity_metadata.source->record_ordinal=2;effects.observe(s);
+    scene=baseline_scene;effects.present(s.packet_entities,scene,.1);context->renderer().render(scene,extent);
+    CHECK(read_pixel(48,48)==baseline); // light is not frozen at ignition
+    s.packet_entities[0].origin.x=0.0;s.packet_entities[0].effects=0;
+    s.entity_metadata.source->record_ordinal=3;effects.observe(s);
+    scene=baseline_scene;effects.present(s.packet_entities,scene,.2);
+    CHECK(scene.world_effect_light_count==0);context->renderer().render(scene,extent);CHECK(read_pixel(48,48)==baseline);
+    s.packet_entities.clear();s.entity_metadata.source->record_ordinal=4;effects.observe(s);
+    scene=baseline_scene;effects.present({},scene,.3);context->renderer().render(scene,extent);CHECK(read_pixel(48,48)==baseline);
+    CHECK(glGetError()==GL_NO_ERROR);
+}
+
+TEST_CASE("Beam scene light reaches translated runtime brush pixels without lighting distant brushes",
+          "[e22][e22-scene-light][renderer][opengl][actual-context][no-stock]") {
+    auto context=try_create_context();if(!context)SKIP("OpenGL 3.3 Core unavailable");
+    context->initialize_renderer();constexpr renderer::RenderExtent extent{96,96};
+    auto brush_world=make_vertical_world();
+    for(auto& vertex:brush_world.vertices) {
+        vertex.position.x*=64;vertex.position.z*=64;
+    }
+    brush_world.bounds={{-64,0,-64},{64,0,64}};
+    brush_world.surfaces[0].bounds=brush_world.bounds;
+    auto built=world_render::WorldRenderPackageBuilder{}.build(
+        assets::TexturedWorldAsset{std::move(brush_world),make_frame_texture_set(false,80)},
+        make_frame_lightmap_set(false,1,0));
+    REQUIRE(built);
+    auto brush=std::make_shared<const world_render::WorldRenderPackage>(std::move(*built.package));
+    auto world=make_frame_package(false,false,1,0,80);
+    auto map=make_profiled_brush_scene(world,brush,{});
+    auto frame=std::make_shared<world_scene::RuntimeBrushRenderFrame>();
+    frame->scene_identity=map->resource_identity();frame->generation=frame->revision=1;
+    for(unsigned i=0;i<2;++i) {
+        world_scene::RuntimeBrushRenderInstance instance;
+        instance.entity_number=100+i;instance.model_slot=10;instance.source_model_index=1;
+        instance.model_transform=make_brush_fixture_transform(512.F+400.F*i,0,0);
+        instance.transformed_bounds=transform_brush_fixture_bounds(brush->bounds(),instance.model_transform);
+        frame->instances.push_back(instance);
+    }
+    REQUIRE(world_scene::valid_runtime_brush_frame(*frame,*map));
+    auto scene=make_scene(world);
+    scene.static_world->scene_package=map;scene.static_world->runtime_brushes=frame;
+    scene.camera.position={712,-600,0};scene.camera.target={712,0,0};scene.camera.far_plane=2000;
+    auto& renderer=context->renderer();renderer.render(scene,extent);
+    const auto near_baseline=read_pixel(20,48),far_baseline=read_pixel(76,48);
+    REQUIRE_FALSE(approximately_clear(near_baseline,scene.clear_color));
+    REQUIRE_FALSE(approximately_clear(far_baseline,scene.clear_color));
+    const auto before=renderer.statistics().runtime_brush_submitted_count;
+    // The selected beam profile (192 radius, .65 intensity) at .7 opacity.
+    // Only the existing neutral batch is supplied: no visible ribbon/halo can
+    // account for these changed material pixels or hide a missing light upload.
+    scene.world_effect_lights[0]={{512,-16,0},192,.65F*.7F,{.5F,.5F,1}};
+    scene.world_effect_light_count=1;renderer.render(scene,extent);
+    CHECK(renderer.statistics().runtime_brush_submitted_count==before+2);
+    const auto lit=read_pixel(20,48);
+    CHECK(lit[0]>near_baseline[0]);CHECK(lit[1]>near_baseline[1]);CHECK(lit[2]>near_baseline[2]);
+    CHECK(read_pixel(76,48)==far_baseline);
+    scene.world_effect_light_count=0;renderer.render(scene,extent);
+    CHECK(read_pixel(20,48)==near_baseline);CHECK(read_pixel(76,48)==far_baseline);
+    CHECK(glGetError()==GL_NO_ERROR);context->release_renderer();
 }
 
 TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",
@@ -1426,6 +1827,130 @@ TEST_CASE("Full synthetic GoldSrc pipeline renders an OpenGL world frame",
 
     context->release_renderer();
     CHECK(glGetError() == GL_NO_ERROR);
+}
+
+TEST_CASE("Production OpenGL keeps BSP boundary junctions opaque without seam leaks",
+          "[renderer][opengl][integration][bsp-boundary-seam]")
+{
+    // The second offset is exactly representable and smaller than the old
+    // cleanup tolerance at x=1024 (approximately 1/256). Removing M from the
+    // pentagon alone opens a physical gap about five framebuffer pixels wide
+    // at this camera distance. This makes the regression independent of a
+    // driver's subpixel rounding behavior for exactly collinear T-junctions.
+    constexpr std::array boundary_offsets{0.0F, 1.0F / 512.0F};
+    std::array<std::shared_ptr<const world_render::WorldRenderPackage>, 2U>
+        packages;
+    for (std::size_t index = 0U; index < packages.size(); ++index) {
+        packages[index] = make_boundary_junction_package(boundary_offsets[index]);
+        const auto& world = packages[index]->textured_world().world;
+        REQUIRE(world.surfaces.size() == 3U);
+        CHECK(world.surfaces[0U].vertex_count == 5U);
+        CHECK(packages[index]->statistics().triangle_count == 7U);
+        CHECK(packages[index]->statistics().masked_batch_count == 0U);
+        CHECK(packages[index]->lightmaps().binding_count() == 3U);
+        CHECK(packages[index]->lightmaps().page_count() == 0U);
+        const auto retained_junctions = std::count_if(
+            world.vertices.begin(), world.vertices.end(),
+            [offset = boundary_offsets[index]](const auto& vertex) {
+                return vertex.position.x == 1024.0F + offset &&
+                    vertex.position.y == 0.0F && vertex.position.z == 0.0F;
+            });
+        CHECK(retained_junctions == 3);
+    }
+
+    auto context = try_create_context();
+    if (!context) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_version = current_actual_open_gl_version();
+    REQUIRE(actual_version.has_value());
+    if (!supports_required_open_gl_version(*actual_version)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    const auto actual_profile_mask = current_actual_open_gl_profile_mask();
+    REQUIRE(actual_profile_mask.has_value());
+    if (!supports_required_open_gl_profile(*actual_profile_mask)) {
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    }
+    context->initialize_renderer();
+
+    constexpr renderer::RenderExtent extent{96, 96};
+    constexpr int sample_size = 24;
+    constexpr int sample_start = (extent.width - sample_size) / 2;
+    struct BoundaryCameraPose {
+        float along_seam;
+        float eye_offset_x;
+        float eye_offset_y;
+    };
+    // Preserve the original reproducer first, then translate along both
+    // shared segments and look obliquely from either side of the junction.
+    constexpr std::array camera_poses{
+        BoundaryCameraPose{0.0F, 0.0F, 0.0F},
+        BoundaryCameraPose{-16.0F, 0.0F, 0.0F},
+        BoundaryCameraPose{16.0F, 0.0F, 0.0F},
+        BoundaryCameraPose{-8.0F, 1.0F / 64.0F, 1.0F / 128.0F},
+        BoundaryCameraPose{8.0F, -1.0F / 64.0F, -1.0F / 128.0F},
+    };
+    constexpr std::size_t repeated_frame_count = 2U;
+    for (std::size_t index = 0U; index < packages.size(); ++index) {
+        CAPTURE(boundary_offsets[index]);
+        auto scene = make_full_pipeline_scene(packages[index]);
+        scene.clear_color = {1.0F, 0.0F, 1.0F, 1.0F};
+        scene.camera.near_plane = 1.0F / 1024.0F;
+        scene.camera.far_plane = 128.0F;
+        scene.static_world->cull_mode = renderer::RenderCullMode::back;
+        for (std::size_t pose_index = 0U;
+             pose_index < camera_poses.size(); ++pose_index) {
+            CAPTURE(pose_index);
+            const auto& pose = camera_poses[pose_index];
+            const auto segment_fraction =
+                1.0F - std::abs(pose.along_seam) / 32.0F;
+            const auto center_x = 1024.0F +
+                boundary_offsets[index] * segment_fraction * 0.5F;
+            scene.camera.position = {
+                center_x + pose.eye_offset_x,
+                pose.along_seam + pose.eye_offset_y, 1.0F / 32.0F};
+            scene.camera.target = {center_x, pose.along_seam, 0.0F};
+            for (std::size_t frame_index = 0U;
+                 frame_index < repeated_frame_count; ++frame_index) {
+                CAPTURE(frame_index);
+                context->renderer().render(scene, extent);
+
+                std::array<std::uint8_t, sample_size * sample_size * 4U>
+                    pixels{};
+                std::array<float, sample_size * sample_size> depths{};
+                glReadBuffer(GL_BACK);
+                glReadPixels(sample_start, sample_start, sample_size, sample_size,
+                    GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                glReadPixels(sample_start, sample_start, sample_size, sample_size,
+                    GL_DEPTH_COMPONENT, GL_FLOAT, depths.data());
+                std::size_t uncovered_color_pixels = 0U;
+                std::size_t unwritten_depth_pixels = 0U;
+                for (std::size_t pixel = 0U; pixel < depths.size(); ++pixel) {
+                    const auto offset = pixel * 4U;
+                    // Opaque, unlit, constant-color material: no sampling or
+                    // lighting tolerance can hide a bright seam leak.
+                    if (pixels[offset] != 0x30U ||
+                        pixels[offset + 1U] != 0x60U ||
+                        pixels[offset + 2U] != 0x28U ||
+                        pixels[offset + 3U] != 0xFFU) {
+                        ++uncovered_color_pixels;
+                    }
+                    if (!(depths[pixel] > 0.0F && depths[pixel] < 1.0F)) {
+                        ++unwritten_depth_pixels;
+                    }
+                }
+                CHECK(uncovered_color_pixels == 0U);
+                CHECK(unwritten_depth_pixels == 0U);
+                CHECK(context->renderer().statistics().world_present);
+                CHECK(context->renderer().statistics().active_world_resources);
+                CHECK(context->renderer().statistics().failed_upload_count == 0U);
+                CHECK(glGetError() == GL_NO_ERROR);
+            }
+        }
+    }
+    CHECK(context->renderer().statistics().rendered_frame_count ==
+        packages.size() * camera_poses.size() * repeated_frame_count);
 }
 
 TEST_CASE("OpenGL framebuffer observer reads the completed default back frame",

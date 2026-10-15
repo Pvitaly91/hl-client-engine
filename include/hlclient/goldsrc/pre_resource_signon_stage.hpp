@@ -188,6 +188,8 @@ private:
 
     [[nodiscard]] const OwnedServicePayload* retained_source_payload() const noexcept;
     [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    // Terminal-only same-driver borrow; does not relax normal handoff gates.
+    [[nodiscard]] NetchanDriver* close_driver() noexcept;
     void finalize_retained_boundary(PreResourceSignonTimePoint now) noexcept;
     [[nodiscard]] bool can_push_events(std::size_t count = 1U) const noexcept;
     void push_event(PreResourceSignonEvent event) noexcept;

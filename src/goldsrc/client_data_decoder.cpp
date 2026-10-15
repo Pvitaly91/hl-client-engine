@@ -218,6 +218,13 @@ bool ClientWeaponSlotState::shares_object_with(
     return object_ == other.object_;
 }
 
+bool ClientWeaponSlotState::wire_field_updated(const std::string_view name) const noexcept
+{
+    const auto* field = object_->find_exact(name);
+    return field && field->wire_index() < wire_updated_fields_.size() &&
+        wire_updated_fields_[field->wire_index()];
+}
+
 ClientDataFrameState::ClientDataFrameState(
     ClientDataFrameReference reference,
     std::optional<ClientDataFrameReference> base_reference,
@@ -556,10 +563,12 @@ try {
     }
 
     const auto fingerprint_hash = payload_hash(bytes);
+    const bool unanchored_completion = input.payload.normal_fragment_completion;
     const auto fingerprint = std::find_if(
         state.fingerprints_.begin(), state.fingerprints_.end(),
-        [source_sequence](const auto& item) noexcept {
-            return item.sequence == source_sequence->value();
+        [source_sequence, unanchored_completion](const auto& item) noexcept {
+            return item.sequence == source_sequence->value() &&
+                item.unanchored_completion == unanchored_completion;
         });
     if (fingerprint != state.fingerprints_.end()) {
         return failure(
@@ -797,7 +806,7 @@ try {
         ++wire_records;
 
         const auto& weapon_base = weapon_slots[index].object();
-        const auto decoded_weapon = delta_decoder.decode_delta(
+        auto decoded_weapon = delta_decoder.decode_delta(
             *weapon_schema, &weapon_base,
             DeltaValueDecodeContext{bytes, bit_cursor,
                                     bytes.size() * 8U - bit_cursor,
@@ -834,6 +843,8 @@ try {
                 }
             }
             updated_indices.push_back(index);
+            weapon_slots[index].wire_updated_fields_ =
+                std::move(decoded_weapon.wire_updated_fields);
         } catch (const std::bad_alloc&) {
             return failure(ClientDataDecodeErrorCode::unable_to_retain_output,
                            "unable to retain decoded weapon slot",
@@ -900,36 +911,42 @@ try {
                     accounted_value_bytes},
                 profile_}};
 
-        auto frames = state.history_->frames_;
-        auto evicted_through = state.history_->evicted_through_;
-        auto history_bytes = state.history_->accounted_value_bytes_;
-        const bool must_evict =
-            frames.size() == limits_.maximum_history_frames;
-        if (must_evict) {
-            evicted_through = frames.front()->reference();
-            history_bytes -=
-                frames.front()->statistics().accounted_value_bytes;
-            frames.erase(frames.begin());
+        if (!unanchored_completion) {
+            auto frames = state.history_->frames_;
+            auto evicted_through = state.history_->evicted_through_;
+            auto history_bytes = state.history_->accounted_value_bytes_;
+            const bool must_evict =
+                frames.size() == limits_.maximum_history_frames;
+            if (must_evict) {
+                evicted_through = frames.front()->reference();
+                history_bytes -=
+                    frames.front()->statistics().accounted_value_bytes;
+                frames.erase(frames.begin());
+            }
+            if (!checked_add(history_bytes, accounted_value_bytes, history_bytes) ||
+                history_bytes > limits_.maximum_history_value_bytes) {
+                return failure(
+                    ClientDataDecodeErrorCode::history_value_limit_exceeded,
+                    "clientdata history exceeds its aggregate value-byte bound",
+                    ClientDataRecoveryStatus::none, input.start_cursor);
+            }
+            frames.push_back(frame);
+            history = std::shared_ptr<const ClientDataHistoryState>{
+                new ClientDataHistoryState{
+                    std::move(frames), evicted_through, history_bytes,
+                    input.source_generation, profile_}};
+        } else {
+            // Decode and publish the reliable body, but do not invent its
+            // original delta-base sequence from its later completion header.
+            history = state.history_;
         }
-        if (!checked_add(history_bytes, accounted_value_bytes, history_bytes) ||
-            history_bytes > limits_.maximum_history_value_bytes) {
-            return failure(
-                ClientDataDecodeErrorCode::history_value_limit_exceeded,
-                "clientdata history exceeds its aggregate value-byte bound",
-                ClientDataRecoveryStatus::none, input.start_cursor);
-        }
-        frames.push_back(frame);
-        history = std::shared_ptr<const ClientDataHistoryState>{
-            new ClientDataHistoryState{
-                std::move(frames), evicted_through, history_bytes,
-                input.source_generation, profile_}};
 
         fingerprints = state.fingerprints_;
         if (fingerprints.size() == limits_.maximum_history_frames) {
             fingerprints.erase(fingerprints.begin());
         }
         fingerprints.push_back(ClientDataSnapshotState::FrameFingerprint{
-            source_sequence->value(), fingerprint_hash});
+            source_sequence->value(), fingerprint_hash, unanchored_completion});
     } catch (const std::bad_alloc&) {
         return failure(ClientDataDecodeErrorCode::unable_to_retain_output,
                        "unable to publish owning clientdata frame and history");

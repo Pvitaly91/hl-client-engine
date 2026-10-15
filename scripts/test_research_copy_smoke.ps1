@@ -50,12 +50,37 @@ foreach ($required in @(
         "'live-visual-control'",
         '$projectClientUserCmdMode',
         '$projectClientVisualMode',
-        '$projectClientStockSignonMode -and -not $fastManualMode -and $TestStartHealth -ne 50 -and -not $RemoteAudioPeer -and -not $manualSessionTiming',
+        'Get-FunctionalEvidenceEligibility',
         'fresh_project_client_live_visual_control_integrated',
         'fresh_project_client_usercmd_server_motion_verified',
         'usercmd_server_motion_verified')) {
     if ($captureText -cnotmatch [regex]::Escape($required)) {
         throw "Functional wrapper policy marker is absent: $required"
+    }
+}
+# E28.2 centralizes the unchanged policy; assert its executable truth table
+# rather than requiring the old duplicated spelling at one projection site.
+$policyTokens = $null; $policyErrors = $null
+$policyAst = [Management.Automation.Language.Parser]::ParseFile(
+    $capture, [ref]$policyTokens, [ref]$policyErrors)
+if ($policyErrors.Count) { throw 'Functional wrapper policy syntax is invalid.' }
+$policyFunction = $policyAst.Find({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Get-FunctionalEvidenceEligibility'
+}, $true)
+if ($null -eq $policyFunction) { throw 'Shared functional eligibility policy is absent.' }
+. ([scriptblock]::Create($policyFunction.Extent.Text))
+foreach ($project in @($false, $true)) {
+    foreach ($fast in @($false, $true)) {
+        foreach ($health in @(0, 50)) {
+            foreach ($peer in @($false, $true)) {
+                foreach ($timing in @($false, $true)) {
+                    $actual = Get-FunctionalEvidenceEligibility $project $fast $health $peer $timing
+                    $expected = $project -and -not $fast -and $health -ne 50 -and -not $peer -and -not $timing
+                    if ($actual -ne $expected) { throw 'Shared functional evidence eligibility changed its contract.' }
+                }
+            }
+        }
     }
 }
 foreach ($required in @(

@@ -202,6 +202,16 @@ void add_command(HistorySignatureHasher& hash,
     hash.add(command.source_input_sequence());
     hash.add(command.sample_time_nanoseconds());
     hash.add(command.sample_duration_nanoseconds());
+    // Retain legacy zero-impulse signatures. Nonzero simulation-only sidecars
+    // must still distinguish histories even when wire commands are identical.
+    if(std::ranges::any_of(command.velocity_impulse(),[](float v){return v!=0;})) {
+        hash.add(0x56454C31U); // VEL1, neutral command-local delta velocity
+        for(const auto value:command.velocity_impulse())hash.add(value);
+    }
+    if(std::ranges::any_of(command.post_velocity_impulse(),[](float v){return v!=0;})) {
+        hash.add(0x56454C32U); // VEL2, neutral post-movement delta velocity
+        for(const auto value:command.post_velocity_impulse())hash.add(value);
+    }
 }
 
 void add_movement_statistics(HistorySignatureHasher& hash,

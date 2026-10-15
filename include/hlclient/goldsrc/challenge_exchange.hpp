@@ -45,6 +45,8 @@ struct ChallengeExchangeError {
     ChallengeExchangeErrorCategory category{ChallengeExchangeErrorCategory::protocol};
     std::optional<ChallengeProtocolErrorCode> protocol_code;
     std::string context;
+    std::optional<std::size_t> protocol_byte_offset{};
+    std::optional<ChallengeProtocolField> protocol_field{};
 };
 
 struct ChallengeExchangeConfig {
@@ -129,7 +131,9 @@ private:
         ChallengeTraceClassification classification,
         network::NetworkAddress endpoint,
         std::size_t datagram_size,
-        std::span<const std::byte> preview);
+        std::span<const std::byte> preview,
+        std::optional<std::size_t> protocol_byte_offset = {},
+        std::optional<ChallengeProtocolField> protocol_field = {});
     void emit_trace(
         ChallengeTraceClassification classification,
         ChallengeExchangeTimePoint now,

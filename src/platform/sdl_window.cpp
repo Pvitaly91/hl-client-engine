@@ -7,6 +7,7 @@
 #include <SDL3/SDL.h>
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <optional>
@@ -246,6 +247,10 @@ struct SdlWindow::Impl final {
     std::size_t pending_event_count{0U};
     std::size_t native_events_in_current_drain{0U};
     bool native_event_pump_terminal{false};
+    bool escape_input_owned{false};
+    core::VideoSettings requested_video;
+    bool safe_window_recovery{};
+    std::string video_recovery_reason;
     detail::SdlPlatformEventTranslator translator{};
 
     [[nodiscard]] bool pending_event_available() const noexcept
@@ -328,8 +333,44 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
     }
     implementation_->owns_event_pump = true;
 
-    if (config.width <= 0 || config.height <= 0) {
-        throw std::invalid_argument{"SDL window dimensions must be positive"};
+    implementation_->requested_video = {config.display_index, config.mode,
+        config.width, config.height, config.vsync, config.msaa_samples};
+    if (!core::valid_video_settings(implementation_->requested_video)) {
+        throw std::invalid_argument{"SDL video settings are outside the bounded contract"};
+    }
+
+    const auto displays = enumerate_video_displays();
+    if (displays.empty()) throw std::runtime_error{"SDL has no usable display"};
+    const auto selected_index = config.display_index < displays.size() ? config.display_index : 0U;
+    const auto& display = displays[selected_index];
+    SDL_Rect usable{0,0,display.desktop_width,display.desktop_height};
+    if (!SDL_GetDisplayUsableBounds(display.id,&usable) || usable.w<=0 || usable.h<=0)
+        usable={0,0,display.desktop_width,display.desktop_height};
+    const int safe_width=std::max(1,std::min(1280,usable.w-32));
+    const int safe_height=std::max(1,std::min(720,usable.h-64));
+    auto requested_mode = config.mode;
+    if (selected_index != config.display_index) {
+        requested_mode = core::VideoWindowMode::windowed;
+        implementation_->safe_window_recovery = true;
+        implementation_->video_recovery_reason = "selected_display_unavailable";
+    }
+    if (requested_mode == core::VideoWindowMode::exclusive) {
+        requested_mode = core::VideoWindowMode::windowed;
+        implementation_->safe_window_recovery = true;
+        implementation_->video_recovery_reason = "exclusive_mode_unsupported";
+    }
+    // Hidden offscreen windows intentionally retain the exact caller extent,
+    // including larger-than-desktop GPU fixtures. Only interactive windows
+    // need this desktop-fit recovery; unavailable displays/modes still recover.
+    if (!config.hidden && !implementation_->safe_window_recovery && requested_mode == core::VideoWindowMode::windowed &&
+        (config.width>usable.w || config.height>usable.h)) {
+        implementation_->safe_window_recovery = true;
+        implementation_->video_recovery_reason = "window_resolution_exceeds_display";
+    }
+    int initial_width = config.width, initial_height = config.height;
+    if (implementation_->safe_window_recovery) {
+        initial_width = safe_width;
+        initial_height = safe_height;
     }
 
     set_gl_attribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3, "Unable to request OpenGL major version");
@@ -340,6 +381,10 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
         "Unable to request an OpenGL core profile");
     set_gl_attribute(SDL_GL_DOUBLEBUFFER, 1, "Unable to request OpenGL double buffering");
     set_gl_attribute(SDL_GL_DEPTH_SIZE, 24, "Unable to request a 24-bit OpenGL depth buffer");
+    // Antialiasing belongs to the production scene FBO. Reset sticky SDL
+    // attributes so earlier contexts cannot silently add native MSAA too.
+    set_gl_attribute(SDL_GL_MULTISAMPLEBUFFERS, 0, "Unable to disable native MSAA buffers");
+    set_gl_attribute(SDL_GL_MULTISAMPLESAMPLES, 0, "Unable to disable native MSAA samples");
 
 #if !defined(NDEBUG)
     set_gl_attribute(
@@ -355,8 +400,8 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
     }
     implementation_->window = SDL_CreateWindow(
         config.title.c_str(),
-        config.width,
-        config.height,
+        initial_width,
+        initial_height,
         flags);
     if (implementation_->window == nullptr) {
         throw_sdl_opengl_startup_failure(
@@ -366,6 +411,37 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
     implementation_->window_id = SDL_GetWindowID(implementation_->window);
     if (implementation_->window_id == 0U) {
         throw std::runtime_error{sdl_error("Unable to identify the SDL window")};
+    }
+    const auto centered = static_cast<int>(SDL_WINDOWPOS_CENTERED_DISPLAY(display.id));
+    if ((!config.hidden || selected_index != 0U || requested_mode != core::VideoWindowMode::windowed) &&
+        (!SDL_SetWindowPosition(implementation_->window, centered, centered) ||
+         !SDL_SyncWindow(implementation_->window))) {
+        implementation_->safe_window_recovery = true;
+        implementation_->video_recovery_reason = "window_position_not_confirmed";
+        requested_mode = core::VideoWindowMode::windowed;
+    }
+    if (requested_mode == core::VideoWindowMode::borderless) {
+        const bool completed = SDL_SetWindowFullscreenMode(implementation_->window, nullptr) &&
+            SDL_SetWindowFullscreen(implementation_->window, true) &&
+            SDL_SyncWindow(implementation_->window);
+        int pixel_width{}, pixel_height{};
+        const bool dimensions = SDL_GetWindowSizeInPixels(implementation_->window, &pixel_width, &pixel_height);
+        const bool confirmed = completed && dimensions &&
+            (SDL_GetWindowFlags(implementation_->window) & SDL_WINDOW_FULLSCREEN) != 0U &&
+            SDL_GetDisplayForWindow(implementation_->window) == display.id &&
+            pixel_width == display.desktop_width && pixel_height == display.desktop_height;
+        if (!confirmed) {
+            implementation_->safe_window_recovery = true;
+            implementation_->video_recovery_reason = "borderless_mode_not_confirmed";
+            // No exclusive mode or desktop gamma is ever set. Recover this
+            // owned window synchronously; failure is explicit, never a hidden
+            // black/fullscreen client advertised as ready.
+            if (!SDL_SetWindowFullscreen(implementation_->window, false) ||
+                !SDL_SetWindowSize(implementation_->window,safe_width,safe_height) ||
+                !SDL_SyncWindow(implementation_->window) ||
+                (SDL_GetWindowFlags(implementation_->window) & SDL_WINDOW_FULLSCREEN) != 0U)
+                throw std::runtime_error{"Unable to recover the safe windowed video mode"};
+        }
     }
     implementation_->focus_state =
         (SDL_GetWindowFlags(implementation_->window) & SDL_WINDOW_INPUT_FOCUS) != 0U
@@ -385,10 +461,12 @@ SdlWindow::SdlWindow(const SdlWindowConfig& config) : implementation_{std::make_
             "Unable to make the OpenGL context current");
     }
 
-    implementation_->vsync = SDL_GL_SetSwapInterval(1);
-    if (!implementation_->vsync) {
+    const bool swap_request = SDL_GL_SetSwapInterval(config.vsync ? 1 : 0);
+    if (!swap_request) {
         (void)SDL_GL_SetSwapInterval(0);
     }
+    int actual_interval{};
+    implementation_->vsync = SDL_GL_GetSwapInterval(&actual_interval) && actual_interval != 0;
 }
 
 SdlWindow::~SdlWindow() noexcept = default;
@@ -432,6 +510,13 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
         if (native_event.type == SDL_EVENT_KEY_DOWN &&
             native_event.key.scancode == SDL_SCANCODE_ESCAPE &&
             !native_event.key.repeat) {
+            if (implementation_->escape_input_owned) {
+                if (const auto translated = implementation_->translator.translate(native_event)) {
+                    event = *translated;
+                    return true;
+                }
+                continue;
+            }
             if (implementation_->capture_state == input::InputCaptureState::captured) {
                 const auto translated = implementation_->translator.translate(native_event);
                 const auto recovered =
@@ -474,6 +559,10 @@ bool SdlWindow::poll_event(PlatformEvent& event) noexcept
     }
     implementation_->native_events_in_current_drain = 0U;
     return false;
+}
+
+void SdlWindow::set_escape_input_owned(const bool owned) noexcept {
+    implementation_->escape_input_owned = owned;
 }
 
 bool SdlWindow::poll_event(WindowEvent& event) noexcept
@@ -679,6 +768,57 @@ PixelExtent SdlWindow::pixel_extent() const
 bool SdlWindow::vsync_enabled() const noexcept
 {
     return implementation_->vsync;
+}
+
+std::vector<VideoDisplay> enumerate_video_displays()
+{
+    int count{};
+    SDL_DisplayID* ids = SDL_GetDisplays(&count);
+    if (ids == nullptr) throw std::runtime_error{sdl_error("Unable to enumerate displays")};
+    struct Release { SDL_DisplayID* ids; ~Release(){SDL_free(ids);} } release{ids};
+    std::vector<VideoDisplay> result;
+    result.reserve(static_cast<std::size_t>(std::clamp(count, 0, 32)));
+    for (int index=0; index<std::min(count,32); ++index) {
+        const auto* mode = SDL_GetDesktopDisplayMode(ids[index]);
+        if (!mode || mode->w <= 0 || mode->h <= 0)
+            throw std::runtime_error{sdl_error("Unable to query a display desktop mode")};
+        const auto* name = SDL_GetDisplayName(ids[index]);
+        const float scale = SDL_GetDisplayContentScale(ids[index]);
+        result.push_back({static_cast<std::size_t>(index), ids[index], name ? name : "Display",
+            mode->w, mode->h, scale > 0.0F ? scale : 1.0F});
+    }
+    return result;
+}
+
+VideoWindowState SdlWindow::video_state() const
+{
+    VideoWindowState state;
+    state.requested = implementation_->requested_video;
+    state.safe_window_recovery = implementation_->safe_window_recovery;
+    state.recovery_reason = implementation_->video_recovery_reason;
+    const auto display = SDL_GetDisplayForWindow(implementation_->window);
+    const auto displays = enumerate_video_displays();
+    const auto found = std::find_if(displays.begin(),displays.end(),[&](const auto& candidate){return candidate.id == display;});
+    if (found != displays.end()) {
+        state.display_index = found->index;
+        state.desktop_extent = {found->desktop_width,found->desktop_height};
+        state.display_content_scale = found->content_scale;
+    }
+    if (!SDL_GetWindowSize(implementation_->window,&state.window_extent.width,&state.window_extent.height))
+        throw std::runtime_error{sdl_error("Unable to query the window client size")};
+    state.framebuffer_extent = pixel_extent();
+    if (!SDL_GetWindowPosition(implementation_->window,&state.window_x,&state.window_y))
+        throw std::runtime_error{sdl_error("Unable to query the window position")};
+    state.display_scale = SDL_GetWindowDisplayScale(implementation_->window);
+    state.pixel_density = SDL_GetWindowPixelDensity(implementation_->window);
+    state.default_framebuffer_samples_observed =
+        SDL_GL_GetAttribute(SDL_GL_MULTISAMPLEBUFFERS,&state.default_framebuffer_sample_buffers) &&
+        SDL_GL_GetAttribute(SDL_GL_MULTISAMPLESAMPLES,&state.default_framebuffer_samples);
+    if ((SDL_GetWindowFlags(implementation_->window) & SDL_WINDOW_FULLSCREEN) != 0U)
+        state.actual_mode = SDL_GetWindowFullscreenMode(implementation_->window) != nullptr
+            ? core::VideoWindowMode::exclusive : core::VideoWindowMode::borderless;
+    state.vsync = implementation_->vsync;
+    return state;
 }
 
 void SdlWindow::swap_buffers()

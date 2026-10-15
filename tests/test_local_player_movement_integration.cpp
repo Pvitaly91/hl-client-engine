@@ -64,6 +64,360 @@ literal_world_package();
     return seed;
 }
 
+TEST_CASE("E32 normal Half-Life module selects exact nonblocking point gib profiles without rewriting entities",
+          "[e32-gibs][movement][game-module][halflife]") {
+    namespace client=hlclient::client;
+    const auto parsed=goldsrc_bsp::GoldSrcBspParser::parse(literal::make_slope_bsp_v30(0.F));REQUIRE(parsed);
+    const auto built=goldsrc_collision::GoldSrcCollisionWorldBuilder::build(parsed.document->collision_source);REQUIRE(built);
+    const auto library=goldsrc_collision::build_brush_collision_model_library(built.package);REQUIRE(library);
+    hlclient::game_api::GameClientHost game{hlclient::games::halflife::make_half_life_client_module()};
+    const auto& policy=game.movement_policy();REQUIRE(policy.nonblocking_point_boxes.size()==6);
+    client::RuntimeClientObservationState observation;
+    observation.generation=1;observation.publication_revision=10;
+    observation.entity_metadata={1,client::RuntimeObservationFreshness::observed_in_record,
+        client::RuntimeObservationCompleteness::complete_reconstruction,client::RuntimeObservationSource{10,10,10,0,8}};
+    std::map<std::uint32_t,std::string> names;
+    std::uint32_t index=200;
+    for (const auto& rule:policy.nonblocking_point_boxes) {
+        client::RuntimePacketEntityObservation gib;
+        gib.entity_number=index;gib.model_index=index;gib.solid=2;
+        gib.brush_move_type=rule.move_type;gib.owner_entity_reference=0;
+        gib.origin={0,0,2};gib.collision_mins={0,0,0};gib.collision_maxs={0,0,0};
+        gib.ordinary_visual_schema=true;gib.body=1;
+        names.emplace(index,rule.model_name);observation.packet_entities.push_back(gib);++index;
+    }
+    const auto canonical_entities=observation.packet_entities;
+    const auto context=goldsrc::build_reference_brush_collision(library.library,names,observation,1,
+        policy.server_box_solid_code,1,policy.exclude_receiving_client_owned_boxes,
+        policy.server_player_solid_code,policy.nonblocking_point_boxes);
+    REQUIRE(context.scene);CHECK(context.boxes.empty());CHECK(context.excluded_point_box_count==6);
+    CHECK(observation.packet_entities==canonical_entities);
+    movement::GoldSrcLocalMovementScratch scratch;
+    const movement::BrushSceneMovementCollision collision{context.scene,context.boxes};
+    const auto seeded=goldsrc::derive_reference_prediction_ground(reference_floor_seed(),{},collision,scratch,{},
+        player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);
+    REQUIRE(seeded.state);CHECK(seeded.state->origin().z==36);
+    REQUIRE(seeded.state->ground_state().hit());
+    CHECK(seeded.state->ground_state().hit()->kind==player::PlayerMovementHitKind::world);
+    // A stale generation never authorizes the otherwise matching profile.
+    CHECK_FALSE(goldsrc::build_reference_brush_collision(library.library,names,observation,2,
+        policy.server_box_solid_code,1,true,policy.server_player_solid_code,policy.nonblocking_point_boxes).scene);
+}
+
+TEST_CASE("E25 server satchel bounds step and rest without repeated authority corrections",
+          "[e25][movement][prediction][server-box]") {
+    namespace client=hlclient::client;
+    const auto parsed=goldsrc_bsp::GoldSrcBspParser::parse(literal::make_slope_bsp_v30(0.F));REQUIRE(parsed);
+    const auto built=goldsrc_collision::GoldSrcCollisionWorldBuilder::build(parsed.document->collision_source);REQUIRE(built);
+    const auto library=goldsrc_collision::build_brush_collision_model_library(built.package);REQUIRE(library);
+    client::RuntimeClientObservationState observation;
+    observation.generation=1;observation.publication_revision=10;
+    observation.entity_metadata={1,client::RuntimeObservationFreshness::observed_in_record,
+        client::RuntimeObservationCompleteness::complete_reconstruction,client::RuntimeObservationSource{10,10,10,0,8}};
+    client::RuntimePacketEntityObservation charge;
+    charge.entity_number=40;charge.model_index=237;charge.ordinary_visual_schema=true;
+    charge.origin={40,0,4};charge.collision_mins={-4,-4,-4};charge.collision_maxs={4,4,4};
+    charge.owner_entity_reference=2;charge.solid=2;charge.brush_move_type=10;
+    charge.effects=128;observation.packet_entities.push_back(charge); // rendering visibility must not disable collision
+    const std::map<std::uint32_t,std::string> names{{237,"models/w_satchel.mdl"}};
+    hlclient::game_api::GameClientHost game{hlclient::games::halflife::make_half_life_client_module()};
+    const auto& policy=game.movement_policy();REQUIRE(policy.server_box_solid_code==2U);
+    const auto context=goldsrc::build_reference_brush_collision(library.library,names,observation,1,
+        policy.server_box_solid_code,1,policy.exclude_receiving_client_owned_boxes);
+    REQUIRE(context.scene);REQUIRE(context.boxes.size()==1);
+    movement::BrushSceneMovementCollision collision{context.scene,context.boxes};
+    movement::GoldSrcLocalMovementScratch scratch;
+    auto seed=reference_floor_seed();
+    auto grounded=goldsrc::derive_reference_prediction_ground(seed,{},collision,scratch,{},
+        player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);REQUIRE(grounded.state);
+    std::optional<player::LocalPlayerMovementState> current{*grounded.state};float maximum_z=36;
+    for(unsigned id=8;id<73;++id) {
+        goldsrc::GoldSrcWireUserCmd wire;wire.msec=20;wire.forward=100;
+        const auto command=goldsrc::reference_jump_duck_weapon_use_movement_command(*goldsrc::GoldSrcUserCmdSequence::create(id),wire);REQUIRE(command);
+        const auto moved=goldsrc::simulate_reference_movement(*current,*command.state,fixture::make_environment(),collision,scratch,{});
+        REQUIRE(moved);current.emplace(*moved.state);maximum_z=std::max(maximum_z,current->origin().z);
+    }
+    CHECK(maximum_z==Catch::Approx(44).margin(.001));CHECK(current->origin().x>80);
+    CHECK(current->origin().z==Catch::Approx(36).margin(.001));
+    seed.origin={40,0,44};const auto rest_grounded=goldsrc::derive_reference_prediction_ground(seed,{},collision,scratch,{},
+        player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);REQUIRE(rest_grounded.state);
+    REQUIRE(rest_grounded.state->ground_state().hit());CHECK(rest_grounded.state->ground_state().hit()->kind==player::PlayerMovementHitKind::server_entity_box);
+    current.emplace(*rest_grounded.state);
+    for(unsigned id=8;id<73;++id) {
+        goldsrc::GoldSrcWireUserCmd wire;wire.msec=20;
+        const auto command=goldsrc::reference_jump_duck_weapon_use_movement_command(*goldsrc::GoldSrcUserCmdSequence::create(id),wire);
+        const auto moved=goldsrc::simulate_reference_movement(*current,*command.state,fixture::make_environment(),collision,scratch,{});
+        REQUIRE(moved);current.emplace(*moved.state);CHECK(current->origin().z==44.F);CHECK(current->ground_state().grounded());
+    }
+    // Own charge, SOLID_NOT, removal and policy absence have no box fallback.
+    observation.packet_entities[0].owner_entity_reference=1;
+    CHECK(goldsrc::build_reference_brush_collision(library.library,names,observation,1,2,1,true).boxes.empty());
+    observation.packet_entities[0].owner_entity_reference=2;observation.packet_entities[0].solid=0;
+    CHECK(goldsrc::build_reference_brush_collision(library.library,names,observation,1,2,1,true).boxes.empty());
+    observation.packet_entities[0].solid=2;
+    observation.packet_entities[0].model_index=0;
+    CHECK(goldsrc::build_reference_brush_collision(library.library,{},observation,1,2,1,true).boxes.size()==1);
+    observation.packet_entities[0].model_index=237;
+    CHECK(goldsrc::build_reference_brush_collision(library.library,names,observation,1).boxes.empty());
+    observation.packet_entities[0].collision_mins.x.reset();
+    const auto missing=goldsrc::build_reference_brush_collision(library.library,names,observation,1,2,1,true);
+    CHECK_FALSE(missing.scene);CHECK(missing.reason=="collision_box_fields_unavailable");
+    observation.packet_entities.clear();
+    CHECK(goldsrc::build_reference_brush_collision(library.library,names,observation,1,2,1,true).boxes.empty());
+}
+
+[[nodiscard]] goldsrc::ReferenceBrushCollisionContext wall_tripmine_context(
+    const hlclient::game_api::GameMovementPolicy& policy,
+    const std::uint32_t owner, const float wire_offset)
+{
+    using namespace hlclient::tests;
+    namespace client = hlclient::client;
+    // Literal BSP halfspaces, independently authored for each player hull:
+    // floor z<=0 and mounting wall x>=8+offset. No AABB sweep is used by
+    // the mine-free oracle below.
+    const std::vector<literal::ConvexVolume> volumes{
+        literal::ConvexVolume{{literal::normalized_halfspace({0, 0, 1}, 0, false)}, -2},
+        literal::ConvexVolume{{literal::normalized_halfspace({-1, 0, 0}, -8-wire_offset, false)}, -2}};
+    std::vector<SyntheticBspPlane> planes{{{0, 0, 1}, 0, 2}};
+    std::vector<SyntheticBspNode> nodes;
+    std::vector<SyntheticBspClipnode> clips;
+    SyntheticBspModel model;
+    model.minimum = {-256, -256, -128};
+    model.maximum = {256, 256, 256};
+    model.headnodes = {
+        literal::compile_point_tree(volumes, planes, nodes),
+        literal::compile_clip_tree(volumes, {16, 16, 36}, planes, clips), -1,
+        literal::compile_clip_tree(volumes, {16, 16, 18}, planes, clips)};
+    model.face_count = 1;
+    model.visibility_leaf_count = 1;
+    const std::array leaves{
+        SyntheticBspLeaf{-1, -1, {-256, -256, -128}, {256, 256, 256}, 0, 0, {}},
+        SyntheticBspLeaf{-2, -1, {-256, -256, -128}, {256, 256, 256}, 0, 0, {}}};
+    const auto bytes = SyntheticBspBuilder{}.set_planes(planes).set_nodes(nodes)
+        .set_clipnodes(clips).set_leaves(leaves)
+        .set_models(std::span{&model, 1U}).build();
+    const auto parsed = goldsrc_bsp::GoldSrcBspParser::parse(bytes);
+    REQUIRE(parsed);
+    const auto built = goldsrc_collision::GoldSrcCollisionWorldBuilder::build(
+        parsed.document->collision_source);
+    REQUIRE(built);
+    const auto library = goldsrc_collision::build_brush_collision_model_library(built.package);
+    REQUIRE(library);
+
+    client::RuntimeClientObservationState observation;
+    observation.generation = 1U;
+    observation.publication_revision = 10U;
+    observation.entity_metadata = {1U, client::RuntimeObservationFreshness::observed_in_record,
+        client::RuntimeObservationCompleteness::complete_reconstruction,
+        client::RuntimeObservationSource{10U, 10U, 10U, 0U, 8U}};
+    client::RuntimePacketEntityObservation mine;
+    mine.entity_number = 40U;
+    mine.model_index = 237U;
+    mine.ordinary_visual_schema = true;
+    mine.origin = {wire_offset, wire_offset, 32.0+wire_offset};
+    mine.collision_mins = {-8, -8, -8};
+    mine.collision_maxs = {8, 8, 8};
+    mine.owner_entity_reference = owner;
+    mine.solid = 2U;
+    mine.brush_move_type = 5U;
+    mine.body = 3U;
+    observation.packet_entities.push_back(mine);
+    const auto context = goldsrc::build_reference_brush_collision(library.library,
+        {{237U, "models/v_tripmine.mdl"}}, observation, 1U,
+        policy.server_box_solid_code, 1U, policy.exclude_receiving_client_owned_boxes);
+    REQUIRE(context.scene);
+    REQUIRE(context.boxes.size() == 1U);
+    CHECK(context.boxes.front().bounds.minimum.x == wire_offset-8.0F);
+    CHECK(context.boxes.front().bounds.maximum.z == wire_offset+40.0F);
+    return context;
+}
+
+TEST_CASE("E26 wall tripmine top-corner air ticks preserve reference physical state",
+    "[e26][movement][prediction][server-box][tripmine][integration]")
+{
+    hlclient::game_api::GameClientHost game{
+        hlclient::games::halflife::make_half_life_client_module()};
+    const auto& policy = game.movement_policy();
+    REQUIRE(policy.server_box_solid_code == 2U);
+    REQUIRE(policy.exclude_receiving_client_owned_boxes);
+    const auto environment = fixture::make_environment();
+    REQUIRE(environment.gravity() == 800.0F);
+    struct AirTick {
+        hlclient::assets::AssetVector3 origin, velocity, endpoint, final_velocity;
+    };
+    // A 20 ms split-gravity step subtracts 8 before and after movement.
+    // Both paths touch (-24,0,76) at t=.5, but never enter the box interior.
+    // Keep the upward endpoint above the stock 180-unit ground-snap threshold
+    // and the downward start two units above the top: genuine top support is
+    // deliberately not conflated with this zero-duration contact.
+    const std::array ticks{
+        AirTick{{-25, 0, 74}, {100, 0, 208}, {-23, 0, 78}, {100, 0, 192}},
+        AirTick{{-23, 0, 78}, {-100, 0, -192}, {-25, 0, 74}, {-100, 0, -208}}};
+    for (const auto owner : {0U, 2U}) {
+        for (const float wire_offset : {0.0F, 0.125F}) {
+            CAPTURE(owner, wire_offset);
+            const auto context = wall_tripmine_context(policy, owner, wire_offset);
+            const movement::BrushSceneMovementCollision collision{context.scene, context.boxes};
+            const movement::WorldOnlyMovementCollision oracle{
+                context.scene->model_library()->collision_world()};
+            movement::GoldSrcLocalMovementScratch scratch, oracle_scratch;
+            for (const auto& tick : ticks) {
+                CAPTURE(tick.velocity.z);
+                auto seed = reference_floor_seed(tick.origin.z+wire_offset, tick.velocity.z, 0U);
+                seed.origin = {tick.origin.x+wire_offset, tick.origin.y+wire_offset,
+                    tick.origin.z+wire_offset};
+                seed.velocity = {tick.velocity.x, tick.velocity.y, tick.velocity.z};
+                const hlclient::assets::AssetVector3 endpoint{
+                    tick.endpoint.x+wire_offset, tick.endpoint.y+wire_offset,
+                    tick.endpoint.z+wire_offset};
+                for (unsigned sample = 0U; sample <= 16U; ++sample) {
+                    const auto fraction = static_cast<float>(sample)/16.0F;
+                    const hlclient::assets::AssetVector3 position{
+                        static_cast<float>(*seed.origin.x)+(endpoint.x-static_cast<float>(*seed.origin.x))*fraction,
+                        static_cast<float>(*seed.origin.y)+(endpoint.y-static_cast<float>(*seed.origin.y))*fraction,
+                        static_cast<float>(*seed.origin.z)+(endpoint.z-static_cast<float>(*seed.origin.z))*fraction};
+                    const auto tested = collision.test_position(position,
+                        player::PlayerMovementHull::standing, scratch.collision);
+                    REQUIRE(tested);
+                    CHECK(tested.result->status == movement::LocalMovementPositionStatus::free);
+                    CHECK_FALSE(tested.result->hit);
+                }
+                const auto initial = goldsrc::derive_reference_prediction_ground(seed, {}, collision,
+                    scratch, policy.movement_config,
+                    player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);
+                const auto control = goldsrc::derive_reference_prediction_ground(seed, {}, oracle,
+                    oracle_scratch, policy.movement_config,
+                    player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);
+                REQUIRE(initial.state);
+                REQUIRE(control.state);
+                REQUIRE_FALSE(initial.state->ground_state().grounded());
+                goldsrc::GoldSrcWireUserCmd wire;
+                wire.msec = 20U;
+                const auto command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+                    *goldsrc::GoldSrcUserCmdSequence::create(8U), wire);
+                REQUIRE(command);
+                const auto moved = goldsrc::simulate_reference_movement(*initial.state, *command.state,
+                    environment, collision, scratch, policy.movement_config);
+                const auto expected = goldsrc::simulate_reference_movement(*control.state, *command.state,
+                    environment, oracle, oracle_scratch, policy.movement_config);
+                INFO((moved.error ? moved.error->context : "ready"));
+                REQUIRE(moved);
+                REQUIRE(expected);
+                CHECK(moved.statistics.collision_hit_count == 0U);
+                CHECK(moved.touches.empty());
+                CHECK(moved.state->origin().x == endpoint.x);
+                CHECK(moved.state->origin().y == endpoint.y);
+                CHECK(moved.state->origin().z == endpoint.z);
+                CHECK(moved.state->velocity().x == tick.final_velocity.x);
+                CHECK(moved.state->velocity().z == tick.final_velocity.z);
+                CHECK_FALSE(moved.state->ground_state().grounded());
+                CHECK(moved.state->mode() == player::PlayerMovementMode::airborne);
+                CHECK(player::local_player_movement_state_signature(*moved.state) ==
+                    player::local_player_movement_state_signature(*expected.state));
+            }
+        }
+    }
+}
+
+TEST_CASE("E26 jumping away from a wall tripmine corner matches BSP wall slide and landing",
+    "[e26][movement][prediction][server-box][tripmine][integration][jump]")
+{
+    hlclient::game_api::GameClientHost game{
+        hlclient::games::halflife::make_half_life_client_module()};
+    const auto& policy = game.movement_policy();
+    REQUIRE(policy.server_box_solid_code == 2U);
+    REQUIRE(policy.exclude_receiving_client_owned_boxes);
+    const auto environment = fixture::make_environment();
+    for (const auto owner : {0U, 2U}) {
+        for (const float wire_offset : {0.0F, 0.125F}) {
+            CAPTURE(owner, wire_offset);
+            const auto context = wall_tripmine_context(policy, owner, wire_offset);
+            const movement::BrushSceneMovementCollision collision{context.scene, context.boxes};
+            const movement::WorldOnlyMovementCollision oracle{
+                context.scene->model_library()->collision_world()};
+            movement::GoldSrcLocalMovementScratch scratch, oracle_scratch;
+            auto seed = reference_floor_seed();
+            seed.origin = {-24.0+wire_offset, -24.0+wire_offset, 36.0};
+            seed.velocity = {100, -100, 0};
+            const auto initial = goldsrc::derive_reference_prediction_ground(seed, {}, collision,
+                scratch, policy.movement_config,
+                player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);
+            const auto control = goldsrc::derive_reference_prediction_ground(seed, {}, oracle,
+                oracle_scratch, policy.movement_config,
+                player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);
+            REQUIRE(initial.state);
+            REQUIRE(control.state);
+            REQUIRE(initial.state->ground_state().grounded());
+            std::optional<player::LocalPlayerMovementState> current{*initial.state};
+            std::optional<player::LocalPlayerMovementState> expected{*control.state};
+            std::uint64_t jumps = 0U, world_contacts = 0U;
+            bool rose = false, descended = false, landed = false;
+            for (unsigned id = 8U; id < 88U; ++id) {
+                CAPTURE(id);
+                goldsrc::GoldSrcWireUserCmd wire;
+                wire.msec = 20U;
+                wire.buttons = id == 8U ? goldsrc::kReferenceGoldSrcButtonJump : 0U;
+                const auto command = goldsrc::reference_jump_duck_weapon_use_movement_command(
+                    *goldsrc::GoldSrcUserCmdSequence::create(id), wire);
+                REQUIRE(command);
+                const auto moved = goldsrc::simulate_reference_movement(*current, *command.state,
+                    environment, collision, scratch, policy.movement_config);
+                const auto reference = goldsrc::simulate_reference_movement(*expected, *command.state,
+                    environment, oracle, oracle_scratch, policy.movement_config);
+                INFO((moved.error ? moved.error->context : "ready"));
+                REQUIRE(moved);
+                REQUIRE(reference);
+                // At t=0 this jump enters the mine's X slab while leaving its
+                // Y slab. Every later point is outside; clipping X here would
+                // immediately create a physical error requiring authority repair.
+                if (id == 8U) {
+                    CHECK(moved.statistics.collision_hit_count == 0U);
+                    CHECK(moved.state->origin().x == wire_offset-22.0F);
+                    CHECK(moved.state->origin().y == wire_offset-26.0F);
+                    CHECK(moved.state->velocity().x == 100.0F);
+                    CHECK(moved.state->velocity().y == -100.0F);
+                    CHECK(moved.state->velocity().z == Catch::Approx(252.3281573F).margin(.0001));
+                    for (unsigned sample = 0U; sample <= 16U; ++sample) {
+                        const auto fraction = static_cast<float>(sample)/16.0F;
+                        const hlclient::assets::AssetVector3 position{
+                            current->origin().x+(reference.state->origin().x-current->origin().x)*fraction,
+                            current->origin().y+(reference.state->origin().y-current->origin().y)*fraction,
+                            current->origin().z+(reference.state->origin().z-current->origin().z)*fraction};
+                        const auto tested = collision.test_position(position,
+                            player::PlayerMovementHull::standing, scratch.collision);
+                        REQUIRE(tested);
+                        CHECK(tested.result->status == movement::LocalMovementPositionStatus::free);
+                    }
+                }
+                CHECK(player::local_player_movement_state_signature(*moved.state) ==
+                    player::local_player_movement_state_signature(*reference.state));
+                CHECK(moved.statistics.start_solid_count == 0U);
+                CHECK(moved.statistics.all_solid_count == 0U);
+                for (const auto& touch : moved.touches) {
+                    CHECK(touch.hit.kind == player::PlayerMovementHitKind::world);
+                    ++world_contacts;
+                }
+                jumps += moved.statistics.jump_count;
+                rose = rose || moved.state->velocity().z > 0.0F;
+                descended = descended || moved.state->velocity().z < 0.0F;
+                landed = landed || id > 8U && moved.state->ground_state().grounded();
+                current.emplace(*moved.state);
+                expected.emplace(*reference.state);
+            }
+            CHECK(jumps == 1U);
+            CHECK(rose);
+            CHECK(descended);
+            CHECK(landed);
+            CHECK(world_contacts > 0U);
+            CHECK(current->ground_state().grounded());
+            REQUIRE(current->ground_state().hit());
+            CHECK(current->ground_state().hit()->kind == player::PlayerMovementHitKind::world);
+            CHECK(current->origin().z == Catch::Approx(36.0F).margin(.00001));
+            CHECK(current->velocity().z == 0.0F);
+        }
+    }
+}
+
 TEST_CASE("Reference seed categorizes literal world ground without moving server origin",
     "[goldsrc][movement][prediction][reference-ground]")
 {
@@ -2176,6 +2530,90 @@ TEST_CASE("Sequence revision and simulation-time bounds fail closed",
         CHECK(result.error->code == movement::
             LocalMovementSimulationErrorCode::simulation_time_overflow);
     }
+}
+
+TEST_CASE("E21 neutral immutable impulse suffix replays once under authoritative rebase", "[e21][movement][prediction][no-stock]") {
+    const movement::WorldOnlyMovementCollision collision{literal_world_package()};const auto environment=fixture::make_environment();
+    movement::GoldSrcLocalMovementScratch scratch;
+    const auto ground=goldsrc::derive_reference_prediction_ground(reference_floor_seed(),{},collision,scratch,{},player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);REQUIRE(ground.state);
+    const auto session=hlclient::prediction::create_prediction_session_identity(1,1,collision,environment,{},*ground.state,
+        hlclient::prediction::PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4,
+        hlclient::prediction::PredictionAcknowledgementProfile::reference_sent_carrier_boundary_v1);REQUIRE(session);
+    auto history=hlclient::prediction::LocalPredictionHistoryState::create_initial(*ground.state,*session.session).history;REQUIRE(history);
+    std::shared_ptr<const player::LocalPlayerMovementState> boundary;
+    for(unsigned id=8;id<=14;++id) {
+        goldsrc::GoldSrcWireUserCmd wire;wire.msec=20;const auto command=goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(*goldsrc::GoldSrcUserCmdSequence::create(id),wire);REQUIRE(command);
+        const auto impulse=command.state->with_velocity_impulse(id==10 ? std::array<float,3>{-300,0,600} : std::array<float,3>{});REQUIRE(impulse);
+        const auto before=history->current_predicted_state();const auto simulated=movement::GoldSrcLocalMovementKernel::simulate(*before,*impulse.state,environment,collision,scratch);REQUIRE(simulated);
+        auto after=std::make_shared<const player::LocalPlayerMovementState>(*simulated.state);if(id==9)boundary=after;
+        const hlclient::prediction::PredictedCommandAppend append{std::make_shared<const goldsrc::GoldSrcUserCmdState>(*impulse.state),before,after,simulated.statistics,
+            hlclient::prediction::summarize_prediction_touches(simulated.touches,false,false)};
+        const auto added=hlclient::prediction::append_local_prediction_commands(*history,std::span{&append,1U});REQUIRE(added);history=added.history;
+    }
+    REQUIRE(boundary);CHECK(history->size()==7);const auto endpoint=player::local_player_movement_state_signature(*history->current_predicted_state());
+    CHECK(history->current_predicted_state()->velocity().z>400);
+    const auto replay=goldsrc::rebase_reference_prediction(*history,*boundary,environment,collision,scratch);REQUIRE(replay.history);CHECK(replay.replayed_commands==5);
+    CHECK(player::local_player_movement_state_signature(*replay.history->current_predicted_state())==endpoint);
+    const auto again=goldsrc::rebase_reference_prediction(*replay.history,*boundary,environment,collision,scratch);REQUIRE(again.history);
+    CHECK(player::local_player_movement_state_signature(*again.history->current_predicted_state())==endpoint);
+    auto corrected_info=player::local_player_movement_state_create_info(*boundary);corrected_info.origin.x+=1;
+    const auto corrected=player::LocalPlayerMovementState::create(corrected_info);REQUIRE(corrected.state);
+    const auto adjusted=goldsrc::rebase_reference_prediction(*history,*corrected.state,environment,collision,scratch);REQUIRE(adjusted.history);CHECK(adjusted.raw_position_error==Catch::Approx(1));
+    CHECK(adjusted.history->current_predicted_state()->velocity().z==history->current_predicted_state()->velocity().z);
+}
+TEST_CASE("E16 secondary wire history replay preserves identical H4 physics endpoint",
+          "[e16][goldsrc][movement][prediction][secondary][reference-actions]") {
+    const movement::WorldOnlyMovementCollision collision{literal_world_package()};
+    const auto environment = fixture::make_environment();
+    movement::GoldSrcLocalMovementScratch scratch;
+    const auto ground = goldsrc::derive_reference_prediction_ground(reference_floor_seed(), {}, collision,
+        scratch, {}, player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2);
+    REQUIRE(ground.state);
+    const auto session = hlclient::prediction::create_prediction_session_identity(1, 1, collision,
+        environment, {}, *ground.state,
+        hlclient::prediction::PredictionCompatibilityProfile::reference_carrier_jump_duck_weapon_use_v4,
+        hlclient::prediction::PredictionAcknowledgementProfile::reference_sent_carrier_boundary_v1);
+    REQUIRE(session);
+    auto history = hlclient::prediction::LocalPredictionHistoryState::create_initial(*ground.state, *session.session).history;
+    REQUIRE(history);
+    auto control = std::make_shared<const player::LocalPlayerMovementState>(*ground.state);
+    std::shared_ptr<const player::LocalPlayerMovementState> boundary;
+    for (unsigned id = 8; id <= 14; ++id) {
+        goldsrc::GoldSrcWireUserCmd wire; wire.msec = 20; wire.forward = 400;
+        wire.buttons = id <= 11 ? goldsrc::kReferenceGoldSrcButtonAttack2 : 0U;
+        const auto command = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(
+            *goldsrc::GoldSrcUserCmdSequence::create(id), wire);
+        REQUIRE(command); CHECK(command.state->buttons() == wire.buttons);
+        const auto before = history->current_predicted_state();
+        const auto simulated = movement::GoldSrcLocalMovementKernel::simulate(*before, *command.state,
+            environment, collision, scratch);
+        REQUIRE(simulated);
+        auto after = std::make_shared<const player::LocalPlayerMovementState>(*simulated.state);
+        auto neutral_wire = wire; neutral_wire.buttons = 0U;
+        const auto neutral = goldsrc::reference_jump_duck_weapon_use_movement_command(
+            *goldsrc::GoldSrcUserCmdSequence::create(id), neutral_wire);
+        REQUIRE(neutral);
+        const auto unchanged = movement::GoldSrcLocalMovementKernel::simulate(*control, *neutral.state,
+            environment, collision, scratch);
+        REQUIRE(unchanged);
+        control = std::make_shared<const player::LocalPlayerMovementState>(*unchanged.state);
+        CHECK(after->origin().x == control->origin().x); CHECK(after->origin().y == control->origin().y);
+        CHECK(after->origin().z == control->origin().z);
+        CHECK(after->velocity().x == control->velocity().x); CHECK(after->velocity().z == control->velocity().z);
+        CHECK(after->ground_state().grounded() == control->ground_state().grounded());
+        if (id == 10) boundary = after;
+        const hlclient::prediction::PredictedCommandAppend append{
+            std::make_shared<const goldsrc::GoldSrcUserCmdState>(*command.state), before, after, simulated.statistics,
+            hlclient::prediction::summarize_prediction_touches(simulated.touches, false, false)};
+        const auto appended = hlclient::prediction::append_local_prediction_commands(*history, std::span{&append, 1U});
+        REQUIRE(appended); history = appended.history;
+    }
+    CHECK(history->size() == 7U); REQUIRE(boundary);
+    const auto endpoint = player::local_player_movement_state_signature(*history->current_predicted_state());
+    CHECK(endpoint == player::local_player_movement_state_signature(*control));
+    const auto replay = goldsrc::rebase_reference_prediction(*history, *boundary, environment, collision, scratch);
+    REQUIRE(replay.history); CHECK(replay.replayed_commands == 4U);
+    CHECK(player::local_player_movement_state_signature(*replay.history->current_predicted_state()) == endpoint);
 }
 
 } // namespace

@@ -129,7 +129,43 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
         const auto library_records = create_info.asset_library
             ? create_info.asset_library->records()
             : std::span<const entity_visual::EntityVisualAssetRecord>{};
-        if (!project_generated && library_records.size() != visual_asset_count) {
+        if(create_info.presentation_studio_sources.size()>128U ||
+            (project_generated && !create_info.presentation_studio_sources.empty()))
+            return scene_fail(EntitySceneRenderErrorCode::source_limit_exceeded,std::nullopt,
+                "Supplemental Studio presentation source bound exceeded");
+        std::unordered_set<std::uint64_t> presentation_source_ids;
+        for(const auto& source:create_info.presentation_studio_sources) {
+            if(!source.model || !source.model->skeletal_data || !source.identity.resource_id || !source.identity.revision)
+                return scene_fail(EntitySceneRenderErrorCode::invalid_studio_asset,std::nullopt,
+                    "Supplemental Studio source has no owning imported data or identity");
+            if(!presentation_source_ids.insert(source.identity.resource_id).second ||
+                std::any_of(library_records.begin(),library_records.end(),[&](const auto& record){
+                    return record.resource_id()==source.identity.resource_id;
+                }) || std::count_if(create_info.studio_assets.begin(),create_info.studio_assets.end(),[&](const auto& asset){
+                    return asset && asset->source_identity()==source.identity;
+                })!=1)
+                return scene_fail(EntitySceneRenderErrorCode::invalid_studio_asset,std::nullopt,
+                    "Supplemental Studio source must have one distinct exact render asset");
+        }
+        if(create_info.presentation_sprite_sources.size()>8U ||
+            (project_generated && !create_info.presentation_sprite_sources.empty()))
+            return scene_fail(EntitySceneRenderErrorCode::source_limit_exceeded,std::nullopt,
+                "Supplemental Sprite presentation source bound exceeded");
+        for(const auto& source:create_info.presentation_sprite_sources) {
+            if(!source.sprite || !source.sprite->source_data || !source.identity.resource_id || !source.identity.revision)
+                return scene_fail(EntitySceneRenderErrorCode::invalid_sprite_asset,std::nullopt,
+                    "Supplemental Sprite source has no owning imported data or identity");
+            if(!presentation_source_ids.insert(source.identity.resource_id).second ||
+                std::any_of(library_records.begin(),library_records.end(),[&](const auto& record){
+                    return record.resource_id()==source.identity.resource_id;
+                }) || std::count_if(create_info.sprite_assets.begin(),create_info.sprite_assets.end(),[&](const auto& asset){
+                    return asset && asset->source_identity()==source.identity;
+                })!=1)
+                return scene_fail(EntitySceneRenderErrorCode::invalid_sprite_asset,std::nullopt,
+                    "Supplemental Sprite source must have one distinct exact render asset");
+        }
+        if (!project_generated && library_records.size()+create_info.presentation_studio_sources.size()+
+            create_info.presentation_sprite_sources.size() != visual_asset_count) {
             return scene_fail(EntitySceneRenderErrorCode::invalid_library_identity,
                 std::nullopt,
                 "Entity scene render assets do not exactly cover the retained visual library");
@@ -162,7 +198,11 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
                               value.resource_revision() ==
                                   asset->source_identity().revision;
                       });
-            if (!project_generated && record == library_records.end()) {
+            const bool presentation=std::count_if(create_info.presentation_studio_sources.begin(),
+                create_info.presentation_studio_sources.end(),[&](const auto& source){
+                    return source.identity==asset->source_identity();
+                })==1;
+            if (!project_generated && record == library_records.end() && !presentation) {
                 return scene_fail(EntitySceneRenderErrorCode::invalid_studio_asset,
                     index,
                     "Studio render asset has no exact immutable library record");
@@ -211,7 +251,11 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
                         value.resource_revision() ==
                             asset->source_identity().revision;
                 });
-            if (record == library_records.end()) {
+            const bool presentation=std::count_if(create_info.presentation_sprite_sources.begin(),
+                create_info.presentation_sprite_sources.end(),[&](const auto& source){
+                    return source.identity==asset->source_identity();
+                })==1;
+            if (record == library_records.end() && !presentation) {
                 return scene_fail(EntitySceneRenderErrorCode::invalid_sprite_asset,
                     index,
                     "Sprite render asset has no exact immutable library record");
@@ -262,6 +306,8 @@ EntitySceneRenderPackageBuildResult EntitySceneRenderPackageBuilder::build(
                 create_info.world_scene_association,
                 std::move(create_info.studio_assets),
                 std::move(create_info.sprite_assets),
+                std::move(create_info.presentation_studio_sources),
+                std::move(create_info.presentation_sprite_sources),
                 statistics,
             },
             std::nullopt,

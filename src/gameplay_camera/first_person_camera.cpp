@@ -201,6 +201,8 @@ constexpr double kMaximumSpeedMultiplier = 16.0;
     };
     return std::isfinite(mouse.degrees_per_pixel_x) &&
         std::isfinite(mouse.degrees_per_pixel_y) &&
+        std::isfinite(mouse.sensitivity_scale) &&
+        mouse.sensitivity_scale > 0.0 && mouse.sensitivity_scale <= 4.0 &&
         std::isfinite(mouse.maximum_delta_per_frame) &&
         mouse.degrees_per_pixel_x >= kMinimumMouseSensitivity &&
         mouse.degrees_per_pixel_x <= kMaximumMouseSensitivity &&

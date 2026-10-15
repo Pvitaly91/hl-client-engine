@@ -11,7 +11,13 @@ namespace hlclient::games::halflife {
 class HalfLifeRemotePlayerPresentation final {
 public:
     [[nodiscard]] static game_api::RemotePlayerPresentationPolicy policy() noexcept;
+    [[nodiscard]] static bool compatible_model(const assets::SkeletalModelAssetData&) noexcept;
+    [[nodiscard]] game_api::WorldEntityPresentationIntent world_entity(
+        const game_api::WorldEntityPresentationContext&) const noexcept;
+    void slot_boundary(std::uint32_t entity) noexcept;
     void reset() noexcept;
+    void entities(std::span<const client::RuntimePacketEntityObservation>,std::uint32_t,
+        std::uint64_t) noexcept;
     [[nodiscard]] game_api::RemotePlayerPresentationIntent sample(
         const game_api::RemotePlayerPresentationContext&) noexcept;
 
@@ -56,6 +62,10 @@ private:
         const FrameAnchor&, const assets::SkeletalModelAssetData&, double) noexcept;
     std::array<ModelProfile, game_api::kMaximumRemotePlayers> models_{};
     std::array<PlayerState, game_api::kMaximumRemotePlayers> players_{};
+    std::array<bool, game_api::kMaximumRemotePlayers> visual_inactive_{};
+    std::array<std::uint64_t, game_api::kMaximumRemotePlayers> visual_epochs_{};
+    std::array<std::optional<std::uint32_t>, game_api::kMaximumRemotePlayers> selected_models_{};
+    std::uint64_t entity_ordinal_{};
 };
 
 } // namespace hlclient::games::halflife

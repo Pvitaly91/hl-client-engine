@@ -37,11 +37,39 @@ enum class ChallengeProtocolErrorCode {
     unsupported_variant,
 };
 
+// Parser-owned location only. Never contains the field value (challenge,
+// server identity, authentication material or an untrusted packet preview).
+enum class ChallengeProtocolField {
+    envelope,
+    response_type,
+    challenge_token,
+    authentication_profile,
+    server_identity,
+    security_flag,
+    terminator,
+    trailing_data,
+};
+
 struct ChallengeProtocolError {
     ChallengeProtocolErrorCode code{ChallengeProtocolErrorCode::unsupported_variant};
     std::size_t byte_offset{0};
     std::string context;
+    ChallengeProtocolField field{ChallengeProtocolField::envelope};
 };
+
+[[nodiscard]] constexpr std::string_view to_string(ChallengeProtocolField field) noexcept {
+    switch(field) {
+    case ChallengeProtocolField::envelope:return "envelope";
+    case ChallengeProtocolField::response_type:return "response_type";
+    case ChallengeProtocolField::challenge_token:return "challenge_token";
+    case ChallengeProtocolField::authentication_profile:return "authentication_profile";
+    case ChallengeProtocolField::server_identity:return "server_identity";
+    case ChallengeProtocolField::security_flag:return "security_flag";
+    case ChallengeProtocolField::terminator:return "terminator";
+    case ChallengeProtocolField::trailing_data:return "trailing_data";
+    }
+    return "unknown";
+}
 
 struct ChallengeResponseParseResult {
     std::optional<ChallengeResponse> response;

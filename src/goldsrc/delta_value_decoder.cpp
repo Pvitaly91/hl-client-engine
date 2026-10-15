@@ -65,6 +65,7 @@ namespace {
         0U,
         initial_bit_offset,
         initial_bit_offset / 8U,
+        {},
     };
 }
 
@@ -1190,6 +1191,7 @@ DeltaValueDecodeResult GoldSrcDeltaValueDecoder::decode_delta(
         bits_consumed,
         reader.bit_offset(),
         reader.bit_offset() / 8U,
+        std::move(changed),
     };
 }
 

@@ -1,13 +1,34 @@
 # This executable never links or includes the concrete game. The same host
 # and engine objects are used by the ordinary client.
 add_executable(hlclient_core_api_tests
+    ../test_post_movement_effect.cpp
+    ../test_reference_brush_boundary_recovery.cpp
+    ../test_remote_snapshot_buffer_e32.cpp
+    ../test_remote_nointerp_motion.cpp
+    ../test_uneven_ground_e32.cpp
+    ../test_external_diagnostics_e31.cpp
+    ../test_external_session_e31.cpp
+    ../test_movement_diagnostics_e32.cpp
+    ../test_movement_session_diagnostics.cpp
+    ../test_remote_movement_diagnostics.cpp
+    ../test_reference_lift_top_e32_1.cpp
+    ../test_convex_corner_stability_e321.cpp
+    ../test_hud_resources_core_e29.cpp
+    ../test_hud_input_routing_e29.cpp
+    ../test_application_close_e281.cpp
+    ../test_session_receipt_e281.cpp
+    ../test_hand_grenade_observations.cpp
+    ../test_satchel_observations.cpp
     ../test_audio_api.cpp
     ../test_game_client_module.cpp
     ../test_game_camera_intent.cpp
+    ../test_local_movement_collision.cpp
     ../test_remote_player_visibility_trace.cpp
     ../test_packet_entity_decoder.cpp
     ../test_entity_snapshot_interpolation.cpp
     ../test_studio_pose_evaluator.cpp
+    ../test_impact_particle_pool.cpp
+    ../test_entity_scene_render_package.cpp
     ../test_entity_render_frame_composer.cpp
     ../test_byte_io.cpp
     ../test_bit_reader.cpp
@@ -22,15 +43,21 @@ add_executable(hlclient_core_api_tests
     ../test_goldsrc_lightmap_import.cpp
     ../test_world_texture_resolution.cpp
     ../test_world_texture_set.cpp
+    ../test_sky_assets.cpp
     ../test_world_render_package.cpp
-    ../test_render_camera_math.cpp)
+    ../test_render_camera_math.cpp
+    ../test_render_line_geometry.cpp)
 target_link_libraries(hlclient_core_api_tests PRIVATE
+    hlclient::goldsrc_hud_assets
+    hlclient::goldsrc_sky_assets
+    hlclient::session_receipts
     Catch2::Catch2WithMain
     hlclient::goldsrc_audio
     hlclient::game_api hlclient::game_client_host hlclient::game_policy
     hlclient::goldsrc_client_message
     hlclient::goldsrc_runtime_replay hlclient::client
     hlclient::goldsrc_usercmd_session hlclient::goldsrc_local_movement
+    hlclient::prediction_visual
     hlclient::gameplay_input hlclient::input_api hlclient::renderer_api
     hlclient::live_visual_control)
 target_link_libraries(hlclient_core_api_tests PRIVATE
@@ -40,6 +67,9 @@ target_link_libraries(hlclient_core_api_tests PRIVATE
 target_link_libraries(hlclient_core_api_tests PRIVATE
     hlclient_goldsrc_bsp hlclient_goldsrc_world_texture_import
     hlclient_goldsrc_lightmaps hlclient_world_render_package)
+if(WIN32)
+    target_link_libraries(hlclient_core_api_tests PRIVATE hlclient::windows_secure_output)
+endif()
 target_compile_features(hlclient_core_api_tests PRIVATE cxx_std_20)
 target_compile_definitions(hlclient_core_api_tests PRIVATE HLCLIENT_HAS_GAME_HALFLIFE=0)
 hlclient_enable_warnings(hlclient_core_api_tests)

@@ -413,4 +413,40 @@ PredictionVisualCorrectionSampleResult sample_prediction_visual_correction(
         completed, constrained};
 }
 
+PredictionVisualCorrectionSampleResult publish_validated_prediction_visual_camera(
+    const PredictionVisualCorrectionState& correction,
+    const gameplay_camera::GameplayCameraState& corrected_camera,
+    const assets::AssetVector3 validated_eye,const double sample_time,
+    const std::uint64_t expected_revision,const std::uint64_t expected_authority,
+    const double maximum_offset) noexcept
+{
+    const auto fail=[] {return PredictionVisualCorrectionSampleResult{{},{},PredictionError{
+        PredictionErrorCode::visual_correction_failed,{},"validated camera does not match the live bounded correction"}};};
+    if(!correction.active()||!finite_vector(validated_eye)||!std::isfinite(sample_time)||
+        !std::isfinite(maximum_offset)||maximum_offset<=0||maximum_offset>16||
+        expected_revision==0||expected_revision!=correction.new_prediction_revision()||
+        expected_authority==0||expected_authority!=correction.source_authority_update_ordinal()||
+        sample_time<correction.start_monotonic_time_seconds()||
+        sample_time<correction.last_sample_monotonic_time_seconds()||
+        sample_time>correction.start_monotonic_time_seconds()+correction.duration_seconds())return fail();
+    const assets::AssetVector3 residual{validated_eye.x-corrected_camera.position().x,
+        validated_eye.y-corrected_camera.position().y,validated_eye.z-corrected_camera.position().z};
+    const auto amount=magnitude(residual);if(!std::isfinite(amount)||amount>maximum_offset)return fail();
+    const bool completed=sample_time>=correction.start_monotonic_time_seconds()+correction.duration_seconds();
+    if(completed&&amount>1e-5)return fail();
+    auto info=camera_info(corrected_camera);info.position=validated_eye;
+    const auto& previous=correction.last_published_camera();
+    if(previous&&same_camera_content(*previous,info))info.revision=previous->revision();
+    else {
+        const auto revision=std::max(corrected_camera.revision(),correction.camera_publication_revision());
+        if(revision==UINT64_MAX)return fail();info.revision=revision+1;
+    }
+    const auto created=gameplay_camera::GameplayCameraState::create(info);if(!created||!created.state)return fail();
+    auto next=PredictionVisualCorrectionState{correction.correction_class(),correction.initial_position_offset(),residual,
+        correction.start_monotonic_time_seconds(),sample_time,completed?0:correction.duration_seconds(),
+        correction.source_authority_update_ordinal(),correction.old_prediction_revision(),correction.new_prediction_revision(),
+        info.revision,*created.state,true,completed?PredictionVisualCorrectionProfile::no_smoothing_snap_v1:correction.profile()};
+    return {*created.state,std::move(next),{},completed,true};
+}
+
 } // namespace hlclient::prediction

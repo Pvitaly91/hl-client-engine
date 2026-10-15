@@ -189,6 +189,13 @@ bool GoldSrcUserCmdTransmissionStage::terminal() const noexcept
     return terminal_state(state_);
 }
 
+bool GoldSrcUserCmdTransmissionStage::has_pending_reference_submission() const noexcept
+{
+    return config_.planner.profile ==
+               GoldSrcUserCmdPacketPlannerProfile::reference_backup_v1 &&
+           prepared_move_.has_value();
+}
+
 std::size_t GoldSrcUserCmdTransmissionStage::sampled_command_count() const noexcept
 {
     return sampled_command_count_;

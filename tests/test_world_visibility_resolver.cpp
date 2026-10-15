@@ -23,6 +23,7 @@ struct SpatialOptions {
     bool camera_leaf_solid{false};
     bool duplicate_surface_membership{false};
     bool candidate_leaf_solid{false};
+    bool candidate_leaf_bounds_outside_frustum{false};
 };
 
 [[nodiscard]] spatial::WorldSpatialPackage make_spatial_package(
@@ -66,6 +67,8 @@ struct SpatialOptions {
     back.source_leaf_index = 2U;
     back.contents = -1;
     back.bounds = {{-12.0F, -2.0F, -5.0F}, {0.0F, 2.0F, 1.0F}};
+    if (options.candidate_leaf_bounds_outside_frustum)
+        back.bounds.maximum.x = -10.0F;
     back.pvs_row_index = 1U;
     back.surface_membership.source_leaf_index = 2U;
     back.surface_membership.world_surface_indices =
@@ -253,6 +256,31 @@ TEST_CASE("PVS camera leaf is included explicitly even when its row clears self"
         std::array{1U}));
     CHECK(std::ranges::equal(resolved.visibility->visible_world_surface_indices(),
         std::array{0U, 1U}));
+}
+
+TEST_CASE("PVS marked face uses its own frustum bounds beyond its referring leaf",
+          "[world-visibility][resolver][sky-background][no-stock]")
+{
+    auto options = SpatialOptions{};
+    options.camera_row = std::byte{0x03};
+    options.candidate_leaf_bounds_outside_frustum = true;
+    const auto package = make_spatial_package(options);
+    auto surfaces = make_surfaces();
+    surfaces[2U].bounds.minimum.x = -12.0F;
+    const visibility::WorldVisibilityResolver resolver;
+    const auto visible = resolver.resolve(make_input(package, surfaces, {},
+        visibility::WorldVisibilityMode::pvs_and_frustum));
+    REQUIRE(visible.visibility);
+    CHECK(std::ranges::equal(visible.visibility->visible_leaf_indices(), std::array{1U}));
+    CHECK(std::ranges::equal(visible.visibility->visible_world_surface_indices(), std::array{0U, 2U}));
+    CHECK(visible.visibility->statistics().world_surface_culled_by_frustum_count == 2U);
+
+    options.camera_row = std::byte{0x01};
+    const auto hidden_package = make_spatial_package(options);
+    const auto hidden = resolver.resolve(make_input(hidden_package, surfaces, {},
+        visibility::WorldVisibilityMode::pvs_and_frustum));
+    REQUIRE(hidden.visibility);
+    CHECK(std::ranges::equal(hidden.visibility->visible_world_surface_indices(), std::array{0U}));
 }
 
 TEST_CASE("PVS candidate selection excludes solid or special leaves",

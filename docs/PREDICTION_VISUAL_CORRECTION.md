@@ -110,5 +110,44 @@ The sampler does not rebuild a scene or change world, brush, Studio, Sprite,
 geometry or texture resource identity. The renderer consumes only the final
 camera and normal `RenderScene`.
 
+## Normal live reference velocity-correction profile (E32 follow-up)
+
+The normal live owner reuses this neutral API for a narrowly classified server
+velocity correction. It does not change the API defaults above or infer damage.
+The exact acknowledged position error must be greater than 0.25 and at most
+32 units, authority age at most 100 ms, and the velocity difference at least
+32 units/s. Projecting position error onto that velocity difference must give
+a positive interval at most 100 ms, with at most 2 units perpendicular error.
+These are local-compatible bounds, not claimed stock constants.
+
+Walking/airborne transitions are allowed, including an upward server impulse
+without a local jump. Hull/view offset must remain equal, duck transitions and
+ladder/liquid modes are excluded. New setangle sources, advertised EF_NOINTERP,
+dead/reset states and blocked body/eye paths deny the profile. The persisted
+spawn setangle slot alone is not a new discontinuity. Presentation rechecks
+context and pose even between clientdata ACKs.
+
+Successful rebase publishes corrected simulation and replays the saved suffix
+immediately. Only the displayed eye retains its previous position, decaying
+over 100 ms with a 32-unit total-offset limit. During that transition ordinary
+accepted corrections (up to the existing 16-unit gate) and further qualifying
+velocity corrections retarget from the already displayed eye, after removing
+the old residual from the new physical sample. They keep the original end
+time, so repeated ACKs cannot prolong smoothing indefinitely. Same-time cache
+reads do not repeat collision queries. All samples retain world/brush/full-hull
+collision checks; the separate small exterior-corner path is disabled here.
+
+The normal diagnostic reason is `visual_server_velocity_correction`; no new
+feature flag is required. Larger/unclassified corrections now retain a
+successfully validated physical rebase with a hard visual snap (E32
+contact/stale-seed follow-up). They clear all prior residuals and predecessor
+bridges instead of discarding exact command slots solely because the visual
+16-unit gate was exceeded. Invalid authority, failed collision/replay and
+expired command seeds still suspend; no correction is reclassified as an
+impulse to make it eligible. Explicit discontinuities snap, and genuinely blocked smoothing may
+still produce a visible correction. An unmarked server displacement is not
+provably distinguishable from an impulse by position/velocity alone. This is
+bounded presentation policy, not stock-binary parity or proof of a damage cause.
+
 See [prediction reconciliation](PREDICTION_RECONCILIATION.md) and the
 [prediction viewer](PREDICTION_VIEWER.md).

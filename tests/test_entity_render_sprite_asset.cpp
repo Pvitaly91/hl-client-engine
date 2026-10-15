@@ -47,14 +47,53 @@ TEST_CASE("Neutral Sprite asset retains exact origins and typed formats",
     const auto additive = make_asset(assets::SpriteTextureFormat::additive);
     CHECK(additive.texture_support_status() ==
         render::SpriteRenderTextureSupportStatus::
-            unsupported_additive_evidence_pending);
+            supported_additive);
     CHECK(additive.render_profile() ==
-        render::SpriteRenderTextureProfile::unsupported);
+        render::SpriteRenderTextureProfile::additive);
     const auto index_alpha = make_asset(assets::SpriteTextureFormat::index_alpha);
     CHECK(index_alpha.texture_support_status() ==
         render::SpriteRenderTextureSupportStatus::
-            unsupported_index_alpha_evidence_pending);
-    CHECK(index_alpha.frames()[0U].rgba8.empty());
+            supported_index_alpha_local_compatible);
+    CHECK(index_alpha.render_profile() == render::SpriteRenderTextureProfile::index_alpha);
+    CHECK(index_alpha.frames()[0U].rgba8.size() == 4U * 6U * 4U);
+}
+
+TEST_CASE("E16 neutral index-alpha asset derives explicit index coverage without mutating source",
+    "[e16][entity-render][sprite][asset]")
+{
+    auto source = *fixture::sprite_asset(assets::SpriteTextureFormat::index_alpha);
+    auto& metadata = *source.source_data;
+    metadata.palette.colors[255U] = {16U,32U,64U};
+    metadata.palette.colors[128U] = {255U,0U,0U};
+    auto& frame = metadata.indexed_frames.front();
+    frame.indexed_pixels[0U] = std::byte{0U};
+    frame.indexed_pixels[1U] = std::byte{128U};
+    frame.indexed_pixels[2U] = std::byte{255U};
+    auto built = render::SpriteRenderAssetBuilder{}.build(source,{0x501U,0x502U});
+    REQUIRE(built);
+    const auto& pixels = built.asset->frames().front().rgba8;
+    REQUIRE(pixels.size() == 96U);
+    for (const auto offset : {0U,4U,8U}) {
+        CHECK(pixels[offset] == std::byte{16U});
+        CHECK(pixels[offset+1U] == std::byte{32U});
+        CHECK(pixels[offset+2U] == std::byte{64U});
+    }
+    CHECK(pixels[3U] == std::byte{0U});
+    CHECK(pixels[7U] == std::byte{128U});
+    CHECK(pixels[11U] == std::byte{255U});
+    CHECK(frame.derived_rgba8.empty());
+    CHECK(frame.rgba_evidence == assets::SpriteRgbaEvidenceProfile::index_alpha_conversion_evidence_pending);
+    CHECK(built.asset->statistics().renderable_frame_count == 3U);
+    CHECK(built.asset->statistics().texture_rgba_bytes == (4U+5U+6U)*6U*4U);
+    auto limits=render::RuntimeEntityVisualLimits{};
+    limits.maximum_sprite_gpu_bytes=500U;
+    const auto bounded=render::SpriteRenderAssetBuilder{}.build(source,{0x501U,0x502U},limits);
+    REQUIRE_FALSE(bounded);
+    CHECK(bounded.error->code==render::SpriteRenderAssetErrorCode::source_limit_exceeded);
+    frame.indexed_pixels.pop_back();
+    const auto invalid = render::SpriteRenderAssetBuilder{}.build(source,{0x501U,0x502U});
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error->code == render::SpriteRenderAssetErrorCode::invalid_frame);
 }
 
 TEST_CASE("Neutral Sprite selector uses cumulative exact interval boundaries",
@@ -128,6 +167,26 @@ TEST_CASE("Neutral Sprite billboard supports required bases and degeneracy",
     CHECK(render::SpriteBillboardBasis::calculate(oriented).status ==
         render::SpriteBillboardBasisStatus::
             unsupported_facing_upright_evidence_pending);
+}
+
+TEST_CASE("E16 camera-parallel oriented sprites retain finite roll and camera attachment",
+    "[e16][entity-render][sprite][billboard]")
+{
+    render::SpriteBillboardInput input;
+    input.orientation=assets::SpriteOrientation::view_parallel_oriented;
+    input.camera_right={1,0,0};input.camera_up={0,0,1};
+    auto result=render::SpriteBillboardBasis::calculate(input);
+    REQUIRE(result);
+    CHECK(result.right.x==Catch::Approx(1.0F));CHECK(result.up.z==Catch::Approx(1.0F));
+    input.roll_degrees=90.0F;
+    result=render::SpriteBillboardBasis::calculate(input);
+    REQUIRE(result);
+    CHECK(result.right.z==Catch::Approx(1.0F));CHECK(result.up.x==Catch::Approx(-1.0F));
+    CHECK(result.normal.y==Catch::Approx(-1.0F));
+    input.roll_degrees=std::numeric_limits<float>::infinity();
+    CHECK(render::SpriteBillboardBasis::calculate(input).status==render::SpriteBillboardBasisStatus::non_finite_input);
+    input.roll_degrees=0.0F;input.camera_up={1,0,0};
+    CHECK(render::SpriteBillboardBasis::calculate(input).status==render::SpriteBillboardBasisStatus::degenerate_camera_basis);
 }
 
 } // namespace

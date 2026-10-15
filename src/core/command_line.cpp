@@ -2,6 +2,8 @@
 #include <hlclient/core/manual_session_timing.hpp>
 
 #include <charconv>
+#include <array>
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -15,7 +17,10 @@ namespace {
 
 [[nodiscard]] bool needs_value(const std::string_view argument) noexcept
 {
-    return argument == "--audio-volume" || argument == "--basedir" || argument == "--game" || argument == "--connect" ||
+    return argument == "--audio-volume" || argument == "--server-blood-presentation" ||
+           argument == "--hud-draw" || argument == "--crosshair" || argument == "--hud-fastswitch" ||
+           argument == "--hud-scale" || argument == "--msaa" ||
+           argument == "--basedir" || argument == "--game" || argument == "--connect" ||
            argument == "+connect" || argument == "--renderer" ||
            argument == "--stop-after" || argument == "--auth-provider" ||
            argument == "--auth-material-file" || argument == "--steam-api-runtime" ||
@@ -30,7 +35,9 @@ namespace {
            argument == "--runtime-replay-record-budget" ||
            argument == "--runtime-replay-byte-budget" ||
            argument == "--live-input" || argument == "--prediction" ||
-           argument == "--live-session-seconds" || argument == "--test-start-health";
+           argument == "--live-session-seconds" || argument == "--test-start-health" ||
+           argument == "--session-receipt-root" || argument == "--session-run-id" ||
+           argument == "--session-role";
 }
 
 [[nodiscard]] std::optional<std::size_t> positive_size(
@@ -54,6 +61,41 @@ namespace {
 CommandLineParseResult parse_command_line(const std::span<const std::string_view> arguments)
 {
     CommandLineOptions options;
+    if (std::ranges::find(arguments, "--external-config") != arguments.end() ||
+        std::ranges::find(arguments, "--external-cancel-event") != arguments.end()) {
+        // All gameplay/video values come from one versioned config. Mixing
+        // research switches or arbitrary overrides is intentionally rejected.
+        for (std::size_t i=0; i<arguments.size(); ++i) {
+            const auto key=arguments[i];
+            if (i+1>=arguments.size()) return failure("Missing external launch value");
+            const auto value=arguments[++i];
+            if (value.empty() || value.find('\0')!=std::string_view::npos)
+                return failure("Invalid external launch value");
+            if (key=="--external-config") {
+                if(options.external_config || value.size()>32768U) return failure("Invalid external config path");
+                options.external_config=std::string{value};
+            } else if (key=="--external-cancel-event") {
+                const auto handle=positive_size(value,(std::numeric_limits<std::uintptr_t>::max)()-1U);
+                if(options.external_cancel_event || !handle) return failure("Invalid external cancel event");
+                options.external_cancel_event=static_cast<std::uintptr_t>(*handle);
+            } else if(key=="--session-receipt-root") {
+                if(options.session_receipt_root || value.size()>32768U) return failure("Invalid external receipt root");
+                options.session_receipt_root=std::string{value};
+            } else if(key=="--session-run-id") {
+                if(options.session_run_id || value.size()!=32U || !std::ranges::all_of(value,
+                    [](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');}))
+                    return failure("External run ID must be32 lowercase hex characters");
+                options.session_run_id=std::string{value};
+            } else if(key=="--session-role") {
+                if(options.session_role || value!="A") return failure("External session has one client role A");
+                options.session_role="A";
+            } else return failure("External configuration cannot be combined with other command-line settings");
+        }
+        if(!options.external_config || !options.session_receipt_root || !options.session_run_id || !options.session_role)
+            return failure("External config requires its durable receipt root/run/role");
+        options.external_server_client=true;
+        return {std::move(options),{}};
+    }
     bool stop_after_seen = false;
     bool connect_request_setting_seen = false;
     bool resource_consistency_provider_seen = false;
@@ -68,6 +110,8 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
     bool live_input_seen = false;
     bool prediction_seen = false;
     bool live_session_seconds_seen = false;
+    std::array<bool,3> hud_settings_seen{};
+    bool hud_scale_seen{},msaa_seen{};
 
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
@@ -83,6 +127,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             options.net_trace = true;
             continue;
         }
+        if (argument == "--movement-diagnostics") {
+            if(options.movement_diagnostics)return failure("duplicate --movement-diagnostics");
+            options.movement_diagnostics=true;
+            continue;
+        }
         if (argument == "--live-session-unlimited") {
             if (options.live_session_unlimited) return failure("duplicate --live-session-unlimited");
             options.live_session_unlimited = true;
@@ -93,11 +142,21 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             options.audio_on_focus_loss = true;
             continue;
         }
+        if (argument == "--debug-freeze-tracer") {
+            if (options.debug_freeze_tracer) return failure("duplicate --debug-freeze-tracer");
+            options.debug_freeze_tracer = true;
+            continue;
+        }
         if (argument == "--mute-glock-fire-sound") {
             if (options.mute_glock_fire_sound) {
                 return failure("--mute-glock-fire-sound may be specified only once");
             }
             options.mute_glock_fire_sound = true;
+            continue;
+        }
+        if (argument == "--hud-diagnostics") {
+            if (options.hud_diagnostics) return failure("duplicate --hud-diagnostics");
+            options.hud_diagnostics = true;
             continue;
         }
         if (argument == "--view-world") {
@@ -127,10 +186,52 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             return failure("Empty value after " + std::string{argument});
         }
 
-        if (argument == "--audio-volume") {
+        if (argument == "--hud-scale") {
+            if(hud_scale_seen)return failure("duplicate --hud-scale");
+            hud_scale_seen=true;
+            if(value!="auto") {
+                double scale{};const auto parsed=std::from_chars(value.data(),value.data()+value.size(),scale);
+                if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() ||
+                    !std::isfinite(scale) || scale<0.5 || scale>2.0)return failure("HUD scale must be auto or a number from 0.5 to 2.0");
+                options.hud_scale={false,static_cast<float>(scale)};
+            }
+        } else if (argument == "--msaa") {
+            if(msaa_seen)return failure("duplicate --msaa");
+            msaa_seen=true;
+            if(value=="off" || value=="0")options.video.msaa_samples=0;
+            else if(value=="2" || value=="4" || value=="8")options.video.msaa_samples=static_cast<unsigned>(value[0]-'0');
+            else return failure("MSAA must be off, 2, 4 or 8");
+        } else if (argument == "--hud-draw" || argument == "--crosshair" || argument == "--hud-fastswitch") {
+            const auto slot = argument == "--hud-draw" ? 0U : argument == "--crosshair" ? 1U : 2U;
+            if (hud_settings_seen[slot] || (value != "0" && value != "1"))
+                return failure("HUD setting must occur once and be 0 or 1: " + std::string{argument});
+            hud_settings_seen[slot] = true;
+            if (slot == 0U) options.hud_draw = value == "1";
+            else if (slot == 1U) options.crosshair = value == "1";
+            else options.hud_fastswitch = value == "1";
+        } else if (argument == "--audio-volume") {
             if (value == "0") options.audio_volume=0;
             else if (auto parsed=positive_size(value,100)) options.audio_volume=static_cast<unsigned>(*parsed);
             else return failure("Audio volume must be an integer from 0 to 100");
+        } else if (argument == "--server-blood-presentation") {
+            if (options.server_blood_presentation.has_value())
+                return failure("--server-blood-presentation may be specified only once");
+            if (value == "enabled") options.server_blood_presentation = true;
+            else if (value == "disabled") options.server_blood_presentation = false;
+            else return failure("Server blood presentation must be enabled or disabled");
+        } else if (argument == "--session-receipt-root") {
+            if (options.session_receipt_root || value.size()>32768U)
+                return failure("Invalid or duplicate session receipt root");
+            options.session_receipt_root=std::string{value};
+        } else if (argument == "--session-run-id") {
+            if (options.session_run_id || value.size()!=32U ||
+                !std::ranges::all_of(value,[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');}))
+                return failure("Session run ID must be exactly32 lowercase hex characters");
+            options.session_run_id=std::string{value};
+        } else if (argument == "--session-role") {
+            if (options.session_role || (value!="A" && value!="B"))
+                return failure("Session role must be A or B, once");
+            options.session_role=std::string{value};
         } else if (argument == "--basedir") {
             options.base_directory = std::string{value};
         } else if (argument == "--game") {
@@ -453,20 +554,25 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
             return failure("Non-visual runtime replay requires --renderer null");
         }
         if (options.connect_endpoint || (options.base_directory && !local_assets) ||
-            options.mute_glock_fire_sound ||
+            options.mute_glock_fire_sound || options.debug_freeze_tracer ||
             options.authentication_provider ||
             options.authentication_material_file ||
             options.resource_consistency_provider || stop_after_seen ||
             options.view_world || options.view_entity_snapshot ||
             connect_request_setting_seen || resource_consistency_provider_seen ||
             visibility_seen || brush_submodels_seen || camera_seen ||
-            live_input_seen || live_session_seconds_seen || options.live_session_unlimited) {
+            live_input_seen || live_session_seconds_seen || options.live_session_unlimited ||
+            options.session_receipt_root || options.session_run_id || options.session_role) {
             return failure(
                 "Offline runtime replay is incompatible with connect, asset, "
                 "authentication, stop, view, visibility, brush, and camera options");
         }
         return CommandLineParseResult{std::move(options), {}};
     }
+    const bool any_receipt=options.session_receipt_root || options.session_run_id || options.session_role;
+    if(any_receipt && (!options.session_receipt_root || !options.session_run_id ||
+        !options.session_role || !options.connect_endpoint))
+        return failure("Session receipt root/run/role require each other and a connection");
     if (options.runtime_replay_screenshot) { return failure("Replay screenshot requires capture replay"); }
     if (runtime_replay_visuals_seen) {
         return failure(
@@ -641,6 +747,11 @@ CommandLineParseResult parse_command_line(const std::span<const std::string_view
         (options.stop_after != ConnectionStopPoint::live_visual_control ||
          options.live_input != LiveInputMode::keyboard_mouse))
         return failure("--audio-on-focus-loss requires live visual keyboard-mouse");
+    if (options.debug_freeze_tracer &&
+        (options.stop_after != ConnectionStopPoint::live_visual_control ||
+         options.live_input != LiveInputMode::keyboard_mouse ||
+         options.renderer != RendererBackend::opengl))
+        return failure("--debug-freeze-tracer requires manual keyboard-mouse OpenGL live visuals");
     if (options.mute_glock_fire_sound &&
         (options.stop_after != ConnectionStopPoint::live_visual_control ||
          options.live_input != LiveInputMode::keyboard_mouse ||
@@ -776,9 +887,20 @@ Options:
   --name <name>       Player name, max 31 printable ASCII bytes (default: Player)
   --model <model>     Player model, max 31 printable ASCII bytes (default: ivan)
   --net-trace         Log bounded diagnostics; connect payload/auth bytes are redacted
+  --movement-diagnostics  Bounded movement/lift incident report; F8 marks a stutter
   --audio-volume <0..100>  Interactive application volume (default 35, 0=mute)
   --audio-on-focus-loss  Explicit manual listener; server audio stays on in background
   --mute-glock-fire-sound  Manual diagnostic: mute only local Glock fire audio
+  --hud-draw <0|1>    Gameplay HUD visibility (default 1)
+  --crosshair <0|1>   Resource-backed reticle visibility (default 1)
+  --hud-fastswitch <0|1> Single-candidate bucket fast selection (default 0)
+  --hud-diagnostics  Explicit legacy text diagnostic overlay (default off)
+  --hud-scale <auto|0.5..2.0> Independent HUD layout multiplier (default auto)
+  --msaa <off|2|4|8> Requested scene antialiasing; supported fallback reported (default 4)
+  --server-blood-presentation <enabled|disabled>
+                      Optional observed server blood policy for cosmetic fallback;
+                      absence is unknown; never changes the server setting
+  --debug-freeze-tracer    Manual diagnostic: retain the latest solid 3D streak in world space
   --renderer <name>   Renderer backend: opengl or null (default: opengl)
   --live-input <mode> Input for live-visual-control: keyboard-mouse,
                       scripted-check, scripted-side-check,
@@ -794,6 +916,16 @@ Options:
                       expiry reports timed_session_complete and shuts down
   --live-session-unlimited
                       Explicit user-ended keyboard-mouse session; no game timer
+  --session-receipt-root <owned-run-directory>
+  --session-run-id <32-lowercase-hex>
+  --session-role <A|B>
+                      Runner-owned bounded evidence; all three require connect.
+                      Neither server text nor these options create milestones.
+  --external-config <launch-config.json>
+                      Launcher-owned versioned LAN configuration; requires the
+                      receipt identity trio (role A), rejects other overrides.
+  --external-cancel-event <inherited-event-handle>
+                      Private launcher cancellation capability, external mode only.
   --runtime-replay-fixture <name>
                       Run an owning offline replay in the normal application
                       update loop: basic-mixed, missing-entity-base, or

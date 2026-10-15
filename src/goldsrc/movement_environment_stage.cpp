@@ -614,6 +614,11 @@ MovementEnvironmentStage::retained_source_payload() const noexcept
     return delta_stage_.retained_source_payload();
 }
 
+NetchanDriver* MovementEnvironmentStage::close_driver() noexcept
+{
+    return delta_stage_.close_driver();
+}
+
 NetchanDriver* MovementEnvironmentStage::retained_driver() noexcept
 {
     if (!retain_connection_at_boundary_) {

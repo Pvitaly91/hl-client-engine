@@ -72,12 +72,18 @@ public:
         std::string& error,
         SocketNativeError* native_error = nullptr);
     [[nodiscard]] ReceiveResult receive(std::size_t maximum_size = 65'507);
+    // Explicit, one-shot native teardown. Empty error means successfully
+    // closed/already empty; a native error remains cached on repeated close.
+    // No packet, handshake or network wait is performed here.
+    [[nodiscard]] SocketNativeError close() noexcept;
 
 private:
     struct Impl;
     explicit UdpSocket(std::unique_ptr<Impl> implementation) noexcept;
 
     std::unique_ptr<Impl> implementation_;
+    bool close_requested_{};
+    SocketNativeError close_error_{};
 };
 
 } // namespace hlclient::network

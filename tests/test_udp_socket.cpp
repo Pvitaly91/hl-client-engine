@@ -1,4 +1,5 @@
 #include <hlclient/network/network_address.hpp>
+#include <hlclient/network/datagram_transport.hpp>
 #include <hlclient/network/network_runtime.hpp>
 #include <hlclient/network/udp_socket.hpp>
 
@@ -160,6 +161,122 @@ TEST_CASE("UDP sockets retain the network runtime they need", "[network][udp]")
     const bool bound = socket->bind(NetworkAddress::loopback(0), error);
     INFO(error);
     CHECK(bound);
+}
+
+TEST_CASE("UDP datagram transport preserves native failure codes and neutral polling",
+          "[network][udp][e311][failure-metadata]")
+{
+    NetworkRuntime runtime;
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto receiver = UdpSocket::open_ipv4(runtime, error);
+    REQUIRE(receiver);
+    REQUIRE(receiver->bind(NetworkAddress::loopback(0), error));
+    hlclient::network::UdpDatagramTransport transport{std::move(*receiver)};
+    const auto address = transport.local_address();
+    REQUIRE(address.address);
+    const auto empty = transport.receive(16U);
+    CHECK(empty.status == hlclient::network::DatagramTransportReceiveStatus::would_block);
+    CHECK_FALSE(empty.native_error);
+    CHECK(empty.error.empty());
+    const auto invalid = transport.receive(0U);
+    CHECK(invalid.status == hlclient::network::DatagramTransportReceiveStatus::error);
+    CHECK_FALSE(invalid.native_error);
+
+    auto sender = UdpSocket::open_ipv4(runtime, error);
+    REQUIRE(sender);
+    REQUIRE(sender->bind(NetworkAddress::loopback(0), error));
+    const std::array payload{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    REQUIRE(sender->send_to(*address.address, payload, error));
+    hlclient::network::DatagramTransportReceiveResult truncated;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    do {
+        truncated = transport.receive(2U);
+        if (truncated.status != hlclient::network::DatagramTransportReceiveStatus::would_block)
+            break;
+        CHECK_FALSE(truncated.native_error);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    } while (std::chrono::steady_clock::now() < deadline);
+    REQUIRE(truncated.status == hlclient::network::DatagramTransportReceiveStatus::truncated);
+    REQUIRE(truncated.source);
+    CHECK(truncated.payload_size == 3U); // receive limit + one, not the unknown full size.
+#ifdef _WIN32
+    REQUIRE(truncated.native_error);
+    CHECK(truncated.native_error.domain == hlclient::network::SocketNativeErrorDomain::winsock);
+    CHECK(truncated.native_error.code == WSAEMSGSIZE);
+
+    // Without SO_BROADCAST this send is rejected locally by Winsock; no
+    // outbound broadcast is permitted. Verify the adapter retains that code.
+    const auto rejected = transport.send_to(NetworkAddress{0xffffffffU, 9U}, payload);
+    CHECK(rejected.status == hlclient::network::DatagramSendStatus::error);
+    REQUIRE(rejected.native_error);
+    CHECK(rejected.native_error.domain == hlclient::network::SocketNativeErrorDomain::winsock);
+    CHECK(rejected.native_error.code == WSAEACCES);
+#endif
+    const auto after = transport.receive(16U);
+    CHECK(after.status == hlclient::network::DatagramTransportReceiveStatus::would_block);
+    CHECK_FALSE(after.native_error);
+    CHECK(after.error.empty());
+    CHECK_FALSE(transport.close());
+    const auto closed_send = transport.send_to(NetworkAddress::loopback(1U), payload);
+    CHECK(closed_send.status == hlclient::network::DatagramSendStatus::error);
+    CHECK_FALSE(closed_send.native_error);
+    const auto closed_receive = transport.receive(16U);
+    CHECK(closed_receive.status == hlclient::network::DatagramTransportReceiveStatus::error);
+    CHECK_FALSE(closed_receive.native_error);
+}
+
+TEST_CASE("E28.1 explicit UDP close releases the port before owner destruction and is idempotent",
+          "[e281][network][udp][socket-teardown]")
+{
+    NetworkRuntime runtime;
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto original=UdpSocket::open_ipv4(runtime,error);
+    REQUIRE(original);
+    REQUIRE(original->bind(NetworkAddress::loopback(0),error));
+    const auto address=original->local_address(error);
+    REQUIRE(address);
+    const auto closed=original->close();
+    CHECK_FALSE(closed);
+    CHECK(closed.domain==hlclient::network::SocketNativeErrorDomain::none);
+    CHECK(closed.code==0U);
+    CHECK_FALSE(original->local_address(error));
+    CHECK_FALSE(error.empty());
+    CHECK(original->receive().status==ReceiveStatus::error);
+
+    // Native port release is observable while the old UdpSocket object lives.
+    // A potentially reused handle belongs only to the new socket from here.
+    auto replacement=UdpSocket::open_ipv4(runtime,error);
+    REQUIRE(replacement);
+    REQUIRE(replacement->bind(*address,error));
+    CHECK_FALSE(original->close());
+    original.reset();
+    CHECK(replacement->local_address(error)==address);
+    CHECK_FALSE(replacement->close());
+    CHECK_FALSE(replacement->close());
+}
+
+TEST_CASE("E28.1 datagram transport close prevents late send receive and moved-source double teardown",
+          "[e281][network][udp][socket-teardown]")
+{
+    NetworkRuntime runtime;
+    REQUIRE(runtime.valid());
+    std::string error;
+    auto source=UdpSocket::open_ipv4(runtime,error);
+    REQUIRE(source);
+    REQUIRE(source->bind(NetworkAddress::loopback(0),error));
+    hlclient::network::UdpDatagramTransport transport{std::move(*source)};
+    REQUIRE(transport.local_address());
+    CHECK_FALSE(source->close()); // The moved-from source owns no native handle.
+    REQUIRE(transport.local_address());
+    CHECK_FALSE(transport.close());
+    CHECK_FALSE(transport.local_address());
+    const std::array bytes{std::byte{1}};
+    CHECK(transport.send_to(NetworkAddress::loopback(27015),bytes).status==
+          hlclient::network::DatagramSendStatus::error);
+    CHECK(transport.receive(16U).status==hlclient::network::DatagramTransportReceiveStatus::error);
+    CHECK_FALSE(transport.close());
 }
 
 TEST_CASE("Moved-from UDP sockets fail safely", "[network][udp]")

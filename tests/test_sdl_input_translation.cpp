@@ -44,6 +44,7 @@ TEST_CASE("SDL keyboard translation uses physical scancodes only", "[platform][s
         {SDL_SCANCODE_LSHIFT, input::PhysicalKey::left_shift},
         {SDL_SCANCODE_E, input::PhysicalKey::e},
         {SDL_SCANCODE_R, input::PhysicalKey::r},
+        {SDL_SCANCODE_Q, input::PhysicalKey::q},
         {SDL_SCANCODE_ESCAPE, input::PhysicalKey::escape},
         {SDL_SCANCODE_TAB, input::PhysicalKey::tab},
         {SDL_SCANCODE_UP, input::PhysicalKey::up},
@@ -52,6 +53,7 @@ TEST_CASE("SDL keyboard translation uses physical scancodes only", "[platform][s
         {SDL_SCANCODE_RIGHT, input::PhysicalKey::right},
         {SDL_SCANCODE_F1, input::PhysicalKey::f1},
         {SDL_SCANCODE_F2, input::PhysicalKey::f2},
+        {SDL_SCANCODE_F8, input::PhysicalKey::f8},
     };
 
     for (const auto& [scancode, expected] : mappings) {

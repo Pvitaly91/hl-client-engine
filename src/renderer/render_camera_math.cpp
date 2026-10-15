@@ -10,6 +10,11 @@ namespace {
 constexpr float kVectorEpsilon = 1.0e-6F;
 constexpr float kMinimumFieldOfViewRadians = 0.0174532925F;
 constexpr float kMaximumFieldOfViewRadians = 3.1241393611F;
+// Camera-local Studio has its own depth range. Geometry parked at the eye
+// must not intersect the near plane and expand across the viewport; ordinary
+// held/reload geometry remains farther forward. This does not alter world
+// clipping, asset data, bone transforms or game-specific visibility rules.
+constexpr float kFirstPersonNearPlane = 1.0F;
 
 [[nodiscard]] assets::AssetVector3 subtract(
     const assets::AssetVector3& left,
@@ -228,6 +233,38 @@ bool is_valid(const RenderCamera& camera) noexcept
         camera.far_plane));
 }
 
+bool valid_render_screen_effects(const game_api::ScreenEffectsFrame& effects) noexcept
+{
+    for(const auto value:effects.translation)
+        if(!std::isfinite(value) || std::abs(value)>16.0F)return false;
+    if(!std::isfinite(effects.roll_degrees) || std::abs(effects.roll_degrees)>16.0)return false;
+    for(const auto value:effects.overlay_rgba)
+        if(!std::isfinite(value) || value<0.0F || value>1.0F)return false;
+    return true;
+}
+
+std::optional<RenderCamera> apply_screen_effects(const RenderCamera& camera,
+    const game_api::ScreenEffectsFrame& effects) noexcept
+{
+    if(!valid_render_screen_effects(effects) || !is_valid(camera))return std::nullopt;
+    RenderCamera result=camera;
+    result.position.x+=effects.translation[0];result.target.x+=effects.translation[0];
+    result.position.y+=effects.translation[1];result.target.y+=effects.translation[1];
+    result.position.z+=effects.translation[2];result.target.z+=effects.translation[2];
+    if(effects.roll_degrees!=0.0) {
+        const auto forward=normalize(subtract(camera.target,camera.position));
+        if(!forward)return std::nullopt;
+        const float angle=static_cast<float>(effects.roll_degrees*0.017453292519943295);
+        const float c=std::cos(angle),s=std::sin(angle);
+        const auto side=cross(*forward,camera.up);
+        const float along=dot(*forward,camera.up)*(1.0F-c);
+        result.up={camera.up.x*c+side.x*s+forward->x*along,
+            camera.up.y*c+side.y*s+forward->y*along,
+            camera.up.z*c+side.z*s+forward->z*along};
+    }
+    return is_valid(result) ? std::optional{result} : std::nullopt;
+}
+
 RenderMatrixResult camera_view_projection(
     const RenderCamera& camera,
     const RenderExtent extent) noexcept
@@ -263,6 +300,7 @@ RenderCamera camera_local_first_person_camera(
     result.position = {0.0F, 0.0F, 0.0F};
     result.target = {1.0F, 0.0F, 0.0F};
     result.up = {0.0F, 0.0F, 1.0F};
+    result.near_plane = kFirstPersonNearPlane;
     return result;
 }
 

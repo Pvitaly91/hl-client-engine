@@ -1,0 +1,604 @@
+#include <hlclient/core/external_launch_config.hpp>
+#include <hlclient/app/external_session.hpp>
+#include <hlclient/hash/sha256.hpp>
+#include <hlclient/platform/sdl_runtime.hpp>
+#include <hlclient/platform/sdl_window.hpp>
+#include <hlclient/platform/windows/external_launcher.hpp>
+#include <hlclient/platform/windows/external_launch_preflight.hpp>
+#include <hlclient/platform/windows/session_receipt_file.hpp>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+#include <windows.h>
+#include <commctrl.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <shellapi.h>
+#include <SDL3/SDL.h>
+#include "smooth_scroll.hpp"
+#include "smooth_scroll_check.hpp"
+
+namespace {
+namespace core=hlclient::core;
+namespace app=hlclient::app;
+namespace platform=hlclient::platform;
+namespace native=hlclient::platform::windows;
+using Clock=std::chrono::steady_clock;
+enum Control : int {server=101,name,display,resolution,mode,vsync,brightness,gamma,contrast,volume,
+    reset_image,assets,choose_assets,runtime,choose_runtime,connect_button,cancel_button,report_button,status_label,
+    image_values,dependency_label,client_label,mode_note,save_button,
+    hud_mode,hud_scale,hud_values,reset_hud,msaa,movement_diagnostics,movement_hotkey};
+struct Positioned {HWND control{};int x{},y{},w{},h{};};
+struct Progress {bool finished{},success{},started{},cancel_timed_out{};std::string stage{"checking_resources"},reason;std::filesystem::path report;std::optional<core::SceneAntialiasingObservation> antialiasing;};
+struct Worker {
+    std::thread thread;std::mutex mutex;Progress progress;std::atomic_bool cancel{},force{};
+    ~Worker(){if(thread.joinable())thread.join();}
+    void publish(Progress p){std::scoped_lock guard{mutex};progress=std::move(p);}
+    Progress snapshot(){std::scoped_lock guard{mutex};return progress;}
+};
+struct Ui {
+    HWND window{};HFONT font{};UINT dpi{96};std::vector<Positioned> controls;
+    std::filesystem::path executable,settings,storage,last_report;
+    core::ExternalLaunchConfiguration configuration;
+    std::vector<platform::VideoDisplay> displays;
+    std::vector<std::pair<int,int>> resolutions;
+    core::ExternalLauncherLifecycle lifecycle;
+    std::unique_ptr<Worker> worker;
+    bool close_after{},offline_check{},scroll_timer{};int scroll_pixels{},offline_exit_code{2};std::string settings_status;
+    UINT font_dpi{};hlclient::launcher::SmoothScroll scroll;
+    ~Ui(){if(font)::DeleteObject(font);}
+};
+int scaled(Ui&ui,int value){return ::MulDiv(value,static_cast<int>(ui.dpi),96);}
+HWND get(Ui&ui,int id){return ::GetDlgItem(ui.window,id);}
+void text(Ui&ui,int id,const std::wstring&value){::SetWindowTextW(get(ui,id),value.c_str());}
+std::wstring read_control(Ui&ui,int id){const auto h=get(ui,id);const int n=::GetWindowTextLengthW(h);if(n<0 || n>4096)return {};std::wstring out(static_cast<std::size_t>(n)+1,0);::GetWindowTextW(h,out.data(),n+1);out.resize(static_cast<std::size_t>(n));return out;}
+void choice(Ui&ui,int id,const std::wstring&value){::SendMessageW(get(ui,id),CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value.c_str()));}
+int selected(Ui&ui,int id){return static_cast<int>(::SendMessageW(get(ui,id),CB_GETCURSEL,0,0));}
+void select(Ui&ui,int id,int n){::SendMessageW(get(ui,id),CB_SETCURSEL,static_cast<WPARAM>(n),0);}
+int slider(Ui&ui,int id){return static_cast<int>(::SendMessageW(get(ui,id),TBM_GETPOS,0,0));}
+void slide(Ui&ui,int id,int value){::SendMessageW(get(ui,id),TBM_SETPOS,TRUE,value);}
+constexpr UINT_PTR kWorkerTimer=1,kScrollTimer=2;
+double scroll_time(){return std::chrono::duration<double>{Clock::now().time_since_epoch()}.count();}
+void stop_scrolling(Ui&ui)
+{
+    ::KillTimer(ui.window,kScrollTimer);ui.scroll_timer=false;ui.scroll.jump(ui.scroll.position());
+}
+void position_controls(Ui&ui,bool geometry=false)
+{
+    // One physical offset for every child avoids relative rounding wobble at
+    // fractional DPI. Scroll frames neither recreate fonts nor resize controls.
+    const int offset=static_cast<int>(std::lround(ui.scroll.position()*ui.dpi/96.0));
+    if(!geometry && offset==ui.scroll_pixels)return;
+    ui.scroll_pixels=offset;
+    SCROLLINFO info{sizeof(SCROLLINFO),SIF_POS,0,0,0,static_cast<int>(std::lround(ui.scroll.position())),0};
+    ::SetScrollInfo(ui.window,SB_VERT,&info,TRUE);
+    const UINT flags=SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|SWP_NOCOPYBITS|(geometry?0U:SWP_NOSIZE);
+    auto batch=::BeginDeferWindowPos(static_cast<int>(ui.controls.size()));
+    for(const auto&p:ui.controls){if(!batch)break;batch=::DeferWindowPos(batch,p.control,nullptr,scaled(ui,p.x),scaled(ui,p.y)-offset,scaled(ui,p.w),scaled(ui,p.h),flags);}
+    if(!batch || !::EndDeferWindowPos(batch))for(const auto&p:ui.controls)
+        ::SetWindowPos(p.control,nullptr,scaled(ui,p.x),scaled(ui,p.y)-offset,scaled(ui,p.w),scaled(ui,p.h),flags);
+    // Queue one paint for the composited native form, not one synchronous
+    // erase/paint per child. Do not toggle WM_SETREDRAW on the hidden test UI.
+    ::RedrawWindow(ui.window,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);
+}
+void scroll_to(Ui&ui,double position)
+{
+    stop_scrolling(ui);ui.scroll.jump(position);position_controls(ui);
+}
+void scroll_tick(Ui&ui,double now)
+{
+    static_cast<void>(ui.scroll.advance(now));position_controls(ui);
+    if(!ui.scroll.active()){::KillTimer(ui.window,kScrollTimer);ui.scroll_timer=false;}
+}
+void scroll_wheel(Ui&ui,short delta,double now,UINT lines,bool animate)
+{
+    if(lines==0U || delta==0)return;
+    RECT client{};::GetClientRect(ui.window,&client);
+    const double distance=lines==WHEEL_PAGESCROLL?static_cast<double>(client.bottom)*96.0/ui.dpi:
+        static_cast<double>(lines)*16.0;
+    ui.scroll.move_by(-static_cast<double>(delta)/WHEEL_DELTA*distance,now);
+    if(!animate){scroll_to(ui,ui.scroll.target());return;}
+    position_controls(ui);
+    if(ui.scroll.active() && !ui.scroll_timer){
+        ui.scroll_timer=::SetTimer(ui.window,kScrollTimer,16,nullptr)!=0;
+        if(!ui.scroll_timer)scroll_to(ui,ui.scroll.target());
+    }
+    if(!ui.scroll.active())stop_scrolling(ui);
+}
+void layout(Ui&ui)
+{
+    stop_scrolling(ui);
+    if(!ui.font || ui.font_dpi!=ui.dpi){
+        const auto next=::CreateFontW(-scaled(ui,14),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+        if(next){const auto previous=ui.font;ui.font=next;ui.font_dpi=ui.dpi;
+            for(const auto&p:ui.controls)::SendMessageW(p.control,WM_SETFONT,reinterpret_cast<WPARAM>(next),FALSE);
+            if(previous)::DeleteObject(previous);}
+    }
+    RECT client{};::GetClientRect(ui.window,&client);
+    const int page=::MulDiv(client.bottom,96,static_cast<int>(ui.dpi));
+    ui.scroll.reset(ui.scroll.position(),std::max(0,1012-page));
+    SCROLLINFO scroll{sizeof(SCROLLINFO),SIF_RANGE|SIF_PAGE|SIF_POS,0,1011,static_cast<UINT>(std::max(1,page)),static_cast<int>(std::lround(ui.scroll.position())),0};
+    ::SetScrollInfo(ui.window,SB_VERT,&scroll,TRUE);
+    position_controls(ui,true);
+}
+void scroll_bar(Ui&ui,UINT code,int track,int page)
+{
+    double position=ui.scroll.position();
+    switch(code){
+    case SB_THUMBTRACK:case SB_THUMBPOSITION:position=track;break;
+    case SB_LINEUP:position-=24;break;case SB_LINEDOWN:position+=24;break;
+    case SB_PAGEUP:position-=page;break;case SB_PAGEDOWN:position+=page;break;
+    case SB_TOP:position=0;break;case SB_BOTTOM:position=ui.scroll.maximum();break;
+    default:break;
+    }
+    scroll_to(ui,position);
+}
+void reveal_control(Ui&ui,HWND window)
+{
+    stop_scrolling(ui);
+    const auto p=std::find_if(ui.controls.begin(),ui.controls.end(),[window](const auto&value){return value.control==window;});
+    if(p==ui.controls.end())return;
+    RECT area{};::GetClientRect(ui.window,&area);const int page=::MulDiv(area.bottom,96,static_cast<int>(ui.dpi));
+    const int height=std::min(30,p->h);
+    if(p->y<ui.scroll.position())scroll_to(ui,p->y);
+    else if(p->y+height>ui.scroll.position()+page)scroll_to(ui,p->y+height-page);
+}
+LRESULT CALLBACK focus_subclass(HWND window,UINT message,WPARAM wparam,LPARAM lparam,UINT_PTR id,DWORD_PTR data)
+{
+    auto&ui=*reinterpret_cast<Ui*>(data);
+    const int control=::GetDlgCtrlID(window);
+    if(control==brightness || control==gamma || control==contrast || control==volume){
+        // These value controls must not consume a form-scrolling gesture,
+        // including when focused. Forward once, bypassing trackbar defaults.
+        if(message==WM_MOUSEWHEEL)return ::SendMessageW(ui.window,message,wparam,lparam);
+        if(message==WM_MOUSEHWHEEL)return 0;
+    }
+    if(message==WM_SETFOCUS)reveal_control(ui,window);
+    if(message==WM_NCDESTROY)::RemoveWindowSubclass(window,focus_subclass,id);
+    return ::DefSubclassProc(window,message,wparam,lparam);
+}
+HWND add(Ui&ui,int id,const wchar_t*class_name,const wchar_t*label,DWORD style,int x,int y,int w,int h)
+{
+    HWND child=::CreateWindowExW(std::wstring_view{class_name}==L"EDIT"?WS_EX_CLIENTEDGE:0,class_name,label,WS_CHILD|WS_VISIBLE|style,0,0,1,1,ui.window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),::GetModuleHandleW(nullptr),nullptr);
+    ui.controls.push_back({child,x,y,w,h});if(child && (style&WS_TABSTOP)!=0)::SetWindowSubclass(child,focus_subclass,1,reinterpret_cast<DWORD_PTR>(&ui));return child;
+}
+void label(Ui&ui,const wchar_t*s,int x,int y,int w,int h=22){static_cast<void>(add(ui,0,L"STATIC",s,0,x,y,w,h));}
+void combo(Ui&ui,int id,int x,int y,int w){static_cast<void>(add(ui,id,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,x,y,w,180));}
+void button(Ui&ui,int id,const wchar_t*s,int x,int y,int w,bool primary=false){static_cast<void>(add(ui,id,L"BUTTON",s,WS_TABSTOP|(primary?BS_DEFPUSHBUTTON:BS_PUSHBUTTON),x,y,w,30));}
+void add_slider(Ui&ui,int id,const wchar_t*s,int y,int low,int high){label(ui,s,28,y+4,130);const auto h=add(ui,id,TRACKBAR_CLASSW,L"",WS_TABSTOP|TBS_AUTOTICKS,160,y,440,30);::SendMessageW(h,TBM_SETRANGE,TRUE,MAKELPARAM(low,high));}
+void update_image_labels(Ui&ui)
+{
+    const auto rounded=[](float value){auto s=std::to_wstring(value);s.resize(s.find(L'.')+3);return s;};
+    text(ui,image_values,L"Яскр. "+rounded(static_cast<float>(slider(ui,brightness))/100.F)+L"   Гамма "+rounded(static_cast<float>(slider(ui,gamma))/100.F)+L"   Контраст "+rounded(static_cast<float>(slider(ui,contrast))/100.F)+L"   Звук "+std::to_wstring(slider(ui,volume))+L"%");
+    text(ui,hud_values,selected(ui,hud_mode)==0?L"Авто: масштаб за оригінальним макетом HUD.":L"Масштаб HUD: "+std::to_wstring(slider(ui,hud_scale))+L"%");
+    ::EnableWindow(get(ui,hud_scale),selected(ui,hud_mode)==1 && !ui.lifecycle.busy());
+}
+void update_modes(Ui&ui)
+{
+    const bool borderless=selected(ui,mode)==1;::EnableWindow(get(ui,resolution),!borderless && !ui.lifecycle.busy());
+    text(ui,mode_note,borderless?L"Без рамки: розмір робочого столу обраного монітора.":L"Розмір області гри. Exclusive-режим поки недоступний.");
+}
+void fill_resolutions(Ui&ui)
+{
+    ::SendMessageW(get(ui,resolution),CB_RESETCONTENT,0,0);ui.resolutions.clear();
+    const int index=selected(ui,display);const auto&d=ui.displays[static_cast<std::size_t>(std::max(0,index))];
+    const std::array candidates{std::pair{640,480},std::pair{800,600},std::pair{1024,768},std::pair{1280,720},std::pair{1280,800},std::pair{1600,900},std::pair{1920,1080},std::pair{2560,1440},std::pair{3840,2160},std::pair{ui.configuration.video.width,ui.configuration.video.height}};
+    for(const auto [w,h]:candidates)if(w<=d.desktop_width && h<=d.desktop_height && std::find(ui.resolutions.begin(),ui.resolutions.end(),std::pair{w,h})==ui.resolutions.end())ui.resolutions.emplace_back(w,h);
+    if(ui.resolutions.empty())ui.resolutions.emplace_back(std::max(640,d.desktop_width),std::max(480,d.desktop_height));
+    std::sort(ui.resolutions.begin(),ui.resolutions.end());int current=0;
+    for(std::size_t i=0;i<ui.resolutions.size();++i){const auto [w,h]=ui.resolutions[i];choice(ui,resolution,std::to_wstring(w)+L" × "+std::to_wstring(h));if(w==ui.configuration.video.width && h==ui.configuration.video.height)current=static_cast<int>(i);}select(ui,resolution,current);update_modes(ui);
+}
+bool refresh_displays(Ui&ui)
+{
+    try{
+        const auto previous=static_cast<std::size_t>(std::max(0,selected(ui,display)));
+        const auto previous_id=previous<ui.displays.size()?ui.displays[previous].id:0U;
+        auto actual=platform::enumerate_video_displays();if(actual.empty()){text(ui,status_label,L"Монітор недоступний. Підключення відкладено.");return false;}
+        auto next=std::find_if(actual.begin(),actual.end(),[previous_id](const auto&d){return d.id==previous_id;});
+        const bool missing=next==actual.end();const auto index=missing?0U:static_cast<std::size_t>(next-actual.begin());
+        ui.displays=std::move(actual);::SendMessageW(get(ui,display),CB_RESETCONTENT,0,0);
+        for(const auto&d:ui.displays)choice(ui,display,native::external_widen(d.name)+L" — "+std::to_wstring(d.desktop_width)+L" × "+std::to_wstring(d.desktop_height));
+        ui.configuration.video.display_index=index;select(ui,display,static_cast<int>(index));
+        if(missing){ui.configuration.video.mode=core::VideoWindowMode::windowed;ui.configuration.video.width=std::max(640,ui.displays[index].desktop_width*4/5);ui.configuration.video.height=std::max(480,ui.displays[index].desktop_height*4/5);select(ui,mode,0);text(ui,status_label,L"Монітор змінився. Відновлено безпечний віконний режим.");}
+        fill_resolutions(ui);return true;
+    }catch(...){text(ui,status_label,L"Не вдалося оновити список моніторів.");return false;}
+}
+bool collect(Ui&ui,bool show_error)
+{
+    auto c=ui.configuration;c.endpoint=native::external_utf8(read_control(ui,server));c.name=native::external_utf8(read_control(ui,name));c.asset_root=native::external_utf8(read_control(ui,assets));c.steam_api_runtime=native::external_utf8(read_control(ui,runtime));
+    c.video.display_index=static_cast<std::size_t>(std::max(0,selected(ui,display)));c.video.mode=selected(ui,mode)==1?core::VideoWindowMode::borderless:core::VideoWindowMode::windowed;
+    const auto i=static_cast<std::size_t>(std::max(0,selected(ui,resolution)));if(i<ui.resolutions.size()){c.video.width=ui.resolutions[i].first;c.video.height=ui.resolutions[i].second;}
+    c.video.vsync=::SendMessageW(get(ui,vsync),BM_GETCHECK,0,0)==BST_CHECKED;
+    constexpr std::array<unsigned,4> samples{0,2,4,8};
+    const auto aa=selected(ui,msaa);if(aa<0 || aa>=static_cast<int>(samples.size()))return false;
+    c.video.msaa_samples=samples[static_cast<std::size_t>(aa)];
+    c.hud_scale={selected(ui,hud_mode)==0,static_cast<float>(slider(ui,hud_scale))/100.F};
+    c.movement_diagnostics=::SendMessageW(get(ui,movement_diagnostics),BM_GETCHECK,0,0)==BST_CHECKED;
+    c.image={static_cast<float>(slider(ui,brightness))/100.F,static_cast<float>(slider(ui,gamma))/100.F,static_cast<float>(slider(ui,contrast))/100.F};c.volume=static_cast<unsigned>(slider(ui,volume));
+    const auto error=core::validate_external_launch_configuration(c);if(!error.empty()){if(show_error){const auto message=error=="invalid_player_name"?L"Ім’я: 1–31 латинський символ, цифри або пробіли. Символи \\, ; та лапки не підтримуються чинним протоколом.":error=="invalid_endpoint"?L"Введіть IPv4:порт, наприклад 192.168.0.104:27016. Без порту — 27015. Додаткові команди заборонені.":L"Перевірте локальні абсолютні шляхи та налаштування відео.";::MessageBoxW(ui.window,message,L"Некоректні налаштування",MB_OK|MB_ICONWARNING);}return false;}
+    c.endpoint=*core::normalize_external_endpoint(c.endpoint);ui.configuration=std::move(c);return true;
+}
+void fill(Ui&ui)
+{
+    text(ui,server,native::external_widen(ui.configuration.endpoint));text(ui,name,native::external_widen(ui.configuration.name));text(ui,assets,native::external_widen(ui.configuration.asset_root));text(ui,runtime,native::external_widen(ui.configuration.steam_api_runtime));text(ui,client_label,L"Клієнт: "+ui.executable.wstring());
+    for(const auto&d:ui.displays)choice(ui,display,native::external_widen(d.name)+L" — "+std::to_wstring(d.desktop_width)+L" × "+std::to_wstring(d.desktop_height));
+    if(ui.configuration.video.display_index>=ui.displays.size()){ui.configuration.video.display_index=0;ui.configuration.video.mode=core::VideoWindowMode::windowed;ui.settings_status="display_missing_recovered";}
+    select(ui,display,static_cast<int>(ui.configuration.video.display_index));choice(ui,mode,L"Віконний");choice(ui,mode,L"Повноекранний без рамки");select(ui,mode,ui.configuration.video.mode==core::VideoWindowMode::borderless?1:0);fill_resolutions(ui);
+    ::SendMessageW(get(ui,vsync),BM_SETCHECK,ui.configuration.video.vsync?BST_CHECKED:BST_UNCHECKED,0);
+    choice(ui,msaa,L"Вимкнено");choice(ui,msaa,L"MSAA 2×");choice(ui,msaa,L"MSAA 4×");choice(ui,msaa,L"MSAA 8×");
+    select(ui,msaa,ui.configuration.video.msaa_samples==0?0:ui.configuration.video.msaa_samples==2?1:ui.configuration.video.msaa_samples==4?2:3);
+    choice(ui,hud_mode,L"Авто");choice(ui,hud_mode,L"Власний масштаб");select(ui,hud_mode,ui.configuration.hud_scale.automatic?0:1);
+    slide(ui,hud_scale,static_cast<int>(std::lround(ui.configuration.hud_scale.scale*100)));
+    ::SendMessageW(get(ui,movement_diagnostics),BM_SETCHECK,ui.configuration.movement_diagnostics?BST_CHECKED:BST_UNCHECKED,0);
+    slide(ui,brightness,static_cast<int>(ui.configuration.image.brightness*100));slide(ui,gamma,static_cast<int>(ui.configuration.image.gamma*100));slide(ui,contrast,static_cast<int>(ui.configuration.image.contrast*100));slide(ui,volume,static_cast<int>(ui.configuration.volume));update_image_labels(ui);
+    text(ui,status_label,ui.settings_status=="loaded" || ui.settings_status=="defaults" || ui.settings_status.empty()?L"Готовий. Підключення почнеться після натискання кнопки.":L"Відновлено безпечні налаштування: "+native::external_widen(ui.settings_status));
+}
+void create_controls(Ui&ui)
+{
+    static_cast<void>(add(ui,0,L"BUTTON",L"Підключення",BS_GROUPBOX,16,10,610,105));
+    label(ui,L"Сервер",28,38,105);static_cast<void>(add(ui,server,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,135,34,460,25));::SendMessageW(get(ui,server),EM_SETLIMITTEXT,128,0);
+    label(ui,L"Ім’я гравця",28,75,105);static_cast<void>(add(ui,name,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,135,71,460,25));::SendMessageW(get(ui,name),EM_SETLIMITTEXT,31,0);
+    static_cast<void>(add(ui,0,L"BUTTON",L"Відео",BS_GROUPBOX,16,124,610,142));
+    label(ui,L"Монітор",28,152,105);combo(ui,display,135,147,460);
+    label(ui,L"Роздільність",28,187,105);combo(ui,resolution,135,182,170);combo(ui,mode,316,182,279);
+    static_cast<void>(add(ui,vsync,L"BUTTON",L"VSync",WS_TABSTOP|BS_AUTOCHECKBOX,28,218,100,24));static_cast<void>(add(ui,mode_note,L"STATIC",L"",0,135,219,460,37));
+    static_cast<void>(add(ui,0,L"BUTTON",L"Зображення й звук",BS_GROUPBOX,16,278,610,201));
+    add_slider(ui,brightness,L"Яскравість",302,-50,50);add_slider(ui,gamma,L"Гамма",335,25,400);add_slider(ui,contrast,L"Контраст",368,0,200);add_slider(ui,volume,L"Гучність",401,0,100);
+    static_cast<void>(add(ui,image_values,L"STATIC",L"",0,28,439,430,24));button(ui,reset_image,L"Скинути",487,435,108);
+    static_cast<void>(add(ui,0,L"BUTTON",L"Локальні ресурси (додатково)",BS_GROUPBOX,16,490,610,150));
+    label(ui,L"Half-Life",28,520,84);static_cast<void>(add(ui,assets,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,115,515,388,25));button(ui,choose_assets,L"Папка…",512,513,83);
+    label(ui,L"Steam DLL",28,552,84);static_cast<void>(add(ui,runtime,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,115,550,388,25));button(ui,choose_runtime,L"Файл…",512,547,83);
+    static_cast<void>(add(ui,dependency_label,L"STATIC",L"Steam має бути запущений. Ресурси й офіційний runtime перевіряються перед входом.",0,28,585,565,21));
+    static_cast<void>(add(ui,client_label,L"STATIC",L"",SS_PATHELLIPSIS,28,611,565,20));
+    label(ui,L"Налаштування застосовуються до наступного запуску гри.",22,651,605);
+    button(ui,connect_button,L"Підключитися",20,681,157,true);button(ui,cancel_button,L"Від’єднатися",187,681,174);button(ui,report_button,L"Відкрити звіт",371,681,133);button(ui,save_button,L"Зберегти",514,681,104);
+    static_cast<void>(add(ui,status_label,L"STATIC",L"",0,22,727,595,60));
+    // Insert the independent HUD/AA controls before image settings. Native
+    // coordinates below are DPI-scaled once; they are never in-game HUD units.
+    for(auto& p:ui.controls)if(p.y>=278)p.y+=135;
+    static_cast<void>(add(ui,0,L"BUTTON",L"HUD і згладжування",BS_GROUPBOX,16,278,610,123));
+    label(ui,L"Масштаб HUD",28,304,110);combo(ui,hud_mode,145,299,175);
+    const auto hud_slider=add(ui,hud_scale,TRACKBAR_CLASSW,L"",WS_TABSTOP|TBS_AUTOTICKS,325,299,158,30);
+    ::SendMessageW(hud_slider,TBM_SETRANGE,TRUE,MAKELPARAM(50,200));button(ui,reset_hud,L"Скинути",487,299,108);
+    static_cast<void>(add(ui,hud_values,L"STATIC",L"",0,28,337,565,22));
+    label(ui,L"Згладжування",28,368,110);combo(ui,msaa,145,363,175);
+    label(ui,L"Фактичне MSAA та fallback — у статусі й звіті.",330,367,265,28);
+    for(auto& p:ui.controls)if(p.y>=413)p.y+=82;
+    static_cast<void>(add(ui,0,L"BUTTON",L"Запис ривків",BS_GROUPBOX,16,412,610,72));
+    static_cast<void>(add(ui,movement_diagnostics,L"BUTTON",L"Діагностика плавності та ліфтів",WS_TABSTOP|BS_AUTOCHECKBOX,28,432,565,24));
+    static_cast<void>(add(ui,movement_hotkey,L"STATIC",L"Запис усієї сесії. F8 — позначка. Звіт після закриття гри.",0,28,459,565,21));
+    ::EnableWindow(get(ui,cancel_button),FALSE);::EnableWindow(get(ui,report_button),FALSE);layout(ui);fill(ui);
+}
+void browse(Ui&ui,bool folder)
+{
+    IFileOpenDialog*dialog{};if(FAILED(::CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dialog))))return;
+    DWORD flags{};static_cast<void>(dialog->GetOptions(&flags));static_cast<void>(dialog->SetOptions(flags|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST|(folder?FOS_PICKFOLDERS:FOS_FILEMUSTEXIST)));
+    if(!folder){const COMDLG_FILTERSPEC filter{L"Офіційний Steam runtime",L"steam_api.dll"};static_cast<void>(dialog->SetFileTypes(1,&filter));}
+    if(SUCCEEDED(dialog->Show(ui.window))){IShellItem*item{};if(SUCCEEDED(dialog->GetResult(&item))){PWSTR path{};if(SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH,&path))){text(ui,folder?assets:runtime,path);if(folder)text(ui,runtime,(std::filesystem::path{path}/L"steam_api.dll").wstring());::CoTaskMemFree(path);}item->Release();}}dialog->Release();
+}
+std::wstring stage_label(const Progress&p)
+{
+    if(p.finished){
+        if(p.reason=="startup_cancelled" || p.reason=="cancelled_before_gameplay")return L"Підключення скасовано. Можна спробувати знову.";
+        if(p.success)return L"Завершено. Можна підключитися знову.";
+        if(p.reason=="active_research_session_conflict")return L"Цей hlclient.exe ізольовано активним дослідницьким тестом. Закрийте його штатно й повторіть підключення.";
+        if(p.reason=="official_steam_runtime_unavailable_or_untrusted")return L"Не знайдено перевірений офіційний Steam runtime (x86). Оберіть steam_api.dll зі своєї ліцензованої Half-Life.";
+        if(p.reason=="server_full")return L"Сервер заповнений. Звільніть місце на сервері й повторіть підключення. Деталі — у звіті.";
+        if(p.reason=="server_password_required_or_rejected")return L"Сервер вимагає пароль або відхилив його. Введення пароля цим лаунчером поки не підтримується. Деталі — у звіті.";
+        if(p.reason=="server_protocol_rejected")return L"Сервер відхилив версію протоколу клієнта. Деталі — у звіті.";
+        if(p.reason=="server_authentication_rejected")return L"Сервер відхилив автентифікацію клієнта. Перевірте Steam і правила доступу сервера. Деталі — у звіті.";
+        if(p.reason=="connection_rejected")return L"Сервер відхилив підключення. Деталі — у звіті.";
+        if(p.reason=="challenge_protocol_error")return L"Початкову відповідь сервера (challenge) відхилено перевіркою протоколу. Причина й поле — у звіті external-diagnostics.json.";
+        if(p.reason=="challenge_network_error")return L"Помилка мережі під час початкового обміну із сервером (challenge). Деталі — у звіті.";
+        if(p.reason=="challenge_configuration_error")return L"Некоректне налаштування початкового обміну із сервером (challenge). Деталі — у звіті.";
+        if(p.reason=="protocol_error")return L"Вхід перервано перевіркою протоколу сервера. Це не помилка від’єднання. Деталі — у звіті.";
+        return L"Помилка: "+native::external_widen(p.reason)+L". Деталі — у звіті.";}
+    if(p.stage=="error")return L"Помилка підключення: "+native::external_widen(p.reason)+L". Завершення й збереження звіту…";
+    if(p.stage=="in_game")return L"У грі. Карту й ігровий стан підтверджено клієнтом.";
+    if(p.stage=="authentication")return L"Автентифікація Steam…";
+    if(p.stage=="signon")return L"Вхід на сервер (sign-on)…";
+    if(p.stage=="preparing_map")return L"Підготовка карти й ресурсів…";
+    if(p.stage=="disconnecting")return p.cancel_timed_out?L"Клієнт не відповідає. Натисніть «Від’єднатися» для явного завершення.":L"Від’єднання й збереження звіту…";
+    if(p.stage=="connecting")return L"Підключення до сервера…";
+    return L"Перевірка локальних ресурсів і залежностей…";
+}
+void run_child(Worker&worker,const core::ExternalLaunchConfiguration configuration,const std::filesystem::path client,const std::filesystem::path launcher,const std::filesystem::path storage)
+{
+    Progress p;std::filesystem::path run;std::string run_id,client_sha,launcher_sha,config_sha,isolation="not_observed";std::optional<app::SessionReceiptSnapshot> receipt;std::optional<std::uint32_t> exit;std::uint32_t pid{};std::uint64_t creation{};bool forced{};
+    std::unique_ptr<native::ExternalClientProcess> child_owner;
+    native::ExternalFailureMarkers failures;
+    const auto observe_failures=[&](std::string_view bytes){const auto observed=native::external_failure_markers(bytes);
+        if(failures.primary_reason.empty())failures.primary_reason=observed.primary_reason;
+        if(failures.cleanup_reason.empty())failures.cleanup_reason=observed.cleanup_reason;};
+    const auto finalize=[&](bool success,std::string reason){p.finished=true;p.success=success;p.reason=std::move(reason);p.stage=success?"completed":"error";
+        if(!run.empty()){const auto snapshot=receipt?app::encode_session_receipt(*receipt):std::nullopt;
+            const auto report=std::string{"{\n\"schema\":\"hlclient.external-run.v1\",\n\"mode\":\"external_server_client\",\n\"server_process_owned\":false,\n\"server_cleanup\":\"not_applicable\",\n\"owned_helpers\":0,\n\"run_id\":"}+core::external_json_string(run_id)+",\n\"target_endpoint\":"+core::external_json_string(configuration.endpoint)+",\n\"client_sha256\":"+core::external_json_string(client_sha)+",\n\"launcher_sha256\":"+core::external_json_string(launcher_sha)+",\n\"config_sha256\":"+core::external_json_string(config_sha)+",\n\"process_id\":"+std::to_string(pid)+",\n\"process_creation\":"+std::to_string(creation)+",\n\"research_isolation\":"+core::external_json_string(isolation)+",\n\"client_exit\":"+(exit?std::to_string(*exit):"null")+",\n\"terminal_reason\":"+core::external_json_string(p.reason)+",\n\"launcher_forced_own_child\":"+(forced?"true":"false")+",\n\"gameplay_observed\":"+(receipt && app::external_gameplay_receipt_ready(*receipt)?"true":"false")+",\n\"receipt_status\":"+core::external_json_string(receipt?"identity_bound":"not_observed")+",\n\"receipt\":"+(snapshot?core::external_json_string(*snapshot):"null")+",\n\"video_start_report\":\"external-video-start.json\",\n\"video_final_report\":\"external-video-final.json\",\n\"server_live_compatibility\":\"manual_confirmation_required\"\n}\n";
+            // These leaves are immutable, process-owned outputs; a reference
+            // is not a claim that a crashed child managed to publish them.
+            const auto with_diagnostics=report.substr(0,report.size()-2)+
+                ",\n\"primary_failure_reason\":"+core::external_json_string(failures.primary_reason.empty()?"none":failures.primary_reason)+
+                ",\n\"cleanup_failure_reason\":"+core::external_json_string(failures.cleanup_reason.empty()?"none":failures.cleanup_reason)+
+                ",\n\"diagnostics_report\":\"external-diagnostics.json\",\n\"client_status_log\":\"client-status.log\",\n\"movement_report\":\"external-movement.json\",\n\"movement_diagnostics_enabled\":"+(configuration.movement_diagnostics?"true":"false")+",\n\"movement_incident_hotkey\":\"F8\"\n}\n";
+            p.report=run/L"external-run-report.json";if(!native::write_external_text_atomic(p.report,with_diagnostics,false)){p.success=false;p.reason="final_report_publication_failed";p.report=run;}}
+        worker.publish(p);};
+    try{
+        run_id=native::new_external_run_id();if(run_id.empty()){finalize(false,"run_identity_failed");return;}
+        run=storage/L"runs"/native::external_widen(run_id);std::filesystem::create_directories(run);p.report=run;worker.publish(p);
+        auto pinned=native::open_secure_output_directory(run);if(!pinned){finalize(false,"run_directory_unavailable");return;}
+        const auto config=core::encode_external_launch_configuration(configuration);if(!config){finalize(false,"configuration_invalid");return;}
+        config_sha=hlclient::hash::sha256_hex(*hlclient::hash::sha256(std::as_bytes(std::span{config->data(),config->size()})));
+        if(!native::write_external_text_atomic(run/L"launch-config.json",*config,false)){finalize(false,"configuration_publication_failed");return;}
+        const auto binary=native::observe_windows_binary_identity(client,native::kMaximumObservedExecutableBytes,{native::AuthenticodePolicy::not_required_for_project_owned_binary,false});
+        if(!binary){finalize(false,"client_binary_"+std::string{native::to_string(binary.code)});return;}client_sha=hlclient::hash::sha256_hex(binary.identity->sha256);
+        const auto launcher_binary=native::observe_windows_binary_identity(launcher,native::kMaximumObservedExecutableBytes,{native::AuthenticodePolicy::not_required_for_project_owned_binary,false});if(launcher_binary)launcher_sha=hlclient::hash::sha256_hex(launcher_binary.identity->sha256);
+        const auto conflict=native::observe_research_isolation_conflict(client);isolation=conflict.state==native::ResearchIsolationConflict::present?"present":conflict.state==native::ResearchIsolationConflict::absent?"absent":"query_unavailable";
+        if(conflict.state==native::ResearchIsolationConflict::present){finalize(false,"active_research_session_conflict");return;}
+        const auto steam=native::observe_official_steam_runtime(native::external_widen(configuration.steam_api_runtime));if(!steam){finalize(false,"official_steam_runtime_unavailable_or_untrusted");return;}
+        const auto manifest=std::string{"{\"schema\":\"hlclient.external-launch-identity.v1\",\"run_id\":"}+core::external_json_string(run_id)+",\"client_sha256\":"+core::external_json_string(client_sha)+",\"launcher_sha256\":"+core::external_json_string(launcher_sha)+",\"config_sha256\":"+core::external_json_string(config_sha)+",\"server_process_owned\":false}\n";
+        if(!native::write_external_text_atomic(run/L"launch-manifest.json",manifest,false)){finalize(false,"launch_manifest_publication_failed");return;}
+        if(worker.cancel){finalize(false,"startup_cancelled");return;}
+        child_owner=std::make_unique<native::ExternalClientProcess>();auto&child=*child_owner;
+        const std::vector<std::wstring> arguments{L"--external-config",(run/L"launch-config.json").wstring(),L"--session-receipt-root",run.wstring(),L"--session-run-id",native::external_widen(run_id),L"--session-role",L"A"};
+        if(!child.launch(*binary.identity,arguments)){finalize(false,"child_create_failed_"+std::to_string(child.launch_error()));return;}
+        pid=child.process_id();creation=child.process_creation();p.started=true;p.stage="connecting";worker.publish(p);
+        const auto process_manifest=std::string{"{\"schema\":\"hlclient.external-process-identity.v1\",\"run_id\":"}+core::external_json_string(run_id)+",\"process_id\":"+std::to_string(pid)+",\"process_creation\":"+std::to_string(creation)+",\"client_sha256\":"+core::external_json_string(client_sha)+"}\n";
+        const bool process_recorded=native::write_external_text_atomic(run/L"process-manifest.json",process_manifest,false);
+        if(!process_recorded)worker.cancel=true;
+        const app::SessionReceiptIdentity expected{run_id,app::SessionReceiptRole::A,pid,creation};
+        std::optional<Clock::time_point> cancelled;
+        auto next_video_observation=Clock::now();
+        for(;;){const auto state=child.poll();if(worker.cancel && !cancelled){cancelled=Clock::now();child.request_cancel();p.stage="disconnecting";}
+            if(worker.force && !forced){forced=child.terminate_owned_child(125);}
+            if(cancelled && Clock::now()-*cancelled>std::chrono::seconds{8})p.cancel_timed_out=true;
+            const auto log=child.log_snapshot();observe_failures(log.bytes);
+            const auto marker=native::latest_external_status_marker(log.bytes);if(marker && !cancelled)p.stage=marker->stage;
+            if(!failures.primary_reason.empty() || !failures.cleanup_reason.empty()){
+                p.stage="error";p.reason=!failures.primary_reason.empty()?failures.primary_reason:failures.cleanup_reason;}
+            const auto observed=native::read_latest_external_session_receipt(*pinned.directory,expected);if(observed)receipt=observed.snapshot;
+            if(receipt && app::external_gameplay_receipt_ready(*receipt) && !cancelled && failures.primary_reason.empty() && failures.cleanup_reason.empty())p.stage="in_game";
+            if(!state.running || Clock::now()>=next_video_observation) {
+                if(const auto aa_observation=native::read_external_msaa_observation(*pinned.directory,run_id))p.antialiasing=*aa_observation;
+                next_video_observation=Clock::now()+std::chrono::seconds{1};
+            }
+            worker.publish(p);if(!state.running){exit=state.exit_code;if(!exit && failures.primary_reason.empty())failures.primary_reason="child_wait_failed_"+std::to_string(state.native_error);break;}
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});}
+        const auto final_log=child.finish_log();observe_failures(final_log.bytes);
+        const auto safe_log=native::redacted_external_status_log(final_log.bytes)+"[launcher-capture] observed_bytes="+std::to_string(final_log.observed_bytes)+" byte_truncated="+(final_log.byte_truncated?"true":"false")+" capture_failed="+(final_log.capture_failed?"true":"false")+"\n";
+        const bool log_published=native::write_external_text_atomic(run/L"client-status.log",safe_log,false);
+        const auto terminal=native::read_latest_external_session_receipt(*pinned.directory,expected,true);if(terminal.snapshot)receipt=terminal.snapshot;
+        const bool success=process_recorded && log_published && exit && *exit==0 && terminal && receipt && app::external_close_succeeded(&*receipt,!failures.primary_reason.empty(),!failures.cleanup_reason.empty()) && !forced;
+        finalize(success,success?(app::external_gameplay_receipt_ready(*receipt)?"normal_close_completed":"startup_cancelled"):!process_recorded?"process_manifest_publication_failed":!log_published?"client_status_log_publication_failed":forced?"explicit_owned_child_termination":!failures.primary_reason.empty()?failures.primary_reason:!failures.cleanup_reason.empty()?failures.cleanup_reason:cancelled?"cancelled_before_gameplay":exit && *exit!=0?"client_exit_"+std::to_string(*exit):"gameplay_or_terminal_receipt_not_observed");
+    }catch(...){if(child_owner){const auto closed=native::close_external_child_after_failure(*child_owner);forced=closed.forced;exit=closed.exit_code;finalize(false,closed.exited?"launcher_internal_or_filesystem_error":"launcher_failed_child_cleanup_unconfirmed");}else finalize(false,"launcher_internal_or_filesystem_error");}
+}
+void enable_controls(Ui&ui,bool enabled)
+{
+    for(const int id:{server,name,display,resolution,mode,vsync,brightness,gamma,contrast,volume,reset_image,hud_mode,hud_scale,reset_hud,msaa,movement_diagnostics,assets,choose_assets,runtime,choose_runtime,connect_button,save_button})::EnableWindow(get(ui,id),enabled);
+    ::EnableWindow(get(ui,cancel_button),!enabled);update_modes(ui);update_image_labels(ui);
+}
+void connect(Ui&ui)
+{
+    if(ui.lifecycle.busy() || !collect(ui,true) || !refresh_displays(ui) || !collect(ui,true))return;
+    if(!native::save_external_settings(ui.settings,ui.configuration)){::MessageBoxW(ui.window,L"Не вдалося атомарно зберегти налаштування.",L"Помилка",MB_OK|MB_ICONERROR);return;}
+    if(!ui.lifecycle.begin())return;
+    ui.last_report.clear();::EnableWindow(get(ui,report_button),FALSE);
+    if(ui.configuration.video.mode==core::VideoWindowMode::borderless){const auto encoded=core::encode_external_launch_configuration(ui.configuration);if(!encoded || !native::write_external_text_atomic(ui.storage/L"pending-video.json",*encoded,true)){ui.lifecycle.finish(false);text(ui,status_label,L"Не вдалося зберегти безпечне відновлення відеорежиму.");return;}}
+    ui.worker=std::make_unique<Worker>();auto*worker=ui.worker.get();const auto configuration=ui.configuration;const auto client=ui.executable,storage=ui.storage;
+    std::array<wchar_t,32768> path{};const auto n=::GetModuleFileNameW(nullptr,path.data(),static_cast<DWORD>(path.size()));const std::filesystem::path launcher{std::wstring{path.data(),n}};
+    worker->thread=std::thread{[worker,configuration,client,launcher,storage]{run_child(*worker,configuration,client,launcher,storage);}};enable_controls(ui,false);text(ui,status_label,L"Перевірка локальних ресурсів…");
+}
+void cancel(Ui&ui)
+{
+    if(!ui.worker || !ui.lifecycle.busy())return;const auto p=ui.worker->snapshot();
+    if(p.cancel_timed_out){if(::MessageBoxW(ui.window,L"Штатне від’єднання не завершилось за 8 секунд. Примусово завершити лише запущений цим лаунчером клієнт? Сервер залишиться працювати.",L"Клієнт не відповідає",MB_YESNO|MB_DEFBUTTON2|MB_ICONWARNING)==IDYES)ui.worker->force=true;return;}
+    static_cast<void>(ui.lifecycle.cancel());ui.worker->cancel=true;text(ui,status_label,L"Від’єднання…");
+}
+void tick(Ui&ui)
+{
+    if(!ui.worker)return;const auto p=ui.worker->snapshot();if(p.started)static_cast<void>(ui.lifecycle.child_started());
+    auto status=stage_label(p);
+    if(p.antialiasing){const auto&aa=*p.antialiasing;status+=L"\r\nОстаннє підтвердження MSAA: запит "+std::to_wstring(aa.requested_samples)+L"×, фактично "+(aa.actual_samples?std::to_wstring(aa.actual_samples)+L"×":L"вимкнено");
+        if(aa.actual_samples<aa.requested_samples)status+=L". Нижчий доступний режим: "+native::external_widen(aa.fallback_reason);}
+    text(ui,status_label,status);
+    text(ui,cancel_button,p.stage=="in_game"?L"Від’єднатися":L"Скасувати підключення");
+    if(!p.report.empty()){ui.last_report=p.report;::EnableWindow(get(ui,report_button),TRUE);}
+    if(!p.finished)return;ui.lifecycle.finish(p.success);ui.worker.reset();enable_controls(ui,true);
+    if(ui.configuration.video.mode==core::VideoWindowMode::borderless){if(p.success && p.reason=="normal_close_completed" && ::MessageBoxW(ui.window,L"Повноекранне зображення було правильним? Зберегти цей режим для наступних запусків?",L"Перевірка відеорежиму",MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION)==IDYES){static_cast<void>(::DeleteFileW((ui.storage/L"pending-video.json").c_str()));}
+        else{ui.configuration.video.mode=core::VideoWindowMode::windowed;select(ui,mode,0);update_modes(ui);static_cast<void>(native::save_external_settings(ui.settings,ui.configuration));}}
+    if(ui.close_after)::DestroyWindow(ui.window);
+}
+bool offline_scroll_check(Ui&ui)
+{
+    struct CheckTrace{const char*phase{"model"};UINT dpi{};bool passed{};
+        ~CheckTrace(){if(!passed)std::fprintf(stderr,"launcher_scroll_check_phase=%s dpi=%u\n",phase,dpi);}} check;
+    if(!hlclient::launcher::smooth_scroll_check())return false;
+    const auto original_dpi=ui.dpi;
+    const auto original_config=core::encode_external_launch_configuration(ui.configuration);
+    RECT original{};::GetWindowRect(ui.window,&original);
+    ::SetWindowPos(ui.window,nullptr,0,0,original.right-original.left,700,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    for(const UINT dpi:{96U,120U,144U,192U}){
+        check.phase="font";check.dpi=dpi;
+        ui.dpi=dpi;layout(ui);scroll_to(ui,40);
+        const auto font=ui.font;layout(ui);
+        if(!font || ui.font!=font || ui.scroll.maximum()<100 || ::IsWindowVisible(ui.window))return false;
+        LOGFONTW description{};
+        if(!::GetObjectW(font,sizeof(description),&description) || description.lfHeight!=-scaled(ui,14))return false;
+        std::vector<RECT> before;std::vector<HFONT> before_fonts;
+        for(const auto&p:ui.controls){RECT r{};::GetWindowRect(p.control,&r);before.push_back(r);
+            before_fonts.push_back(reinterpret_cast<HFONT>(::SendMessageW(p.control,WM_GETFONT,0,0)));
+            std::array<wchar_t,64> type{};::GetClassNameW(p.control,type.data(),static_cast<int>(type.size()));
+            if(std::wstring_view{type.data()}!=TRACKBAR_CLASSW && before_fonts.back()!=font)return false;}
+        check.phase="geometry";
+        const auto offset=ui.scroll_pixels;
+        // Small high-resolution wheel inputs must accumulate, without changing
+        // font handles or moving even one child immediately to the final target.
+        for(int i=0;i<4;++i)scroll_wheel(ui,-30,10.0,3,true);
+        if(ui.scroll.target()!=88.0 || ui.scroll.position()!=40.0 || !ui.scroll_timer)return false;
+        scroll_tick(ui,10.03);
+        if(ui.scroll.position()<=40.0 || ui.scroll.position()>=88.0 || ui.font!=font)return false;
+        const int moved=ui.scroll_pixels-offset;
+        if(moved<=0)return false;
+        for(std::size_t i=0;i<ui.controls.size();++i){RECT r{};::GetWindowRect(ui.controls[i].control,&r);
+            if(r.top!=before[i].top-moved || r.bottom!=before[i].bottom-moved ||
+                r.left!=before[i].left || r.right!=before[i].right ||
+                reinterpret_cast<HFONT>(::SendMessageW(ui.controls[i].control,WM_GETFONT,0,0))!=before_fonts[i])return false;}
+        scroll_tick(ui,10.2);
+        if(ui.scroll.position()!=88.0 || ui.scroll_timer || ui.scroll.active())return false;
+        // Smallest wheel units preserve their fractional displacement too.
+        check.phase="fractional_wheel";
+        scroll_to(ui,0);
+        for(int i=0;i<120;++i)scroll_wheel(ui,-1,11.0,3,true);
+        scroll_tick(ui,11.2);
+        if(std::abs(ui.scroll.position()-48.0)>.000001 || ui.scroll_timer)return false;
+        check.phase="scrollbar";scroll_wheel(ui,-120,12.0,3,true);
+        scroll_bar(ui,SB_THUMBTRACK,44,100);
+        if(ui.scroll.position()!=44 || ui.scroll.target()!=44 || ui.scroll_timer)return false;
+        scroll_bar(ui,SB_LINEDOWN,0,100);if(ui.scroll.position()!=68)return false;
+        scroll_bar(ui,SB_LINEUP,0,100);if(ui.scroll.position()!=44)return false;
+        scroll_bar(ui,SB_PAGEDOWN,0,50);if(ui.scroll.position()!=94)return false;
+        scroll_bar(ui,SB_PAGEUP,0,50);if(ui.scroll.position()!=44)return false;
+        scroll_bar(ui,SB_BOTTOM,0,100);if(ui.scroll.position()!=ui.scroll.maximum())return false;
+        scroll_bar(ui,SB_TOP,0,100);if(ui.scroll.position()!=0)return false;
+        check.phase="focus";scroll_wheel(ui,-120,13.0,3,true);reveal_control(ui,get(ui,save_button));
+        const auto revealed=ui.scroll.position();scroll_tick(ui,13.2);
+        RECT page{};::GetClientRect(ui.window,&page);
+        const auto item=std::find_if(ui.controls.begin(),ui.controls.end(),[&](const auto&p){return p.control==get(ui,save_button);});
+        if(item==ui.controls.end() || revealed<=0 || ui.scroll.position()!=revealed || ui.scroll_timer ||
+            item->y+std::min(30,item->h)>revealed+::MulDiv(page.bottom,96,static_cast<int>(dpi)))return false;
+        reveal_control(ui,get(ui,server));
+        if(ui.scroll.position()>34 || ui.scroll_timer)return false;
+        check.phase="system_policy";scroll_to(ui,0);scroll_wheel(ui,-120,14.0,0,true);
+        if(ui.scroll.position()!=0 || ui.scroll.active())return false;
+        scroll_wheel(ui,-120,14.0,3,false);
+        if(ui.scroll.position()!=48 || ui.scroll_timer || ui.scroll.active())return false;
+        scroll_to(ui,0);scroll_wheel(ui,-120,15.0,WHEEL_PAGESCROLL,false);
+        const double expected=std::min(static_cast<double>(ui.scroll.maximum()),page.bottom*96.0/dpi);
+        if(ui.scroll.position()!=expected || ui.scroll_timer)return false;
+        scroll_wheel(ui,120,16.0,3,true);layout(ui);
+        if(ui.scroll_timer || ui.scroll.active() || ui.font!=font)return false;
+        check.phase="slider_wheel";
+        for(const int id:{brightness,gamma,contrast,volume}){
+            const auto control=get(ui,id);const int value=slider(ui,id);
+            for(const bool focused:{false,true}){
+                ::SendMessageW(control,focused?WM_SETFOCUS:WM_KILLFOCUS,0,0);
+                for(const short delta:{short{-120},short{120},short{-30},short{1}}){
+                    const WPARAM wheel=MAKEWPARAM(focused?MK_CONTROL:0,static_cast<WORD>(delta));
+                    scroll_to(ui,50);::SendMessageW(ui.window,WM_MOUSEWHEEL,wheel,0);
+                    const auto expected_target=ui.scroll.target();
+                    scroll_to(ui,50);::SendMessageW(control,WM_MOUSEWHEEL,wheel,0);
+                    if(slider(ui,id)!=value || std::abs(ui.scroll.target()-expected_target)>.000001)return false;
+                    ::SendMessageW(control,WM_MOUSEHWHEEL,wheel,0);
+                    if(slider(ui,id)!=value || std::abs(ui.scroll.target()-expected_target)>.000001)return false;
+                }
+            }
+            // Disabling wheel changes must not disable deliberate keyboard edits.
+            ::SendMessageW(control,WM_KEYDOWN,VK_RIGHT,0);::SendMessageW(control,WM_KEYUP,VK_RIGHT,0);
+            if(slider(ui,id)!=value+1)return false;
+            ::SendMessageW(control,WM_KEYDOWN,VK_LEFT,0);::SendMessageW(control,WM_KEYUP,VK_LEFT,0);
+            if(slider(ui,id)!=value)return false;
+        }
+        stop_scrolling(ui);
+    }
+    // Even when the viewport grows beyond the whole form, no stale target
+    // remains to pull the controls away after resize or a DPI transition.
+    check.phase="resize";ui.dpi=96;
+    ::SetWindowPos(ui.window,nullptr,0,0,original.right-original.left,1300,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    layout(ui);scroll_wheel(ui,-120,20.0,3,true);
+    if(ui.scroll.maximum()!=0 || ui.scroll.position()!=0 || ui.scroll_timer)return false;
+    ::SetWindowPos(ui.window,nullptr,0,0,original.right-original.left,original.bottom-original.top,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    ui.dpi=original_dpi;layout(ui);scroll_to(ui,0);
+    check.phase="state_preservation";
+    check.passed=!::IsWindowVisible(ui.window) && collect(ui,false) &&
+        core::encode_external_launch_configuration(ui.configuration)==original_config && !ui.worker && !ui.lifecycle.busy();
+    return check.passed;
+}
+bool offline_control_check(Ui&ui)
+{
+    // Exercise the real Win32 controls and the same collection routine used
+    // by Connect. No save, preflight, Steam initialization or child process.
+    if(read_control(ui,server)!=L"192.168.0.104:27016" || ui.displays.empty() || !collect(ui,false))return false;
+    if(!offline_scroll_check(ui)){std::fprintf(stderr,"launcher_scroll_check=failed\n");return false;}
+    std::fprintf(stdout,"launcher_scroll_check=passed duration_ms=120 dpi=96,120,144,192 fractional_wheel=verified native_geometry=verified slider_wheel_values=unchanged slider_wheel_routes=form keyboard_edits=verified\n");
+    for(const int id:{server,name,display,resolution,mode,vsync,brightness,gamma,contrast,volume,reset_image,hud_mode,hud_scale,hud_values,reset_hud,msaa,movement_diagnostics,movement_hotkey,assets,choose_assets,runtime,choose_runtime,connect_button,cancel_button,report_button,save_button})if(!get(ui,id))return false;
+    if(::SendMessageW(get(ui,movement_diagnostics),BM_GETCHECK,0,0)!=BST_UNCHECKED || read_control(ui,movement_hotkey).find(L"F8")==std::wstring::npos)return false;
+    ::SendMessageW(get(ui,movement_diagnostics),BM_SETCHECK,BST_CHECKED,0);
+    text(ui,server,L"connect 192.168.0.104:27016");text(ui,name,L"E31 Offline");text(ui,assets,L"D:\\Тест ресурси\\Half Life");text(ui,runtime,L"D:\\Тест ресурси\\Half Life\\steam_api.dll");
+    slide(ui,brightness,17);slide(ui,gamma,137);slide(ui,contrast,163);slide(ui,volume,77);
+    if(selected(ui,msaa)!=2 || selected(ui,hud_mode)!=0 || ::IsWindowEnabled(get(ui,hud_scale)))return false;
+    select(ui,hud_mode,1);slide(ui,hud_scale,75);select(ui,msaa,3);update_image_labels(ui);
+    if(!::IsWindowEnabled(get(ui,hud_scale)))return false;
+    ::SendMessageW(get(ui,vsync),BM_SETCHECK,BST_UNCHECKED,0);select(ui,mode,1);update_modes(ui);
+    if(::IsWindowEnabled(get(ui,resolution)) || !collect(ui,false))return false;
+    const auto encoded=core::encode_external_launch_configuration(ui.configuration);if(!encoded)return false;const auto decoded=core::decode_external_launch_configuration(*encoded);if(!decoded)return false;const auto&c=*decoded.configuration;
+    if(c.endpoint!="192.168.0.104:27016" || c.name!="E31 Offline" || c.asset_root!=native::external_utf8(L"D:\\Тест ресурси\\Half Life") || c.steam_api_runtime!=native::external_utf8(L"D:\\Тест ресурси\\Half Life\\steam_api.dll") || c.video.mode!=core::VideoWindowMode::borderless || c.video.vsync || c.image!=core::ImageAdjustments{.17F,1.37F,1.63F} || c.volume!=77 || c.video.msaa_samples!=8 || c.hud_scale!=core::HudScaleSettings{false,.75F} || !c.movement_diagnostics)return false;
+    const auto resolution_index=static_cast<std::size_t>(selected(ui,resolution));if(resolution_index>=ui.resolutions.size() || c.video.width!=ui.resolutions[resolution_index].first || c.video.height!=ui.resolutions[resolution_index].second || c.video.display_index!=static_cast<std::size_t>(selected(ui,display)))return false;
+    ::SendMessageW(ui.window,WM_COMMAND,MAKEWPARAM(reset_image,BN_CLICKED),0);select(ui,mode,0);update_modes(ui);
+    if(!collect(ui,false) || ui.configuration.hud_scale!=core::HudScaleSettings{false,.75F})return false;
+    ::SendMessageW(ui.window,WM_COMMAND,MAKEWPARAM(reset_hud,BN_CLICKED),0);
+    // A native DPI change moves native controls, not their persisted game units.
+    for(const UINT dpi:{96U,120U,144U,192U}){ui.dpi=dpi;layout(ui);if(!collect(ui,false) || ui.configuration.hud_scale!=core::HudScaleSettings{} || ui.configuration.video.msaa_samples!=8 || !ui.configuration.movement_diagnostics)return false;}
+    return ::IsWindowEnabled(get(ui,resolution)) && !::IsWindowEnabled(get(ui,hud_scale)) && collect(ui,false) && ui.configuration.image==core::ImageAdjustments{} && ui.configuration.hud_scale==core::HudScaleSettings{} && ui.configuration.video.mode==core::VideoWindowMode::windowed && !ui.worker && !ui.lifecycle.busy();
+}
+LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam)
+{
+    Ui*ui=reinterpret_cast<Ui*>(::GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+    if(message==WM_NCCREATE){ui=static_cast<Ui*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);ui->window=hwnd;::SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(ui));}
+    if(!ui)return ::DefWindowProcW(hwnd,message,wparam,lparam);
+    switch(message){
+    case WM_CREATE:create_controls(*ui);::SetTimer(hwnd,kWorkerTimer,100,nullptr);if(ui->offline_check)::PostMessageW(hwnd,WM_APP+1,0,0);return 0;
+    case WM_APP+1:ui->offline_exit_code=offline_control_check(*ui)?0:2;::DestroyWindow(hwnd);return 0;
+    case WM_DPICHANGED:{ui->dpi=HIWORD(wparam);const auto*r=reinterpret_cast<RECT*>(lparam);::SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);layout(*ui);return 0;}
+    case WM_SIZE:if(!ui->controls.empty())layout(*ui);return 0;
+    // The hidden SDL utility window receives the same broadcast and refreshes
+    // SDL's display cache. Defer enumeration until after that broadcast.
+    case WM_DISPLAYCHANGE: ::PostMessageW(hwnd,WM_APP+2,0,0);return 0;
+    case WM_APP+2:if(!ui->lifecycle.busy() && !ui->controls.empty())static_cast<void>(refresh_displays(*ui));return 0;
+    case WM_VSCROLL:{SCROLLINFO info{sizeof(SCROLLINFO),SIF_ALL,0,0,0,0,0};::GetScrollInfo(hwnd,SB_VERT,&info);scroll_bar(*ui,LOWORD(wparam),info.nTrackPos,static_cast<int>(info.nPage));return 0;}
+    case WM_MOUSEWHEEL:{UINT lines=3;BOOL animate=TRUE;::SystemParametersInfoW(SPI_GETWHEELSCROLLLINES,0,&lines,0);::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animate,0);scroll_wheel(*ui,static_cast<short>(HIWORD(wparam)),scroll_time(),lines,animate!=FALSE);return 0;}
+    case WM_HSCROLL:update_image_labels(*ui);return 0;
+    case WM_TIMER:if(wparam==kScrollTimer)scroll_tick(*ui,scroll_time());else if(wparam==kWorkerTimer)tick(*ui);return 0;
+    case WM_COMMAND:{const int id=LOWORD(wparam);if(id==mode && HIWORD(wparam)==CBN_SELCHANGE){update_modes(*ui);return 0;}if(id==hud_mode && HIWORD(wparam)==CBN_SELCHANGE){update_image_labels(*ui);return 0;}if(id==display && HIWORD(wparam)==CBN_SELCHANGE){fill_resolutions(*ui);return 0;}if(HIWORD(wparam)!=BN_CLICKED && id!=IDOK && id!=IDCANCEL)return 0;
+        if(id==connect_button || id==IDOK)connect(*ui);else if(id==cancel_button || id==IDCANCEL){if(ui->lifecycle.busy())cancel(*ui);else ::SendMessageW(hwnd,WM_CLOSE,0,0);}
+        else if(id==reset_image){slide(*ui,brightness,0);slide(*ui,gamma,100);slide(*ui,contrast,100);update_image_labels(*ui);}
+        else if(id==reset_hud){select(*ui,hud_mode,0);slide(*ui,hud_scale,100);update_image_labels(*ui);}
+        else if(id==choose_assets)browse(*ui,true);else if(id==choose_runtime)browse(*ui,false);
+        else if(id==save_button){if(collect(*ui,true))text(*ui,status_label,native::save_external_settings(ui->settings,ui->configuration)?L"Налаштування збережено. Вони діятимуть під час наступного запуску.":L"Не вдалося зберегти налаштування.");}
+        else if(id==report_button && !ui->last_report.empty())static_cast<void>(::ShellExecuteW(hwnd,L"open",ui->last_report.c_str(),nullptr,nullptr,SW_SHOWNORMAL));return 0;}
+    case WM_CLOSE:if(ui->lifecycle.busy()){if(::MessageBoxW(hwnd,L"Від’єднати клієнт і закрити лаунчер після збереження звіту?",L"Гра ще працює",MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION)==IDYES){ui->close_after=true;cancel(*ui);}return 0;}if(!ui->offline_check && collect(*ui,false))static_cast<void>(native::save_external_settings(ui->settings,ui->configuration));::DestroyWindow(hwnd);return 0;
+    case WM_DESTROY: ::KillTimer(hwnd,kWorkerTimer);::KillTimer(hwnd,kScrollTimer);::PostQuitMessage(ui->offline_check?ui->offline_exit_code:0);return 0;
+    default:return ::DefWindowProcW(hwnd,message,wparam,lparam);}
+}
+}
+int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int show)
+{
+    try{
+        static_cast<void>(::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
+        const HRESULT com=::CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE);
+        struct Com{HRESULT code;~Com(){if(SUCCEEDED(code))::CoUninitialize();}}com_owner{com};
+        const INITCOMMONCONTROLSEX common{sizeof(INITCOMMONCONTROLSEX),ICC_BAR_CLASSES|ICC_STANDARD_CLASSES};::InitCommonControlsEx(&common);
+        platform::SdlRuntime sdl;
+        // SDL3 updates its actual display cache from an SDL WindowProc. This
+        // hidden, non-GL utility owns no game, network or renderer session.
+        std::unique_ptr<SDL_Window,decltype(&SDL_DestroyWindow)> display_events{
+            SDL_CreateWindow("HLClient display events",1,1,SDL_WINDOW_HIDDEN|SDL_WINDOW_UTILITY),SDL_DestroyWindow};
+        if(!display_events)throw std::runtime_error{"display_event_window_unavailable"};
+        Ui ui;ui.offline_check=std::wstring_view{command}==L"--offline-ui-check";
+        ui.displays=platform::enumerate_video_displays();if(ui.displays.empty())throw std::runtime_error{"display_unavailable"};
+        ui.configuration.video.width=std::max(640,ui.displays[0].desktop_width*4/5);ui.configuration.video.height=std::max(480,ui.displays[0].desktop_height*4/5);
+        std::array<wchar_t,32768> binary{};const DWORD n=::GetModuleFileNameW(nullptr,binary.data(),static_cast<DWORD>(binary.size()));if(!n || n>=binary.size())return 2;ui.executable=std::filesystem::path{std::wstring{binary.data(),n}}.parent_path()/L"hlclient.exe";
+        PWSTR local{};if(FAILED(::SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_DEFAULT,nullptr,&local)))return 2;ui.storage=std::filesystem::path{local}/L"HLClientEngine";::CoTaskMemFree(local);ui.settings=ui.storage/L"launcher.json";
+        if(!ui.offline_check){std::filesystem::create_directories(ui.storage);auto loaded=native::load_external_settings(ui.settings,ui.configuration);ui.configuration=std::move(loaded.configuration);ui.settings_status=loaded.status;
+            if(std::filesystem::exists(ui.storage/L"pending-video.json")){ui.configuration.video.mode=core::VideoWindowMode::windowed;ui.settings_status="unconfirmed_video_recovered_to_windowed";}}
+        WNDCLASSW type{};type.lpfnWndProc=procedure;type.hInstance=instance;type.hCursor=::LoadCursorW(nullptr,IDC_ARROW);type.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);type.lpszClassName=L"HLClientExternalLauncherE31";if(!::RegisterClassW(&type))return 2;
+        ui.dpi=::GetDpiForSystem();RECT work{};::SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);
+        HWND window=::CreateWindowExW(WS_EX_CONTROLPARENT|WS_EX_COMPOSITED,type.lpszClassName,L"HL Client — підключення до LAN-сервера",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VSCROLL,CW_USEDEFAULT,CW_USEDEFAULT,scaled(ui,664),std::min(scaled(ui,825),static_cast<int>(work.bottom-work.top)),nullptr,nullptr,instance,&ui);if(!window)return 2;
+        ::ShowWindow(window,ui.offline_check?SW_HIDE:show);::UpdateWindow(window);MSG msg{};while(::GetMessageW(&msg,nullptr,0,0)>0){if(!::IsDialogMessageW(window,&msg)){::TranslateMessage(&msg);::DispatchMessageW(&msg);}}return static_cast<int>(msg.wParam);
+    }catch(...){if(std::wstring_view{command}!=L"--offline-ui-check")::MessageBoxW(nullptr,L"Не вдалося відкрити лаунчер. Перевірте доступність SDL3.dll, локальної папки налаштувань і монітора.",L"HL Client — помилка запуску",MB_OK|MB_ICONERROR);return 2;}
+}

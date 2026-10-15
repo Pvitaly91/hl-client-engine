@@ -1,15 +1,19 @@
 #include <algorithm>
 #include <cmath>
 #include <hlclient/app/runtime_replay_local_assets.hpp>
+#include <hlclient/goldsrc/reference_brush_collision.hpp>
 #include <hlclient/collision/collision_world_query.hpp>
 #include <hlclient/client/client_scene_source.hpp>
 #include <hlclient/goldsrc/entity_snapshot_interpolation.hpp>
 #include <hlclient/world_visibility/world_view_frustum.hpp>
 #include <hlclient/entity_render/entity_render_frame_composer.hpp>
 #include <hlclient/goldsrc/bsp/goldsrc_bsp_world_importer.hpp>
+#include <hlclient/goldsrc/bsp/goldsrc_worldspawn_wad_references.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_brush_render_library.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_brush_entity.hpp>
 #include <hlclient/goldsrc/brush_models/goldsrc_brush_transform.hpp>
+#include <hlclient/entity_render/studio_socket.hpp>
+#include <hlclient/entity_render/beam_ribbon.hpp>
 #include <hlclient/goldsrc/spatial/goldsrc_spatial_package_builder.hpp>
 #include <hlclient/goldsrc/collision/goldsrc_collision_world_builder.hpp>
 #include <hlclient/goldsrc/goldsrc_builtin_asset_importers.hpp>
@@ -17,6 +21,7 @@
 #include <hlclient/goldsrc/local_resource_inventory.hpp>
 #include <hlclient/goldsrc/precache_asset_dispatch.hpp>
 #include <hlclient/goldsrc/studio/goldsrc_studio_pose.hpp>
+#include <hlclient/goldsrc/sprite/goldsrc_sprite_importer.hpp>
 #include <hlclient/goldsrc/visual_assets/goldsrc_visual_asset_import.hpp>
 #include <hlclient/goldsrc/world_textures/world_texture_import.hpp>
 #include <hlclient/goldsrc/wad3/goldsrc_wad3_catalog.hpp>
@@ -27,8 +32,80 @@
 #include <hlclient/world_spatial/world_spatial_query.hpp>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace hlclient::app {
+namespace {
+bool rigid_effect_surface_transform(const renderer::RenderMatrix4& matrix) noexcept {
+  if(!renderer::is_finite(matrix) || std::abs(matrix.values[3])>1e-6F ||
+      std::abs(matrix.values[7])>1e-6F || std::abs(matrix.values[11])>1e-6F ||
+      std::abs(matrix.values[15]-1)>1e-6F)return false;
+  const assets::AssetVector3 x{matrix.values[0],matrix.values[1],matrix.values[2]},
+      y{matrix.values[4],matrix.values[5],matrix.values[6]},
+      z{matrix.values[8],matrix.values[9],matrix.values[10]};
+  return std::abs(renderer::dot(x,x)-1)<1e-4F && std::abs(renderer::dot(y,y)-1)<1e-4F &&
+      std::abs(renderer::dot(z,z)-1)<1e-4F && std::abs(renderer::dot(x,y))<1e-4F &&
+      std::abs(renderer::dot(x,z))<1e-4F && std::abs(renderer::dot(y,z))<1e-4F &&
+      renderer::dot(renderer::cross(x,y),z)>.9999F;
+}
+}
+const goldsrc::PreparedDecalAssets& RuntimeReplayLocalAssets::prepare_surface_decals(
+    std::span<const game_api::DecalAssetRequest> requests) noexcept {
+  if(!surface_decal_assets_) {
+    try {
+      auto prepared=goldsrc::prepare_decal_assets(sound_resources_,requests);
+      for(std::size_t i=0;i<std::min(requests.size(),surface_decal_modes_.size());++i)
+        surface_decal_modes_[i]=requests[i].material_mode;
+      surface_decal_assets_=std::make_shared<const goldsrc::PreparedDecalAssets>(std::move(prepared));
+    } catch(...) {}
+  }
+  static const goldsrc::PreparedDecalAssets unavailable=[] {
+    goldsrc::PreparedDecalAssets value;value.archive_status=goldsrc::DecalAssetStatus::capacity;return value;
+  }();
+  return surface_decal_assets_ ? *surface_decal_assets_ : unavailable;
+}
+ServerDecalMaterializationResult RuntimeReplayLocalAssets::materialize_server_decal(
+    const game_api::TemporaryEffectIntent& intent,WorldImpactPresentation& owner,
+    std::uint64_t resource_generation) const noexcept {
+  ServerDecalMaterializationResult result;
+  if(!intent.surface_decal || !surface_decal_assets_)return result;
+  const auto& placement=*intent.surface_decal;
+  if(placement.asset_slot>=surface_decal_assets_->count) {
+    result.asset_status=goldsrc::DecalAssetStatus::not_authorized;return result;
+  }
+  const auto& asset=surface_decal_assets_->entries[placement.asset_slot];
+  result.asset_status=asset.status;
+  if(asset.status!=goldsrc::DecalAssetStatus::ready || !asset.texture)return result;
+  WorldImpactPresentation::ServerDecalRequest request{intent.identity,intent.record_ordinal,
+      resource_generation,intent.origin,placement.target_entity,asset.texture,surface_decal_modes_[placement.asset_slot]};
+  if(!world_scene_) {result.placement.status=ServerDecalStatus::target_unavailable;return result;}
+  if(placement.target_entity==0) {
+    result.placement=owner.submit_server(request,world_scene_->world_package().get());return result;
+  }
+  // Birth placement uses the immutable committed target pose, not a delayed
+  // render frame or the player's current camera. Current transforms are only
+  // used later by frame_batches when the already-attached decal is drawn.
+  if(!placement.target_pose) {result.placement.status=ServerDecalStatus::target_unavailable;return result;}
+  const auto& pose=*placement.target_pose;
+  const auto binding=bindings_.find(pose.model_slot);
+  const auto life=entity_follow_.lifetime(placement.target_entity,intent.record_ordinal);
+  if(!life || binding==bindings_.end() || !binding->second.brush_model ||
+      (placement.target_model_reference && static_cast<std::uint32_t>(*placement.target_model_reference)!=pose.model_slot)) {
+    result.placement.status=ServerDecalStatus::target_unavailable;return result;
+  }
+  const auto transform=goldsrc::brush_models::make_brush_submodel_transform(
+      pose.origin,pose.angles_degrees,binding->second.brush_source_origin);
+  const auto& library=world_scene_->brush_library();
+  const auto model=std::ranges::find(library.models(),*binding->second.brush_model,
+      &world_scene_render::BrushSubmodelRenderModel::source_model_index);
+  if(!transform || model==library.models().end() || model->render_surface_indices().empty()) {
+    result.placement.status=ServerDecalStatus::target_unavailable;return result;
+  }
+  const WorldImpactPresentation::ServerDecalTarget target{placement.target_entity,pose.model_slot,
+      *binding->second.brush_model,life,transform.transform->model_matrix};
+  result.placement=owner.submit_server(request,library.render_package().get(),model->render_surface_indices(),target);
+  return result;
+}
 LocalImpactDecalStatus RuntimeReplayLocalAssets::prepare_impact_decal(
     const game_api::LocalImpactAssetProfile& profile, std::size_t slot) noexcept {
   if (slot>=impact_decal_statuses_.size()) return LocalImpactDecalStatus::rejected;
@@ -82,11 +159,48 @@ LocalImpactDecalStatus RuntimeReplayLocalAssets::prepare_impact_decal(
     if (!decoded || decoded.texture->alpha_mode!=assets::WorldTextureAlphaMode::masked_index_255 ||
         decoded.texture->width>256U || decoded.texture->height>256U) return status;
     texture_asset=std::make_shared<const assets::WorldTextureAsset>(std::move(*decoded.texture));
+    impact_decal_modes_[slot]=profile.material_mode;
     status=LocalImpactDecalStatus::ready;
   } catch (...) { status=LocalImpactDecalStatus::rejected; }
   return status;
 }
 namespace {
+[[nodiscard]] game_api::EffectPaletteMetadata read_effect_palette(
+    std::string_view token,
+    const std::shared_ptr<const local_resources::LocalResourceEnvironment>& environment,
+    const goldsrc::PrecacheManifestEntry& world) {
+  game_api::EffectPaletteMetadata result;
+  if(token.empty())return result;
+  result.status=game_api::EffectPaletteStatus::not_authorized;
+  // One compiled module dependency: a leaf palette under gfx, exactly768 RGB
+  // bytes. No arbitrary directory, unbounded source or alternate installation.
+  if(!token.starts_with("gfx/") || !token.ends_with(".lmp") || token.size()>64 ||
+      token.substr(4).find('/')!=token.npos || token.find("..")!=token.npos ||
+      !std::ranges::all_of(token,[](char c){return (c>='a'&&c<='z') ||
+          (c>='0'&&c<='9') || c=='/' || c=='_' || c=='.';}) || !environment || !world.locator())return result;
+  const auto name=local_resources::LocalVirtualResourceName::create(std::string{token});
+  if(!name)return result;
+  auto resolved=environment->resolve_exact_root(*name.name,world.locator()->root_id());
+  if(!resolved) {result.status=game_api::EffectPaletteStatus::absent;return result;}
+  if(resolved.file->file_size()!=768) {result.status=game_api::EffectPaletteStatus::decode_failed;return result;}
+  auto locator=environment->make_locator(resolved.file->root_id(),*name.name,
+      resolved.file->identity(),resolved.file->file_size());
+  resolved.file->close();if(!locator)return result;
+  local_assets::LocalAssetSourceOpenLimits limits;limits.maximum_source_bytes=768;
+  limits.timeout=std::chrono::seconds{2};
+  local_assets::LocalAssetSourceOpener opener;
+  auto opened=opener.begin(*locator.locator,environment,limits);
+  if(!opened) {result.status=game_api::EffectPaletteStatus::open_failed;return result;}
+  for(std::size_t i=0;i<32 && !opened.operation->result() && !opened.operation->error();++i)
+    opened.operation->update(std::chrono::steady_clock::now());
+  auto source=opened.operation->take_result();
+  if(!source) {result.status=game_api::EffectPaletteStatus::open_failed;return result;}
+  const auto bytes=source->source().bytes();
+  if(bytes.size()!=768) {result.status=game_api::EffectPaletteStatus::decode_failed;return result;}
+  for(std::size_t color=0;color<256;++color)for(std::size_t channel=0;channel<3;++channel)
+    result.colors[color][channel]=std::to_integer<std::uint8_t>(bytes[color*3+channel]);
+  result.status=game_api::EffectPaletteStatus::ready;return result;
+}
 [[nodiscard]] std::string read_movement_materials(
     const std::shared_ptr<const local_resources::LocalResourceEnvironment>& environment,
     const goldsrc::PrecacheManifestEntry& world) {
@@ -144,7 +258,7 @@ void RuntimeReplayLocalAssets::sound_sources(const client::RuntimeClientObservat
         if(p.identity.source_entity_index==entity.entity_number && p.identity.source_model_index==*b.brush_model)
           position.z+=p.transform.translation.z-transform.transform->model_matrix.values[14];
     }
-    sources.push_back({entity.entity_number,position});
+    sources.push_back({entity.entity_number,position,entity_follow_.lifetime(entity.entity_number)});
   }
 }
 std::shared_ptr<const world_scene_render::RuntimeBrushRenderFrame>
@@ -329,10 +443,13 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
                                  const g::ServerInfoState &server_info,
                                  const std::filesystem::path &basedir,
                                  const std::string_view game,
-                                 const ReplayLocalCameraPolicy camera_policy) {
+                                 const ReplayLocalCameraPolicy camera_policy,
+                                 const std::string_view effect_palette_dependency,
+                                 const std::span<const std::string> effect_sprite_dependencies,
+                                 const std::string_view sky_name) {
+  std::unique_ptr<RuntimeReplayLocalAssets> result;
   try {
-    auto result =
-        std::unique_ptr<RuntimeReplayLocalAssets>{new RuntimeReplayLocalAssets};
+    result.reset(new RuntimeReplayLocalAssets);
     result->camera_policy_ = camera_policy;
     auto roots =
         local_resources::LocalResourceSearchRoots::create(basedir, game);
@@ -361,12 +478,30 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
         resources, *inventory.state, server_info, mapper, *environment);
     if (!manifest || !manifest.state->world_geometry_ready() ||
         !manifest.state->world_entry()) {
-      throw std::runtime_error{"captured map resource is not locally ready"};
+      const auto safe_map=local_resources::LocalVirtualResourceName::create(server_info.map_file_path());
+      throw std::runtime_error{"map_resource_not_ready: virtual=" +
+          (safe_map ? std::string{safe_map.name->value()} : std::string{"rejected_virtual_name"}) +
+          "; status=" + std::string{manifest ? g::to_string(manifest.state->completeness()) :
+              manifest.error ? g::to_string(manifest.error->code) : std::string_view{"unavailable"}}};
     }
     auto &summary = result->summary_;
+    for(const auto& entry:inventory.state->entries()) {
+      if(entry.status()==g::LocalResourceInventoryStatus::resolved) continue;
+      const auto& wire=resources.entries()[entry.wire_ordinal()];
+      const auto mapped=mapper.classify(wire.type(),wire.name().bytes());
+      if(mapped.kind()==g::GoldSrcResourceNameClassificationKind::metadata_only ||
+          wire.name().bytes().starts_with('*')) continue;
+      if(summary.resource_issues.size()>=32U) {++summary.resource_issues_omitted;continue;}
+      summary.resource_issues.push_back({mapped.safe_virtual_name() ?
+          std::string{mapped.safe_virtual_name()->value()} : std::string{"rejected_virtual_name"},
+          std::string{g::to_string(entry.status())},entry.resource_index(),
+          static_cast<std::uint8_t>(entry.resource_type())});
+    }
     result->maximum_clients_=server_info.maximum_clients().value();
     result->sound_resources_={std::make_shared<const g::PrecacheManifestState>(*manifest.state),environment};
+    result->player_model_assets_=std::make_shared<g::ApprovedPlayerModelAssets>(result->sound_resources_);
     result->movement_materials_=read_movement_materials(environment,*manifest.state->world_entry());
+    result->effect_palette_=read_effect_palette(effect_palette_dependency,environment,*manifest.state->world_entry());
     summary.map = server_info.map_file_path();
     summary.precache_completeness =
         g::to_string(manifest.state->completeness());
@@ -416,6 +551,36 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       throw std::runtime_error{collision.error->context};
     }
     result->camera_collision_ = collision.package;
+    // Recover names only from the already retained, validated BSP metadata.
+    // The existing importer supplies the actual archive outcome/ordinal; this
+    // does not probe, resolve or reopen any asset for diagnostic purposes.
+    const auto wad_references = g::bsp::GoldSrcEntityLumpParser::
+        parse_worldspawn_wad_references(attachment->document().entity_lump_bytes);
+    const auto record_wad_issue = [&](std::uint32_t ordinal, std::string_view reason) {
+      if (!wad_references || ordinal > (std::numeric_limits<std::uint16_t>::max)()) return;
+      const auto references = wad_references.references->references();
+      const auto reference = std::ranges::find_if(references, [ordinal](const auto& item) {
+        return item.declaration_ordinal == ordinal;
+      });
+      if (reference == references.end()) return;
+      if (std::ranges::any_of(summary.resource_issues, [&](const auto& issue) {
+        return issue.resource_type == 255U && issue.virtual_name == reference->basename &&
+            issue.reason == reason;
+      })) return;
+      if (summary.resource_issues.size() >= 32U) {++summary.resource_issues_omitted;return;}
+      summary.resource_issues.push_back({reference->basename,std::string{reason},
+          static_cast<std::uint16_t>(ordinal),255U});
+    };
+    const auto archive_issue_reason = [](assets::WorldTextureArchiveStatus status) -> std::string_view {
+      switch(status) {
+      case assets::WorldTextureArchiveStatus::missing: return "wad_missing";
+      case assets::WorldTextureArchiveStatus::malformed: return "wad_malformed";
+      case assets::WorldTextureArchiveStatus::unsupported_profile: return "wad_unsupported_profile";
+      case assets::WorldTextureArchiveStatus::not_required:
+      case assets::WorldTextureArchiveStatus::resolved: return {};
+      }
+      return {};
+    };
     g::GoldSrcWorldTextureImportLimits texture_limits;
     texture_limits.missing_texture_policy = g::MissingWorldTexturePolicy::placeholder_for_absent_name;
     auto textures = g::WorldTextureImportOperation::begin(
@@ -429,9 +594,21 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     }
     auto texture_set = textures.operation->take_result();
     if (!texture_set) {
+      if (const auto* failure = textures.operation->error(); failure && failure->archive_ordinal) {
+        auto reason = std::string{g::to_string(failure->code)};
+        if (failure->resolution_code)
+          reason = "wad_resolution_" + std::string{local_resources::to_string(*failure->resolution_code)};
+        else if (failure->source_open_code)
+          reason = "wad_open_" + std::string{local_assets::to_string(*failure->source_open_code)};
+        record_wad_issue(*failure->archive_ordinal,reason);
+      }
       throw std::runtime_error{textures.operation->error()
                                    ? textures.operation->error()->context
                                    : "world textures unavailable"};
+    }
+    for (const auto& archive : texture_set->archive_metadata()) {
+      const auto reason = archive_issue_reason(archive.status);
+      if (!reason.empty()) record_wad_issue(archive.declaration_ordinal,reason);
     }
     summary.missing_texture_placeholder_bindings = texture_set->statistics().placeholder_material_count;
     auto lightmaps = g::lightmaps::GoldSrcWorldLightmapImporter::import(
@@ -447,14 +624,25 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     }
     result->world_ = std::make_shared<const world_render::WorldRenderPackage>(
         std::move(*world_package.package));
+    result->sky_assets_=g::prepare_sky_assets(result->sound_resources_,sky_name,
+        attachment->document().entity_lump_bytes);
 
     const auto& document = attachment->document();
     g::brush_models::GoldSrcBrushRenderLibraryLimits brush_limits;
     brush_limits.textures = texture_limits;
     auto brushes = g::brush_models::GoldSrcBrushRenderLibraryBuilder::build(
         document, world_source.source().bytes(), environment, brush_limits);
-    if (!brushes) throw std::runtime_error{"brush geometry preparation: " +
-        std::string{g::brush_models::to_string(brushes.error->code)}};
+    if (!brushes) {
+      if (brushes.error && brushes.error->texture_incomplete_reason) {
+        const auto& incomplete = *brushes.error->texture_incomplete_reason;
+        if (incomplete.source_archive_ordinal && incomplete.archive_status) {
+          const auto reason = archive_issue_reason(*incomplete.archive_status);
+          if (!reason.empty()) record_wad_issue(*incomplete.source_archive_ordinal,reason);
+        }
+      }
+      throw std::runtime_error{"brush geometry preparation: " +
+          std::string{g::brush_models::to_string(brushes.error->code)}};
+    }
     summary.missing_texture_placeholder_bindings +=
         static_cast<std::size_t>(brushes.statistics.placeholder_material_count);
     const auto& spatial = document.spatial_source;
@@ -695,6 +883,58 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
       result->bindings_[reference.reference.value()] =
           record_bindings.at(reference.asset_library_index);
     }
+    // Compiled presentation dependencies are rooted in the selected map's
+    // approved installation, never assigned fictitious server model slots.
+    // Preload in this existing preparation worker: no first-shot file I/O.
+    if(effect_sprite_dependencies.size()>8U) {
+      ++result->muzzle_sprite_stats_.rejected;
+    } else for(const auto& token:effect_sprite_dependencies) {
+      const auto reject=[&]{++result->muzzle_sprite_stats_.rejected;};
+      if(token.size()>63 || !token.starts_with("sprites/") || !token.ends_with(".spr") ||
+          token.substr(8).find('/')!=std::string::npos || token.find("..")!=std::string::npos ||
+          !std::ranges::all_of(token,[](char c){return (c>='a'&&c<='z') || (c>='0'&&c<='9') ||
+              c=='_' || c=='.' || c=='/';}) || result->effect_sprite_bindings_.contains(token)) {
+        reject();continue;
+      }
+      const auto name=local_resources::LocalVirtualResourceName::create(token);
+      if(!name || !manifest.state->world_entry()->locator()){reject();continue;}
+      auto resolved=environment->resolve_exact_root(*name.name,manifest.state->world_entry()->locator()->root_id());
+      if(!resolved){++result->muzzle_sprite_stats_.missing;continue;}
+      constexpr std::size_t maximum_source=256U*1024U;
+      if(resolved.file->file_size()>maximum_source){reject();continue;}
+      auto locator=environment->make_locator(resolved.file->root_id(),*name.name,
+          resolved.file->identity(),resolved.file->file_size());
+      resolved.file->close();if(!locator){reject();continue;}
+      local_assets::LocalAssetSourceOpenLimits open_limits;
+      open_limits.maximum_source_bytes=maximum_source;open_limits.timeout=std::chrono::seconds{2};
+      auto opened=local_assets::LocalAssetSourceOpener{}.begin(*locator.locator,environment,open_limits);
+      if(!opened){reject();continue;}
+      for(std::size_t i=0;i<65536 && !opened.operation->result() && !opened.operation->error();++i)
+        opened.operation->update(std::chrono::steady_clock::now());
+      auto source=opened.operation->take_result();if(!source){reject();continue;}
+      g::sprite::GoldSrcSpriteImportLimits sprite_limits;
+      sprite_limits.maximum_source_bytes=maximum_source;
+      sprite_limits.maximum_width=sprite_limits.maximum_height=256;
+      sprite_limits.maximum_top_level_entries=sprite_limits.maximum_flattened_frames=8;
+      sprite_limits.maximum_group_frames=8;
+      sprite_limits.maximum_total_indexed_bytes=256U*256U*8U;
+      sprite_limits.maximum_total_rgba_bytes=256U*256U*8U*4U;
+      sprite_limits.maximum_pixels_per_frame=256U*256U;
+      auto imported_sprite=g::sprite::GoldSrcSpriteImporter{sprite_limits}.import(source->source());
+      if(!imported_sprite){reject();continue;}
+      auto sprite=std::make_shared<const assets::SpriteAsset>(std::move(imported_sprite.value()));
+      const auto fingerprint=g::visual_assets::goldsrc_studio_source_fingerprint(source->source().bytes());
+      const r::EntityRenderResourceIdentity identity{0xAE33000000000000ULL+package.presentation_sprite_sources.size()+1U,
+          fingerprint.primary ? fingerprint.primary : fingerprint.secondary ? fingerprint.secondary : 1U};
+      auto render=r::SpriteRenderAssetBuilder{}.build(*sprite,identity);
+      if(!render || render.asset->orientation()!=assets::SpriteOrientation::view_parallel ||
+          render.asset->render_profile()!=r::SpriteRenderTextureProfile::additive ||
+          !render.asset->groups().empty() || render.asset->frames().empty()){reject();continue;}
+      result->effect_sprite_bindings_.emplace(token,package.sprite_assets.size());
+      package.sprite_assets.push_back(std::make_shared<const r::SpriteRenderAsset>(std::move(*render.asset)));
+      package.presentation_sprite_sources.push_back({identity,std::move(sprite)});
+      ++result->muzzle_sprite_stats_.ready;
+    }
     summary.imported_studio = package.studio_assets.size();
     summary.imported_sprites = package.sprite_assets.size();
     auto built = r::EntitySceneRenderPackageBuilder{}.build(std::move(package));
@@ -715,7 +955,10 @@ RuntimeReplayLocalAssets::create(const g::ResourceListState &resources,
     }
     return {std::move(result), {}};
   } catch (const std::exception &error) {
-    return {{}, visual_error(error.what())};
+    return {{}, visual_error(error.what()),
+        result ? std::move(result->summary_.resource_issues) :
+            std::vector<ReplayLocalVisualSummary::ResourceIssue>{},
+        result ? result->summary_.resource_issues_omitted : 0U};
   }
 }
 
@@ -743,8 +986,19 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::reset_generation(
   candidate.set_world_scene(world_scene_);
   auto result = project_entities(observation, candidate);
   if (result) {
+    impact_brush_scene_.reset();impact_brush_generation_=impact_brush_revision_=0;
+    entity_follow_.reset(observation.generation);entity_follow_.observe(observation);
     target = std::move(candidate);
-    previous_entities_.reset(); clock_record_=0U; light_cache_.clear();
+    previous_entities_.reset();clock_record_=0U; light_cache_.clear(); bone_merge_cache_.reset();
+    ordinary_presentation_.reset();ordinary_presentation_.observe(current_entities_);
+    player_presentation_.reset();player_presentation_.observe(current_entities_);
+    sampled_player_anchors_.clear();sampled_player_previous_.reset();sampled_player_current_.reset();
+    sampled_motion_exceptions_.clear();
+    remote_movement_.clear();remote_movement_valid_=false;
+    beam_endpoint_bindings_.clear();beam_glow_profiles_.clear();beam_light_profiles_.clear();
+    beam_light_count_=0;beam_light_frame_.reset();unavailable_effect_sources_.clear();placement_entities_.reset();
+    remote_weapon_pose_count_=0;
+    published_appearances_.clear();corpse_appearances_.clear();
     for(auto& [entity,lifetime]:player_lifetimes_) { (void)entity; lifetime.identity=++next_player_lifetime_; lifetime.continuity_floor=0U; }
   }
   else {
@@ -756,15 +1010,19 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::reset_generation(
 }
 
 void RuntimeReplayLocalAssets::player_slot_boundary(std::uint32_t entity) noexcept {
+  published_appearances_.erase(entity);
   if (const auto found=player_lifetimes_.find(entity);found!=player_lifetimes_.end()) {
     found->second.identity=++next_player_lifetime_;
     found->second.continuity_floor=current_entities_ && current_entities_->entity_metadata.source ?
         current_entities_->entity_metadata.source->record_ordinal : 0U;
   }
   light_cache_.erase(entity);
+  remote_weapon_pose_count_=0;
 }
 
 void RuntimeReplayLocalAssets::invalidate_player_continuity() noexcept {
+  remote_movement_.clear();remote_movement_valid_=false;
+  sampled_motion_exceptions_.clear();
   for (auto& [entity,lifetime]:player_lifetimes_) {
     (void)entity;
     lifetime.identity=++next_player_lifetime_;
@@ -772,14 +1030,32 @@ void RuntimeReplayLocalAssets::invalidate_player_continuity() noexcept {
         current_entities_->entity_metadata.source->record_ordinal : 0U;
   }
   previous_entities_.reset();
+  player_presentation_.reset();player_presentation_.observe(current_entities_);
   clock_record_=0U;
   light_cache_.clear();
+  remote_weapon_pose_count_=0;
 }
 
 RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
     game_api::GameClientHost& game, double application_seconds,
     std::optional<std::uint32_t> receiving_entity, client::ClientWorldState& target,
-    renderer::RenderExtent extent) {
+    renderer::RenderExtent extent, bool capture_remote_diagnostics) {
+  remote_movement_.clear();remote_movement_valid_=false;
+  sampled_motion_exceptions_.clear();
+  // Resolve game policy only through approved ready sprite slots. Retain the
+  // owning numeric profile, never the module or borrowed resource name.
+  if(current_entities_)for(const auto& entity:current_entities_->packet_entities)if(entity.custom_beam) {
+    const auto slot=entity.custom_beam->sprite_model_index;
+    if(beam_glow_profiles_.contains(slot))continue;
+    const auto named=summary_.model_names.find(slot);
+    const auto bound=bindings_.find(slot);
+    if(named!=summary_.model_names.end() && bound!=bindings_.end() &&
+        bound->second.status==ReplayLocalVisualStatus::ready_sprite) {
+      beam_glow_profiles_.emplace(slot,game.beam_ribbon_glow_profile(named->second));
+      beam_light_profiles_.emplace(slot,std::array{
+          game.beam_scene_light_profile(named->second,false),game.beam_scene_light_profile(named->second,true)});
+    }
+  }
   const auto policy=game.remote_player_policy();
   if (!policy.enabled || !current_entities_ || !current_entities_->server_time_seconds)
     return {true,false,{}};
@@ -791,18 +1067,10 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
     return {false,false,visual_error("invalid selected remote player policy")};
   if (!std::isfinite(application_seconds))
     return {false,false,visual_error("invalid explicit application presentation clock")};
-  const auto record=current_entities_->publication_revision;
-  if(clock_record_!=record) {clock_record_=record;clock_anchor_seconds_=application_seconds;}
+  if(clock_record_!=current_entities_->publication_revision) {
+    clock_record_=current_entities_->publication_revision;clock_anchor_seconds_=application_seconds;
+  }
   const auto& previous=previous_entities_ ? *previous_entities_ : *current_entities_;
-  // A bounded two-observation owner cannot cover a fixed 100 ms delay at
-  // high RX cadence. Adapt the delay to this actual pair, without extrapolation.
-  const double pair_duration=std::max(0.0,*current_entities_->server_time_seconds-
-      previous.server_time_seconds.value_or(*current_entities_->server_time_seconds));
-  const double delay=std::min(policy.interpolation_delay_seconds,pair_duration);
-  const double elapsed=std::clamp(application_seconds-clock_anchor_seconds_,0.0,
-      delay);
-  const double target_seconds=*current_entities_->server_time_seconds-
-      delay+elapsed;
   g::RuntimeEntityInterpolationOptions options;
   options.limits.maximum_snapshot_gap_seconds=policy.maximum_observation_gap_seconds;
   options.teleport_distance=policy.teleport_distance_units;
@@ -811,23 +1079,237 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::present_entities(
   std::size_t discontinuous_count{};
   const auto previous_record=previous.entity_metadata.source ? previous.entity_metadata.source->record_ordinal : 0U;
   for(const auto& [entity,lifetime]:player_lifetimes_) {
-    if(lifetime.continuity_floor && previous_record<=lifetime.continuity_floor && discontinuous_count<discontinuous.size())
+    const auto now=std::ranges::find(current_entities_->packet_entities,entity,&client::RuntimePacketEntityObservation::entity_number);
+    const auto before=std::ranges::find(previous.packet_entities,entity,&client::RuntimePacketEntityObservation::entity_number);
+    const bool game_boundary=now!=current_entities_->packet_entities.end() && game.world_entity({*now,
+        before==previous.packet_entities.end() ? nullptr : &*before,current_entities_->packet_entities,maximum_clients_}).discontinuity;
+    if(((lifetime.continuity_floor && previous_record<=lifetime.continuity_floor) || game_boundary) && discontinuous_count<discontinuous.size())
       discontinuous[discontinuous_count++]=entity;
   }
   options.discontinuous_entities=std::span{discontinuous}.first(discontinuous_count);
-  auto sampled=g::EntitySnapshotInterpolator{}.interpolate_runtime(previous,
-      *current_entities_,target_seconds,options);
-  if (!sampled) return {false,false,visual_error(sampled.error->context)};
+  // Ready kinetic Studio slots and supported server-controlled glow sprites
+  // opt in. MOVETYPE_NONE does not mean an immutable server origin: a glow
+  // sprite can be repositioned every snapshot without client physics. Keep
+  // other static assets discrete and brush carry under its separate D4 owner.
+  // Public generic movetypes: fly/toss/flymissile/bounce/bouncemissile.
+  std::vector<std::uint32_t> ordinary;
+  ordinary.reserve(current_entities_->packet_entities.size());
+  for(const auto& entity:current_entities_->packet_entities) if(!entity.player_movement_schema && entity.model_index) {
+    const auto binding=bindings_.find(*entity.model_index);
+    if(binding==bindings_.end()) continue;
+    const bool kinetic_studio=binding->second.status==ReplayLocalVisualStatus::ready_studio &&
+        entity.brush_move_type && (*entity.brush_move_type==5U || *entity.brush_move_type==6U ||
+        *entity.brush_move_type==9U || *entity.brush_move_type==10U || *entity.brush_move_type==11U);
+    const bool glow_sprite=binding->second.status==ReplayLocalVisualStatus::ready_sprite &&
+        entity.render_mode==3U && (entity.render_effect.value_or(0U)==0U || entity.render_effect==14U);
+    if(kinetic_studio || glow_sprite) ordinary.push_back(entity.entity_number);
+  }
+  std::sort(ordinary.begin(),ordinary.end());
+  std::vector<std::uint32_t> players;
+  std::vector<g::RuntimePlayerContinuityBoundary> boundaries;
+  for(const auto& entity:current_entities_->packet_entities) {
+    if(!entity.player_movement_schema || entity.entity_number>maximum_clients_ ||
+        entity.entity_number==receiving_entity)continue;
+    if(players.size()>=policy.maximum_players)break;
+    players.push_back(entity.entity_number);
+    std::size_t floor{};
+    const client::RuntimePacketEntityObservation* before=nullptr;
+    std::optional<double> before_seconds;
+    for(const auto& source:player_presentation_.observations()) {
+      const auto row=std::ranges::find(source->packet_entities,entity.entity_number,
+          &client::RuntimePacketEntityObservation::entity_number);
+      if(row!=source->packet_entities.end()) {
+        const auto approved=studio_model_data(row->model_index.value_or(0U));
+        const auto intent=game.world_entity({*row,before,source->packet_entities,maximum_clients_,
+            approved.get(),before_seconds,source->server_time_seconds});
+        if(intent.discontinuity)
+          floor=source->entity_metadata.source->record_ordinal;
+        if(intent.animation_only_effect_mask && sampled_motion_exceptions_.size()<
+            g::RuntimePlayerSnapshotPresentation::maximum_history*g::RuntimePlayerSnapshotPresentation::maximum_players)
+          sampled_motion_exceptions_.push_back({entity.entity_number,source->entity_metadata.source->record_ordinal,
+              intent.animation_only_effect_mask});
+        before=&*row;
+        before_seconds=source->server_time_seconds;
+      } else {before=nullptr;before_seconds.reset();}
+    }
+    if(floor)boundaries.push_back({entity.entity_number,floor});
+  }
+  options.animation_only_effect_exceptions=sampled_motion_exceptions_;
+  auto buffered=player_presentation_.sample(*current_entities_,application_seconds,options,
+      policy.interpolation_delay_seconds,players,boundaries);
+  if(!buffered)return {false,false,visual_error(buffered.presentation.error->context)};
+  auto& sampled=buffered.presentation;
+  options.ordinary_entities=ordinary;
+  // Kinetic models can cover 200 units per 100 ms authoritative interval.
+  // Do not misclassify them with a player teleport threshold. Keep a separate
+  // finite displacement guard, the same bounded gap, and no extrapolation.
+  options.ordinary_teleport_distance=g::RuntimeOrdinarySnapshotPresentation::default_continuity_distance_units;
+  auto ordinary_sample=ordinary_presentation_.sample(*sampled.state,application_seconds,options,
+      std::min(policy.interpolation_delay_seconds,g::RuntimeOrdinarySnapshotPresentation::maximum_delay_seconds));
+  if (!ordinary_sample) return {false,false,visual_error(ordinary_sample.error->context)};
   sampled_game_=&game; sampled_receiving_entity_=receiving_entity; sampled_extent_=extent;
+  sampled_application_seconds_=application_seconds;
   sampled_server_seconds_=sampled.sample_seconds;
-  sampled_previous_seconds_=previous.server_time_seconds.value_or(sampled.sample_seconds);
-  sampled_current_seconds_=*current_entities_->server_time_seconds; sampled_alpha_=sampled.alpha;
+  sampled_player_previous_=std::move(buffered.previous);sampled_player_current_=std::move(buffered.current);
+  sampled_player_anchors_=std::move(buffered.players);
+  sampled_previous_seconds_=sampled_player_previous_->server_time_seconds.value_or(sampled.sample_seconds);
+  sampled_current_seconds_=*sampled_player_current_->server_time_seconds; sampled_alpha_=sampled.alpha;
+  sampled_selection_status_=sampled.selection_status;
   if(sampled.selection_status==g::EntitySnapshotPairSelectionStatus::held_only) {
     sampled_previous_seconds_=sampled_current_seconds_; sampled_alpha_=0.0;
   }
-  auto result=project_entities(*sampled.state,target);
+  auto result=project_entities(*ordinary_sample.state,target);
+  if(result && capture_remote_diagnostics)capture_remote_movement(*ordinary_sample.state,target);
   sampled_game_=nullptr; sampled_extent_.reset(); sampled_receiving_entity_.reset();
+  sampled_player_anchors_.clear();sampled_player_previous_.reset();sampled_player_current_.reset();
   return result;
+}
+
+void RuntimeReplayLocalAssets::capture_remote_movement(
+    const client::RuntimeClientObservationState& sampled,
+    const client::ClientWorldState& target) noexcept {
+  // Best-effort capture cannot fail a presentation or allocate every frame.
+  // The bounded vector is on the existing heap asset owner, not the Win32
+  // main-loop stack. An RX coordinate is not proof of a submitted transform.
+  try {
+    remote_movement_.reserve(game_api::kMaximumRemotePlayers);
+    const auto actor=[](const client::RuntimeClientObservationState* source,std::uint32_t number)
+        -> const client::RuntimePacketEntityObservation* {
+      if(!source)return nullptr;
+      const auto row=std::ranges::find(source->packet_entities,number,
+          &client::RuntimePacketEntityObservation::entity_number);
+      return row==source->packet_entities.end() ? nullptr : &*row;
+    };
+    const auto origin=[](const client::RuntimePacketEntityObservation* row)
+        -> std::optional<std::array<double,3>> {
+      if(!row || !row->origin.complete())return {};
+      return std::array<double,3>{*row->origin.x,*row->origin.y,*row->origin.z};
+    };
+    const auto source=[&](std::size_t ordinal) -> const client::RuntimeClientObservationState* {
+      for(const auto& observation:player_presentation_.observations())
+        if(observation->entity_metadata.source && observation->entity_metadata.source->record_ordinal==ordinal)
+          return observation.get();
+      return nullptr;
+    };
+    for(const auto& anchor:sampled_player_anchors_) {
+      if(remote_movement_.size()==game_api::kMaximumRemotePlayers)break;
+      RemoteMovementObservation row;
+      row.entity_index=anchor.entity;row.presentation=anchor.diagnostics;
+      if(const auto life=player_lifetimes_.find(anchor.entity);life!=player_lifetimes_.end())
+        row.lifetime=life->second.identity;
+      const auto* previous=source(anchor.diagnostics.position_previous_record_ordinal);
+      const auto* current=source(anchor.diagnostics.position_current_record_ordinal);
+      const auto* latest=actor(current_entities_.get(),anchor.entity);
+      const auto* selected=actor(&sampled,anchor.entity);
+      row.previous_raw_origin=origin(actor(previous,anchor.entity));
+      row.current_raw_origin=origin(actor(current,anchor.entity));
+      row.latest_raw_origin=origin(latest);row.sampled_origin=origin(selected);
+      if(previous && previous->entity_metadata.source) {
+        row.previous_source_ordinal=previous->entity_metadata.source->record_ordinal;
+        row.previous_server_s=previous->server_time_seconds;
+      }
+      if(current && current->entity_metadata.source) {
+        row.current_source_ordinal=current->entity_metadata.source->record_ordinal;
+        row.current_server_s=current->server_time_seconds;
+      }
+      if(current_entities_->entity_metadata.source)
+        row.latest_source_ordinal=current_entities_->entity_metadata.source->record_ordinal;
+      row.latest_server_s=current_entities_->server_time_seconds;row.sample_server_s=anchor.sample_seconds;
+      if(latest) {
+        row.model_index=latest->model_index.value_or(0U);
+        row.raw_main=latest->sequence;row.raw_gait=latest->gait_sequence;
+        row.raw_weapon=latest->weapon_model_index;row.raw_effects=latest->effects;
+      }
+      if(selected) {
+        row.selected_main=selected->sequence;row.selected_gait=selected->gait_sequence;
+        row.selected_weapon=selected->weapon_model_index;
+      }
+      row.pose_submitted=false;row.visible=false;
+      if(const auto& frame=target.entity_frame();frame) {
+        for(const auto& instance:frame->studio_instances()) {
+          if(instance.entity_number!=anchor.entity || instance.subinstance_ordinal!=0U)continue;
+          row.pose_submitted=true;
+          row.visible=instance.visibility_status==r::RuntimeEntityVisibilityStatus::visible;
+          const auto& position=instance.transform.origin;
+          row.rendered_origin=std::array<double,3>{position.x,position.y,position.z};
+          break;
+        }
+      }
+      remote_movement_.push_back(row);
+    }
+    remote_movement_valid_=true;
+  } catch(...) {
+    remote_movement_.clear();remote_movement_valid_=false;
+  }
+}
+
+std::optional<std::size_t> RuntimeReplayLocalAssets::resolve_player_appearance(
+    game_api::PlayerAppearanceSelection& selection,const assets::ModelAsset& fallback,
+    r::EntityRenderResourceIdentity base_identity,assets::AssetSourceFingerprint fingerprint,
+    const client::RuntimePacketEntityObservation& entity) {
+  using Status=game_api::PlayerAppearanceStatus;
+  if(!sampled_game_ || !package_ || !fallback.skeletal_data)return {};
+  if(selection.model_name.empty() && !selection.fields.top_color && !selection.fields.bottom_color)return {};
+  std::shared_ptr<const assets::ModelAsset> selected;
+  if(!selection.model_name.empty()) {
+    const auto prepared=player_model_assets_ ? player_model_assets_->request(selection.model_name) : g::PreparedPlayerModel{};
+    selection.status=prepared.status;
+    if(!prepared.model)return {};
+    selected=prepared.model;fingerprint=prepared.revision;
+    const auto& data=*selected->skeletal_data;
+    if(!sampled_game_->player_model_compatible(data) || entity.sequence.value_or(0U)>=data.sequences.size() ||
+        entity.gait_sequence.value_or(0U)>=data.sequences.size() || entity.skin.value_or(0)<0 ||
+        static_cast<std::size_t>(entity.skin.value_or(0))>=data.skin_families.size()) {
+      selection.status=Status::pose_incompatible;return {};
+    }
+  } else selected=std::make_shared<const assets::ModelAsset>(fallback);
+  const auto ranges=sampled_game_->player_palette(selection.fields,*selected->skeletal_data);
+  if(selection.model_name.empty() && ranges.empty())return {};
+  std::string key=selection.model_name+":"+std::to_string(base_identity.resource_id)+":"+
+      std::to_string(fingerprint.primary)+":"+std::to_string(fingerprint.secondary);
+  for(const auto& range:ranges)key+=":"+std::to_string(range.texture)+","+std::to_string(range.first)+","+
+      std::to_string(range.last)+","+std::to_string(range.hue_degrees);
+  for(std::size_t i=0;i<appearance_variants_.size();++i)if(appearance_variants_[i].key==key)return i;
+  if(appearance_variants_.size()>=64U) {selection.status=Status::resource_limit;return {};}
+  // Every remap owns its cloned animation graph as well as its pixels. Count
+  // all nested track/run vectors before copying; GPU source bytes are added below.
+  const auto model_bytes=g::retained_player_model_bytes(*selected);
+  if(model_bytes>128U*1024U*1024U-appearance_variant_bytes_) {selection.status=Status::resource_limit;return {};}
+  if(!ranges.empty())selected=g::remap_player_model_palette(*selected,ranges);
+  if(!selected){selection.status=Status::asset_import_failed;return {};}
+  const std::uint64_t id=0xAD31000000000000ULL+appearance_variants_.size()+1U;
+  const r::EntityRenderResourceIdentity identity{id,fingerprint.primary ? fingerprint.primary : fingerprint.secondary};
+  auto render=r::StudioModelRenderAssetBuilder{}.build(*selected,identity);
+  if(!render){selection.status=Status::asset_import_failed;return {};}
+  const auto bytes=render.asset->statistics().total_gpu_source_bytes+model_bytes;
+  if(bytes>128U*1024U*1024U-appearance_variant_bytes_){selection.status=Status::resource_limit;return {};}
+  r::EntitySceneRenderPackageCreateInfo package;
+  package.asset_library=package_->asset_library();package.asset_library_identity=package_->asset_library_identity();
+  package.resource_id=package_->resource_id();package.world_scene_association=package_->world_scene_association();
+  package.studio_assets.assign(package_->studio_assets().begin(),package_->studio_assets().end());
+  package.sprite_assets.assign(package_->sprite_assets().begin(),package_->sprite_assets().end());
+  package.presentation_studio_sources.assign(package_->presentation_studio_sources().begin(),package_->presentation_studio_sources().end());
+  package.presentation_sprite_sources.assign(package_->presentation_sprite_sources().begin(),package_->presentation_sprite_sources().end());
+  const auto render_index=package.studio_assets.size();
+  package.studio_assets.push_back(std::make_shared<const r::StudioModelRenderAsset>(std::move(*render.asset)));
+  package.presentation_studio_sources.push_back({identity,selected});
+  auto built=r::EntitySceneRenderPackageBuilder{}.build(std::move(package));
+  if(!built){selection.status=Status::resource_limit;return {};}
+  auto next_package=std::make_shared<const r::EntitySceneRenderPackage>(std::move(*built.package));
+  appearance_variants_.push_back({std::move(key),selection.model_name,selected,fingerprint,identity,render_index,!ranges.empty()});
+  package_=std::move(next_package);appearance_variant_bytes_+=bytes;
+  return appearance_variants_.size()-1U;
+}
+
+std::optional<std::array<float,3>> RuntimeReplayLocalAssets::studio_light(
+    std::uint32_t key, assets::AssetVector3 origin) {
+  if (!world_ || !std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z)) return {};
+  auto cached=light_cache_.find(key);
+  if (cached==light_cache_.end() || std::abs(cached->second.first.x-origin.x)>8.0F ||
+      std::abs(cached->second.first.y-origin.y)>8.0F || std::abs(cached->second.first.z-origin.z)>8.0F) {
+    cached=light_cache_.insert_or_assign(key,std::pair{origin,static_world_light(*world_,origin)}).first;
+  }
+  return cached->second.second;
 }
 
 RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
@@ -855,13 +1337,13 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
     if (sampled_game_) {
       input.interpolation={sampled_server_seconds_,sampled_previous_seconds_,
           sampled_current_seconds_,static_cast<float>(sampled_alpha_),
-          sampled_previous_seconds_!=sampled_current_seconds_ && previous_entities_ ?
-              (previous_entities_->entity_metadata.source ? previous_entities_->entity_metadata.source->record_identity :
-                  client::runtime_observation_visual_hash_v2(*previous_entities_)) :
-              (current_entities_->entity_metadata.source ? current_entities_->entity_metadata.source->record_identity :
-                  client::runtime_observation_visual_hash_v2(*current_entities_)),
-          current_entities_->entity_metadata.source ? current_entities_->entity_metadata.source->record_identity :
-              client::runtime_observation_visual_hash_v2(*current_entities_),
+          sampled_previous_seconds_!=sampled_current_seconds_ && sampled_player_previous_ ?
+              (sampled_player_previous_->entity_metadata.source ? sampled_player_previous_->entity_metadata.source->record_identity :
+                  client::runtime_observation_visual_hash_v3(*sampled_player_previous_)) :
+              (sampled_player_current_->entity_metadata.source ? sampled_player_current_->entity_metadata.source->record_identity :
+                  client::runtime_observation_visual_hash_v3(*sampled_player_current_)),
+          sampled_player_current_->entity_metadata.source ? sampled_player_current_->entity_metadata.source->record_identity :
+              client::runtime_observation_visual_hash_v3(*sampled_player_current_),
           r::EntityRenderInterpolationProfile::public_runtime_server_seconds_v1};
       const auto camera=client::build_render_scene(target).camera;
       const auto leaf=world_spatial::WorldSpatialQuery::locate_point(
@@ -879,11 +1361,19 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
       }
     }
     auto next = summary_;
+    std::erase_if(corpse_appearances_,[&](const auto& item){
+      return std::ranges::none_of(observation.packet_entities,[&](const auto& entity){return entity.entity_number==item.first;});
+    });
+    std::array<game_api::RemoteWeaponPoseSample,32> next_weapon_poses{};
+    std::size_t next_weapon_pose_count=0;
+    std::map<std::uint32_t,std::array<std::optional<assets::AssetVector3>,4>> next_attachments;
     next.remote_player_count=0U;
     if(sampled_game_) {
       next.remote_previous_seconds=sampled_previous_seconds_; next.remote_current_seconds=sampled_current_seconds_;
       next.remote_sample_seconds=sampled_server_seconds_; next.remote_alpha=sampled_alpha_;
+      next.remote_snapshot_mode=sampled_selection_status_;
     }
+    else next.remote_snapshot_mode.reset();
     next.coverage.clear();
     next.rendered_model_slots.clear();
     next.decoded_entities = observation.packet_entities.size();
@@ -919,6 +1409,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
            r::RuntimeEntityVisibilityStatus::unsupported_visual});
     };
     for (const auto &entity : observation.packet_entities) {
+      if(entity.custom_beam)continue; // typed persistent beams execute after owner poses
       if (sampled_game_ && entity.player_movement_schema && sampled_receiving_entity_ &&
           entity.entity_number==*sampled_receiving_entity_) continue;
       if (!entity.ordinary_visual_schema) {
@@ -926,15 +1417,55 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
                     ReplayLocalVisualStatus::unsupported_schema);
         continue;
       }
-      if (!entity.model_index || *entity.model_index == 0U) {
+      const client::RuntimePacketEntityObservation* selection_previous=nullptr;
+      if(sampled_game_ && previous_entities_) {
+        const auto old=std::ranges::find(previous_entities_->packet_entities,entity.entity_number,
+            &client::RuntimePacketEntityObservation::entity_number);
+        if(old!=previous_entities_->packet_entities.end()) selection_previous=&*old;
+      }
+      auto selection=sampled_game_ ? sampled_game_->world_entity(
+          {entity,selection_previous,current_entities_->packet_entities,maximum_clients_}) : game_api::WorldEntityPresentationIntent{};
+      // A body queue instance freezes the originating appearance. A later
+      // player occupant or model change cannot repaint that retained corpse.
+      // Compare only the already classified corpse anchor, never infer death.
+      const auto same_corpse=[&](const CorpseAppearance& saved) {
+        const auto& a=saved.anchor;
+        // Body queues retain server MOVETYPE_TOSS/velocity (SDK world.cpp).
+        // A changing position is motion, not a new corpse/appearance lifetime.
+        return a.entity_number==entity.entity_number && a.render_effect==entity.render_effect &&
+            a.render_amount==entity.render_amount && a.model_index==entity.model_index &&
+            a.sequence==entity.sequence && a.animation_time_seconds==entity.animation_time_seconds;
+      };
+      auto corpse=corpse_appearances_.find(entity.entity_number);
+      if(corpse!=corpse_appearances_.end() && !same_corpse(corpse->second)) {
+        corpse_appearances_.erase(corpse);corpse=corpse_appearances_.end();
+      }
+      if(corpse!=corpse_appearances_.end())selection=corpse->second.selection;
+      const bool proxy=selection.role==game_api::WorldEntityPresentationRole::player_proxy;
+      if(selection.role==game_api::WorldEntityPresentationRole::unavailable) {
+        if(next.remote_player_count<next.remote_players.size()) {
+          auto& diagnostic=next.remote_players[next.remote_player_count++];diagnostic={};
+          diagnostic.entity=entity.entity_number;diagnostic.render_effect=entity.render_effect;
+          diagnostic.render_amount=entity.render_amount;diagnostic.classification=selection.reason;
+          diagnostic.status=game_api::RemotePlayerPresentationStatus::missing_fields;
+          diagnostic.network_generation=diagnostic.map_generation=generation_;
+        }
+        unavailable(entity.entity_number,ReplayLocalVisualStatus::unsupported_pose);continue;
+      }
+      const auto model_slot=proxy ? selection.model_index : entity.model_index;
+      if (!model_slot || *model_slot == 0U) {
         unavailable(entity.entity_number,
                     ReplayLocalVisualStatus::absent_model);
         continue;
       }
-      const auto found = bindings_.find(*entity.model_index);
+      const auto found = bindings_.find(*model_slot);
       if (found == bindings_.end()) {
         unavailable(entity.entity_number,
                     ReplayLocalVisualStatus::unknown_model_slot);
+        continue;
+      }
+      if (proxy && found->second.status != ReplayLocalVisualStatus::ready_studio) {
+        unavailable(entity.entity_number, ReplayLocalVisualStatus::unsupported_pose);
         continue;
       }
       const auto &binding = found->second;
@@ -998,7 +1529,9 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
                     ReplayLocalVisualStatus::incomplete_transform);
         continue;
       }
-      if (entity.render_mode.value_or(0U) != 0U) {
+      if (entity.render_mode.value_or(0U) != 0U &&
+          !(binding.status==ReplayLocalVisualStatus::ready_sprite && entity.render_mode==3U &&
+            (entity.render_effect.value_or(0U)==0U || entity.render_effect==14U))) {
         unavailable(entity.entity_number,
                     ReplayLocalVisualStatus::unsupported_render_mode);
         continue;
@@ -1014,13 +1547,44 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
                                          {static_cast<float>(*entity.angles.z),
                                           -static_cast<float>(*entity.angles.x),
                                           static_cast<float>(*entity.angles.y)},
-                                         1.0F};
+                                         static_cast<float>(entity.visual_scale && *entity.visual_scale>0 ? *entity.visual_scale : 1.0)};
       if (!r::finite_entity_render_transform(transform)) {
         return {false, false, visual_error("nonfinite local entity transform")};
       }
       const auto &record = library_->records()[*binding.library_index];
       if (binding.status == ReplayLocalVisualStatus::ready_studio) {
-        const auto &model = *record.model_asset()->skeletal_data;
+        game_api::PlayerAppearanceSelection appearance;
+        std::optional<std::size_t> appearance_index;
+        auto visual_identity=r::EntityRenderResourceIdentity{record.resource_id(),record.resource_revision()};
+        auto visual_fingerprint=record.source_fingerprint();
+        auto visual_render_index=*binding.render_index;
+        auto visual_model=record.model_asset();
+        if(sampled_game_ && (entity.player_movement_schema || proxy)) {
+          const auto model_name=summary_.model_names.find(*model_slot);
+          if(corpse!=corpse_appearances_.end())appearance=corpse->second.appearance;
+          else appearance=sampled_game_->player_appearance(proxy ? selection.source_player.value_or(0U) : entity.entity_number,
+              model_name!=summary_.model_names.end() ? model_name->second : std::string_view{});
+          if(proxy && corpse==corpse_appearances_.end() && corpse_appearances_.size()<64U)
+            corpse_appearances_.emplace(entity.entity_number,CorpseAppearance{entity,selection,appearance});
+          appearance_index=resolve_player_appearance(appearance,*record.model_asset(),visual_identity,visual_fingerprint,entity);
+          if(!proxy && entity.entity_number<=32U) {
+            auto published=published_appearances_.find(entity.entity_number);
+            if(published!=published_appearances_.end() && published->second.occupant_epoch!=appearance.occupant_epoch) {
+              published_appearances_.erase(published);published=published_appearances_.end();
+            }
+            // A late update is published atomically once its owning variant is
+            // ready; only the same occupant may retain the previous selection.
+            if(!appearance_index && appearance.status==game_api::PlayerAppearanceStatus::asset_pending &&
+                published!=published_appearances_.end())appearance_index=published->second.variant;
+            else if(appearance_index)published_appearances_[entity.entity_number]={appearance.occupant_epoch,*appearance_index};
+            else published_appearances_.erase(entity.entity_number);
+          }
+          if(appearance_index) {
+            const auto& variant=appearance_variants_[*appearance_index];visual_model=variant.model;
+            visual_identity=variant.identity;visual_fingerprint=variant.fingerprint;visual_render_index=variant.render_index;
+          }
+        }
+        const auto &model = *visual_model->skeletal_data;
         g::studio::StudioPoseInput pose_input;
         pose_input.compatibility_profile =
             g::studio::StudioPoseCompatibilityProfile::
@@ -1054,43 +1618,65 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
               static_cast<std::uint8_t>(entity.blending[i].value_or(0U));
         }
         const g::studio::StudioPoseModelIdentity pose_identity{
-            std::to_string(record.resource_id()),record.source_fingerprint()};
+            std::to_string(visual_identity.resource_id),visual_fingerprint};
         std::optional<g::studio::StudioPoseEvaluationResult> pose_result;
         bool player_pose=false;
-        if (sampled_game_ && entity.player_movement_schema) {
-          const auto current=std::ranges::find(current_entities_->packet_entities,
+        std::optional<std::uint32_t> attachment_slot;
+        ReplayLocalVisualSummary::RemotePlayer* player_diagnostic=nullptr;
+        game_api::RemoteWeaponPoseSample* weapon_sample=nullptr;
+        if (sampled_game_ && (entity.player_movement_schema || proxy)) {
+          const auto sampled_anchor=std::ranges::find(sampled_player_anchors_,entity.entity_number,
+              &g::RuntimePlayerInterpolationAnchor::entity);
+          const auto current_source=!proxy && sampled_anchor!=sampled_player_anchors_.end() ?
+              sampled_anchor->current : current_entities_;
+          auto previous_source=!proxy && sampled_anchor!=sampled_player_anchors_.end() ?
+              sampled_anchor->previous : previous_entities_;
+          if(current_source==current_entities_ && previous_source==current_source)
+            previous_source=previous_entities_; // Preserve real held/gap raw anchors at the API.
+          const auto current=std::ranges::find(current_source->packet_entities,
               entity.entity_number,&client::RuntimePacketEntityObservation::entity_number);
           const client::RuntimePacketEntityObservation* previous=nullptr;
-          if (previous_entities_) {
-            const auto found_previous=std::ranges::find(previous_entities_->packet_entities,
+          if (previous_source && previous_source!=current_source) {
+            const auto found_previous=std::ranges::find(previous_source->packet_entities,
                 entity.entity_number,&client::RuntimePacketEntityObservation::entity_number);
-            if (found_previous!=previous_entities_->packet_entities.end()) previous=&*found_previous;
+            if (found_previous!=previous_source->packet_entities.end()) previous=&*found_previous;
           }
           const auto lifetime=player_lifetimes_.find(entity.entity_number);
-          if (current==current_entities_->packet_entities.end() || lifetime==player_lifetimes_.end()) {
+          if (current==current_source->packet_entities.end() || (!proxy && lifetime==player_lifetimes_.end())) {
             unavailable(entity.entity_number,ReplayLocalVisualStatus::unsupported_pose); continue;
           }
-          const auto source_record=current_entities_->entity_metadata.source ? current_entities_->entity_metadata.source->record_ordinal : 0U;
-          if(lifetime->second.continuity_floor && source_record<=lifetime->second.continuity_floor) {
+          const auto source_record=current_source->entity_metadata.source ? current_source->entity_metadata.source->record_ordinal : 0U;
+          const auto latest_record=current_entities_->entity_metadata.source ? current_entities_->entity_metadata.source->record_ordinal : 0U;
+          if(!proxy && lifetime->second.continuity_floor && latest_record<=lifetime->second.continuity_floor) {
             unavailable(entity.entity_number,ReplayLocalVisualStatus::unsupported_pose); continue;
           }
-          if(lifetime->second.continuity_floor && previous_entities_ && previous_entities_->entity_metadata.source &&
-              previous_entities_->entity_metadata.source->record_ordinal<=lifetime->second.continuity_floor) previous=nullptr;
-          game_api::RemotePlayerPresentationContext context{generation_,generation_,lifetime->second.identity,
-              record.resource_id(),record.source_fingerprint(),model,entity,*current,previous,
+          if(!proxy && lifetime->second.continuity_floor && previous_source && previous_source->entity_metadata.source &&
+              previous_source->entity_metadata.source->record_ordinal<=lifetime->second.continuity_floor) previous=nullptr;
+          game_api::RemotePlayerPresentationContext context{generation_,generation_,proxy ? 0U : lifetime->second.identity,
+              visual_identity.resource_id,visual_fingerprint,model,entity,*current,previous,
               maximum_clients_,sampled_receiving_entity_,
-              current_entities_->entity_metadata.source ? current_entities_->entity_metadata.source->record_identity : 0U,
-              previous_entities_ && previous_entities_->entity_metadata.source ? previous_entities_->entity_metadata.source->record_identity : 0U,
-              sampled_current_seconds_,previous_entities_ ?
-                  previous_entities_->server_time_seconds.value_or(sampled_previous_seconds_) : sampled_previous_seconds_,
-              sampled_server_seconds_,false,
-              source_record,previous_entities_ && previous_entities_->entity_metadata.source ?
-                  previous_entities_->entity_metadata.source->record_ordinal : 0U};
+              current_source->entity_metadata.source ? current_source->entity_metadata.source->record_identity : 0U,
+              previous_source && previous_source->entity_metadata.source ? previous_source->entity_metadata.source->record_identity : 0U,
+              current_source->server_time_seconds.value_or(sampled_current_seconds_),previous_source ?
+                  previous_source->server_time_seconds.value_or(sampled_previous_seconds_) : sampled_previous_seconds_,
+              !proxy && sampled_anchor!=sampled_player_anchors_.end() ? sampled_anchor->sample_seconds :
+                  proxy ? current_source->server_time_seconds.value_or(sampled_current_seconds_) : sampled_server_seconds_,false,
+              source_record,previous_source && previous_source->entity_metadata.source ?
+                  previous_source->entity_metadata.source->record_ordinal : 0U};
           const auto policy=sampled_game_->remote_player_policy();
-          context.discontinuity=!previous || previous->model_index!=current->model_index ||
+          g::RuntimeEntityInterpolationOptions motion_options;
+          motion_options.animation_only_effect_exceptions=sampled_motion_exceptions_;
+          if(!proxy) {
+            context.current_animation_only_effect_mask=g::runtime_animation_only_effect_mask(motion_options,entity.entity_number,source_record);
+            context.previous_animation_only_effect_mask=g::runtime_animation_only_effect_mask(motion_options,entity.entity_number,
+                static_cast<std::size_t>(context.previous_record_ordinal));
+          }
+          context.server_owned_proxy=proxy;
+          context.discontinuity=proxy || (sampled_anchor!=sampled_player_anchors_.end() && sampled_anchor->discontinuity) || sampled_game_->world_entity({*current,previous,
+              current_entities_->packet_entities,maximum_clients_}).discontinuity || !previous || previous->model_index!=current->model_index ||
               previous->player_movement_schema!=current->player_movement_schema ||
-              (current->effects.value_or(0U)&policy.no_interpolation_effect_mask)!=0U ||
-              sampled_current_seconds_-sampled_previous_seconds_>policy.maximum_observation_gap_seconds;
+              (current->effects.value_or(0U)&policy.no_interpolation_effect_mask&~context.current_animation_only_effect_mask)!=0U ||
+              context.current_server_seconds-context.previous_server_seconds>policy.maximum_observation_gap_seconds;
           if (previous && previous->origin.complete() && current->origin.complete()) {
             const double dx=*current->origin.x-*previous->origin.x,dy=*current->origin.y-*previous->origin.y,
                 dz=*current->origin.z-*previous->origin.z;
@@ -1100,13 +1686,49 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
           const auto intent=sampled_game_->remote_player(context);
           if(next.remote_player_count<next.remote_players.size()) {
             auto& diagnostic=next.remote_players[next.remote_player_count++];
-            diagnostic={}; diagnostic.entity=entity.entity_number; diagnostic.model_slot=*entity.model_index;
+            diagnostic={}; diagnostic.entity=entity.entity_number; diagnostic.model_slot=*model_slot;
+            diagnostic.appearance=appearance;diagnostic.visual_model_resource_id=visual_identity.resource_id;
+            const auto base_name=summary_.model_names.find(*model_slot);
+            diagnostic.resolved_visual_model=appearance_index && !appearance_variants_[*appearance_index].virtual_name.empty()
+                ? appearance_variants_[*appearance_index].virtual_name : base_name!=summary_.model_names.end() ? base_name->second : "";
+            diagnostic.palette_remapped=appearance_index && appearance_variants_[*appearance_index].remapped;
             diagnostic.status=intent.status; diagnostic.intent=intent;
+            diagnostic.server_owned_proxy=proxy;diagnostic.source_player=selection.source_player;
+            diagnostic.classification=selection.reason;
+            diagnostic.network_generation=diagnostic.map_generation=generation_;
+            diagnostic.entity_lifetime=context.entity_lifetime;
+            diagnostic.render_effect=entity.render_effect;diagnostic.render_amount=entity.render_amount;
+            diagnostic.weapon_model_index=current->weapon_model_index;diagnostic.gait_sequence=current->gait_sequence;
+            diagnostic.effects=current->effects.value_or(0U);diagnostic.no_interpolation=context.discontinuity;
             diagnostic.origin={*entity.origin.x,*entity.origin.y,*entity.origin.z};
             diagnostic.source_angles={*entity.angles.x,*entity.angles.y,*entity.angles.z};
+            player_diagnostic=&diagnostic;
           }
           if (intent.status!=game_api::RemotePlayerPresentationStatus::ready) {
             unavailable(entity.entity_number,ReplayLocalVisualStatus::unsupported_pose); continue;
+          }
+          const auto latest_socket_entity=std::ranges::find(current_entities_->packet_entities,
+              entity.entity_number,&client::RuntimePacketEntityObservation::entity_number);
+          const bool matching_socket_weapon=!intent.attachment_model_index ||
+              (latest_socket_entity!=current_entities_->packet_entities.end() &&
+               latest_socket_entity->weapon_model_index==intent.attachment_model_index &&
+               current->weapon_model_index==intent.attachment_model_index);
+          // A delayed old p-model cannot supply a socket for a new weapon's
+          // live event. Omit only that numeric pose and retain the existing
+          // server-event fallback; never weaken the effects' mismatch guard.
+          if(!proxy && matching_socket_weapon && next_weapon_pose_count<next_weapon_poses.size()) {
+            weapon_sample=&next_weapon_poses[next_weapon_pose_count++];
+            weapon_sample->generation=generation_;weapon_sample->map_generation=generation_;
+            weapon_sample->entity_lifetime=lifetime->second.identity;
+            weapon_sample->entity=entity.entity_number;weapon_sample->model_slot=intent.attachment_model_index.value_or(0U);
+            weapon_sample->current_model_slot=current->weapon_model_index;
+            weapon_sample->source_record=context.current_record_identity;
+            weapon_sample->source_ordinal=context.current_record_ordinal;
+            weapon_sample->frame_identity=frame_revision_+1U;
+            weapon_sample->observed_at_seconds=clock_anchor_seconds_;
+            weapon_sample->presented_at_seconds=sampled_application_seconds_;
+            weapon_sample->effects=current->effects.value_or(0U);
+            weapon_sample->server_sequence=intent.sample.sequence;
           }
           const auto convert=[&](const game_api::RemotePlayerStudioSample& sample) {
             auto value=pose_input; value.sequence_index=sample.sequence;
@@ -1124,6 +1746,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
               if(intent.gait_bone_mask[i]) composition.lower_bone_indices.push_back(static_cast<std::uint32_t>(i));
           }
           pose_input=composition.main;
+          attachment_slot=intent.attachment_model_index;
           transform.rotation_degrees={static_cast<float>(intent.transform_angles[2]),
               -static_cast<float>(intent.transform_angles[0]),static_cast<float>(intent.transform_angles[1])};
           pose_result.emplace(g::studio::StudioPoseEvaluator{}.compose(pose_identity,model,composition));
@@ -1135,7 +1758,14 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
                       ReplayLocalVisualStatus::unsupported_pose);
           continue;
         }
-        const auto &asset = *package_->studio_assets()[*binding.render_index];
+        if(!model.attachments.empty()) {
+          auto& attachments=next_attachments[entity.entity_number];
+          for(std::uint32_t i=0;i<std::min<std::size_t>(4,model.attachments.size());++i) {
+            const auto socket=r::evaluate_studio_attachment(pose_identity,model,*pose.pose,i,transform);
+            if(socket)attachments[i]=socket.socket->origin;
+          }
+        }
+        const auto &asset = *package_->studio_assets()[visual_render_index];
         const auto material = r::studio_entity_material_support(
             asset, static_cast<std::uint32_t>(pose_input.body_value), pose_input.skin_family_index);
         if (!material) {
@@ -1153,7 +1783,7 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         r::StudioEntityRenderInstance instance;
         instance.entity_number = entity.entity_number;
         instance.studio_asset_index =
-            static_cast<std::uint32_t>(*binding.render_index);
+            static_cast<std::uint32_t>(visual_render_index);
         instance.pose_index =
             static_cast<std::uint32_t>(input.studio_poses.size());
         instance.transform = transform;
@@ -1162,23 +1792,99 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         instance.material_support_status = *material;
         instance.interpolated_bounds =
             bounds({asset.bounds().minimum, asset.bounds().maximum}, transform);
+        // World lighting is a Studio property, not a remote-player policy.
+        // Ordinary pickups/projectiles must not fall back to constant brightness.
+        instance.static_light_rgb=studio_light(entity.entity_number,transform.origin);
         if (player_pose) {
           const auto posed=g::studio::StudioPoseEvaluator{}.posed_bounds(pose_identity,model,*pose.pose);
           if (!posed) { unavailable(entity.entity_number,ReplayLocalVisualStatus::unsupported_pose); continue; }
           instance.interpolated_bounds=bounds({posed.bounds->minimum,posed.bounds->maximum},transform);
-          const auto cached=light_cache_.find(entity.entity_number);
-          const auto origin=transform.origin;
-          if(cached==light_cache_.end() || std::abs(cached->second.first.x-origin.x)>8.0F ||
-              std::abs(cached->second.first.y-origin.y)>8.0F || std::abs(cached->second.first.z-origin.z)>8.0F)
-            light_cache_[entity.entity_number]={origin,static_world_light(*world_,origin)};
-          instance.static_light_rgb=light_cache_[entity.entity_number].second;
-          if(next.remote_player_count) {
-            auto& diagnostic=next.remote_players[next.remote_player_count-1U];
-            diagnostic.static_light=instance.static_light_rgb; diagnostic.pose_submitted=true;
+          if(player_diagnostic) {
+            player_diagnostic->static_light=instance.static_light_rgb; player_diagnostic->pose_submitted=true;
           }
         }
         input.studio_poses.push_back(std::move(render_pose));
         input.studio_instances.push_back(instance);
+        if(player_pose && attachment_slot) {
+          // This is an exact committed type-local slot, not a filename-derived
+          // substitution. Failure affects only the child, never its owner.
+          const auto attach=[&]() -> ReplayAttachmentStatus {
+            const auto found=bindings_.find(*attachment_slot);
+            if(found==bindings_.end()) return ReplayAttachmentStatus::unknown_slot;
+            const auto& child_binding=found->second;
+            if(child_binding.status!=ReplayLocalVisualStatus::ready_studio ||
+                !child_binding.library_index || !child_binding.render_index)
+              return ReplayAttachmentStatus::resource_unavailable;
+            const auto& child_record=library_->records()[*child_binding.library_index];
+            const auto& child=*child_record.model_asset()->skeletal_data;
+            const g::studio::StudioPoseModelIdentity child_identity{
+                std::to_string(child_record.resource_id()),child_record.source_fingerprint()};
+            const auto mapping=bone_merge_cache_.prepare(pose_identity,model,child_identity,child);
+            if(!mapping) return ReplayAttachmentStatus::merge_rejected;
+            if(player_diagnostic) {
+              player_diagnostic->attachment_matched_bones=mapping.mapping->matched_bones;
+              player_diagnostic->attachment_bone_count=child.bones.size();
+            }
+            auto child_input=pose_input;
+            // Public Studio attachment semantics: child defaults for body/skin,
+            // shared sequence when available, otherwise sequence zero. Matched
+            // bones use the final composed player palette; unmatched bones use
+            // this child's sequence/controller context and merged hierarchy.
+            child_input.body_value=0; child_input.skin_family_index=0;
+            if(child_input.sequence_index>=child.sequences.size()) child_input.sequence_index=0;
+            if(child.sequences.empty() || child.sequences[child_input.sequence_index].frame_count==0U)
+              return ReplayAttachmentStatus::pose_rejected;
+            const auto& sequence=child.sequences[child_input.sequence_index];
+            child_input.frame_coordinate=entity.frame.value_or(0.0)*double(sequence.frame_count-1U)/256.0;
+            if(entity.animation_time_seconds && sampled_server_seconds_>*entity.animation_time_seconds)
+              child_input.frame_coordinate+=(sampled_server_seconds_-*entity.animation_time_seconds)*
+                  entity.frame_rate.value_or(1.0)*sequence.frames_per_second;
+            const auto merged=g::studio::StudioPoseEvaluator{}.merge(*pose.pose,child,*mapping.mapping,child_input);
+            if(!merged) return ReplayAttachmentStatus::pose_rejected;
+            const auto posed=g::studio::StudioPoseEvaluator{}.posed_bounds(child_identity,child,*merged.pose);
+            if(!posed) return ReplayAttachmentStatus::pose_rejected;
+            const auto& child_asset=*package_->studio_assets()[*child_binding.render_index];
+            const auto support=r::studio_entity_material_support(child_asset,0U,0U);
+            if(!support || *support==r::StudioEntityMaterialSupportStatus::unsupported_material)
+              return ReplayAttachmentStatus::material_rejected;
+            if(weapon_sample) {
+              const auto named=summary_.model_names.find(*attachment_slot);
+              const auto plan=sampled_game_->remote_weapon_socket_plan({child_record.resource_id(),
+                  child_record.source_fingerprint(),named==summary_.model_names.end() ? std::string_view{} : named->second,child});
+              weapon_sample->semantic_known=true;weapon_sample->semantic_match=plan.semantic_match;
+              weapon_sample->semantic_key=plan.semantic_key;
+              weapon_sample->resource_id=child_record.resource_id();weapon_sample->revision=child_record.source_fingerprint();
+              weapon_sample->muzzle_bone=plan.muzzle.bone_index;weapon_sample->shell_bone=plan.shell.bone_index;
+              if(plan.source!=game_api::RemoteSocketSource::unavailable) {
+                const auto muzzle=plan.muzzle_attachment ? r::evaluate_studio_attachment(child_identity,child,*merged.pose,*plan.muzzle_attachment,transform) :
+                    r::evaluate_studio_socket(child_identity,child,*merged.pose,plan.muzzle,transform);
+                const auto shell=plan.shell_attachment ? r::evaluate_studio_attachment(child_identity,child,*merged.pose,*plan.shell_attachment,transform) :
+                    r::evaluate_studio_socket(child_identity,child,*merged.pose,plan.shell,transform);
+                if(muzzle && shell) {
+                  weapon_sample->source=plan.source;weapon_sample->muzzle=*muzzle.socket;weapon_sample->shell=*shell.socket;
+                }
+              }
+            }
+            r::StudioRenderPose child_pose{child_asset.source_identity(),{}};
+            for(const auto& bone:merged.pose->world_bones()) {
+              const auto& m=bone.transform.values;
+              child_pose.bone_matrices.push_back({m[0],m[4],m[8],0,m[1],m[5],m[9],0,m[2],m[6],m[10],0,m[3],m[7],m[11],1});
+            }
+            auto child_instance=instance;
+            child_instance.subinstance_ordinal=1U;
+            child_instance.studio_asset_index=static_cast<std::uint32_t>(*child_binding.render_index);
+            child_instance.pose_index=static_cast<std::uint32_t>(input.studio_poses.size());
+            child_instance.body_value=0U;child_instance.skin_family_index=0U;
+            child_instance.material_support_status=*support;
+            child_instance.interpolated_bounds=bounds({posed.bounds->minimum,posed.bounds->maximum},transform);
+            input.studio_poses.push_back(std::move(child_pose));
+            input.studio_instances.push_back(std::move(child_instance));
+            ++next.rendered_model_slots[*attachment_slot];
+            return ReplayAttachmentStatus::submitted;
+          };
+          const auto status=attach();
+          if(player_diagnostic) player_diagnostic->attachment_status=status;
+        }
         if (camera_policy_ == ReplayLocalCameraPolicy::offline_spectator &&
             !camera_selected_ && !camera) {
           // One-time spectator view of the first supported model.
@@ -1196,8 +1902,9 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
                       ReplayLocalVisualStatus::unsupported_asset);
           continue;
         }
-        // The first slice supports ordinary single-frame sprites only.
-        if (record.sprite_asset()->frames.size() != 1U) {
+        // Grouped formats still require the existing selector. Ordinary frame
+        // sprites (including server-owned endpoint effects) use server frame.
+        if (asset.frames().empty() || (record.sprite_asset()->source_data && !record.sprite_asset()->source_data->groups.empty())) {
           unavailable(entity.entity_number,
                       ReplayLocalVisualStatus::unsupported_pose);
           continue;
@@ -1209,6 +1916,11 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
         instance.transform = transform;
         instance.orientation = asset.orientation();
         instance.texture_format_support = asset.texture_support_status();
+        instance.selected_frame_index=static_cast<std::uint32_t>(std::min(static_cast<double>(asset.frames().size()-1),std::floor(entity.frame.value_or(0))));
+        if(entity.render_mode==3U) {
+          instance.blend_mode=r::SpriteBlendMode::glow;
+          instance.opacity=entity.render_amount.value_or(255U)/255.0F;
+        }
         const float radius = asset.bounding_radius();
         instance.bounds = bounds(
             {{-radius, -radius, -radius}, {radius, radius, radius}}, transform);
@@ -1229,6 +1941,14 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
           &r::StudioEntityRenderInstance::entity_number);
       diagnostic.visible=instance!=frame.frame->studio_instances().end() &&
           instance->visibility_status==r::RuntimeEntityVisibilityStatus::visible;
+      if(diagnostic.attachment_status==ReplayAttachmentStatus::submitted) {
+        const auto child=std::ranges::find_if(frame.frame->studio_instances(),[&](const auto& value) {
+          return value.entity_number==diagnostic.entity && value.subinstance_ordinal==1U;
+        });
+        diagnostic.attachment_status=child!=frame.frame->studio_instances().end() &&
+            child->visibility_status==r::RuntimeEntityVisibilityStatus::visible ?
+            ReplayAttachmentStatus::visible : ReplayAttachmentStatus::culled;
+      }
     }
     auto candidate = target;
     std::ranges::sort(brush_frame.instances, {}, &world_scene_render::RuntimeBrushRenderInstance::entity_number);
@@ -1253,15 +1973,56 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
     const bool retain=!sampled_game_ && observation.entity_metadata.source &&
         (!current_entities_ || current_entities_->entity_metadata.source!=observation.entity_metadata.source);
     std::shared_ptr<const client::RuntimeClientObservationState> retained;
+    std::optional<g::RuntimeOrdinarySnapshotPresentation> next_ordinary;
+    std::optional<g::RuntimePlayerSnapshotPresentation> next_players;
     std::map<std::uint32_t,PlayerLifetime> lifetimes;
     auto lifetime_identity=next_player_lifetime_;
     if(retain) {
       retained=std::make_shared<const client::RuntimeClientObservationState>(observation);
+      next_ordinary=ordinary_presentation_;next_ordinary->observe(retained);
+      next_players=player_presentation_;next_players->observe(retained);
       for(const auto& value:observation.packet_entities) {
         if(!value.player_movement_schema || value.entity_number>maximum_clients_) continue;
         const auto old=player_lifetimes_.find(value.entity_number);
         lifetimes.emplace(value.entity_number,old!=player_lifetimes_.end() && old->second.model==value.model_index
             ? old->second : PlayerLifetime{++lifetime_identity,value.model_index});
+      }
+    }
+    // Preserve the transactional copy, but its bounded smoke history must not
+    // consume the limited stack left below the Win32 application loop.
+    auto next_follow=std::make_unique<EntityFollowPresentation>(entity_follow_);
+    if(!sampled_game_) next_follow->observe(observation);
+    auto next_effect_entities=observation.packet_entities;
+    std::vector<std::uint32_t> next_unavailable_sources;
+    next_unavailable_sources.reserve(next_effect_entities.size());
+    if(sampled_game_) std::erase_if(next_effect_entities,[&](const auto& entity) {
+      const client::RuntimePacketEntityObservation* previous=nullptr;
+      if(previous_entities_) {
+        const auto found=std::ranges::find(previous_entities_->packet_entities,entity.entity_number,
+            &client::RuntimePacketEntityObservation::entity_number);
+        if(found!=previous_entities_->packet_entities.end()) previous=&*found;
+      }
+      const auto& current=current_entities_ ? current_entities_->packet_entities : observation.packet_entities;
+      // Copy the selected module's source-availability decision while its
+      // synchronous view is bound. Later attachment passes retain no module
+      // pointer and must not resurrect an unavailable retained actor. Canonical
+      // packets and independent world entities/point effects remain untouched.
+      const bool unavailable=sampled_game_->world_entity({entity,previous,current,maximum_clients_}).role==
+          game_api::WorldEntityPresentationRole::unavailable;
+      if(unavailable) next_unavailable_sources.push_back(entity.entity_number);
+      return unavailable;
+    });
+    std::vector<WorldImpactPresentation::ServerDecalTargetLifetime> next_decal_lifetimes;
+    if(!sampled_game_) {
+      next_decal_lifetimes.reserve(observation.packet_entities.size());
+      for(const auto& entity:observation.packet_entities) {
+        const auto id=next_follow->lifetime(entity.entity_number);
+        if(id) {
+          const auto bound=entity.model_index ? bindings_.find(*entity.model_index) : bindings_.end();
+          next_decal_lifetimes.push_back({entity.entity_number,id,
+              entity.model_index.value_or(0U),
+              bound!=bindings_.end() ? bound->second.brush_model.value_or(0U) : 0U});
+        }
       }
     }
     target = std::move(candidate);
@@ -1273,12 +2034,35 @@ RuntimeReplayVisualProjectionResult RuntimeReplayLocalAssets::project_entities(
     ++frame_revision_;
     ++next.projected_frames;
     summary_ = std::move(next);
+    if(sampled_game_) {
+      remote_weapon_poses_=next_weapon_poses;remote_weapon_pose_count_=next_weapon_pose_count;
+      sampled_game_->remote_weapon_poses(remote_weapon_poses());
+    }
     if (retain) {
       previous_entities_=std::move(current_entities_); current_entities_=std::move(retained);
+      // A committed removal is a lifetime boundary even if no render frame
+      // samples that gap before this slot is reused by the next RX record.
+      std::erase_if(beam_endpoint_bindings_,[&](const auto& entry) {
+        return std::ranges::none_of(current_entities_->packet_entities,
+            [&](const auto& e){return e.entity_number==entry.first && e.custom_beam;});
+      });
+      ordinary_presentation_=std::move(*next_ordinary);
+      player_presentation_=std::move(*next_players);
       next_player_lifetime_=lifetime_identity;
       player_lifetimes_=std::move(lifetimes);
-      std::erase_if(light_cache_,[&](const auto& value){return !player_lifetimes_.contains(value.first);});
+      std::erase_if(light_cache_,[&](const auto& value){
+        if(value.first==0U || value.first>=0xe0000000U) return false;
+        const auto& entities=current_entities_->packet_entities;
+        const auto found=std::ranges::lower_bound(entities,value.first,{},
+            &client::RuntimePacketEntityObservation::entity_number);
+        return found==entities.end() || found->entity_number!=value.first;
+      });
     }
+    if(!sampled_game_)server_decal_lifetimes_=std::move(next_decal_lifetimes);
+    entity_follow_=std::move(*next_follow);
+    presented_effect_entities_=std::move(next_effect_entities);
+    unavailable_effect_sources_=std::move(next_unavailable_sources);
+    presented_attachments_=std::move(next_attachments);
     return {true, true, {}};
   } catch (const std::exception &error) {
     return {false, false, visual_error(error.what())};
@@ -1319,7 +2103,7 @@ RuntimeReplayLocalAssets::presentation_model(
   result.resource_name = named->second;
   for (const auto& seq : model.sequences)
     result.sequences.push_back({seq.frames_per_second, seq.frame_count,
-                                (seq.source_flags & 1U) != 0U, seq.events});
+                                (seq.source_flags & 1U) != 0U, seq.events, seq.label});
   for (std::size_t body = 0U; body < result.supported_bodies.size(); ++body) {
     result.selectable_bodies[body] =
         static_cast<bool>(g::studio::StudioBodyPartSelector{}.select(model, static_cast<int>(body)));
@@ -1332,7 +2116,8 @@ RuntimeReplayLocalAssets::presentation_model(
 }
 
 std::optional<renderer::RenderDynamicEntities>
-RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent& intent) {
+RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent& intent,
+    std::optional<assets::AssetVector3> world_light_origin) {
   first_person_status_ = ReplayLocalVisualStatus::absent_model;
   viewmodel_attachment_zero_.reset();
   if (intent.status == game_api::ViewmodelStatus::unsupported_asset) {
@@ -1420,6 +2205,9 @@ RuntimeReplayLocalAssets::materialize_viewmodel(const game_api::ViewmodelIntent&
   instance.material_support_status = *material;
   instance.interpolated_bounds = bounds(
       {asset.bounds().minimum, asset.bounds().maximum}, transform);
+  // Sampling uses the world eye, while geometry and animation remain strictly
+  // camera-local. Omitted/invalid probes retain the diagnostic unlit fallback.
+  if(world_light_origin) instance.static_light_rgb=studio_light(0U,*world_light_origin);
   r::EntityRenderFrameBuildInput input;
   input.resource_id = frame_id + 1U;
   input.resource_revision = ++viewmodel_frame_revision_;
@@ -1479,40 +2267,22 @@ RuntimeReplayLocalAssets::viewmodel_attachment_at_frame(
   return location;
 }
 
+bool RuntimeReplayLocalAssets::has_shell_model(std::string_view name) const noexcept {
+  const auto named=std::ranges::find_if(summary_.model_names,[&](const auto& entry) {return entry.second==name;});
+  if(named==summary_.model_names.end()) return false;
+  const auto found=bindings_.find(named->first);
+  return found!=bindings_.end() && found->second.status==ReplayLocalVisualStatus::ready_studio &&
+      found->second.library_index && found->second.render_index;
+}
+
 std::optional<renderer::RenderDynamicEntities>
 RuntimeReplayLocalAssets::materialize_shells(
-    std::span<const renderer::TransientShellState> shells, double now) {
+    std::span<const renderer::TransientShellState> shells, double now,
+    std::span<const TemporaryStudioFrame> models) {
   last_shell_frame_status_=ReplayShellFrameStatus::invalid_input;
-  if (shells.empty() || shells.size()>32U || !std::isfinite(now)) return {};
+  if ((shells.empty() && models.empty()) || shells.size()>32U || models.size()>32U || !std::isfinite(now)) return {};
   last_shell_frame_status_=ReplayShellFrameStatus::binding_unavailable;
-  if (!shell_model_index_ || !package_ || !library_) return {};
-  const auto found=bindings_.find(*shell_model_index_);
-  if (found==bindings_.end() || !found->second.library_index ||
-      !found->second.render_index ||
-      found->second.status!=ReplayLocalVisualStatus::ready_studio) return {};
-  const auto& record=library_->records()[*found->second.library_index];
-  if (!record.model_asset() || !record.model_asset()->skeletal_data) return {};
-  const auto& model=*record.model_asset()->skeletal_data;
-  const auto& asset=*package_->studio_assets()[*found->second.render_index];
-  g::studio::StudioPoseInput pose_input;
-  pose_input.compatibility_profile=
-      g::studio::StudioPoseCompatibilityProfile::public_goldsrc48_discrete_local_asset_v1;
-  pose_input.sequence_index=0U;
-  pose_input.body_value=0U;
-  pose_input.frame_coordinate=0.0;
-  last_shell_frame_status_=ReplayShellFrameStatus::pose_rejected;
-  auto pose=g::studio::StudioPoseEvaluator{}.evaluate(
-      {std::to_string(record.resource_id()),record.source_fingerprint()},model,pose_input);
-  if (!pose) return {};
-  const auto material=r::studio_entity_material_support(asset,0U,0U);
-  last_shell_frame_status_=ReplayShellFrameStatus::material_rejected;
-  if (!material) return {};
-  r::StudioRenderPose render_pose{asset.source_identity(),{}};
-  for (const auto& bone:pose.pose->world_bones()) {
-    const auto& m=bone.transform.values;
-    render_pose.bone_matrices.push_back({m[0],m[4],m[8],0,m[1],m[5],m[9],0,
-                                         m[2],m[6],m[10],0,m[3],m[7],m[11],1});
-  }
+  if (!package_ || !library_) return {};
   r::EntityRenderFrameBuildInput input;
   input.resource_id=frame_id+2U;
   input.resource_revision=++shell_frame_revision_;
@@ -1520,24 +2290,76 @@ RuntimeReplayLocalAssets::materialize_shells(
   // These are presentation-frame identities, not authoritative snapshots.
   input.interpolation={now,now,now,0.0F,input.resource_revision,input.resource_revision,
       r::EntityRenderInterpolationProfile::decoded_discrete_runtime_replay_v1};
-  input.studio_poses.push_back(std::move(render_pose));
-  for (std::size_t i=0;i<shells.size();++i) {
-    const auto& shell=shells[i];
-    const r::EntityRenderTransform transform{shell.position,
-        {0.0F,shell.yaw_degrees,0.0F},1.0F};
+  std::map<std::size_t,std::uint32_t> poses;
+  bool had_ready_binding=false;
+  for (std::size_t i=0;i<shells.size()+models.size();++i) {
+    const bool is_shell=i<shells.size();
+    const auto token=is_shell ? std::span<const char>{shells[i].model_name} :
+        std::span<const char>{models[i-shells.size()].model.model_name};
+    const auto end=std::find(token.begin(),token.end(),'\0');
+    if(end==token.end()) continue;
+    const std::string_view name{token.data(),static_cast<std::size_t>(end-token.begin())};
+    if(!is_shell) {
+        const auto& frame=models[i-shells.size()];
+        if(frame.identity.generation!=generation_ || !std::isfinite(frame.age_seconds) ||
+            frame.age_seconds<0 || frame.age_seconds>=frame.model.lifetime_seconds) continue;
+    }
+    auto index=shell_model_index_; // compatibility for existing unnamed neutral fixtures
+    if(!name.empty()) {
+      const auto named=std::ranges::find_if(summary_.model_names,[&](const auto& entry) {return entry.second==name;});
+      index=named!=summary_.model_names.end() ? std::optional{named->first} : std::nullopt;
+    }
+    if(!index) continue;
+    const auto found=bindings_.find(*index);
+    if(found==bindings_.end() || found->second.status!=ReplayLocalVisualStatus::ready_studio ||
+        !found->second.library_index || !found->second.render_index) continue;
+    const auto& record=library_->records()[*found->second.library_index];
+    if(!record.model_asset() || !record.model_asset()->skeletal_data) continue;
+    had_ready_binding=true;
+    const auto render_index=*found->second.render_index;
+    const auto& asset=*package_->studio_assets()[render_index];
+    const auto material=r::studio_entity_material_support(asset,0U,0U);
+    if(!material) {last_shell_frame_status_=ReplayShellFrameStatus::material_rejected;continue;}
+    if(!poses.contains(render_index)) {
+      g::studio::StudioPoseInput pose_input;
+      pose_input.compatibility_profile=g::studio::StudioPoseCompatibilityProfile::public_goldsrc48_discrete_local_asset_v1;
+      auto pose=g::studio::StudioPoseEvaluator{}.evaluate(
+          {std::to_string(record.resource_id()),record.source_fingerprint()},*record.model_asset()->skeletal_data,pose_input);
+      if(!pose) {last_shell_frame_status_=ReplayShellFrameStatus::pose_rejected;continue;}
+      r::StudioRenderPose render_pose{asset.source_identity(),{}};
+      for(const auto& bone:pose.pose->world_bones()) {
+        const auto& m=bone.transform.values;
+        render_pose.bone_matrices.push_back({m[0],m[4],m[8],0,m[1],m[5],m[9],0,
+            m[2],m[6],m[10],0,m[3],m[7],m[11],1});
+      }
+      poses.emplace(render_index,static_cast<std::uint32_t>(input.studio_poses.size()));
+      input.studio_poses.push_back(std::move(render_pose));
+    }
+    const r::EntityRenderTransform transform{
+        is_shell ? shells[i].position : models[i-shells.size()].origin,
+        is_shell ? assets::AssetVector3{0.0F,shells[i].yaw_degrees,0.0F} :
+            assets::AssetVector3{models[i-shells.size()].model.angles_degrees.z,
+                -models[i-shells.size()].model.angles_degrees.x,
+                models[i-shells.size()].model.angles_degrees.y},1.0F};
     if (!r::finite_entity_render_transform(transform)) continue;
     r::StudioEntityRenderInstance instance;
     instance.entity_number=0xe0000000U+static_cast<std::uint32_t>(i);
     instance.studio_asset_index=static_cast<std::uint32_t>(*found->second.render_index);
-    instance.pose_index=0U;
+    instance.pose_index=poses.at(render_index);
     instance.transform=transform;
     instance.body_value=0U;
     instance.material_support_status=*material;
     instance.interpolated_bounds=bounds({asset.bounds().minimum,asset.bounds().maximum},transform);
+    instance.static_light_rgb=studio_light(instance.entity_number,transform.origin);
     input.studio_instances.push_back(instance);
   }
-  last_shell_frame_status_=ReplayShellFrameStatus::no_valid_instances;
-  if (input.studio_instances.empty()) return {};
+  if (input.studio_instances.empty()) {
+    // A missing/unready named or legacy binding is not a malformed instance.
+    // Keep the original binding reason, and preserve any pose/material error.
+    if(had_ready_binding && last_shell_frame_status_==ReplayShellFrameStatus::binding_unavailable)
+      last_shell_frame_status_=ReplayShellFrameStatus::no_valid_instances;
+    return {};
+  }
   last_shell_frame_status_=ReplayShellFrameStatus::frame_rejected;
   auto frame=r::EntityRenderFrameBuilder{}.build(*package_,std::move(input));
   if (!frame) return {};
@@ -1560,6 +2382,586 @@ std::string_view to_string(ReplayShellFrameStatus status) noexcept {
   case ReplayShellFrameStatus::submitted:return "submitted";
   }
   return "unknown";
+}
+
+std::optional<renderer::RenderDynamicEntities>
+RuntimeReplayLocalAssets::materialize_muzzle_sprites(std::span<const MuzzleSpriteFrame> sprites,double now) {
+  if(sprites.empty() || sprites.size()>32 || !std::isfinite(now) || !package_)return {};
+  r::EntityRenderFrameBuildInput input;
+  input.resource_id=frame_id+5U;input.resource_revision=++muzzle_sprite_frame_revision_;
+  input.interpolation={now,now,now,0.0F,input.resource_revision,input.resource_revision,
+      r::EntityRenderInterpolationProfile::decoded_discrete_runtime_replay_v1};
+  for(std::size_t i=0;i<sprites.size();++i) {
+    const auto& request=sprites[i];
+    const auto end=std::find(request.sprite.virtual_name.begin(),request.sprite.virtual_name.end(),'\0');
+    if(end==request.sprite.virtual_name.end() || !std::isfinite(request.sprite.scale) ||
+        request.sprite.scale<=0 || request.sprite.scale>1) {++muzzle_sprite_stats_.unavailable;continue;}
+    const std::string_view name{request.sprite.virtual_name.data(),static_cast<std::size_t>(end-request.sprite.virtual_name.begin())};
+    const auto found=effect_sprite_bindings_.find(name);
+    if(found==effect_sprite_bindings_.end() || found->second>=package_->sprite_assets().size()) {
+      ++muzzle_sprite_stats_.unavailable;continue;
+    }
+    const auto& asset=*package_->sprite_assets()[found->second];
+    r::SpriteEntityRenderInstance instance;
+    instance.entity_number=0xc1000000U+static_cast<std::uint32_t>(i);
+    instance.sprite_asset_index=static_cast<std::uint32_t>(found->second);
+    instance.selected_frame_index=request.sprite.frame_seed%static_cast<std::uint32_t>(asset.frames().size());
+    instance.transform={request.origin,{},request.sprite.scale};
+    if(!r::finite_entity_render_transform(instance.transform)){++muzzle_sprite_stats_.unavailable;continue;}
+    instance.orientation=asset.orientation();instance.texture_format_support=asset.texture_support_status();
+    instance.bounds=bounds({asset.bounds().minimum,asset.bounds().maximum},instance.transform);
+    instance.blend_mode=r::SpriteBlendMode::additive;
+    // Original palette supplies emitted RGB. Do not tint or statically light
+    // the sprite; its black texels are additive-neutral, not white-key alpha.
+    input.sprite_instances.push_back(instance);
+  }
+  if(input.sprite_instances.empty())return {};
+  auto frame=r::EntityRenderFrameBuilder{}.build(*package_,std::move(input));
+  if(!frame){++muzzle_sprite_stats_.frame_rejected;return {};}
+  const auto count=frame.frame->sprite_instances().size();muzzle_sprite_stats_.submitted+=count;
+  return renderer::RenderDynamicEntities{package_,
+      std::make_shared<const r::EntityRenderFrame>(std::move(*frame.frame)),{count,count,0U,count,0U}};
+}
+
+std::optional<renderer::RenderDynamicEntities>
+RuntimeReplayLocalAssets::materialize_temporary_sprites(std::span<const TemporarySpriteFrame> sprites,double now) {
+  if(sprites.empty() || sprites.size()>160 || !std::isfinite(now) || !package_) return {};
+  r::EntityRenderFrameBuildInput input;
+  input.resource_id=frame_id+3U;input.resource_revision=++temporary_sprite_frame_revision_;
+  input.interpolation={now,now,now,0.0F,input.resource_revision,input.resource_revision,
+      r::EntityRenderInterpolationProfile::decoded_discrete_runtime_replay_v1};
+  std::array<std::uint64_t,4> tag_submissions{};
+  for(std::size_t i=0;i<sprites.size();++i) {
+    const auto& frame=sprites[i];const auto& request=frame.sprite;
+    const auto tag=frame.diagnostic_tag<temporary_sprite_tag_stats_.size() ? frame.diagnostic_tag : 0U;
+    const auto count_reason=[&](auto member){++(temporary_sprite_stats_.*member);++(temporary_sprite_tag_stats_[tag].*member);};
+    if(frame.identity.generation!=generation_ || !std::isfinite(frame.age_seconds) || frame.age_seconds<0 ||
+        !std::isfinite(request.scale) || request.scale<=0 || request.scale>25.5F ||
+        request.animation>game_api::TemporarySpriteAnimation::fixed ||
+        (request.animation==game_api::TemporarySpriteAnimation::elapsed && !request.frames_per_second) ||
+        request.blend>game_api::TemporarySpriteBlend::alpha_blended ||
+        !std::isfinite(request.opacity) || request.opacity<0 || request.opacity>1 ||
+        !std::ranges::all_of(request.tint,[](float v){return std::isfinite(v) && v>=0 && v<=1;}) ||
+        !std::isfinite(request.vertical_speed_units) || std::abs(request.vertical_speed_units)>128 ||
+        !std::isfinite(request.gravity_units) || request.gravity_units<0 || request.gravity_units>1024 ||
+        !std::isfinite(request.maximum_lifetime_seconds) || request.maximum_lifetime_seconds<=0 ||
+        request.maximum_lifetime_seconds>4 ||
+        !std::isfinite(frame.velocity.x) || !std::isfinite(frame.velocity.y) || !std::isfinite(frame.velocity.z) ||
+        std::abs(frame.velocity.x)>512 || std::abs(frame.velocity.y)>512 || std::abs(frame.velocity.z)>512) {
+      count_reason(&TemporarySpriteStatistics::invalid);continue;
+    }
+    const auto binding=bindings_.find(request.model_slot);
+    if(binding==bindings_.end() || !binding->second.render_index) {count_reason(&TemporarySpriteStatistics::absent);continue;}
+    if(binding->second.status!=ReplayLocalVisualStatus::ready_sprite) {count_reason(&TemporarySpriteStatistics::unsupported);continue;}
+    const auto& asset=*package_->sprite_assets()[*binding->second.render_index];
+    if(asset.frames().empty()) {count_reason(&TemporarySpriteStatistics::unsupported);continue;}
+    const double index=request.animation==game_api::TemporarySpriteAnimation::fixed ?
+        static_cast<double>(request.frame_choice%asset.frames().size()) :
+        std::floor(frame.age_seconds*request.frames_per_second);
+    if(frame.age_seconds>=request.maximum_lifetime_seconds ||
+        index>=static_cast<double>(asset.frames().size())) {count_reason(&TemporarySpriteStatistics::expired);continue;}
+    const auto selected=static_cast<std::uint32_t>(index);
+    const auto& source=asset.frames()[selected];
+    if(source.profile==r::SpriteRenderTextureProfile::unsupported) {count_reason(&TemporarySpriteStatistics::unsupported);continue;}
+    auto position=frame.origin;
+    position.x+=frame.velocity.x*static_cast<float>(frame.age_seconds);
+    position.y+=frame.velocity.y*static_cast<float>(frame.age_seconds);
+    position.z+=frame.velocity.z*static_cast<float>(frame.age_seconds);
+    if(request.gravity_units==0)
+      position.z+=request.vertical_speed_units*static_cast<float>(frame.age_seconds);
+    else
+      position.z+=static_cast<float>(request.vertical_speed_units*frame.age_seconds-
+          .5*request.gravity_units*frame.age_seconds*frame.age_seconds);
+    const r::EntityRenderTransform transform{position,{},request.scale};
+    if(!r::finite_entity_render_transform(transform)) {count_reason(&TemporarySpriteStatistics::invalid);continue;}
+    r::SpriteEntityRenderInstance instance;
+    instance.entity_number=0xd0000000U+static_cast<std::uint32_t>(i);
+    instance.sprite_asset_index=static_cast<std::uint32_t>(*binding->second.render_index);
+    instance.selected_frame_index=selected;instance.transform=transform;
+    instance.orientation=asset.orientation();instance.texture_format_support=asset.texture_support_status();
+    instance.bounds=bounds({asset.bounds().minimum,asset.bounds().maximum},transform);
+    instance.blend_mode=request.blend==game_api::TemporarySpriteBlend::opaque ? r::SpriteBlendMode::opaque :
+        request.blend==game_api::TemporarySpriteBlend::additive ? r::SpriteBlendMode::additive : r::SpriteBlendMode::alpha_blended;
+    // Blend coverage does not imply a smoke fade. The selected module can
+    // preserve the imported masked animation's intensity until its expiry.
+    instance.opacity=request.opacity;
+    instance.tint=request.tint;
+    if(request.blend==game_api::TemporarySpriteBlend::alpha_blended && request.fade_with_animation &&
+        request.animation==game_api::TemporarySpriteAnimation::elapsed)
+      instance.opacity*=static_cast<float>(std::max(0.0,1.0-frame.age_seconds*request.frames_per_second/asset.frames().size()));
+    input.sprite_instances.push_back(instance);
+    ++tag_submissions[tag];
+  }
+  if(input.sprite_instances.empty()) return {};
+  auto frame=r::EntityRenderFrameBuilder{}.build(*package_,std::move(input));
+  if(!frame) {++temporary_sprite_stats_.frame_rejected;
+    for(std::size_t tag=0;tag<tag_submissions.size();++tag)if(tag_submissions[tag])++temporary_sprite_tag_stats_[tag].frame_rejected;
+    return {};}
+  const auto count=frame.frame->sprite_instances().size();temporary_sprite_stats_.submitted+=count;
+  for(std::size_t tag=0;tag<tag_submissions.size();++tag)temporary_sprite_tag_stats_[tag].submitted+=tag_submissions[tag];
+  return renderer::RenderDynamicEntities{package_,
+      std::make_shared<const r::EntityRenderFrame>(std::move(*frame.frame)),{count,count,0U,count,0U}};
+}
+
+std::shared_ptr<const goldsrc::collision::BrushCollisionScene>
+RuntimeReplayLocalAssets::impact_brush_scene() const noexcept {
+  const auto& observed=current_entities_;
+  if(!camera_collision_ || !observed || observed->generation!=generation_)return {};
+  if(impact_brush_generation_==generation_ && impact_brush_revision_==observed->publication_revision)
+    return impact_brush_scene_;
+  impact_brush_scene_.reset();
+  impact_brush_generation_=generation_;impact_brush_revision_=observed->publication_revision;
+  try {
+    if(!placement_collision_library_) {
+      const auto built=goldsrc::collision::build_brush_collision_model_library(camera_collision_);
+      if(!built)return {};
+      placement_collision_library_=built.library;
+    }
+    // Defaults intentionally omit player/entity boxes. Only explicitly
+    // committed inline BSP solidity participates in this presentation query.
+    impact_brush_scene_=goldsrc::build_reference_brush_collision(placement_collision_library_,
+        summary_.model_names,*observed,generation_).scene;
+  } catch(...) {impact_brush_scene_.reset();}
+  return impact_brush_scene_;
+}
+
+game_api::PlacementTraceResult RuntimeReplayLocalAssets::placement_trace(
+    const game_api::PlacementTraceRequest& request) const noexcept {
+  game_api::PlacementTraceResult out;
+  const auto& observed=placement_entities_ ? placement_entities_ : current_entities_;
+  if(!camera_collision_ || !observed || observed->generation!=generation_ || request.generation!=generation_) return out;
+  const auto distance=std::hypot(request.end.x-request.start.x,request.end.y-request.start.y,
+      request.end.z-request.start.z);
+  if(!std::isfinite(distance) || distance<=0 || distance>512) return out;
+  try {
+    if(!placement_collision_library_) {
+      const auto built=goldsrc::collision::build_brush_collision_model_library(camera_collision_);
+      if(!built) return out;
+      placement_collision_library_=built.library;
+    }
+    const auto context=goldsrc::build_reference_brush_collision(placement_collision_library_,
+        summary_.model_names,*observed,generation_,request.server_box_solid_code,
+        request.ignore_entity,false);
+    if(!context.scene) return out;
+    auto boxes=context.boxes;
+    // Protocol player hulls, not model dimensions or game/classname guesses.
+    for(const auto& entity:observed->packet_entities) {
+      if(!entity.player_movement_schema || entity.entity_number==request.ignore_entity ||
+          entity.spectator==true || !request.player_solid_code) continue;
+      if(!entity.solid) return out;
+      if(entity.solid!=request.player_solid_code) continue;
+      if(!entity.use_hull || *entity.use_hull>1 || !entity.origin.complete() ||
+          boxes.size()>=goldsrc::movement::kMaximumServerEntityCollisionBoxes) return out;
+      const auto hull=collision::standard_collision_hull_profile(*entity.use_hull==0 ?
+          collision::CollisionHullOrdinal::standing_32x32x72 : collision::CollisionHullOrdinal::duck_32x32x36);
+      if(!hull)return out;
+      const assets::AssetVector3 origin{static_cast<float>(*entity.origin.x),
+          static_cast<float>(*entity.origin.y),static_cast<float>(*entity.origin.z)};
+      boxes.push_back({entity.entity_number,{{origin.x+hull->clip_mins.x,origin.y+hull->clip_mins.y,origin.z+hull->clip_mins.z},
+          {origin.x+hull->clip_maxs.x,origin.y+hull->clip_maxs.y,origin.z+hull->clip_maxs.z}}});
+    }
+    const auto trace=goldsrc::movement::BrushSceneMovementCollision{context.scene,boxes}
+        .trace_point(request.start,request.end,effect_trace_scratch_);
+    if(!trace || !trace.result) return out;
+    const auto& t=*trace.result;out.valid=true;out.start_solid=t.start_solid;
+    out.all_solid=t.all_solid;out.fraction=t.fraction;out.point=t.end_position;
+    if(t.hit) out.hit_entity=t.hit->source_entity_index.value_or(0U);
+    if(t.collision_plane) out.normal=t.collision_plane->normal;
+  } catch(...) {} return out;
+}
+game_api::StaticEffectTrace RuntimeReplayLocalAssets::trace(assets::AssetVector3 start,assets::AssetVector3 end) const noexcept {
+  game_api::StaticEffectTrace out;
+  if(!camera_collision_ || !current_entities_)return out;
+  try {
+    collision::CollisionTraceResult t;
+    bool unsupported_target=false;
+    if(current_entities_) {
+      // Beam contacts use the same committed solid inline BSP scene as local
+      // bullet/melee impacts. A failed reconstruction is unavailable, not an
+      // empty scene that permits a beam to continue through a closed door.
+      const auto brushes=impact_brush_scene();if(!brushes)return out;
+      goldsrc::collision::BrushCollisionSceneTraceRequest request;request.start=start;request.end=end;
+      const auto traced=goldsrc::collision::BrushCollisionSceneQuery{brushes}
+          .trace_hull(request,effect_trace_scratch_);
+      if(!traced)return out;t=traced.result->trace;
+      if(t.hit && t.hit->kind!=collision::CollisionTraceHitKind::world) {
+        const auto* identity=traced.result->scene_hit && traced.result->scene_hit->brush_instance ?
+            &*traced.result->scene_hit->brush_instance : nullptr;
+        const auto instance=identity ? std::ranges::find(brushes->instances(),*identity,
+            &goldsrc::collision::BrushCollisionSceneInstance::identity) : brushes->instances().end();
+        if(instance!=brushes->instances().end() && identity->source_entity_index &&
+            world_scene_ && t.collision_plane) {
+          const auto entity=*identity->source_entity_index,source_model=identity->source_model_index;
+          const auto life=std::ranges::find_if(server_decal_lifetimes_,[&](const auto& value) {
+            return value.entity_number==entity && value.source_model_index==source_model &&
+                value.lifetime!=0U && value.model_slot!=0U;
+          });
+          const auto& models=world_scene_->brush_library().models();
+          const auto model=std::ranges::find(models,source_model,
+              &world_scene_render::BrushSubmodelRenderModel::source_model_index);
+          if(life!=server_decal_lifetimes_.end() && model!=models.end() &&
+              !model->render_surface_indices().empty()) {
+            const auto point=goldsrc::brush_models::brush_rigid_world_to_local_point(instance->transform,t.end_position);
+            const auto normal=goldsrc::brush_models::brush_rigid_world_to_local_vector(instance->transform,t.collision_plane->normal);
+            const auto finite=[](assets::AssetVector3 v) {return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);};
+            const auto length=std::hypot(normal.x,normal.y,normal.z);
+            if(finite(point) && finite(normal) && length>=.99F && length<=1.01F)
+              out.surface_attachment=game_api::EffectSurfaceAttachment{generation_,life->lifetime,
+                  entity,life->model_slot,source_model,point,normal};
+          }
+        }
+        // Keep the real closest contact, but never treat an unmapped brush as
+        // a supported world hit or fall through it to a farther static wall.
+        unsupported_target=!out.surface_attachment;
+      }
+    }
+    out.valid=true;out.start_solid=t.start_solid;out.all_solid=t.all_solid;
+    out.hit=t.hit.has_value();out.point=t.end_position;
+    if(t.collision_plane)out.normal=t.collision_plane->normal;
+    out.unsupported=unsupported_target || t.in_liquid || t.end_contents.category==collision::CollisionContentsCategory::sky ||
+      (t.blocking_contents && t.blocking_contents->category==collision::CollisionContentsCategory::sky);
+  } catch(...) {}return out;
+}
+void RuntimeReplayLocalAssets::consume_follow(const client::CommittedTemporaryEffect& event,double now,
+    const game_api::GameClientHost* game) noexcept {
+  std::optional<game_api::EntityTrailProfile> profile;
+  if(game && current_entities_) {
+    const auto entity=std::ranges::find(current_entities_->packet_entities,event.entity_attachment&0xfffU,
+        &client::RuntimePacketEntityObservation::entity_number);
+    if(entity!=current_entities_->packet_entities.end() && entity->model_index) {
+      const auto model=summary_.model_names.find(*entity->model_index);
+      const auto sprite=summary_.model_names.find(event.sprite_index);
+      if(model!=summary_.model_names.end() && sprite!=summary_.model_names.end())
+        profile=game->entity_trail_profile(model->second,sprite->second);
+    }
+  }
+  std::uint16_t head_slot=0;
+  if(profile && profile->head_sprite[0]) {
+    const auto end=std::find(profile->head_sprite.begin(),profile->head_sprite.end(),'\0');
+    const std::string_view name{profile->head_sprite.data(),static_cast<std::size_t>(end-profile->head_sprite.begin())};
+    const auto named=std::ranges::find_if(summary_.model_names,[&](const auto& item){return item.second==name;});
+    if(named!=summary_.model_names.end() && named->first<=1023) head_slot=static_cast<std::uint16_t>(named->first);
+    else ++follow_resource_stats_.absent; // Independent optional head, not a smoke rejection.
+  }
+  entity_follow_.consume(event,now,profile,head_slot);
+}
+void RuntimeReplayLocalAssets::present_entity_effects(renderer::RenderScene& scene,double now,std::span<const game_api::BeamSpriteFrame> beams,
+    std::optional<std::uint32_t> receiving_entity,std::optional<assets::AssetVector3> receiving_muzzle) {
+  beam_light_count_=0;beam_light_frame_.reset();
+  if(!std::isfinite(now)) return;
+  std::vector<game_api::BeamSpriteFrame> current_beams;
+  current_beams.reserve(192);
+  current_beams.insert(current_beams.end(),beams.begin(),beams.begin()+std::min<std::size_t>(128,beams.size()));
+  const auto observed_point=[](const client::RuntimeVector3Observation& v)->std::optional<assets::AssetVector3>{
+    if(!v.complete())return {};return assets::AssetVector3{static_cast<float>(*v.x),static_cast<float>(*v.y),static_cast<float>(*v.z)};};
+  const auto resolve=[&](const client::RuntimeBeamEndpoint& ref)->std::optional<assets::AssetVector3> {
+    const auto owner=std::ranges::find(presented_effect_entities_,ref.entity,&client::RuntimePacketEntityObservation::entity_number);
+    if(!ref.entity || owner==presented_effect_entities_.end() || (owner->effects.value_or(0)&128))return {};
+    if(ref.attachment==0)return observed_point(owner->origin); // explicit attachment-zero semantics only
+    if(ref.attachment>4)return {};
+    if(receiving_entity==ref.entity && receiving_muzzle)return receiving_muzzle;
+    const auto a=presented_attachments_.find(ref.entity);
+    if(a!=presented_attachments_.end() && a->second[ref.attachment-1])return a->second[ref.attachment-1];
+    const auto pose=std::ranges::find(remote_weapon_poses(),ref.entity,&game_api::RemoteWeaponPoseSample::entity);
+    const auto lifetime=player_lifetimes_.find(ref.entity);
+    if(pose!=remote_weapon_poses().end() && lifetime!=player_lifetimes_.end() && pose->entity_lifetime==lifetime->second.identity &&
+        pose->generation==generation_ && pose->current_model_slot==owner->weapon_model_index &&
+        pose->source==game_api::RemoteSocketSource::validated_pmodel_socket && pose->semantic_match)
+        return pose->muzzle.origin;
+    return {}; // no silent feet/camera/Glock fallback
+  };
+  std::size_t server_count=0;
+  std::erase_if(beam_endpoint_bindings_,[&](const auto& entry) {
+    const auto& live=current_entities_ ? current_entities_->packet_entities : presented_effect_entities_;
+    return std::ranges::none_of(live,[&](const auto& e) {return e.entity_number==entry.first && e.custom_beam;});
+  });
+  for(const auto& e:presented_effect_entities_)if(e.custom_beam) {
+    if(current_entities_ && std::ranges::none_of(current_entities_->packet_entities,
+        [&](const auto& live){return live.entity_number==e.entity_number && live.custom_beam;})) continue;
+    const auto& b=*e.custom_beam;
+    if(!b.supported || (b.flags&0xe0) || server_count==64){++follow_resource_stats_.unsupported;continue;}
+    auto binding=beam_endpoint_bindings_.find(e.entity_number);
+    if(binding==beam_endpoint_bindings_.end()) {
+      if(beam_endpoint_bindings_.size()==64) {++follow_resource_stats_.unsupported;continue;}
+      binding=beam_endpoint_bindings_.emplace(e.entity_number,BeamEndpointBinding{}).first;
+    }
+    auto& lifetime=binding->second;
+    if(lifetime.type!=b.type || lifetime.start!=b.start_reference || lifetime.end!=b.end_reference ||
+        (lifetime.broken && (lifetime.point!=e.origin || lifetime.sprite!=b.sprite_model_index))) {
+      lifetime={};lifetime.type=b.type;lifetime.start=b.start_reference;lifetime.end=b.end_reference;
+    }
+    lifetime.point=e.origin;lifetime.sprite=b.sprite_model_index;
+    const auto endpoint_alive=[&](const auto& ref,bool& bound,std::optional<std::uint32_t>& model,std::uint64_t& player_life) {
+      const auto owner=std::ranges::find(presented_effect_entities_,ref.entity,&client::RuntimePacketEntityObservation::entity_number);
+      if(!ref.entity || owner==presented_effect_entities_.end() || !owner->model_index || !*owner->model_index ||
+          (owner->effects.value_or(0)&128)) {
+        // A selected module's explicit rejection retires even an unbound
+        // receipt. Merely missing initial source data still waits for loading.
+        // Broken receipts cannot attach to a replacement occupant unless the
+        // server supplies a new beam/reference/geometry occurrence above.
+        if(bound || std::ranges::find(unavailable_effect_sources_,ref.entity)!=unavailable_effect_sources_.end())
+          lifetime.broken=true;
+        return false;
+      }
+      const auto player=player_lifetimes_.find(ref.entity);
+      const auto epoch=player==player_lifetimes_.end() ? 0U : player->second.identity;
+      if(bound && (model!=owner->model_index || player_life!=epoch)) {lifetime.broken=true;return false;}
+      bound=true;model=owner->model_index;player_life=epoch;return true;
+    };
+    const bool start_alive=b.type!=client::RuntimeCustomBeamObservation::Type::entities ||
+        endpoint_alive(b.start_reference,lifetime.start_bound,lifetime.start_model,lifetime.start_player_life);
+    const bool end_alive=b.type==client::RuntimeCustomBeamObservation::Type::points ||
+        endpoint_alive(b.end_reference,lifetime.end_bound,lifetime.end_model,lifetime.end_player_life);
+    if(lifetime.broken || !start_alive || !end_alive) {++follow_resource_stats_.unsupported;continue;}
+    auto a=b.type==client::RuntimeCustomBeamObservation::Type::entities ? resolve(b.start_reference) : observed_point(e.origin);
+    auto end=b.type==client::RuntimeCustomBeamObservation::Type::points ? observed_point(e.angles) : resolve(b.end_reference);
+    if(!a || !end){++follow_resource_stats_.unsupported;continue;}
+    game_api::BeamSpriteFrame out;out.action.generation=generation_;out.server_entity=e.entity_number;out.sprite_model_slot=b.sprite_model_index;
+    out.start=*a;out.end=*end;out.width=static_cast<float>(b.width_units);out.opacity=b.opacity/255.F;
+    out.color={b.color[0]/255.F,b.color[1]/255.F,b.color[2]/255.F};out.starts=now;out.expires=now+.1;out.persistent=true;
+    out.noise_amplitude=static_cast<float>(b.noise_raw*.1);out.sine_noise=(b.flags&16)!=0;
+    out.scroll_cycles_per_second=static_cast<float>(b.scroll_rate*.01);out.phase_seconds=now;
+    if(const auto glow=beam_glow_profiles_.find(b.sprite_model_index);glow!=beam_glow_profiles_.end())out.ribbon_glow=glow->second;
+    if(const auto light=beam_light_profiles_.find(b.sprite_model_index);light!=beam_light_profiles_.end())
+      out.scene_light=light->second[out.sine_noise ? 1U : 0U];
+    out.sprite_frame=static_cast<std::uint32_t>(std::floor(b.frame));current_beams.push_back(out);++server_count;
+  }
+  beams=current_beams;
+  entity_follow_.present(presented_effect_entities_,scene,now);
+  scene.follow_trail_entities.reset();
+  if(!package_ || (entity_follow_.segments().empty() && entity_follow_.heads().empty() && beams.empty())) return;
+  r::EntityRenderFrameBuildInput input;
+  input.resource_id=frame_id+4U;input.resource_revision=++follow_frame_revision_;
+  input.interpolation={now,now,now,0,input.resource_revision,input.resource_revision,
+      r::EntityRenderInterpolationProfile::decoded_discrete_runtime_replay_v1};
+  for(const auto group:{entity_follow_.segments(),entity_follow_.heads()}) for(const auto& segment:group) {
+    const auto binding=bindings_.find(segment.sprite_slot);
+    if(binding==bindings_.end() || !binding->second.render_index) {++follow_resource_stats_.absent;continue;}
+    if(binding->second.status!=ReplayLocalVisualStatus::ready_sprite) {++follow_resource_stats_.unsupported;continue;}
+    const auto& asset=*package_->sprite_assets()[*binding->second.render_index];
+    if(asset.frames().empty() || asset.frames()[0].profile==r::SpriteRenderTextureProfile::unsupported) {++follow_resource_stats_.unsupported;continue;}
+    r::SpriteEntityRenderInstance instance;
+    instance.entity_number=0xc0000000U+static_cast<std::uint32_t>(input.sprite_instances.size());
+    instance.sprite_asset_index=static_cast<std::uint32_t>(*binding->second.render_index);
+    instance.orientation=asset.orientation();instance.texture_format_support=asset.texture_support_status();
+    instance.transform={segment.start,{},1};instance.ribbon_end=segment.end;instance.ribbon_width=segment.width;
+    if(segment.puff) {
+      instance.selected_frame_index=static_cast<std::uint32_t>(std::min(asset.frames().size()-1,
+          static_cast<std::size_t>(segment.age_fraction*asset.frames().size())));
+      const auto& frame=asset.frames()[instance.selected_frame_index];
+      if(frame.profile==r::SpriteRenderTextureProfile::unsupported) {++follow_resource_stats_.unsupported;continue;}
+      const auto extent=std::max(frame.geometry.width,frame.geometry.height);
+      if(!extent) {++follow_resource_stats_.unsupported;continue;}
+      instance.transform.uniform_scale=segment.width/static_cast<float>(extent);
+      instance.ribbon_end.reset();instance.ribbon_width=0;
+    }
+    const auto& a=segment.start;const auto& b=segment.end;const auto w=segment.width;
+    instance.bounds={{std::min(a.x,b.x)-w,std::min(a.y,b.y)-w,std::min(a.z,b.z)-w},
+        {std::max(a.x,b.x)+w,std::max(a.y,b.y)+w,std::max(a.z,b.z)+w}};
+    instance.blend_mode=r::SpriteBlendMode::additive;instance.opacity=segment.opacity;instance.tint=segment.color;
+    input.sprite_instances.push_back(instance);
+  }
+  for(const auto& beam:beams.first(std::min<std::size_t>(192,beams.size()))) {
+    const auto finite_point=[](assets::AssetVector3 p) {return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z);};
+    if(beam.action.generation!=generation_ || !std::isfinite(beam.starts) || !std::isfinite(beam.expires) ||
+      beam.starts>now || beam.expires<=now || (!beam.persistent && beam.expires-beam.starts>6.001) ||
+      !std::isfinite(beam.width) || beam.width<=0 || beam.width>25.5F || !std::isfinite(beam.scale) || beam.scale<=0 || beam.scale>25.5F ||
+      !finite_point(beam.start) || !finite_point(beam.end) ||
+      !game_api::valid_world_line_geometry(beam.geometry) ||
+      !game_api::valid_beam_ribbon_glow(beam.ribbon_glow) ||
+      (beam.ribbon_glow.opacity>0 && (!beam.ribbon || beam.geometry!=game_api::WorldLineGeometry::flat_billboard)) ||
+      !game_api::valid_beam_scene_light(beam.scene_light) ||
+      (beam.scene_light.intensity>0 && (!beam.ribbon || beam.geometry!=game_api::WorldLineGeometry::flat_billboard)) ||
+      !std::isfinite(beam.opacity) || beam.opacity<0 || beam.opacity>1 ||
+      !std::ranges::all_of(beam.color,[](float v){return std::isfinite(v)&&v>=0&&v<=1;})) {++follow_resource_stats_.unsupported;continue;}
+    auto surface_point=beam.start;
+    auto surface_normal=beam.surface_normal;
+    if(beam.surface_attachment) {
+      const auto& target=*beam.surface_attachment;
+      const auto* frame=scene.static_world ? scene.static_world->runtime_brushes.get() : nullptr;
+      if(!surface_normal || beam.ribbon || beam.server_entity ||
+          beam.velocity.x!=0 || beam.velocity.y!=0 || beam.velocity.z!=0 ||
+          target.generation!=generation_ || !target.entity_lifetime || !target.entity ||
+          !target.model_slot || !target.source_model_index ||
+          !finite_point(target.local_point) || !finite_point(target.local_normal) ||
+          std::abs(std::hypot(target.local_normal.x,target.local_normal.y,target.local_normal.z)-1)>.01F ||
+          !frame || !world_scene_ || frame->generation!=generation_ ||
+          frame->scene_identity!=world_scene_->resource_identity() || frame->instances.size()>4096U ||
+          std::ranges::none_of(server_decal_lifetimes_,[&](const auto& live) {
+            return live.entity_number==target.entity && live.lifetime==target.entity_lifetime &&
+                live.model_slot==target.model_slot && live.source_model_index==target.source_model_index;
+          })) {++follow_resource_stats_.unsupported;continue;}
+      const auto current=std::ranges::find_if(frame->instances,[&](const auto& instance) {
+        return instance.entity_number==target.entity && instance.model_slot==target.model_slot &&
+            instance.source_model_index==target.source_model_index;
+      });
+      if(current==frame->instances.end() || !rigid_effect_surface_transform(current->model_transform)) {
+        ++follow_resource_stats_.unsupported;continue;
+      }
+      // Resolve the same presented rigid pose as the visible door. The owning
+      // local contact never borrows the collision scene or follows a reused slot.
+      const auto p=renderer::transform(current->model_transform,
+          {target.local_point.x,target.local_point.y,target.local_point.z,1});
+      const auto n=renderer::transform(current->model_transform,
+          {target.local_normal.x,target.local_normal.y,target.local_normal.z,0});
+      surface_point={p.x,p.y,p.z};surface_normal=assets::AssetVector3{n.x,n.y,n.z};
+      if(!finite_point(surface_point) || !finite_point(*surface_normal) ||
+          !std::isfinite(p.w) || std::abs(p.w-1)>1e-5F || !std::isfinite(n.w) || std::abs(n.w)>1e-5F) {
+        ++follow_resource_stats_.unsupported;continue;
+      }
+    }
+    if(beam.geometry==game_api::WorldLineGeometry::solid_3d) {
+      const bool stationary=beam.travel_speed_units_per_second==0 && beam.segment_length_units==0;
+      if(!beam.ribbon || beam.surface_normal || beam.width>6 ||
+          !std::isfinite(beam.emission_gain) || beam.emission_gain<0 || beam.emission_gain>4 ||
+          !std::isfinite(beam.head_taper_fraction) || beam.head_taper_fraction<0 || beam.head_taper_fraction>1 ||
+          !std::isfinite(beam.taper_end_diameter_fraction) || beam.taper_end_diameter_fraction<0 || beam.taper_end_diameter_fraction>1 ||
+          (beam.motion_starts && (!std::isfinite(*beam.motion_starts) || *beam.motion_starts<beam.starts || *beam.motion_starts>now || *beam.motion_starts>=beam.expires)) ||
+          !game_api::valid_transient_glow(beam.head_glow) ||
+          (!stationary && (!std::isfinite(beam.travel_speed_units_per_second) || beam.travel_speed_units_per_second<=0 ||
+              beam.travel_speed_units_per_second>100000 || !std::isfinite(beam.segment_length_units) ||
+              beam.segment_length_units<=0 || beam.segment_length_units>1024))) {++follow_resource_stats_.unsupported;continue;}
+      const assets::AssetVector3 delta{beam.end.x-beam.start.x,beam.end.y-beam.start.y,beam.end.z-beam.start.z};
+      const auto distance=std::hypot(delta.x,delta.y,delta.z);
+      if(!std::isfinite(distance) || distance<.002F || distance>10000) {++follow_resource_stats_.unsupported;continue;}
+      auto start=beam.start,end=beam.end;auto opacity=beam.opacity;bool head_clipped_to_endpoint=false;
+      if(!stationary) {
+        // Same immutable launch / moving-tail rule as the existing 3D streak.
+        // Rendering never retraces, follows a later muzzle or creates impacts.
+        const auto back=static_cast<double>(beam.travel_speed_units_per_second)*(now-beam.motion_starts.value_or(beam.starts));
+        const auto front=std::min<double>(distance,back+beam.segment_length_units);
+        if(back>=front) continue;
+        head_clipped_to_endpoint=front>=distance;
+        const auto point=[&](double along) {const auto t=static_cast<float>(along/distance);return assets::AssetVector3{
+            beam.start.x+delta.x*t,beam.start.y+delta.y*t,beam.start.z+delta.z*t};};
+        start=point(back);end=point(front);
+        opacity*=static_cast<float>((beam.expires-now)/(beam.expires-beam.starts));
+      }
+      if(scene.world_line_count>=scene.world_lines.size()) {++follow_resource_stats_.unsupported;continue;}
+      scene.world_lines[scene.world_line_count++]={start,end,beam.width,
+          {beam.color[0],beam.color[1],beam.color[2],opacity},beam.head_taper_fraction,
+          beam.geometry,beam.taper_end_diameter_fraction,beam.emission_gain};
+      // At the traced endpoint, the surface-aligned contact sprite owns the
+      // glow. A camera-facing head flash there would cut through the wall again.
+      if(!head_clipped_to_endpoint && beam.head_glow.radius_units>0 && scene.world_flash_count<scene.world_flashes.size())
+        scene.world_flashes[scene.world_flash_count++]={end,beam.head_glow.radius_units,
+            {beam.color[0],beam.color[1],beam.color[2],opacity*.45F}};
+      if(beam.head_glow.light_radius_units>0 && scene.world_effect_light_count<scene.world_effect_lights.size())
+        scene.world_effect_lights[scene.world_effect_light_count++]={end,beam.head_glow.light_radius_units,
+            beam.head_glow.light_intensity*opacity,beam.color};
+      ++follow_resource_stats_.submitted;
+      continue; // Solid geometry does not require a sprite/texture slot.
+    }
+    const auto end=std::find(beam.virtual_sprite.begin(),beam.virtual_sprite.end(),'\0');
+    const std::string_view name{beam.virtual_sprite.data(),static_cast<std::size_t>(end-beam.virtual_sprite.begin())};
+    const auto named=std::ranges::find_if(summary_.model_names,[&](const auto& pair){return pair.second==name;});
+    if(!beam.sprite_model_slot && named==summary_.model_names.end()) {++follow_resource_stats_.absent;continue;}
+    const auto binding=bindings_.find(beam.sprite_model_slot.value_or(named!=summary_.model_names.end() ? named->first : 0));
+    if(binding==bindings_.end() || !binding->second.render_index || binding->second.status!=ReplayLocalVisualStatus::ready_sprite) {++follow_resource_stats_.absent;continue;}
+    const auto& asset=*package_->sprite_assets()[*binding->second.render_index];
+    if(asset.frames().empty() || asset.frames()[0].profile==r::SpriteRenderTextureProfile::unsupported) {++follow_resource_stats_.unsupported;continue;}
+    r::SpriteEntityRenderInstance instance;instance.entity_number=0xc0001000U+static_cast<std::uint32_t>(input.sprite_instances.size());
+    if(beam.persistent && !beam.server_entity) {
+      // Renderer-local logical slots, never advertised/network entity IDs.
+      // A persistent owner's phase must not change when preceding finite
+      // effects expire or change their array positions.
+      if(beam.action.emitter_entity>32 || beam.action.sub_identity>255){++follow_resource_stats_.unsupported;continue;}
+      instance.entity_number=0xc1000000U|(beam.action.emitter_entity<<8)|beam.action.sub_identity;
+    }
+    if(beam.server_entity)instance.entity_number=*beam.server_entity;
+    instance.sprite_asset_index=static_cast<std::uint32_t>(*binding->second.render_index);
+    instance.orientation=asset.orientation();instance.texture_format_support=asset.texture_support_status();
+    instance.transform={beam.start,{},beam.scale};instance.opacity=beam.opacity;instance.tint=beam.color;instance.blend_mode=r::SpriteBlendMode::additive;
+    instance.selected_frame_index=static_cast<std::uint32_t>(beam.sprite_frame%asset.frames().size());
+    if(surface_normal) {
+      const auto normal=*surface_normal;
+      const auto length=std::hypot(normal.x,normal.y,normal.z);
+      if(beam.ribbon || !finite_point(normal) || length<.99F || length>1.01F ||
+          beam.velocity.x!=0 || beam.velocity.y!=0 || beam.velocity.z!=0) {++follow_resource_stats_.unsupported;continue;}
+      const assets::AssetVector3 n{normal.x/length,normal.y/length,normal.z/length};
+      // A depth-tested glow belongs to the traced surface plane, not to a
+      // camera-facing quad cutting through it. Preserve true wall occlusion.
+      constexpr float degrees=57.29577951308232F;
+      instance.orientation=assets::SpriteOrientation::oriented;
+      instance.surface_aligned=true;
+      instance.transform.rotation_degrees={0,std::acos(std::clamp(n.z,-1.0F,1.0F))*degrees,
+          std::atan2(n.y,n.x)*degrees};
+      instance.transform.origin={surface_point.x+n.x*.125F,surface_point.y+n.y*.125F,surface_point.z+n.z*.125F};
+    }
+    instance.bounds=bounds({asset.bounds().minimum,asset.bounds().maximum},instance.transform);
+    if(beam.ribbon) {
+      instance.ribbon_noise_amplitude=beam.noise_amplitude;instance.ribbon_scroll_cycles_per_second=beam.scroll_cycles_per_second;
+      instance.ribbon_sine_noise=beam.sine_noise;instance.ribbon_phase_seconds=beam.phase_seconds;
+      instance.ribbon_glow_width_scale=beam.ribbon_glow.width_scale;instance.ribbon_glow_opacity=beam.ribbon_glow.opacity;
+      instance.ribbon_end=beam.end;instance.ribbon_width=beam.width;const auto a=beam.start,b=beam.end;
+      const auto w=beam.width*(beam.ribbon_glow.opacity>0 ? beam.ribbon_glow.width_scale : 1.F)+
+          r::beam_ribbon_radius(beam.noise_amplitude,beam.sine_noise);
+      instance.bounds={{std::min(a.x,b.x)-w,std::min(a.y,b.y)-w,std::min(a.z,b.z)-w},{std::max(a.x,b.x)+w,std::max(a.y,b.y)+w,std::max(a.z,b.z)+w}};
+    }
+    if(!r::finite_entity_render_transform(instance.transform)) {++follow_resource_stats_.unsupported;continue;}
+    input.sprite_instances.push_back(instance);
+    if(beam.scene_light.intensity>0 && beam.opacity>0) {
+      const auto& profile=beam.scene_light;
+      const double dx=double(beam.end.x)-beam.start.x,dy=double(beam.end.y)-beam.start.y,dz=double(beam.end.z)-beam.start.z;
+      const auto length=std::hypot(dx,dy,dz);
+      if(std::isfinite(length) && length>0 && finite_point(scene.camera.position)) {
+        const auto samples=static_cast<unsigned>(std::clamp(std::ceil(length/profile.spacing_units),1.,4.));
+        const auto inset=std::min(length*.5,double(profile.radius_units)*.25);
+        const auto distance_squared=[&](const auto& light) {
+          const auto& eye=scene.camera.position;
+          return std::pow(double(light.center.x)-eye.x,2)+std::pow(double(light.center.y)-eye.y,2)+std::pow(double(light.center.z)-eye.z,2);
+        };
+        for(unsigned sample=0;sample<samples;++sample) {
+          // Symmetric: local beams run muzzle->contact, server beams may run
+          // contact->muzzle. Keep light outside both ends of the struck wall.
+          const auto along=samples==1 ? length*.5 : inset+(length-2*inset)*sample/(samples-1);
+          const auto t=along/length;
+          renderer::RenderPointLight light{{static_cast<float>(beam.start.x+dx*t),
+              static_cast<float>(beam.start.y+dy*t),static_cast<float>(beam.start.z+dz*t)},
+              profile.radius_units,profile.intensity*(profile.inherit_beam_opacity ? beam.opacity : 1.F),
+              profile.color_override.value_or(beam.color)};
+          if(!renderer::valid_render_point_light(light))continue;
+          const auto active=std::span{beam_lights_}.first(beam_light_count_);
+          if(std::ranges::any_of(active,[&](const auto& old) {
+              return std::abs(old.center.x-light.center.x)<.01F && std::abs(old.center.y-light.center.y)<.01F &&
+                  std::abs(old.center.z-light.center.z)<.01F && old.color==light.color &&
+                  old.radius_units==light.radius_units && old.intensity==light.intensity;
+          }))continue;
+          if(beam_light_count_<beam_lights_.size())beam_lights_[beam_light_count_++]=light;
+          else {
+            const auto worst=std::ranges::max_element(beam_lights_,{},distance_squared);
+            if(distance_squared(light)<distance_squared(*worst))*worst=light;
+          }
+        }
+      }
+    }
+  }
+  if(input.sprite_instances.empty()) return;
+  auto frame=r::EntityRenderFrameBuilder{}.build(*package_,std::move(input));
+  if(!frame) {beam_light_count_=0;++follow_resource_stats_.frame_rejected;return;}
+  const auto count=frame.frame->sprite_instances().size();
+  follow_resource_stats_.submitted+=count;
+  scene.follow_trail_entities=renderer::RenderDynamicEntities{package_,
+      std::make_shared<const r::EntityRenderFrame>(std::move(*frame.frame)),{count,count,0,count,0}};
+  beam_light_frame_=scene.follow_trail_entities->frame;
+}
+
+void RuntimeReplayLocalAssets::append_beam_lights(renderer::RenderScene& scene) noexcept {
+  const auto count=std::exchange(beam_light_count_,0U);
+  const auto frame=beam_light_frame_.lock();beam_light_frame_.reset();
+  if(!frame || !scene.follow_trail_entities || scene.follow_trail_entities->frame!=frame)return;
+  auto lights=std::span{beam_lights_}.first(count);
+  const auto& eye=scene.camera.position;
+  if(!std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z))return;
+  std::ranges::sort(lights,{},[&](const auto& light) {
+    const double x=double(light.center.x)-eye.x,y=double(light.center.y)-eye.y,z=double(light.center.z)-eye.z;
+    return x*x+y*y+z*z;
+  });
+  for(const auto& light:lights) {
+    if(scene.world_effect_light_count==scene.world_effect_lights.size())break;
+    if(scene.world_effect_light_count>scene.world_effect_lights.size())return;
+    scene.world_effect_lights[scene.world_effect_light_count++]=light;
+  }
 }
 
 std::string_view to_string(ReplayLocalVisualStatus status) noexcept {

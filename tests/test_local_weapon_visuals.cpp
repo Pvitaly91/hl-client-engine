@@ -2,6 +2,8 @@
 #include <hlclient/game_api/game_client_host.hpp>
 #include <hlclient/games/halflife/client_module.hpp>
 #include <hlclient/games/halflife/weapon_visuals.hpp>
+#include <hlclient/goldsrc/local_audio.hpp>
+#include <hlclient/goldsrc/reference_client_move.hpp>
 #include <hlclient/renderer/transient_visuals.hpp>
 #include <hlclient/goldsrc/studio/goldsrc_studio_model_importer.hpp>
 #include <hlclient/goldsrc/studio/goldsrc_studio_pose.hpp>
@@ -64,6 +66,15 @@ struct Fixture {
         host.submit({1,sequence,static_cast<std::uint16_t>(buttons),t},t);
     }
 };
+struct GlockSecondarySoundAssets final:hlclient::goldsrc::SoundAssets {
+    hlclient::goldsrc::SoundAssetResult request(std::uint16_t) noexcept override { return {}; }
+    hlclient::goldsrc::SoundAssetResult request_local(const api::LocalSoundReference&) noexcept override {
+        auto pcm=std::make_shared<hlclient::assets::AudioAsset>();
+        pcm->sample_rate=48000;pcm->channel_count=1;
+        pcm->interleaved_samples.assign(4800,0.125F);
+        return {hlclient::goldsrc::SoundAssetStatus::ready,pcm};
+    }
+};
 std::vector<std::byte> read(const std::filesystem::path& path) {
     std::ifstream in(path,std::ios::binary);REQUIRE(in);
     std::vector<char> chars{std::istreambuf_iterator<char>{in},{}};
@@ -88,6 +99,10 @@ TEST_CASE("E4 accepted B1 Glock fire yields one Studio-marker flash and world sh
     CHECK_FALSE(fading.shell);
     CHECK(first.flash->variant==11U);CHECK(first.flash->attachment_index==0U);
     CHECK(first.flash->marker_ordinal==0U);
+    REQUIRE(first.flash->sprite);
+    CHECK(std::string_view{first.flash->sprite->virtual_name.data()}=="sprites/muzzleflash2.spr");
+    CHECK(first.flash->sprite->scale==Catch::Approx(.1F));
+    CHECK(f.host.effect_sprite_preparation().size()==2);
     CHECK(first.shell->origin.x==Catch::Approx(120.0F));
     CHECK(first.shell->origin.y==Catch::Approx(196.0F));
     CHECK(first.shell->origin.z==Catch::Approx(52.0F));
@@ -110,6 +125,82 @@ TEST_CASE("E4 accepted B1 Glock fire yields one Studio-marker flash and world sh
     Fixture crowbar(1);crowbar.command(1,1,0.02);
     const auto crowbar_swing=crowbar.sample(0.02);
     CHECK_FALSE(crowbar_swing.flash);CHECK_FALSE(crowbar_swing.light);
+}
+
+TEST_CASE("Glock secondary normal host composes camera-local animation bullet effects and isolated fire PCM",
+          "[glock-secondary][weapon-visuals][game-module][local-audio]") {
+    Fixture f;f.host.set_movement_audio_time_origin(0);
+    api::ScriptedEventBinding binding;binding.index=900U;
+    constexpr std::string_view event_name="events/glock2.sc";
+    std::copy(event_name.begin(),event_name.end(),binding.name.begin());
+    f.host.configure_scripted_events(std::span{&binding,1});
+    hlclient::audio::OfflineOutput output;hlclient::goldsrc::LocalAudio playback{output};
+    GlockSecondarySoundAssets assets;
+    playback.update(f.host.drain_audio(),&assets,0,true);
+    f.command(1U,0U,0.02);CHECK_FALSE(f.host.sample(0.02).identity); // capture-only click
+    api::LocalWeaponSubmittedCommand submitted{1U,2U,
+        hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.04};
+    submitted.shot_context=api::LocalWeaponSubmittedCommand::ShotContext{{5,8,8},{-1,0,0}};
+    f.host.submit(submitted,0.04);
+    const auto shot=f.host.sample(0.04);REQUIRE(shot.identity);REQUIRE(shot.visual);
+    CHECK(shot.visual->sequence==3U);CHECK(shot.visual->body==2U);
+    const auto viewmodel=f.host.viewmodel(state(),model(),0.04,shot.visual);
+    REQUIRE(viewmodel.status==api::ViewmodelStatus::ready);
+    CHECK(viewmodel.sequence==3U);CHECK(viewmodel.frame_coordinate==0.0);
+    const auto effects=f.host.local_visuals(view(0.04));
+    REQUIRE(effects.flash);REQUIRE(effects.light);REQUIRE(effects.shell);REQUIRE(effects.world_impact);
+    CHECK(effects.world_impact->action==*shot.identity);
+    CHECK(effects.world_impact->origin.x==5);CHECK(effects.world_impact->direction.x==-1);
+    CHECK_FALSE(effects.world_impact->tracer); // No MP5 tracer/cadence is borrowed.
+    CHECK(effects.shell->expires_at_seconds-effects.shell->starts_at_seconds==Catch::Approx(2.5));
+    CHECK_FALSE(f.host.local_visuals(view(0.04)).shell);
+    const auto audio=f.host.drain_audio();REQUIRE(audio.count==1U);
+    CHECK(audio.cues[0].kind==api::LocalSoundKind::fire);
+    CHECK(audio.cues[0].reference.name()=="weapons/pl_gun3.wav");
+    playback.update(audio,&assets,0.04,true);
+    std::array<float,256> pcm{};output.mixer.render(pcm);
+    CHECK(playback.statistics().submitted==1U);
+    CHECK(std::all_of(pcm.begin(),pcm.end(),[](float value){return std::isfinite(value);}));
+    CHECK(std::any_of(pcm.begin(),pcm.end(),[](float value){return value!=0.0F;}));
+    // The assigned local server echo confirms, but never restarts or repeats
+    // the already predicted fire/shell/impact/audio effect.
+    api::CommittedScriptedEvent echo;echo.generation=1;echo.record=echo.record_ordinal=2;
+    echo.emitter_entity=1;echo.event_index=900;echo.received_at_seconds=0.05;
+    f.host.committed_scripted_event(echo);f.host.committed_scripted_event(echo);
+    const auto confirmed=f.host.sample(0.08);REQUIRE(confirmed.visual);
+    CHECK(confirmed.primary_fire_confirmed==1U);CHECK(confirmed.duplicate_events==1U);
+    CHECK(confirmed.visual->restart_identity==shot.visual->restart_identity);
+    CHECK(f.host.viewmodel(state(),model(),0.08,confirmed.visual).frame_coordinate==Catch::Approx(1.2));
+    CHECK(f.host.drain_audio().count==0U);CHECK_FALSE(f.host.local_visuals(view(0.08)).shell);
+    CHECK_FALSE(f.host.local_visuals(view(0.08)).world_impact);
+    CHECK(f.host.drain_remote_effects(0.08).count==0U);CHECK(f.host.drain_remote_audio().count==0U);
+    f.host.submit(submitted,0.09);(void)f.host.sample(0.09);
+    CHECK(f.host.drain_audio().count==0U);CHECK_FALSE(f.host.local_visuals(view(0.09)).shell);
+    f.host.reset({2,2,1});f.host.committed_scripted_event(echo);
+    CHECK_FALSE(f.host.local_visuals(view(0.1)).flash);CHECK(f.host.drain_audio().count==0U);
+}
+
+TEST_CASE("Glock2 assigned local event supplies a deduplicated pose and fire cue without inventing hit authority",
+          "[glock-secondary][weapon-visuals][game-module][scripted-events]") {
+    Fixture f;f.host.set_movement_audio_time_origin(0);
+    api::ScriptedEventBinding binding;binding.index=777;
+    constexpr std::string_view token="events/glock2.sc";
+    std::copy(token.begin(),token.end(),binding.name.begin());
+    f.host.configure_scripted_events(std::span{&binding,1});(void)f.host.drain_audio();
+    api::CommittedScriptedEvent event;event.generation=1;event.record=event.record_ordinal=2;
+    event.emitter_entity=1;event.event_index=900;event.received_at_seconds=0.02;
+    f.host.committed_scripted_event(event);CHECK_FALSE(f.host.sample(0.02).identity); // Never fixed-ID fallback.
+    event.event_index=777;event.record=event.record_ordinal=3;
+    f.host.committed_scripted_event(event);
+    const auto accepted=f.host.sample(0.02);REQUIRE(accepted.visual);REQUIRE(accepted.identity);
+    CHECK(accepted.visual->sequence==3U);CHECK(accepted.visual->body==2U);
+    CHECK(accepted.status==api::LocalWeaponActionStatus::server_confirmed);
+    const auto effects=f.host.local_visuals(view(0.02));REQUIRE(effects.shell);REQUIRE(effects.flash);
+    CHECK_FALSE(effects.world_impact); // No frozen accepted wire shot context is available.
+    const auto audio=f.host.drain_audio();REQUIRE(audio.count==1U);
+    CHECK(audio.cues[0].reference.name()=="weapons/pl_gun3.wav");
+    f.host.committed_scripted_event(event);(void)f.host.sample(0.03);
+    CHECK(f.host.drain_audio().count==0U);CHECK_FALSE(f.host.local_visuals(view(0.03)).shell);
 }
 
 TEST_CASE("E5 accepted Glock action emits one immutable command-space world request",

@@ -305,12 +305,16 @@ OwnedServicePayload make_owned_service_payload(OwnedNetchanPayload&& payload) no
         payload.source_sequence.value(),
         payload.source_acknowledgement.value(),
         payload.sequence_flags.reliable,
-        payload.sequence_flags.fragmented,
+        payload.body_kind != NetchanPayloadBodyKind::contemporaneous_fragment_suffix &&
+            (payload.body_kind == NetchanPayloadBodyKind::normal_fragment_completion ||
+             payload.sequence_flags.fragmented),
         false,
         false,
         payload.acknowledgement_reliable,
         payload.direction,
         payload.received_at,
+        payload.body_kind == NetchanPayloadBodyKind::contemporaneous_fragment_suffix,
+        payload.body_kind == NetchanPayloadBodyKind::normal_fragment_completion,
     };
 }
 

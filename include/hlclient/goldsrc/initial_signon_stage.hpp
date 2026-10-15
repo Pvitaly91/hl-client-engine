@@ -207,6 +207,8 @@ private:
     // Idempotently closes the one retained driver and its lifetime guard after
     // the friend-owned continuation reaches a terminal outcome.
     [[nodiscard]] NetchanDriver* retained_driver() noexcept;
+    // Terminal-only same-driver borrow; does not relax normal handoff gates.
+    [[nodiscard]] NetchanDriver* close_driver() noexcept;
     void finalize_retained_boundary(InitialSignonTimePoint now) noexcept;
 
     class Implementation;

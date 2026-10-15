@@ -1,6 +1,8 @@
 #include <hlclient/goldsrc/netchan_driver.hpp>
+#include <hlclient/goldsrc/disconnect_request.hpp>
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -120,6 +122,50 @@ namespace {
     return code == NetchanSessionErrorCode::future_acknowledgement ||
            code == NetchanSessionErrorCode::acknowledgement_half_range_ambiguous;
 }
+
+[[nodiscard]] std::optional<network::SocketNativeError> native_failure(
+    const network::SocketNativeError error) noexcept
+{
+    return error ? std::optional{error} : std::nullopt;
+}
+
+[[nodiscard]] bool received_packet_failure(const NetchanDriverErrorCode code) noexcept
+{
+    switch (code) {
+    case NetchanDriverErrorCode::receive_failed:
+    case NetchanDriverErrorCode::inconsistent_receive_result:
+    case NetchanDriverErrorCode::datagram_truncated:
+    case NetchanDriverErrorCode::unexpected_connectionless_packet:
+    case NetchanDriverErrorCode::unsupported_special_packet:
+    case NetchanDriverErrorCode::malformed_packet:
+    case NetchanDriverErrorCode::invalid_sequence:
+    case NetchanDriverErrorCode::invalid_acknowledgement:
+    case NetchanDriverErrorCode::opaque_payload_too_large:
+    case NetchanDriverErrorCode::fragment_reassembly_failed:
+    case NetchanDriverErrorCode::secondary_stream_pending_m3:
+    case NetchanDriverErrorCode::event_backpressure:
+        return true;
+    default:
+        return false;
+    }
+}
+
+class ReceiveFailureScope final {
+public:
+    explicit ReceiveFailureScope(
+        std::optional<NetchanFailurePacketMetadata>& metadata) noexcept
+        : metadata_{metadata}
+    {
+        metadata_.reset();
+    }
+    ~ReceiveFailureScope() { metadata_.reset(); }
+
+    ReceiveFailureScope(const ReceiveFailureScope&) = delete;
+    ReceiveFailureScope& operator=(const ReceiveFailureScope&) = delete;
+
+private:
+    std::optional<NetchanFailurePacketMetadata>& metadata_;
+};
 
 [[nodiscard]] std::string bounded_context(std::string context)
 {
@@ -512,7 +558,12 @@ public:
         }
         last_update_ = now;
         ++receive_statistics_.updates;
+        expire_split_packets(now);
         if (!validate_local_continuity(now)) {
+            return;
+        }
+        if (graceful_close_.requested) {
+            update_graceful_close(now);
             return;
         }
         if (events_.size() == config_.maximum_events) {
@@ -558,7 +609,11 @@ public:
             network::DatagramTransportReceiveResult received;
             try {
                 ++receive_statistics_.receive_polls;
+                if (movement_diagnostics_enabled_)
+                    socket_read_begin_ns_ = actual_socket_read_ns();
                 received = transport_.receive(config_.maximum_datagram_size);
+                if (movement_diagnostics_enabled_)
+                    socket_read_end_ns_ = actual_socket_read_ns();
             } catch (...) {
                 enter_terminal(
                     NetchanDriverState::network_error,
@@ -603,6 +658,10 @@ public:
         if (trace_callback_active_ || state_ != NetchanDriverState::active) {
             return;
         }
+        if (graceful_close_.outcome == GracefulCloseOutcome::pending) {
+            graceful_close_.outcome = GracefulCloseOutcome::cancelled;
+            graceful_close_.netchan_closed_at = now;
+        }
         enter_terminal(
             NetchanDriverState::cancelled,
             std::nullopt,
@@ -618,9 +677,82 @@ public:
             return;
         }
         state_ = NetchanDriverState::closed;
+        if (graceful_close_.requested && !graceful_close_.netchan_closed_at)
+            graceful_close_.netchan_closed_at = now;
         cleanup();
         emit_trace(NetchanDriverTraceClassification::driver_closed, remote_endpoint_);
         static_cast<void>(now);
+    }
+
+    [[nodiscard]] bool request_graceful_close(const NetchanDriverTimePoint now)
+    {
+        if (trace_callback_active_) return false;
+        if (graceful_close_.requested) return true;
+        graceful_close_.requested = true;
+        graceful_close_.operation_identity = 1U;
+        graceful_close_.session_generation = 1U;
+        graceful_close_.requested_at = now;
+        if (graceful_close_.server_disconnect_observed && !last_error_) {
+            // Goodbye after an already observed server close is ineligible;
+            // retain the exact notice receipt rather than reopen the channel.
+            graceful_close_.eligible = false;
+            graceful_close_.outcome = GracefulCloseOutcome::server_disconnect_confirmed;
+            return true;
+        }
+        if (state_ != NetchanDriverState::active) {
+            graceful_close_.outcome = last_error_ ? GracefulCloseOutcome::fatal_failure
+                : GracefulCloseOutcome::cancel_without_protocol_disconnect;
+            graceful_close_.transport_error = last_error_
+                ? std::optional{last_error_->code} : std::nullopt;
+            graceful_close_.netchan_closed_at = now;
+            close(now);
+            return true;
+        }
+        graceful_close_.eligible = true;
+        graceful_close_.queued = true;
+        graceful_close_.outcome = GracefulCloseOutcome::pending;
+        if (now > NetchanDriverTimePoint::max() - kGracefulCloseBudget) {
+            enter_terminal(NetchanDriverState::protocol_error,
+                NetchanDriverErrorCode::invalid_configuration,
+                "Graceful close deadline exceeds the monotonic clock domain", now,
+                NetchanDriverTraceClassification::protocol_failure,
+                NetchanDriverEventType::protocol_error);
+            return true;
+        }
+        graceful_close_.deadline_at = now + kGracefulCloseBudget;
+        if (last_update_ && now < *last_update_) {
+            enter_terminal(NetchanDriverState::protocol_error,
+                NetchanDriverErrorCode::time_moved_backwards,
+                "Graceful close intent time moved backwards", now,
+                NetchanDriverTraceClassification::protocol_failure,
+                NetchanDriverEventType::protocol_error);
+            return true;
+        }
+        // A previously accepted but unsent movement capability is read-only
+        // session preparation; abandonment does not rewrite reliable state.
+        if (pending_contextual_plan_)
+            static_cast<void>(session_.abandon_outgoing_packet(std::move(*pending_contextual_plan_)));
+        pending_contextual_plan_.reset();
+        pending_contextual_plan_identity_.reset();
+        pending_unreliable_payload_.clear();
+        return true;
+    }
+
+    void confirm_server_disconnect(const NetchanDriverTimePoint now)
+    {
+        if (trace_callback_active_) return;
+        graceful_close_.server_disconnect_observed = true;
+        if (!graceful_close_.session_generation) graceful_close_.session_generation = 1U;
+        if (!last_error_ && !graceful_close_.transport_error) {
+            graceful_close_.outcome = GracefulCloseOutcome::server_disconnect_confirmed;
+            graceful_close_.netchan_closed_at = now;
+            close(now);
+        }
+    }
+
+    [[nodiscard]] GracefulCloseSummary graceful_close_snapshot() const noexcept
+    {
+        return graceful_close_;
     }
 
     [[nodiscard]] NetchanDriverOperationResult queue_reliable(
@@ -631,7 +763,7 @@ public:
                 NetchanDriverErrorCode::reentrant_operation,
                 "Netchan trace callbacks cannot mutate driver state");
         }
-        if (state_ != NetchanDriverState::active) {
+        if (state_ != NetchanDriverState::active || graceful_close_.requested) {
             return operation_failure(
                 NetchanDriverErrorCode::not_active,
                 "Reliable payload requires an active netchan driver");
@@ -660,7 +792,7 @@ public:
                 NetchanDriverErrorCode::reentrant_operation,
                 "Netchan trace callbacks cannot mutate driver state");
         }
-        if (state_ != NetchanDriverState::active) {
+        if (state_ != NetchanDriverState::active || graceful_close_.requested) {
             return operation_failure(
                 NetchanDriverErrorCode::not_active,
                 "Unreliable payload requires an active netchan driver");
@@ -697,7 +829,7 @@ public:
                 NetchanDriverErrorCode::reentrant_operation,
                 "Netchan trace callbacks cannot prepare outgoing context");
         }
-        if (state_ != NetchanDriverState::active) {
+        if (state_ != NetchanDriverState::active || graceful_close_.requested) {
             return context_prepare_failure(
                 NetchanDriverErrorCode::not_active,
                 "Outgoing context requires an active netchan driver");
@@ -801,7 +933,7 @@ public:
                 NetchanDriverErrorCode::stale_unreliable_context,
                 "Outgoing context was already consumed");
         }
-        if (state_ != NetchanDriverState::active) {
+        if (state_ != NetchanDriverState::active || graceful_close_.requested) {
             return operation_failure(
                 NetchanDriverErrorCode::not_active,
                 "Outgoing context requires an active netchan driver");
@@ -996,6 +1128,14 @@ public:
     {
         return receive_statistics_;
     }
+    void set_movement_diagnostics_enabled(const bool enabled) noexcept
+    {
+        movement_diagnostics_enabled_ = enabled;
+        if (!enabled) {
+            socket_read_begin_ns_.reset();
+            socket_read_end_ns_.reset();
+        }
+    }
     [[nodiscard]] std::optional<std::uint64_t>
     last_sent_unreliable_context_identity() const noexcept
     {
@@ -1010,6 +1150,13 @@ public:
     }
 
 private:
+    [[nodiscard]] static std::optional<std::uint64_t> actual_socket_read_ns() noexcept
+    {
+        const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (value < 0) return std::nullopt;
+        return static_cast<std::uint64_t>(value);
+    }
     [[nodiscard]] bool check_fragment_timeout(const NetchanDriverTimePoint now)
     {
         const auto& active = reassembler_.active_transfer();
@@ -1097,6 +1244,7 @@ private:
         const NetchanDriverTimePoint now,
         std::size_t& outgoing_packets_this_update)
     {
+        const ReceiveFailureScope failure_scope{active_receive_metadata_};
         using Status = network::DatagramTransportReceiveStatus;
         if (received.status == Status::would_block) {
             ++receive_statistics_.would_block;
@@ -1125,7 +1273,9 @@ private:
                                        : std::move(received.error),
                 now,
                 NetchanDriverTraceClassification::network_failure,
-                NetchanDriverEventType::network_error);
+                NetchanDriverEventType::network_error,
+                std::nullopt, std::nullopt, std::nullopt,
+                native_failure(received.native_error));
             return false;
         }
 
@@ -1149,6 +1299,9 @@ private:
         }
 
         if (received.status == Status::truncated) {
+            active_receive_metadata_.emplace();
+            active_receive_metadata_->datagram_size = received.payload_size;
+            active_receive_metadata_->datagram_size_is_lower_bound = true;
             enter_terminal(
                 NetchanDriverState::protocol_error,
                 NetchanDriverErrorCode::datagram_truncated,
@@ -1156,7 +1309,9 @@ private:
                                        : std::move(received.error),
                 now,
                 NetchanDriverTraceClassification::protocol_failure,
-                NetchanDriverEventType::protocol_error);
+                NetchanDriverEventType::protocol_error,
+                std::nullopt, std::nullopt, std::nullopt,
+                native_failure(received.native_error));
             return false;
         }
         if (received.status != Status::received || !received.datagram ||
@@ -1179,14 +1334,112 @@ private:
             outgoing_packets_this_update);
     }
 
+    struct SplitTransfer {
+        bool active{};
+        std::uint32_t identity{};
+        std::uint8_t count{};
+        NetchanDriverTimePoint started{};
+        std::size_t retained_bytes{};
+        std::array<std::vector<std::byte>, 15U> parts;
+    };
+
+    void expire_split_packets(const NetchanDriverTimePoint now) {
+        for (auto& transfer : split_transfers_) {
+            if (transfer.active && now - transfer.started >= std::chrono::seconds{1}) {
+                transfer = {};
+                ++receive_statistics_.split_expired;
+            }
+        }
+    }
+
+    // marker:u32(-2), identity:u32, index/count:u8 (high/low nibble).
+    // Keep the inner netchan datagram munged and opaque until EVERY part is
+    // present. Partial/duplicate/expired UDP envelopes never alter ACKs,
+    // reliable generations, command receipts, or application publications.
+    [[nodiscard]] std::optional<std::vector<std::byte>> accept_split_part(
+        const std::span<const std::byte> datagram, const NetchanDriverTimePoint now) {
+        constexpr std::size_t header_size = 9U;
+        ++receive_statistics_.split_parts;
+        const auto reject = [&]() {
+            ++receive_statistics_.split_rejected;
+            return std::optional<std::vector<std::byte>>{};
+        };
+        if (datagram.size() <= header_size || datagram.size() > config_.maximum_datagram_size)
+            return reject();
+        std::uint32_t identity{};
+        for (unsigned i = 0; i < 4U; ++i)
+            identity |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(datagram[4U + i])) << (8U * i);
+        const auto packed = std::to_integer<std::uint8_t>(datagram[8U]);
+        const auto count = static_cast<std::uint8_t>(packed & 15U);
+        const auto index = static_cast<std::uint8_t>(packed >> 4U);
+        if (count < 2U || index >= count) return reject();
+        SplitTransfer* transfer = nullptr;
+        for (auto& candidate : split_transfers_)
+            if (candidate.active && candidate.identity == identity) transfer = &candidate;
+        if (!transfer) {
+            for (auto& candidate : split_transfers_)
+                if (!candidate.active) { transfer = &candidate; break; }
+            if (!transfer) {
+                transfer = &*std::min_element(split_transfers_.begin(), split_transfers_.end(),
+                    [](const auto& a, const auto& b) { return a.started < b.started; });
+                ++receive_statistics_.split_evicted;
+            }
+            *transfer = {};
+            transfer->active = true; transfer->identity = identity;
+            transfer->count = count; transfer->started = now;
+        }
+        if (transfer->count != count) { *transfer = {}; return reject(); }
+        const auto payload = datagram.subspan(header_size);
+        auto& destination = transfer->parts[index];
+        if (!destination.empty()) {
+            if (destination.size() != payload.size() ||
+                !std::equal(destination.begin(), destination.end(), payload.begin())) {
+                *transfer = {}; return reject();
+            }
+            ++receive_statistics_.split_duplicates;
+            return std::nullopt;
+        }
+        if (payload.size() > kMaximumNetchanDatagramSize - transfer->retained_bytes) {
+            *transfer = {}; return reject();
+        }
+        destination.assign(payload.begin(), payload.end());
+        transfer->retained_bytes += payload.size();
+        for (std::size_t i = 0; i < count; ++i)
+            if (transfer->parts[i].empty()) return std::nullopt;
+        const auto stride = transfer->parts[0].size();
+        for (std::size_t i = 1; i + 1U < count; ++i)
+            if (transfer->parts[i].size() != stride) { *transfer = {}; return reject(); }
+        if (transfer->parts[count - 1U].size() > stride) { *transfer = {}; return reject(); }
+        std::vector<std::byte> joined;
+        joined.reserve(transfer->retained_bytes);
+        for (std::size_t i = 0; i < count; ++i)
+            joined.insert(joined.end(), transfer->parts[i].begin(), transfer->parts[i].end());
+        *transfer = {};
+        const auto decoded = decode_server_to_client_netchan_packet(joined,
+            NetchanPacketLimits{kMaximumNetchanDatagramSize});
+        if (!decoded || !decoded.packet) return reject();
+        ++receive_statistics_.split_completed;
+        return joined;
+    }
+
     [[nodiscard]] bool process_target_datagram(
         std::vector<std::byte> datagram,
         const NetchanDriverTimePoint now,
-        std::size_t& outgoing_packets_this_update)
+        std::size_t& outgoing_packets_this_update,
+        const bool reassembled_split = false)
     {
         const auto datagram_size = datagram.size();
         const auto classification = classify_netchan_datagram(datagram);
+        active_receive_metadata_.emplace();
+        active_receive_metadata_->datagram_size = datagram_size;
+        active_receive_metadata_->classification = classification.classification;
         if (classification.classification == NetchanDatagramClassification::connectionless) {
+            // Classification confirms the four-byte OOB marker. Keep only the
+            // next opcode byte; its remaining server/auth text stays opaque.
+            constexpr std::size_t marker_size = sizeof(std::uint32_t);
+            if (datagram_size > marker_size)
+                active_receive_metadata_->connectionless_opcode =
+                    std::to_integer<std::uint8_t>(datagram[marker_size]);
             enter_terminal(
                 NetchanDriverState::protocol_error,
                 NetchanDriverErrorCode::unexpected_connectionless_packet,
@@ -1199,6 +1452,21 @@ private:
         }
         if (classification.classification ==
             NetchanDatagramClassification::unsupported_special) {
+            if (config_.accept_udp_split_packets && !reassembled_split) {
+                std::optional<std::vector<std::byte>> joined;
+                try {
+                    joined = accept_split_part(datagram, now);
+                } catch (...) {
+                    // A UDP split transfer is expendable; preserve the existing
+                    // bounded channel and allow the next ordinary snapshot.
+                    split_transfers_ = {};
+                    ++receive_statistics_.split_rejected;
+                    return true;
+                }
+                if (joined) return process_target_datagram(std::move(*joined), now,
+                    outgoing_packets_this_update, true);
+                return true;
+            }
             enter_terminal(
                 NetchanDriverState::protocol_error,
                 NetchanDriverErrorCode::unsupported_special_packet,
@@ -1247,6 +1515,8 @@ private:
             return false;
         }
         const auto header = peeked.packet->header;
+        active_receive_metadata_->sequence = header.sequence.sequence.value();
+        active_receive_metadata_->acknowledgement = header.acknowledgement.sequence.value();
         emit_trace(
             NetchanDriverTraceClassification::sequenced_packet_received,
             remote_endpoint_,
@@ -1286,7 +1556,8 @@ private:
                 NetchanPacketLimits{
                     header.sequence.flags.fragmented
                         ? config_.maximum_fragment_datagram_size
-                        : config_.maximum_datagram_size});
+                        : reassembled_split ? kMaximumNetchanDatagramSize
+                                            : config_.maximum_datagram_size});
         } catch (...) {
             enter_terminal(
                 NetchanDriverState::protocol_error,
@@ -1393,6 +1664,8 @@ private:
             packet.header.acknowledgement.reliable,
             NetchanDirection::server_to_client,
             now,
+            socket_read_begin_ns_,
+            socket_read_end_ns_,
         };
         const auto committed = session_.commit_incoming(std::move(inspection));
         if (!committed) {
@@ -1408,7 +1681,11 @@ private:
             return false;
         }
 
-        if (!session_.first_acknowledgement_sent()) {
+        if (graceful_close_.requested) {
+            // Terminal scheduling owns the next ordinary packet/ACK. Never
+            // introduce an extra send (or new gameplay payload) from RX.
+            acknowledgement_pending_ = true;
+        } else if (!session_.first_acknowledgement_sent()) {
             if (!send_first_acknowledgement(now, outgoing_packets_this_update)) {
                 return false;
             }
@@ -1654,6 +1931,9 @@ private:
                     packet.header.acknowledgement.reliable,
                     NetchanDirection::server_to_client,
                     now,
+                    socket_read_begin_ns_,
+                    socket_read_end_ns_,
+                    NetchanPayloadBodyKind::contemporaneous_fragment_suffix,
                 });
             } catch (...) {
                 enter_terminal(
@@ -1695,7 +1975,9 @@ private:
             return false;
         }
 
-        if (!session_.first_acknowledgement_sent()) {
+        if (graceful_close_.requested) {
+            acknowledgement_pending_ = true;
+        } else if (!session_.first_acknowledgement_sent()) {
             if (!send_first_acknowledgement(now, outgoing_packets_this_update)) {
                 return false;
             }
@@ -1762,6 +2044,9 @@ private:
                 packet.header.acknowledgement.reliable,
                 NetchanDirection::server_to_client,
                 now,
+                socket_read_begin_ns_,
+                socket_read_end_ns_,
+                NetchanPayloadBodyKind::normal_fragment_completion,
             };
             events_.push(NetchanDriverEvent{
                 NetchanDriverEventType::payload_ready,
@@ -2003,6 +2288,113 @@ private:
         return true;
     }
 
+    void update_graceful_close(const NetchanDriverTimePoint now)
+    {
+        if (!graceful_close_.deadline_at || now >= *graceful_close_.deadline_at) {
+            graceful_close_.deadline_reached = true;
+            graceful_close_.outcome = graceful_close_.successful_send_count
+                ? GracefulCloseOutcome::sent_but_unconfirmed
+                : GracefulCloseOutcome::send_failed;
+            close(now);
+            return;
+        }
+        if (events_.size() == config_.maximum_events) {
+            enter_backpressure(now);
+            return;
+        }
+        const bool due = !last_close_attempt_at_ ||
+            now - *last_close_attempt_at_ >= kGracefulCloseRetryInterval;
+        if (due && graceful_close_.send_attempt_count < kGracefulCloseMaximumSendAttempts) {
+            auto prepared = session_.prepare_outgoing_packet(DisconnectRequestBuilder::build());
+            bool terminal_payload = prepared && prepared.plan &&
+                prepared.plan->unreliable_payload_size() == DisconnectRequestBuilder::build().size();
+            if (!prepared && prepared.error &&
+                (prepared.error->code == NetchanSessionErrorCode::combined_payload_does_not_fit ||
+                 prepared.error->code == NetchanSessionErrorCode::outgoing_fragment_datagram_does_not_fit) &&
+                graceful_close_.support_send_attempt_count < kGracefulCloseMaximumSupportSendAttempts) {
+                // Flush an existing complete reliable unit, never rewrite or
+                // drop it to make room for the terminal suffix.
+                prepared = session_.prepare_outgoing_packet();
+            }
+            if (prepared && prepared.plan &&
+                (terminal_payload || graceful_close_.support_send_attempt_count <
+                    kGracefulCloseMaximumSupportSendAttempts)) {
+                const auto& packet = prepared.plan->packet();
+                const auto sequence = packet.header.sequence.sequence;
+                auto encoded = encode_packet(packet, now);
+                if (!encoded) return;
+                last_close_attempt_at_ = now;
+                if (terminal_payload) ++graceful_close_.send_attempt_count;
+                else ++graceful_close_.support_send_attempt_count;
+                const auto* fragment = prepared.plan->fragment_plan()
+                    ? &*prepared.plan->fragment_plan() : nullptr;
+                if (!send_datagram(*encoded, packet.header, packet.payload.size(), now,
+                                   fragment, 0U, true)) {
+                    static_cast<void>(session_.abandon_outgoing_packet(std::move(*prepared.plan)));
+                } else {
+                    const auto committed = session_.commit_outgoing_send(std::move(*prepared.plan));
+                    if (!committed) {
+                        enter_terminal(NetchanDriverState::protocol_error,
+                            NetchanDriverErrorCode::packet_encode_failed,
+                            "Sent terminal packet could not be committed", now,
+                            NetchanDriverTraceClassification::protocol_failure,
+                            NetchanDriverEventType::protocol_error, std::nullopt,
+                            committed.error ? std::optional{committed.error->code} : std::nullopt);
+                        return;
+                    }
+                    if (terminal_payload) {
+                        ++graceful_close_.successful_send_count;
+                        if (!first_close_sent_sequence_) first_close_sent_sequence_ = sequence;
+                        if (!graceful_close_.first_send_at) graceful_close_.first_send_at = now;
+                        graceful_close_.last_send_at = now;
+                    } else ++graceful_close_.successful_support_send_count;
+                }
+            } else if (!prepared && prepared.error &&
+                prepared.error->code != NetchanSessionErrorCode::combined_payload_does_not_fit &&
+                prepared.error->code != NetchanSessionErrorCode::outgoing_fragment_datagram_does_not_fit) {
+                enter_terminal(NetchanDriverState::protocol_error,
+                    NetchanDriverErrorCode::packet_encode_failed,
+                    "Netchan rejected the typed terminal packet", now,
+                    NetchanDriverTraceClassification::protocol_failure,
+                    NetchanDriverEventType::protocol_error, std::nullopt, prepared.error->code);
+                return;
+            }
+        }
+        if (state_ != NetchanDriverState::active) return;
+        // Exactly the existing endpoint/sequence/fragment validators, with a
+        // bounded RX budget. Deadline is not moved by any traffic.
+        std::size_t no_automatic_tx = config_.maximum_outgoing_packets_per_update;
+        for (std::size_t count{}; count < config_.maximum_datagrams_per_update &&
+             state_ == NetchanDriverState::active; ++count) {
+            network::DatagramTransportReceiveResult received;
+            try {
+                ++receive_statistics_.receive_polls;
+                if (movement_diagnostics_enabled_)
+                    socket_read_begin_ns_ = actual_socket_read_ns();
+                received = transport_.receive(config_.maximum_datagram_size);
+                if (movement_diagnostics_enabled_)
+                    socket_read_end_ns_ = actual_socket_read_ns();
+            } catch (...) {
+                enter_terminal(NetchanDriverState::network_error,
+                    NetchanDriverErrorCode::receive_failed,
+                    "Datagram transport threw during graceful close", now,
+                    NetchanDriverTraceClassification::network_failure,
+                    NetchanDriverEventType::network_error);
+                return;
+            }
+            if (!process_receive_result(std::move(received), now, no_automatic_tx)) break;
+        }
+        if (state_ != NetchanDriverState::active || !first_close_sent_sequence_) return;
+        const auto covering = compare_sequences(session_.state().peer_acknowledgement,
+                                                *first_close_sent_sequence_);
+        if (covering == NetchanSequenceComparison::equal ||
+            covering == NetchanSequenceComparison::newer) {
+            graceful_close_.ack_observed = true;
+            graceful_close_.outcome = GracefulCloseOutcome::transport_acknowledged;
+            close(now);
+        }
+    }
+
     void send_pending(
         const NetchanDriverTimePoint now,
         std::size_t& outgoing_packets_this_update)
@@ -2180,6 +2572,7 @@ private:
             return false;
         }
         if (retain_on_would_block && sent.status == network::DatagramSendStatus::would_block && sent.error.empty()) {
+            if (graceful_close_.requested) ++graceful_close_.would_block_count;
             return false; // Context remains owned; stop before RX can revise it.
         }
         if (!sent || !sent.error.empty()) {
@@ -2190,7 +2583,9 @@ private:
                                    : std::move(sent.error),
                 now,
                 NetchanDriverTraceClassification::network_failure,
-                NetchanDriverEventType::network_error);
+                NetchanDriverEventType::network_error,
+                std::nullopt, std::nullopt, std::nullopt,
+                native_failure(sent.native_error));
             return false;
         }
         ++transmitted_packet_count_;
@@ -2241,12 +2636,19 @@ private:
         const std::optional<NetchanPacketErrorCode> packet_code = std::nullopt,
         const std::optional<NetchanSessionErrorCode> session_code = std::nullopt,
         const std::optional<NetchanReassemblyErrorCode> reassembly_code =
-            std::nullopt)
+            std::nullopt,
+        const std::optional<network::SocketNativeError> native_error = std::nullopt)
     {
         if (terminal_state(state_)) {
             return;
         }
         state_ = state;
+        if (graceful_close_.requested && graceful_close_.outcome == GracefulCloseOutcome::pending) {
+            graceful_close_.transport_error = code;
+            graceful_close_.netchan_closed_at = now;
+            graceful_close_.outcome = code == NetchanDriverErrorCode::send_failed
+                ? GracefulCloseOutcome::send_failed : GracefulCloseOutcome::fatal_failure;
+        }
         if (code) {
             last_error_ = NetchanDriverError{
                 *code,
@@ -2254,6 +2656,8 @@ private:
                 session_code,
                 bounded_context(std::move(context)),
                 reassembly_code,
+                native_error,
+                received_packet_failure(*code) ? active_receive_metadata_ : std::nullopt,
             };
         }
         if (event_type && events_.can_push()) {
@@ -2280,6 +2684,7 @@ private:
         ++cleanup_count_;
         session_.clear_reliable_state();
         reassembler_.clear();
+        split_transfers_ = {};
         std::vector<std::byte>{}.swap(pending_unreliable_payload_);
         pending_contextual_plan_.reset();
         pending_contextual_plan_identity_.reset();
@@ -2355,10 +2760,12 @@ private:
         outgoing_context_identity_{
             std::make_shared<const NetchanDriverContextIdentity>()};
     NetchanNormalReassembler reassembler_;
+    std::array<SplitTransfer, 2U> split_transfers_;
     EventRing events_;
     bool configuration_valid_{false};
     NetchanDriverState state_{NetchanDriverState::idle};
     std::optional<NetchanDriverError> last_error_;
+    std::optional<NetchanFailurePacketMetadata> active_receive_metadata_;
     std::optional<network::NetworkAddress> local_endpoint_;
     std::optional<NetchanDriverTimePoint> started_at_;
     std::optional<NetchanDriverTimePoint> last_update_;
@@ -2372,9 +2779,15 @@ private:
     bool cleanup_done_{false};
     std::size_t transmitted_packet_count_{0U};
     NetchanDriverReceiveStatistics receive_statistics_{};
+    bool movement_diagnostics_enabled_{false};
+    std::optional<std::uint64_t> socket_read_begin_ns_;
+    std::optional<std::uint64_t> socket_read_end_ns_;
     std::size_t cleanup_count_{0U};
     std::uint64_t outgoing_context_revision_{0U};
     std::uint64_t next_outgoing_context_plan_identity_{1U};
+    GracefulCloseSummary graceful_close_;
+    std::optional<NetchanDriverTimePoint> last_close_attempt_at_;
+    std::optional<NetchanSequence> first_close_sent_sequence_;
 };
 
 NetchanDriver::NetchanDriver(
@@ -2414,6 +2827,21 @@ void NetchanDriver::cancel(const NetchanDriverTimePoint now)
 void NetchanDriver::close(const NetchanDriverTimePoint now)
 {
     implementation_->close(now);
+}
+
+bool NetchanDriver::request_graceful_close(const NetchanDriverTimePoint now)
+{
+    return implementation_->request_graceful_close(now);
+}
+
+void NetchanDriver::confirm_server_disconnect(const NetchanDriverTimePoint now)
+{
+    implementation_->confirm_server_disconnect(now);
+}
+
+GracefulCloseSummary NetchanDriver::graceful_close_snapshot() const noexcept
+{
+    return implementation_->graceful_close_snapshot();
 }
 
 NetchanDriverOperationResult NetchanDriver::queue_reliable(
@@ -2503,6 +2931,11 @@ std::size_t NetchanDriver::transmitted_packet_count() const noexcept
 NetchanDriverReceiveStatistics NetchanDriver::receive_statistics() const noexcept
 {
     return implementation_->receive_statistics();
+}
+
+void NetchanDriver::set_movement_diagnostics_enabled(const bool enabled) noexcept
+{
+    implementation_->set_movement_diagnostics_enabled(enabled);
 }
 
 std::optional<std::uint64_t>

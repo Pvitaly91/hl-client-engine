@@ -139,6 +139,43 @@ TEST_CASE("World render package retains exact neutral geometry and UV bindings",
     CHECK(package.resource_revision() != 0U);
 }
 
+TEST_CASE("Flat sky backdrop requires verified uniform opaque special-surface pixels",
+          "[world-render][package][sky-background][no-stock]")
+{
+    const auto build = [](const bool special, const std::string& name,
+                          const bool nonuniform, const bool masked, const bool lit) {
+        auto world = fixture::make_world();
+        world.materials[0U].texture_name = name;
+        world.surfaces[0U].special_surface = special;
+        auto texture = fixture::make_texture(masked);
+        texture.name = name;
+        if (nonuniform) texture.mip_levels[3U].rgba_pixels[0U] = std::byte{0x41};
+        assets::WorldMaterialTextureBinding binding;
+        binding.status = assets::WorldMaterialTextureBindingStatus::resolved_embedded;
+        binding.texture_asset_index = 0U;
+        binding.source_bsp_texture_index = 0U;
+        auto textures = assets::WorldTextureSet::create({std::move(texture)}, {binding}, {}, 1U);
+        REQUIRE(textures.texture_set);
+        fixture::FixtureOptions options;
+        options.unlit = !lit;
+        return world_render::WorldRenderPackageBuilder{}.build(
+            assets::TexturedWorldAsset{std::move(world), std::move(*textures.texture_set)},
+            fixture::make_lightmap_set(options));
+    };
+    const auto accepted = build(true, "SkY", false, false, false);
+    REQUIRE(accepted.package);
+    REQUIRE(accepted.package->flat_sky_background());
+    CHECK(accepted.package->flat_sky_background()->rgb == std::array<std::uint8_t,3>{64,64,64});
+    for (const auto& rejected : {build(false,"sky",false,false,false),
+                               build(true,"STONE",false,false,false),
+                               build(true,"sky",true,false,false),
+                               build(true,"sky",false,true,false),
+                               build(true,"sky",false,false,true)}) {
+        REQUIRE(rejected.package);
+        CHECK_FALSE(rejected.package->flat_sky_background());
+    }
+}
+
 TEST_CASE("World render package supports unlit, masked and multiple-page materials",
           "[world-render][package]")
 {

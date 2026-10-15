@@ -270,9 +270,7 @@ unsupported_sprite_reason(
     const SpriteRenderAsset& asset,
     const entity_visual::EntityVisualRenderMode render_mode) noexcept
 {
-    if (asset.orientation() == assets::SpriteOrientation::facing_upright ||
-        asset.orientation() ==
-            assets::SpriteOrientation::view_parallel_oriented) {
+    if (asset.orientation() == assets::SpriteOrientation::facing_upright) {
         return UnsupportedEntityVisualReason::unsupported_sprite_orientation;
     }
     if (asset.render_profile() == SpriteRenderTextureProfile::unsupported) {
@@ -293,7 +291,7 @@ unsupported_sprite_reason(
             : std::optional<UnsupportedEntityVisualReason>{
                   UnsupportedEntityVisualReason::unsupported_render_mode};
     case entity_visual::EntityVisualRenderMode::additive:
-        return UnsupportedEntityVisualReason::unsupported_render_mode;
+        return std::nullopt;
     }
     return UnsupportedEntityVisualReason::unsupported_render_mode;
 }
@@ -730,6 +728,8 @@ EntityRenderFrameCompositionResult EntityRenderFrameComposer::compose(
                 instance.orientation = render_asset.orientation();
                 instance.texture_format_support =
                     render_asset.texture_support_status();
+                if (entity.render_mode() == entity_visual::EntityVisualRenderMode::additive)
+                    instance.blend_mode = SpriteBlendMode::additive;
                 instance.bounds = *bounds;
                 build_input.sprite_instances.push_back(instance);
                 continue;

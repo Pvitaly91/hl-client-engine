@@ -20,6 +20,7 @@ inline constexpr std::uint16_t kReferenceGoldSrcButtonDirections = kGoldSrcButto
 inline constexpr std::uint16_t kReferenceGoldSrcButtonAttack = 1U << 0U;
 inline constexpr std::uint16_t kReferenceGoldSrcButtonJump = 1U << 1U;
 inline constexpr std::uint16_t kReferenceGoldSrcButtonDuck = 1U << 2U;
+inline constexpr std::uint16_t kReferenceGoldSrcButtonAttack2 = 1U << 11U;
 inline constexpr std::uint16_t kReferenceGoldSrcButtonReload = 1U << 13U;
 
 // Quantized network values, deliberately not a simulation/history command.

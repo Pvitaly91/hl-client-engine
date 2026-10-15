@@ -78,6 +78,11 @@ private:
         collision::CollisionQueryScratch&,
         const collision::CollisionQueryLimits&,
         std::uint64_t);
+    friend PredictionVisualCorrectionSampleResult
+    publish_validated_prediction_visual_camera(
+        const PredictionVisualCorrectionState&,
+        const gameplay_camera::GameplayCameraState&,
+        assets::AssetVector3,double,std::uint64_t,std::uint64_t,double) noexcept;
 
     PredictionVisualCorrectionState(
         PredictionCorrectionClass correction_class,
@@ -160,5 +165,17 @@ sample_prediction_visual_correction(
     collision::CollisionQueryScratch& scratch,
     const collision::CollisionQueryLimits& query_limits = {},
     std::uint64_t maximum_camera_revision = UINT64_MAX);
+
+// The owning presentation layer must already have validated its complete body
+// and eye path. This commits only that camera/residual within the existing
+// correction's identity and deadline; it cannot start or extend a correction.
+[[nodiscard]] PredictionVisualCorrectionSampleResult
+publish_validated_prediction_visual_camera(
+    const PredictionVisualCorrectionState& correction,
+    const gameplay_camera::GameplayCameraState& corrected_camera,
+    assets::AssetVector3 validated_eye,double sample_monotonic_time_seconds,
+    std::uint64_t expected_prediction_revision,
+    std::uint64_t expected_authority_update_ordinal,
+    double maximum_offset_magnitude = 4.0) noexcept;
 
 } // namespace hlclient::prediction

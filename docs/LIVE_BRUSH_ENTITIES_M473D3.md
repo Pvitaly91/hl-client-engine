@@ -1,5 +1,89 @@
 # D3: live brush instances (offline implementation record)
 
+## Crossfire launch-console follow-up — 2026-10-14
+
+New `attribution=user_report`: launch button is hidden as if already pressed.
+Approved read-only BSP inspection distinguishes the visible `func_wall *66`
+(`+abutton2`) from invisible touch triggers `*65/*67`, and the moving cover
+`func_door *44` (`strike_ready_door`). The latter is a toggle door, downwards,
+not START_OPEN. Its authoritative origin must be honored, never forced open.
+
+The actual map's `strike_mm` closes that cover at +2s, starts
+`strike_timer_mmb` at +55s, and the latter invokes `strike_timer_mma` after 180s:
+the normal ready transition is +235s from launch. The nuclear visual messages
+occur at +52s: `strike_flash` white RGBA255 fade-in4s/hold0, `strike_shake`
+amplitude16/duration2s/frequency2.5. These are inspected map facts, not a claim
+that the user's exact server session was in cooldown; its retained reports lack
+the specific committed cover pose. No client-side map timer or force-visible
+override is introduced. The opt-in `[local-brush-control]` checks actual visible
+front pixels/both texture banks with the cover in each server-owned test pose.
+
+The accompanying door-impact fix adds a committed scene fallback when no moving
+support is active and when movement prediction is disabled; see E5's follow-up.
+Read-only inspector now prints bounded safe numeric multi-manager entries and
+fade/shake metadata through its existing approved asset path. Evidence is in
+`manual-artifacts/task-records/crossfire-presentation-repairs-20261014`.
+
+### Combined follow-up verification — 2026-10-15
+
+The four implemented repairs are documented in E15 (MP5 automatic reload),
+E29 (pickup-history/ammo layout), E22 (server fade/shake presentation), and E5
+(verified brush impacts). The launch-cover report is investigated, **not marked
+fixed or manually confirmed**. No server timing, map asset or server state was
+changed to force visibility.
+
+After the last production edit, VS2022/Win32 Debug and Release builds passed.
+Each broad targeted run passed 455 cases/1,091,846 assertions, with 14 explicit
+optional-resource skips. Read-only actual Crossfire GPU control passed 1 case/
+250 assertions in both configurations: closed cover hides the panel, open cover
+shows 1,283..5,458 changed front pixels across the checked views/texture banks,
+GL errors zero. These are authored control poses, not reconstructed live poses.
+Separate Release original HUD SPR/WAV preparation and GPU tests passed 3 cases/
+894,747 assertions through the approved resource pipeline, without playback.
+
+Core-only Release (`HLCLIENT_BUILD_GAME_HALFLIFE=OFF`) built successfully and
+passed all 44 CTest registrations, including the architecture guard. Final full
+Release CTest, serial and after the last production edit: 3,678 registrations,
+3,612 passed, 66 explicit skips, 0 failures (591.40s). Skips include opt-in installed
+assets/device/WFP checks, unavailable reparse/symlink capabilities/private corpus,
+and hidden-SDL capture capabilities; they are not counted as successful tests.
+The separately passed actual Crossfire/HUD controls remain separate evidence.
+The full `scripts/build_source.ps1 -Configuration Release -TestOnly -Parallel 1`
+wrapper then completed successfully: version/help/null startup, transport and
+reporting self-checks, no-stock launcher fixtures, and manual launcher
+`-CheckOnly -SourceOnly`. Source-only CheckOnly verifies selection/contracts,
+not external Steam/game readiness or a live connection.
+
+The first parallel full run had one process-inventory assertion failure in
+`hlclient_functional_publication_roundtrip_powershell51`. Its before/after check
+observes host-wide process names. Both publication variants passed in the final
+serial full run, with no source/assertion changes. The concurrent run is retained
+as failed evidence; the exact intervening process was not identified. Earlier
+development failures exposed fixture body-selection/update-order assumptions and
+the mistaken expectation of seeing the button through its closed cover; the
+positive/negative controls were corrected without weakening production bounds.
+
+Current normal `build/bin/Release/hlclient.exe` SHA-256:
+`E38D6CFCAA7C073750F2149B08640F7A9FC9EAEFFB4C90CBA53D56F539AF1D5F`.
+The launcher remains byte-identical (SHA-256
+`6BBF0102FF183B70BE3C55FEBEA0820F85829FEA77BA886B1826193042B98FF0`),
+selects the sibling `hlclient.exe`, and its saved settings are unchanged.
+No hidden effect flag or asset copying is required.
+
+The pre-edit snapshot of 1,414 source files was hash-verified; none are missing.
+39 existing files changed in this follow-up, 4 source/test files added. HEAD
+`00505f71ff2547a9a6b083e53edf69ec45d48213`, branch and staged set are unchanged;
+pinned SDK `b1b5cf5892918535619b2937bb927e46cb097ba1` remains clean/unchanged.
+`git diff --check` passed. No staging/commit/push or agent live sessions.
+ASan runtime was not revalidated; its recent unconfirmed status is unchanged.
+New image `manual=not_run`: verify empty-magazine MP5 reload, pickups at the
+chosen HUD scale, nuclear white flash/shake, and impacts on closed/moving bunker
+doors. If the cover stays closed outside its server-owned cooldown, that case
+still requires a retained live cover-pose observation rather than a client
+force-open workaround.
+
+## Historical D3 implementation record
+
 Worktree: `D:\DEV\CPP\HLC-steamcfg-5e48b7c1`, branch
 `codex/stock-runtime-campaign-5e48b7c1`, starting HEAD
 `ea738a80e5a66a500c245f95b96eed32198e2d66`. Existing uncommitted sources

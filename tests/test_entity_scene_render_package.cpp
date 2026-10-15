@@ -435,8 +435,7 @@ TEST_CASE("Entity render frame suppresses evidence-pending Sprite orientations",
     "[entity-render][frame][sprite][orientation][unsupported]")
 {
     for (const auto orientation : {
-             assets::SpriteOrientation::facing_upright,
-             assets::SpriteOrientation::view_parallel_oriented}) {
+             assets::SpriteOrientation::facing_upright}) {
         auto scene = fixture::scene_package(fixture::render_assets(false,
             true,
             assets::SpriteTextureFormat::normal,
@@ -472,6 +471,154 @@ TEST_CASE("Entity render frame suppresses evidence-pending Sprite orientations",
     }
 }
 
+TEST_CASE("E16 entity render frame draws verified camera-parallel oriented sprites",
+    "[e16][entity-render][frame][sprite][orientation]")
+{
+    auto scene = fixture::scene_package(fixture::render_assets(false,
+        true, assets::SpriteTextureFormat::normal, false,
+        assets::SpriteOrientation::view_parallel_oriented));
+    REQUIRE(scene);
+    render::EntityRenderFrameBuildInput input;
+    input.resource_id = 0x8001U;
+    input.resource_revision = 1U;
+    input.interpolation = {
+        0.5, 0.0, 1.0, 0.5F, 0x10U, 0x11U,
+        render::EntityRenderInterpolationProfile::synthetic_seconds_v1};
+    render::SpriteEntityRenderInstance sprite;
+    sprite.entity_number = 1U;
+    sprite.sprite_asset_index = 0U;
+    sprite.selected_frame_index = 0U;
+    sprite.orientation = assets::SpriteOrientation::view_parallel_oriented;
+    sprite.texture_format_support =
+        scene.package->sprite_assets()[0U]->texture_support_status();
+    sprite.transform.rotation_degrees.x = 45.0F;
+    sprite.bounds = {{-0.5F, -0.5F, -0.5F}, {0.5F, 0.5F, 0.5F}};
+    input.sprite_instances.push_back(sprite);
+    const auto built = render::EntityRenderFrameBuilder{}.build(
+        *scene.package, std::move(input));
+    REQUIRE(built);
+    REQUIRE(built.frame);
+    REQUIRE(built.frame->sprite_instances().size() == 1U);
+    CHECK(built.frame->sprite_instances()[0U].orientation ==
+        assets::SpriteOrientation::view_parallel_oriented);
+    CHECK(built.frame->sprite_instances()[0U].visibility_status ==
+        render::RuntimeEntityVisibilityStatus::visible);
+    CHECK(built.frame->statistics().unsupported_visual_count == 0U);
+    CHECK(built.frame->statistics().visible_count == 1U);
+    REQUIRE(built.frame->draw_commands().size() == 1U);
+    CHECK(built.frame->draw_commands()[0U].draw_class ==
+        render::EntityDrawClass::sprite_normal);
+}
+
+TEST_CASE("E21 surface-aligned sprite execution is explicit narrow and signature-owned",
+    "[e21][e21-2][entity-render][frame][sprite][orientation][no-stock]")
+{
+    auto scene = fixture::scene_package(fixture::render_assets(true, true,
+        assets::SpriteTextureFormat::additive));
+    REQUIRE(scene);
+    auto input = mixed_frame_input(*scene.package);
+    auto& sprite = input.sprite_instances[0U];
+    CHECK_FALSE(sprite.surface_aligned);
+    REQUIRE(scene.package->sprite_assets()[0U]->orientation() ==
+        assets::SpriteOrientation::view_parallel);
+    sprite.blend_mode = render::SpriteBlendMode::additive;
+    sprite.transform.rotation_degrees = {0.0F, 90.0F, 0.0F};
+    const auto ordinary = render::EntityRenderFrameBuilder{}.build(*scene.package, input);
+    REQUIRE(ordinary);
+
+    sprite.surface_aligned = true;
+    sprite.orientation = assets::SpriteOrientation::oriented;
+    const auto aligned = render::EntityRenderFrameBuilder{}.build(*scene.package, input);
+    REQUIRE(aligned);
+    REQUIRE(aligned.frame->sprite_instances().size() == 1U);
+    CHECK(aligned.frame->sprite_instances()[0U].surface_aligned);
+    CHECK(aligned.frame->sprite_instances()[0U].orientation ==
+        assets::SpriteOrientation::oriented);
+    CHECK(aligned.frame->sprite_instances()[0U].visibility_status ==
+        render::RuntimeEntityVisibilityStatus::visible);
+    CHECK(aligned.frame->frame_signature() != ordinary.frame->frame_signature());
+    const auto repeated = render::EntityRenderFrameBuilder{}.build(*scene.package, input);
+    REQUIRE(repeated);
+    CHECK(repeated.frame->frame_signature() == aligned.frame->frame_signature());
+    CHECK(scene.package->sprite_assets()[0U]->orientation() ==
+        assets::SpriteOrientation::view_parallel); // immutable source metadata
+
+    SECTION("unflagged orientation mismatch remains rejected") { sprite.surface_aligned = false; }
+    SECTION("flag cannot preserve the source billboard orientation") {
+        sprite.orientation = assets::SpriteOrientation::view_parallel;
+    }
+    SECTION("flag cannot select another billboard orientation") {
+        sprite.orientation = assets::SpriteOrientation::view_parallel_oriented;
+    }
+    SECTION("flag cannot bypass additive blend requirement") {
+        sprite.blend_mode = render::SpriteBlendMode::alpha_blended;
+    }
+    SECTION("flag cannot disable depth through the glow mode") {
+        sprite.blend_mode = render::SpriteBlendMode::glow;
+    }
+    SECTION("flag cannot select opaque blending") { sprite.blend_mode = render::SpriteBlendMode::opaque; }
+    SECTION("flag cannot orient a ribbon") { sprite.ribbon_end = assets::AssetVector3{1.0F, 0.0F, 0.0F}; }
+    SECTION("flag cannot bypass finite transform validation") {
+        sprite.transform.rotation_degrees.y = std::numeric_limits<float>::quiet_NaN();
+    }
+    const auto rejected = render::EntityRenderFrameBuilder{}.build(*scene.package, input);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error);
+}
+
+TEST_CASE("E21 surface alignment cannot override other source sprite orientations",
+    "[e21][e21-2][entity-render][frame][sprite][orientation][no-stock]")
+{
+    for (const auto source_orientation : {assets::SpriteOrientation::oriented,
+             assets::SpriteOrientation::view_parallel_oriented,
+             assets::SpriteOrientation::view_parallel_upright,
+             assets::SpriteOrientation::facing_upright}) {
+        CAPTURE(source_orientation);
+        auto scene = fixture::scene_package(fixture::render_assets(true, true,
+            assets::SpriteTextureFormat::additive, false, source_orientation));
+        REQUIRE(scene);
+        auto input = mixed_frame_input(*scene.package);
+        auto& sprite = input.sprite_instances[0U];
+        sprite.surface_aligned = true;
+        sprite.orientation = assets::SpriteOrientation::oriented;
+        sprite.blend_mode = render::SpriteBlendMode::additive;
+        const auto rejected = render::EntityRenderFrameBuilder{}.build(*scene.package, input);
+        REQUIRE_FALSE(rejected);
+        REQUIRE(rejected.error);
+        CHECK(rejected.error->code == render::EntityRenderFrameErrorCode::invalid_asset_reference);
+    }
+}
+
+TEST_CASE("E11 generic frame keeps sixteen owner-child pairs and rejects orphan duplicate attachments",
+          "[e11][entity-render][frame][bounds]") {
+    auto scene=fixture::scene_package(fixture::render_assets());REQUIRE(scene);
+    auto input=mixed_frame_input(*scene.package);
+    const auto body=input.studio_instances[0];
+    input.studio_instances.clear();input.sprite_instances.clear();input.unsupported_instances.clear();
+    for(unsigned player=1U;player<=16U;++player) {
+        auto primary=body;primary.entity_number=player;
+        auto child=primary;child.subinstance_ordinal=1U;
+        input.studio_instances.push_back(child);input.studio_instances.push_back(primary);
+    }
+    const auto built=render::EntityRenderFrameBuilder{}.build(*scene.package,input);REQUIRE(built);
+    REQUIRE(built.frame->studio_instances().size()==32U);REQUIRE(built.frame->draw_commands().size()==64U);
+    for(std::size_t i=0;i<32U;i+=2U) {
+        const auto& a=built.frame->studio_instances()[i];const auto& b=built.frame->studio_instances()[i+1U];
+        CHECK(a.entity_number==b.entity_number);CHECK(a.subinstance_ordinal==0U);CHECK(b.subinstance_ordinal==1U);
+        // This fixture has opaque and masked meshes: BOTH parent passes must
+        // precede BOTH child passes, including mixed-material attachments.
+        CHECK(built.frame->draw_commands()[i*2U].instance_index==i);
+        CHECK(built.frame->draw_commands()[i*2U+1U].instance_index==i);
+        CHECK(built.frame->draw_commands()[i*2U+2U].instance_index==i+1U);
+        CHECK(built.frame->draw_commands()[i*2U+3U].instance_index==i+1U);
+    }
+    auto duplicate=input;duplicate.studio_instances.push_back(input.studio_instances[0]);
+    CHECK_FALSE(render::EntityRenderFrameBuilder{}.build(*scene.package,std::move(duplicate)));
+    auto orphan=input;orphan.studio_instances[1].entity_number=900U;
+    CHECK_FALSE(render::EntityRenderFrameBuilder{}.build(*scene.package,std::move(orphan)));
+    auto illegal=input;illegal.studio_instances[0].subinstance_ordinal=2U;
+    CHECK_FALSE(render::EntityRenderFrameBuilder{}.build(*scene.package,std::move(illegal)));
+}
 TEST_CASE("Entity render boundary exposes no paths snapshots or GL handles",
     "[entity-render][scene][boundary]")
 {

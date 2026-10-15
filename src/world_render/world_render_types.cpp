@@ -13,6 +13,7 @@ WorldRenderPackage::WorldRenderPackage(
     const assets::WorldBounds bounds,
     const WorldRenderCoordinateMetadata coordinate_metadata,
     const WorldRenderStatistics statistics,
+    std::optional<WorldFlatSkyBackground> flat_sky_background,
     const WorldRendererResourceIdentity resource_identity) noexcept
     : textured_world_{std::move(textured_world)},
       lightmaps_{std::move(lightmaps)},
@@ -24,6 +25,7 @@ WorldRenderPackage::WorldRenderPackage(
       bounds_{bounds},
       coordinate_metadata_{coordinate_metadata},
       statistics_{statistics},
+      flat_sky_background_{std::move(flat_sky_background)},
       resource_identity_{resource_identity}
 {
 }
@@ -77,6 +79,12 @@ const WorldRenderCoordinateMetadata& WorldRenderPackage::coordinate_metadata() c
 const WorldRenderStatistics& WorldRenderPackage::statistics() const noexcept
 {
     return statistics_;
+}
+
+const std::optional<WorldFlatSkyBackground>&
+WorldRenderPackage::flat_sky_background() const noexcept
+{
+    return flat_sky_background_;
 }
 
 WorldRendererResourceIdentity WorldRenderPackage::resource_identity() const noexcept

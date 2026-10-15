@@ -421,7 +421,9 @@ bool ChallengeExchange::process_received(
             ChallengeTraceClassification::response_rejected,
             source,
             received.datagram->payload.size(),
-            received.datagram->payload);
+            received.datagram->payload,
+            parsed.error ? std::optional{parsed.error->byte_offset} : std::nullopt,
+            parsed.error ? std::optional{parsed.error->field} : std::nullopt);
         return false;
     }
 
@@ -446,12 +448,14 @@ void ChallengeExchange::fail(
     const ChallengeTraceClassification classification,
     const network::NetworkAddress endpoint,
     const std::size_t datagram_size,
-    const std::span<const std::byte> preview)
+    const std::span<const std::byte> preview,
+    const std::optional<std::size_t> protocol_byte_offset,
+    const std::optional<ChallengeProtocolField> protocol_field)
 {
     state_ = state;
     next_retry_.reset();
     context = bounded_text(std::move(context));
-    error_ = ChallengeExchangeError{category, protocol_code, context};
+    error_ = ChallengeExchangeError{category, protocol_code, context,protocol_byte_offset,protocol_field};
     emit_trace(classification, now, endpoint, datagram_size, preview, std::move(context));
 }
 

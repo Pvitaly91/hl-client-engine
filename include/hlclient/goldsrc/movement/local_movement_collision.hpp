@@ -10,8 +10,23 @@
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <span>
+#include <vector>
 
 namespace hlclient::goldsrc::movement {
+
+inline constexpr std::size_t kMaximumServerEntityCollisionBoxes = 128U;
+struct ServerEntityCollisionBox final {
+    std::uint32_t entity{};
+    assets::WorldBounds bounds{}; // exact committed world-space, axis aligned
+    friend bool operator==(const ServerEntityCollisionBox& a,
+                           const ServerEntityCollisionBox& b) noexcept {
+        return a.entity==b.entity && a.bounds.minimum.x==b.bounds.minimum.x &&
+            a.bounds.minimum.y==b.bounds.minimum.y && a.bounds.minimum.z==b.bounds.minimum.z &&
+            a.bounds.maximum.x==b.bounds.maximum.x && a.bounds.maximum.y==b.bounds.maximum.y &&
+            a.bounds.maximum.z==b.bounds.maximum.z;
+    }
+};
 
 enum class LocalMovementCollisionProfile : std::uint8_t {
     world_only_v1,
@@ -230,7 +245,8 @@ public:
     explicit BrushSceneMovementCollision(
         std::shared_ptr<
             const hlclient::goldsrc::collision::BrushCollisionScene>
-            scene) noexcept;
+            scene, std::span<const ServerEntityCollisionBox> boxes = {});
+    [[nodiscard]] std::span<const ServerEntityCollisionBox> entity_boxes() const noexcept { return boxes_; }
 
     [[nodiscard]] LocalMovementCollisionProfile profile()
         const noexcept override;
@@ -258,14 +274,38 @@ public:
         const LocalMovementCollisionQueryConfig& config = {}) const override;
 
 private:
+    [[nodiscard]] LocalMovementTraceQueryResult trace_shape(
+        const assets::AssetVector3&, const assets::AssetVector3&,
+        std::optional<hlclient::collision::CollisionHullOrdinal>,
+        hlclient::collision::CollisionQueryScratch&,
+        const LocalMovementCollisionQueryConfig&) const;
+public:
+    // Reuses the exact BSP/brush/BBOX union, with zero-size query bounds.
+    [[nodiscard]] LocalMovementTraceQueryResult trace_point(
+        const assets::AssetVector3&, const assets::AssetVector3&,
+        hlclient::collision::CollisionQueryScratch&,
+        const LocalMovementCollisionQueryConfig& = {}) const;
+private:
     [[nodiscard]] std::shared_ptr<
         const hlclient::collision::CollisionWorldPackage>
     world_package() const noexcept;
 
     std::shared_ptr<const hlclient::goldsrc::collision::BrushCollisionScene>
         scene_;
+    std::vector<ServerEntityCollisionBox> boxes_;
+    bool boxes_valid_{true};
 };
 
 // Existing synthetic test/tool callers use the same implementation.
 using SyntheticBrushMovementCollision = BrushSceneMovementCollision;
+
+// Reference prediction only: recover a BSP boundary rounded onto its solid
+// side, by at most one binary32 step per axis (and <= 1/64 world unit).
+// Every candidate must be free in the complete scene. Entity boxes and real
+// penetration are never bypassed; canonical server observations stay intact.
+[[nodiscard]] std::optional<assets::AssetVector3> resolve_movement_boundary_position(
+    const assets::AssetVector3& origin, hlclient::movement::PlayerMovementHull hull,
+    const ILocalMovementCollision& collision,
+    hlclient::collision::CollisionQueryScratch& scratch,
+    const LocalMovementCollisionQueryConfig& config = {});
 } // namespace hlclient::goldsrc::movement

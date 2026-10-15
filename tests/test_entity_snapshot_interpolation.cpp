@@ -6,8 +6,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <span>
 #include <string>
@@ -641,6 +643,553 @@ TEST_CASE("E10 runtime interpolation retains missingness current visibility and 
     now.server_time_seconds = .5; now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
     result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
     REQUIRE_FALSE(result); CHECK(result.error->code == goldsrc::EntityInterpolationErrorCode::invalid_snapshot_time_order);
+}
+
+TEST_CASE("E16 selected ordinary visuals interpolate without simulating server projectiles",
+          "[e16][entity-interpolation][runtime-replay][projectile]")
+{
+    auto old = runtime_player_sample(1.0, 0.0, 1U);
+    auto now = runtime_player_sample(2.0, 100.0, 2U);
+    old.packet_entities.front().player_movement_schema = false;
+    now.packet_entities.front().player_movement_schema = false;
+    old.packet_entities.front().entity_number = now.packet_entities.front().entity_number = 40U;
+    old.packet_entities.front().frame = 64.0;
+    now.packet_entities.front().frame = 128.0;
+    now.packet_entities.front().angles.y = 10.0;
+    for (auto* state : {&old, &now}) {
+        auto independent = state->packet_entities.front();
+        independent.entity_number = 41U;
+        independent.origin.y = 20.0;
+        state->packet_entities.push_back(independent);
+        auto separately_owned_brush = independent;
+        separately_owned_brush.entity_number = 80U;
+        state->packet_entities.push_back(separately_owned_brush);
+        state->canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(*state);
+    }
+    const auto committed = now;
+    const std::array<std::uint32_t, 2U> selected{40U,41U};
+    goldsrc::RuntimeEntityInterpolationOptions options;
+    options.limits.maximum_snapshot_gap_seconds = 2.0;
+    options.ordinary_entities = selected;
+    options.no_interpolation_effect_mask = 32U;
+    for (const auto alpha : {0.0, .25, .5, .75, 1.0}) {
+        const auto result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.0 + alpha, options);
+        REQUIRE(result);
+        const auto& a = result.state->packet_entities[0];
+        const auto& b = result.state->packet_entities[1];
+        CHECK(*a.origin.x == Approx(100.0 * alpha));
+        CHECK(*b.origin.x == Approx(100.0 * alpha));
+        CHECK(*b.origin.y == 20.0);
+        CHECK(*a.angles.y == Approx(alpha == 1.0 ? 10.0 : 350.0 + 20.0 * alpha));
+        CHECK(*a.frame == Approx(64.0 + 64.0 * alpha));
+        CHECK(result.state->packet_entities[2].origin.x == 100.0);
+        CHECK(hlclient::client::valid_runtime_observation(*result.state));
+    }
+    CHECK(now == committed);
+    now.packet_entities.erase(now.packet_entities.begin());
+    now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
+    const auto removed = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+    REQUIRE(removed);
+    REQUIRE(removed.state->packet_entities.size() == 2U);
+    CHECK(removed.state->packet_entities.front().entity_number == 41U);
+    CHECK(removed.state->packet_entities.front().origin.x == 50.0);
+    // A removed server identity is never resurrected by the interpolation bracket.
+    CHECK(std::ranges::none_of(removed.state->packet_entities, [](const auto& entity) { return entity.entity_number == 40U; }));
+}
+
+TEST_CASE("E16 ordinary visuals keep current discontinuities and missing fields",
+          "[e16][entity-interpolation][runtime-replay][projectile]")
+{
+    auto old = runtime_player_sample(1.0, 0.0, 1U);
+    auto now = runtime_player_sample(2.0, 100.0, 2U);
+    old.packet_entities.front().player_movement_schema = now.packet_entities.front().player_movement_schema = false;
+    const std::array<std::uint32_t,1U> selected{2U};
+    goldsrc::RuntimeEntityInterpolationOptions options;
+    options.limits.maximum_snapshot_gap_seconds = 2.0;
+    options.ordinary_entities = selected;
+    options.no_interpolation_effect_mask = 32U;
+    SECTION("no interpolation flag") { now.packet_entities.front().effects = 32U; }
+    SECTION("model replacement") { now.packet_entities.front().model_index = 8U; }
+    SECTION("sequence discontinuity") { now.packet_entities.front().sequence = 4U; }
+    SECTION("teleport") { options.teleport_distance = 50.0; }
+    SECTION("schema switch") { old.packet_entities.front().player_movement_schema = true; }
+    SECTION("explicit disabled interpolation") { options.no_interpolation = true; }
+    old.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(old);
+    now.canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(now);
+    const auto result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+    REQUIRE(result);
+    CHECK(result.reset_count == 1U);
+    CHECK(result.state->packet_entities.front() == now.packet_entities.front());
+}
+
+TEST_CASE("E16 ordinary interpolation opt-in list has finite explicit ownership",
+          "[e16][entity-interpolation][runtime-replay][projectile]")
+{
+    auto old = runtime_player_sample(1.0, 0.0, 1U);
+    auto now = runtime_player_sample(2.0, 100.0, 2U);
+    old.packet_entities.front().player_movement_schema = now.packet_entities.front().player_movement_schema = false;
+    now.packet_entities.front().origin.y.reset();
+    for (auto* state : {&old,&now}) state->canonical_state_hash = hlclient::client::runtime_observation_canonical_hash(*state);
+    const std::array<std::uint32_t,1U> selected{2U};
+    goldsrc::RuntimeEntityInterpolationOptions options;
+    options.limits.maximum_snapshot_gap_seconds = 2.0;
+    options.ordinary_entities = selected;
+    const auto result = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+    REQUIRE(result);
+    CHECK_FALSE(result.state->packet_entities.front().origin.y);
+    CHECK(result.state->packet_entities.front().origin.x == 50.0);
+    const std::array<std::uint32_t,2U> duplicates{2U,2U}, unsorted{3U,2U}, invalid{0U,2U};
+    for (const auto list : {std::span{duplicates},std::span{unsorted},std::span{invalid}}) {
+        options.ordinary_entities = list;
+        const auto rejected = goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old, now, 1.5, options);
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error->code == goldsrc::EntityInterpolationErrorCode::invalid_configuration);
+    }
+}
+
+std::shared_ptr<const hlclient::client::RuntimeClientObservationState> buffered_ordinary_sample(
+    double time,double x,std::uint64_t record) {
+    auto state=runtime_player_sample(time,x,record);
+    auto& entity=state.packet_entities.front();
+    entity.entity_number=40U;entity.player_movement_schema=false;entity.brush_move_type=10U;
+    state.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(state);
+    return std::make_shared<const hlclient::client::RuntimeClientObservationState>(std::move(state));
+}
+
+TEST_CASE("E20 guided ordinary flight turns across yaw wrap without extrapolation or local rocket physics",
+          "[e20][entity-interpolation][projectile]") {
+    auto old=*buffered_ordinary_sample(1.0,0.0,1U);
+    auto now=*buffered_ordinary_sample(1.1,200.0,2U);
+    bool discontinuity=false;
+    SECTION("before ignition BOUNCE") {}
+    SECTION("guided FLY") {old.packet_entities[0].brush_move_type=now.packet_entities[0].brush_move_type=5U;}
+    SECTION("ignition changes movetype") {now.packet_entities[0].brush_move_type=5U;discontinuity=true;}
+    SECTION("NOINTERP") {now.packet_entities[0].effects=32U;discontinuity=true;}
+    old.packet_entities[0].angles.y=359.0;now.packet_entities[0].angles.y=1.0;
+    now.packet_entities[0].origin.y=50.0;
+    old.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(old);
+    now.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(now);
+    const auto committed=now;
+    const std::array<std::uint32_t,1> selected{40};goldsrc::RuntimeEntityInterpolationOptions options;
+    options.ordinary_entities=selected;options.ordinary_teleport_distance=512.0;
+    options.limits.maximum_snapshot_gap_seconds=.25;options.no_interpolation_effect_mask=32;
+    const auto mid=goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old,now,1.05,options);REQUIRE(mid);
+    const auto& entity=mid.state->packet_entities[0];
+    if(discontinuity) {CHECK(entity.origin==now.packet_entities[0].origin);CHECK(entity.angles==now.packet_entities[0].angles);}
+    else {CHECK(*entity.origin.x==Approx(100.0));CHECK(*entity.origin.y==Approx(25.0));CHECK(*entity.angles.y==Approx(360.0));}
+    CHECK(now==committed);
+    const auto latest=goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old,now,2.0,options);REQUIRE(latest);
+    CHECK(latest.state->packet_entities[0].origin==now.packet_entities[0].origin);
+}
+
+TEST_CASE("E19 fast kinetic continuity is independent of the player teleport policy",
+          "[e19][entity-interpolation][runtime-replay][projectile]") {
+    namespace c=hlclient::client;
+    auto old=runtime_player_sample(1.0,0.0,1U);
+    auto now=runtime_player_sample(1.1,200.0,2U);
+    for(auto* state:{&old,&now}) {
+        auto kinetic=state->packet_entities.front();
+        kinetic.entity_number=40U;kinetic.player_movement_schema=false;kinetic.brush_move_type=5U;
+        state->packet_entities.push_back(kinetic);
+        state->canonical_state_hash=c::runtime_observation_canonical_hash(*state);
+    }
+    const auto committed=now;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;
+    options.ordinary_entities=selected;options.teleport_distance=128.0;
+    options.ordinary_teleport_distance=512.0;options.limits.maximum_snapshot_gap_seconds=.25;
+    const auto mid=goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old,now,1.05,options);
+    REQUIRE(mid);CHECK(mid.reset_count==1U);CHECK(mid.interpolated_count==1U);
+    CHECK(mid.state->packet_entities[0].origin.x==200.0); // player still resets
+    CHECK(*mid.state->packet_entities[1].origin.x==Approx(100.0));
+    CHECK(now==committed);
+    const auto latest=goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old,now,5.0,options);
+    REQUIRE(latest);CHECK(latest.state->packet_entities[1].origin.x==200.0); // no extrapolation
+    options.ordinary_teleport_distance.reset();
+    const auto legacy=goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old,now,1.05,options);
+    REQUIRE(legacy);CHECK(legacy.reset_count==2U); // explicit opt-in, no silent default
+    for(const double invalid:{0.0,-1.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+        options.ordinary_teleport_distance=invalid;
+        const auto rejected=goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(old,now,1.05,options);
+        REQUIRE_FALSE(rejected);CHECK(rejected.error->code==goldsrc::EntityInterpolationErrorCode::invalid_configuration);
+    }
+}
+
+TEST_CASE("E19 fast kinetic history smooths authoritative flight but keeps bounded discontinuities",
+          "[e19][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;
+    options.ordinary_entities=selected;options.teleport_distance=128.0;
+    options.ordinary_teleport_distance=512.0;options.limits.maximum_snapshot_gap_seconds=.25;
+    options.no_interpolation_effect_mask=32U;
+    const auto first=buffered_ordinary_sample(1.0,0.0,1U);owner.observe(first);
+    REQUIRE(owner.sample(*first,10.0,options,.1));
+    auto now=*buffered_ordinary_sample(1.1,200.0,2U);
+    bool discontinuity=true;
+    SECTION("fast continuous") {discontinuity=false;}
+    SECTION("finite displacement guard") {now.packet_entities.front().origin.x=600.0;}
+    SECTION("model reuse") {now.packet_entities.front().model_index=8U;}
+    SECTION("NOINTERP") {now.packet_entities.front().effects=32U;}
+    SECTION("snapshot gap") {now.server_time_seconds=1.3;}
+    now.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(now);
+    owner.observe(std::make_shared<const hlclient::client::RuntimeClientObservationState>(now));
+    const auto start=owner.sample(now,10.1,options,.1);REQUIRE(start);
+    const auto mid=owner.sample(now,10.15,options,.1);REQUIRE(mid);
+    if(discontinuity) CHECK(mid.state->packet_entities.front()==now.packet_entities.front());
+    else {
+        CHECK(start.state->packet_entities.front().origin.x==0.0);
+        CHECK(*mid.state->packet_entities.front().origin.x==Approx(100.0));
+        const auto repeated=owner.sample(now,10.15,options,.1);REQUIRE(repeated);
+        CHECK(repeated.state->packet_entities.front().origin.x==mid.state->packet_entities.front().origin.x);
+        const auto held=owner.sample(now,10.24,options,.1);REQUIRE(held);
+        CHECK(held.state->packet_entities.front().origin.x==200.0);
+    }
+}
+
+TEST_CASE("E16 render-only ordinary history is continuous across irregular arrivals and short flight",
+          "[e16][grenade-smoothing][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;options.teleport_distance=128.0;
+    const std::array arrivals{0.0,.025,.045,.055,.085};
+    std::size_t next{};std::shared_ptr<const hlclient::client::RuntimeClientObservationState> current;
+    double previous_x{};
+    // Independent authoritative linear samples, not a locally integrated path.
+    // A third early-arriving sample needs an older bracket, not a pair-clock reset.
+    for(unsigned frame=0U;frame<=20U;++frame) {
+        const double application=static_cast<double>(frame)*.005;
+        while(next<arrivals.size() && arrivals[next]<=application+1e-9) {
+            const double time=1.0+static_cast<double>(next)*.02;
+            current=buffered_ordinary_sample(time,static_cast<double>(next)*16.0,next+1U);
+            owner.observe(current);++next;
+        }
+        REQUIRE(current);
+        const auto immutable=*current;
+        const auto result=owner.sample(*current,100.0+application,options,.1);REQUIRE(result);
+        const auto x=*result.state->packet_entities.front().origin.x;
+        const double expected=std::min(*current->packet_entities.front().origin.x,
+            std::max(0.0,application-.02)*800.0);
+        CHECK(x==Approx(expected).margin(.00001));
+        CHECK(x>=previous_x);CHECK(x-previous_x<=4.00001);
+        if(frame==8U) CHECK(x==Approx(16.0)); // An80ms flight is moving after one cadence, not held100ms.
+        const auto repeated=owner.sample(*current,100.0+application,options,.1);REQUIRE(repeated);
+        CHECK(*repeated.state->packet_entities.front().origin.x==x);
+        CHECK(*current==immutable);previous_x=x;
+    }
+    REQUIRE(owner.cadence_delay_seconds());CHECK(*owner.cadence_delay_seconds()==Approx(.02));
+    auto removed=*buffered_ordinary_sample(1.12,96.0,6U);removed.packet_entities.clear();
+    removed.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(removed);
+    owner.observe(std::make_shared<const hlclient::client::RuntimeClientObservationState>(removed));
+    const auto absent=owner.sample(removed,100.105,options,.1);REQUIRE(absent);
+    CHECK(absent.state->packet_entities.empty());CHECK(owner.lifetime_count()==0U);
+    owner.reset();CHECK(owner.history_size()==0U);CHECK_FALSE(owner.cadence_delay_seconds());
+}
+
+TEST_CASE("E16 ordinary spawn history underflow cannot rewind or resurrect a reused server slot",
+          "[e16][grenade-smoothing][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;options.teleport_distance=128.0;
+    auto first=buffered_ordinary_sample(1.0,0.0,1U);owner.observe(first);
+    REQUIRE(owner.sample(*first,10.0,options,.1));
+    auto second=buffered_ordinary_sample(1.02,16.0,2U);owner.observe(second);
+    const auto held=owner.sample(*second,10.01,options,.1);REQUIRE(held);
+    CHECK(held.state->packet_entities.front().origin.x==0.0);
+    const auto moving=owner.sample(*second,10.03,options,.1);REQUIRE(moving);
+    CHECK(*moving.state->packet_entities.front().origin.x==Approx(8.0));
+    const auto backwards=owner.sample(*second,10.025,options,.1);REQUIRE(backwards);
+    CHECK(backwards.state->packet_entities.front().origin.x==moving.state->packet_entities.front().origin.x);
+    auto absent=*buffered_ordinary_sample(1.04,32.0,3U);absent.packet_entities.clear();
+    absent.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(absent);
+    owner.observe(std::make_shared<const hlclient::client::RuntimeClientObservationState>(absent));
+    // Both records can arrive before the next render; absence still breaks lifetime.
+    auto reused=buffered_ordinary_sample(1.06,48.0,4U);owner.observe(reused);
+    const auto fresh=owner.sample(*reused,10.04,options,.1);REQUIRE(fresh);
+    CHECK(fresh.state->packet_entities.front().origin.x==48.0);CHECK(fresh.reset_count==1U);
+    const auto no_rewind=owner.sample(*reused,10.05,options,.1);REQUIRE(no_rewind);
+    CHECK(no_rewind.state->packet_entities.front().origin.x==48.0);
+}
+
+TEST_CASE("E16 ordinary buffered lifetime discontinuities current visibility and frame guards remain explicit",
+          "[e16][grenade-smoothing][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;options.teleport_distance=128.0;
+    options.no_interpolation_effect_mask=32U;
+    auto first=buffered_ordinary_sample(1.0,0.0,1U);owner.observe(first);
+    REQUIRE(owner.sample(*first,10.0,options,.1));
+    auto current=*buffered_ordinary_sample(1.02,16.0,2U);
+    SECTION("model") {current.packet_entities.front().model_index=8U;}
+    SECTION("movetype") {current.packet_entities.front().brush_move_type=5U;}
+    SECTION("sequence") {current.packet_entities.front().sequence=4U;}
+    SECTION("NOINTERP") {current.packet_entities.front().effects=32U;}
+    SECTION("teleport") {current.packet_entities.front().origin.x=500.0;}
+    SECTION("missing component") {current.packet_entities.front().origin.y.reset();}
+    SECTION("explicit boundary") {options.discontinuous_entities=selected;}
+    SECTION("disabled") {options.no_interpolation=true;}
+    current.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(current);
+    owner.observe(std::make_shared<const hlclient::client::RuntimeClientObservationState>(current));
+    const auto result=owner.sample(current,10.025,options,.1);REQUIRE(result);
+    CHECK(result.state->packet_entities.front()==current.packet_entities.front());CHECK(result.reset_count==1U);
+}
+
+TEST_CASE("E16 ordinary buffered clock and ownership bounds never extrapolate or change player state",
+          "[e16][grenade-smoothing][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;
+    for(unsigned i=0U;i<40U;++i) {
+        const auto current=buffered_ordinary_sample(1.0+i*.02,i*16.0,i+1U);owner.observe(current);
+        const auto result=owner.sample(*current,10.0+i*.02,options,.1);REQUIRE(result);
+        CHECK(*result.state->packet_entities.front().origin.x<=*current->packet_entities.front().origin.x);
+        CHECK(owner.history_size()<=16U);CHECK(owner.lifetime_count()==1U);
+    }
+    const auto same_time=buffered_ordinary_sample(1.78,625.0,41U);owner.observe(same_time);
+    CHECK(owner.history_size()==1U);CHECK(owner.lifetime_count()==0U);
+    auto result=owner.sample(*same_time,10.8,options,.1);REQUIRE(result);
+    CHECK(result.state->packet_entities.front().origin.x==625.0);
+    const auto back_time=buffered_ordinary_sample(.5,20.0,42U);owner.observe(back_time);
+    CHECK(owner.history_size()==1U);REQUIRE(owner.sample(*back_time,10.82,options,.1));
+    auto stalled=buffered_ordinary_sample(.52,36.0,43U);owner.observe(stalled);
+    result=owner.sample(*stalled,12.0,options,.1);REQUIRE(result);
+    CHECK(result.state->packet_entities.front().origin.x==36.0);
+    // An independently already-presented player is not processed by this owner.
+    auto player=runtime_player_sample(.54,12.25,44U);owner.observe(std::make_shared<const decltype(player)>(player));
+    result=owner.sample(player,12.02,options,.1);REQUIRE(result);CHECK(*result.state==player);
+    CHECK(owner.lifetime_count()==0U);
+    const auto invalid=owner.sample(player,std::numeric_limits<double>::quiet_NaN(),options,.1);
+    CHECK_FALSE(invalid);
+}
+
+TEST_CASE("E16 ordinary current hidden fields and wrapped frames do not resurrect historical visibility",
+          "[e16][grenade-smoothing][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;
+    auto first=*buffered_ordinary_sample(1.0,0.0,1U);first.packet_entities.front().frame=250.0;
+    first.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(first);
+    owner.observe(std::make_shared<const decltype(first)>(first));REQUIRE(owner.sample(first,10.0,options,.1));
+    auto now=*buffered_ordinary_sample(1.02,16.0,2U);
+    now.packet_entities.front().effects=128U;now.packet_entities.front().render_amount=0U;
+    now.packet_entities.front().frame=5.0;
+    now.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(now);
+    owner.observe(std::make_shared<const decltype(now)>(now));
+    const auto result=owner.sample(now,10.03,options,.1);REQUIRE(result);
+    CHECK(*result.state->packet_entities.front().origin.x==Approx(8.0));
+    CHECK(result.state->packet_entities.front().effects==128U);
+    CHECK(result.state->packet_entities.front().render_amount==0U);
+    CHECK(result.state->packet_entities.front().frame==5.0);
+}
+
+TEST_CASE("E16 valid untimed entity removal breaks ordinary continuity without accepting stale input",
+          "[e16][grenade-smoothing][entity-interpolation][runtime-replay][projectile]") {
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=.25;
+    const auto first=buffered_ordinary_sample(1.0,0.0,1U);owner.observe(first);
+    REQUIRE(owner.sample(*first,10.0,options,.1));
+    const auto second=buffered_ordinary_sample(1.02,16.0,2U);owner.observe(second);
+    const auto moving=owner.sample(*second,10.03,options,.1);REQUIRE(moving);
+    CHECK(*moving.state->packet_entities.front().origin.x==Approx(8.0));
+    const auto untimed=[](auto state) {
+        state.server_time_seconds.reset();
+        state.server_time_metadata={};state.server_time_metadata.generation=state.generation;
+        state.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(state);
+        return state;
+    };
+    auto older=untimed(*first);REQUIRE(hlclient::client::valid_runtime_observation(older));
+    owner.observe(std::make_shared<const decltype(older)>(older));
+    auto duplicate=untimed(*second);REQUIRE(hlclient::client::valid_runtime_observation(duplicate));
+    owner.observe(std::make_shared<const decltype(duplicate)>(duplicate));
+    auto invalid=untimed(*buffered_ordinary_sample(1.04,32.0,3U));invalid.generation=0U;
+    REQUIRE_FALSE(hlclient::client::valid_runtime_observation(invalid));
+    owner.observe(std::make_shared<const decltype(invalid)>(invalid));
+    CHECK(owner.history_size()==2U);CHECK(owner.lifetime_count()==1U);
+    const auto held=owner.sample(*second,10.03,options,.1);REQUIRE(held);
+    CHECK(held.state->packet_entities.front().origin.x==moving.state->packet_entities.front().origin.x);
+    auto removed=untimed(*buffered_ordinary_sample(1.04,32.0,3U));removed.packet_entities.clear();
+    removed.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(removed);
+    REQUIRE(hlclient::client::valid_runtime_observation(removed));
+    owner.observe(std::make_shared<const decltype(removed)>(removed));
+    CHECK(owner.history_size()==0U);CHECK(owner.lifetime_count()==0U);
+    CHECK_FALSE(owner.cadence_delay_seconds());
+    const auto reused=buffered_ordinary_sample(1.06,48.0,4U);owner.observe(reused);
+    const auto fresh=owner.sample(*reused,10.04,options,.1);REQUIRE(fresh);
+    CHECK(fresh.state->packet_entities.front().origin.x==48.0);CHECK(fresh.reset_count==1U);
+    const auto repeated=owner.sample(*reused,10.05,options,.1);REQUIRE(repeated);
+    CHECK(repeated.state->packet_entities.front().origin.x==48.0);
+}
+
+TEST_CASE("E16 late ordinary birth cannot inherit a session clock lag as a frozen first frame",
+          "[e16][grenade-smoothing][grenade-first-frame][entity-interpolation][runtime-replay][projectile]") {
+    unsigned warm_steps=48U;
+    double application_step=.015, gap_limit=.25;
+    SECTION("current Half-Life250ms recovery bound") {}
+    SECTION("generic1s recovery bound") {warm_steps=96U;application_step=.01;gap_limit=1.0;}
+    goldsrc::RuntimeOrdinarySnapshotPresentation owner;
+    const std::array<std::uint32_t,1U> selected{40U};
+    goldsrc::RuntimeEntityInterpolationOptions options;options.ordinary_entities=selected;
+    options.limits.maximum_snapshot_gap_seconds=gap_limit;options.teleport_distance=128.0;
+    // Valid moving server clocks can acquire positive phase below the recovery
+    // threshold while no projectile exists. This is not a gap or teleport.
+    for(unsigned i=0U;i<warm_steps;++i) {
+        auto empty=*buffered_ordinary_sample(1.0+i*.02,0.0,i+1U);empty.packet_entities.clear();
+        empty.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(empty);
+        owner.observe(std::make_shared<const decltype(empty)>(empty));
+        const auto sampled=owner.sample(empty,100.0+i*application_step,options,.1);REQUIRE(sampled);
+        REQUIRE(sampled.state->packet_entities.empty());
+    }
+    const double birth_time=1.0+warm_steps*.02,birth_application=100.0+warm_steps*application_step;
+    const double phase=warm_steps*(.02-application_step);CAPTURE(phase,gap_limit);
+    REQUIRE(phase<gap_limit);REQUIRE(owner.cadence_delay_seconds());
+    CHECK(*owner.cadence_delay_seconds()==Approx(.02));
+    auto current=buffered_ordinary_sample(birth_time,0.0,warm_steps+1U);owner.observe(current);
+    const auto born=owner.sample(*current,birth_application,options,.1);REQUIRE(born);
+    CHECK(born.state->packet_entities.front().origin.x==0.0);CHECK(born.reset_count==1U);
+    current=buffered_ordinary_sample(birth_time+.02,16.0,warm_steps+2U);owner.observe(current);
+    const auto held=owner.sample(*current,birth_application+.02,options,.1);REQUIRE(held);
+    CHECK(*held.state->packet_entities.front().origin.x==Approx(0.0).margin(.00001));
+    const auto held_snapshot=*held.state;
+    const auto moving=owner.sample(*current,birth_application+.03,options,.1);REQUIRE(moving);
+    // Existing implementation instead holdsx0 for phase+20ms (260/980ms).
+    // A newborn must move after its own one-cadence buffer, not that whole phase.
+    CHECK(*moving.state->packet_entities.front().origin.x==Approx(8.0).margin(.00001));
+    const auto repeated=owner.sample(*current,birth_application+.03,options,.1);REQUIRE(repeated);
+    CHECK(repeated.state->packet_entities.front().origin.x==moving.state->packet_entities.front().origin.x);
+    const auto backwards=owner.sample(*current,birth_application+.029,options,.1);REQUIRE(backwards);
+    CHECK(backwards.state->packet_entities.front().origin.x==moving.state->packet_entities.front().origin.x);
+    const auto original_current=current;const auto immutable=*original_current;
+    for(unsigned i=2U;i<=3U;++i) {
+        current=buffered_ordinary_sample(birth_time+i*.02,i*16.0,warm_steps+i+1U);owner.observe(current);
+        const auto sampled=owner.sample(*current,birth_application+i*.02,options,.1);REQUIRE(sampled);
+        CHECK(*sampled.state->packet_entities.front().origin.x==Approx((i-1U)*16.0).margin(.00001));
+        CHECK(*sampled.state->packet_entities.front().origin.x<=*current->packet_entities.front().origin.x);
+    }
+    CHECK(*held.state==held_snapshot); // Retained result remains owning across later observations.
+    CHECK(*original_current==immutable);
+    auto removed=*buffered_ordinary_sample(birth_time+.08,64.0,warm_steps+5U);removed.packet_entities.clear();
+    removed.canonical_state_hash=hlclient::client::runtime_observation_canonical_hash(removed);
+    owner.observe(std::make_shared<const decltype(removed)>(removed));
+    const auto absent=owner.sample(removed,birth_application+.08,options,.1);REQUIRE(absent);
+    CHECK(absent.state->packet_entities.empty());CHECK(owner.lifetime_count()==0U);
+    CHECK(owner.history_size()<=16U);
+    owner.reset();CHECK(owner.history_size()==0U);CHECK_FALSE(owner.cadence_delay_seconds());
+}
+
+TEST_CASE("E32 presentation sampling keeps immutable mixed populations during repeated render frames",
+          "[e32][fps-presentation-work][entity-interpolation][runtime-replay]") {
+    namespace c=hlclient::client;
+    std::vector<std::uint32_t> players,ordinary;
+    for(std::uint32_t id=1;id<=16;++id)players.push_back(id);
+    for(std::uint32_t id=17;id<=64;++id)ordinary.push_back(id);
+    goldsrc::RuntimeEntityInterpolationOptions options;
+    options.limits.maximum_snapshot_gap_seconds=.25;
+    options.teleport_distance=128.0;options.ordinary_teleport_distance=512.0;
+    options.ordinary_entities=ordinary;
+    goldsrc::RuntimePlayerSnapshotPresentation player_owner;
+    goldsrc::RuntimeOrdinarySnapshotPresentation ordinary_owner;
+    std::shared_ptr<const c::RuntimeClientObservationState> latest;
+    std::vector<std::shared_ptr<const c::RuntimeClientObservationState>> sources;
+    std::vector<c::RuntimeClientObservationState> originals;
+    for(std::uint64_t record=1;record<=16;++record) {
+        auto state=runtime_player_sample(1.0+.02*static_cast<double>(record-1),0.0,record);
+        const auto prototype=state.packet_entities.front();state.packet_entities.clear();
+        for(std::uint32_t id=1;id<=64;++id) {
+            auto entity=prototype;entity.entity_number=id;
+            entity.origin={static_cast<double>(record*2+id),static_cast<double>(id),8.0};
+            entity.player_movement_schema=id<=16;
+            if(id>16)entity.brush_move_type=10U;
+            state.packet_entities.push_back(entity);
+        }
+        state.canonical_state_hash=c::runtime_observation_canonical_hash(state);
+        REQUIRE(c::valid_runtime_observation(state));originals.push_back(state);
+        latest=std::make_shared<const c::RuntimeClientObservationState>(std::move(state));
+        sources.push_back(latest);player_owner.observe(latest);ordinary_owner.observe(latest);
+    }
+    // Timings are observational only; correctness never depends on machine speed.
+    // Same input/history, full player and projectile owner composition each frame.
+    constexpr std::size_t frames=1200;
+    double sampling_us{};
+    std::shared_ptr<const c::RuntimeClientObservationState> retained;
+    std::optional<c::RuntimeClientObservationState> retained_value;
+    for(std::size_t frame=0;frame<frames;++frame) {
+        const double now=100.0+.2*static_cast<double>(frame)/frames;
+        const auto started=std::chrono::steady_clock::now();
+        const auto player=player_owner.sample(*latest,now,options,.1,players);
+        REQUIRE(player);
+        const auto result=ordinary_owner.sample(*player.presentation.state,now,options,.1);
+        sampling_us+=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-started).count();
+        REQUIRE(result);REQUIRE(result.state->packet_entities.size()==64);
+        CHECK(c::valid_runtime_observation(*result.state));
+        for(std::size_t i=0;i<players.size();++i)
+            CHECK(result.state->packet_entities[i]==player.presentation.state->packet_entities[i]);
+        CHECK(*result.state->packet_entities.back().origin.x<=*latest->packet_entities.back().origin.x);
+        if(frame==0) {retained=result.state;retained_value=*result.state;}
+    }
+    REQUIRE(retained);REQUIRE(retained_value);CHECK(*retained==*retained_value);
+    for(std::size_t i=0;i<sources.size();++i)CHECK(*sources[i]==originals[i]);
+    std::cout<<"[fps-presentation-work] frames="<<frames<<" players=16 entities=64 mean_sample_us="
+        <<sampling_us/frames<<" source=project_owned device=false timing_assertion=false\n";
+}
+
+TEST_CASE("E32 buffered sampling retains the shared input rejection contract without disposable frames",
+          "[e32][fps-presentation-validation][entity-interpolation][runtime-replay]") {
+    namespace c=hlclient::client;
+    auto valid=runtime_player_sample(1.0,0.0,1);
+    auto ordinary=valid.packet_entities.front();ordinary.entity_number=40;
+    ordinary.player_movement_schema=false;ordinary.brush_move_type=10;
+    valid.packet_entities.push_back(ordinary);
+    valid.canonical_state_hash=c::runtime_observation_canonical_hash(valid);
+    const auto committed=std::make_shared<const c::RuntimeClientObservationState>(valid);
+    const std::array<std::uint32_t,1> players{2},ordinaries{40};
+    goldsrc::RuntimePlayerSnapshotPresentation player_owner;
+    goldsrc::RuntimeOrdinarySnapshotPresentation ordinary_owner;
+    player_owner.observe(committed);ordinary_owner.observe(committed);
+    auto invalid=valid;
+    goldsrc::RuntimeEntityInterpolationOptions options;
+    options.ordinary_entities=ordinaries;
+    std::vector<goldsrc::RuntimePlayerAnimationEffectException> exceptions;
+    bool update_hash=true;
+    SECTION("canonical checksum") {invalid.canonical_state_hash^=1;update_hash=false;}
+    SECTION("nonfinite un-hashed Studio frame") {invalid.packet_entities.front().frame=std::numeric_limits<double>::quiet_NaN();}
+    SECTION("invalid controller byte") {invalid.packet_entities.front().controllers[0]=256;}
+    SECTION("invalid source identity") {invalid.entity_metadata.source->record_identity=0;}
+    SECTION("duplicate entity") {invalid.packet_entities.back().entity_number=2;}
+    SECTION("missing server clock") {invalid.server_time_seconds.reset();invalid.server_time_metadata={};invalid.server_time_metadata.generation=1;}
+    SECTION("maximum entities") {options.limits.maximum_entities=1;}
+    SECTION("result allocation bound") {options.limits.maximum_result_bytes=sizeof(valid);}
+    SECTION("position bound") {options.limits.maximum_position_magnitude=1;invalid.packet_entities.front().origin.x=2.0;}
+    SECTION("nonfinite teleport bound") {options.teleport_distance=std::numeric_limits<double>::infinity();}
+    SECTION("invalid ordinary continuity bound") {options.ordinary_teleport_distance=0.0;}
+    SECTION("unapproved effect exception") {exceptions={{2,1,32}};options.animation_only_effect_exceptions=exceptions;}
+    SECTION("duplicate effect exception") {exceptions={{2,1,32},{2,1,32}};options.no_interpolation_effect_mask=32;options.animation_only_effect_exceptions=exceptions;}
+    if(update_hash)invalid.canonical_state_hash=c::runtime_observation_canonical_hash(invalid);
+    const auto oracle=goldsrc::EntitySnapshotInterpolator{}.interpolate_runtime(invalid,invalid,
+        invalid.server_time_seconds.value_or(0.0),options);
+    REQUIRE_FALSE(oracle);REQUIRE(oracle.error);
+    const auto player=player_owner.sample(invalid,100.0,options,.1,players);
+    const auto projectile=ordinary_owner.sample(invalid,100.0,options,.1);
+    REQUIRE_FALSE(player);REQUIRE(player.presentation.error);
+    REQUIRE_FALSE(projectile);REQUIRE(projectile.error);
+    CHECK(player.presentation.error->code==oracle.error->code);
+    CHECK(projectile.error->code==oracle.error->code);
+    CHECK(*committed==valid);
+    // Failed validation cannot advance clocks, consume history or alter sources.
+    goldsrc::RuntimeEntityInterpolationOptions recovered_options;
+    recovered_options.ordinary_entities=ordinaries;
+    const auto recovered_player=player_owner.sample(valid,100.0,recovered_options,.1,players);
+    const auto recovered_projectile=ordinary_owner.sample(valid,100.0,recovered_options,.1);
+    REQUIRE(recovered_player);REQUIRE(recovered_projectile);
+    CHECK(*recovered_player.presentation.state==valid);
+    CHECK(*recovered_projectile.state==valid);
+    CHECK(player_owner.history_size()==1);CHECK(ordinary_owner.history_size()==1);
 }
 
 static_assert(!std::is_copy_assignable_v<goldsrc::InterpolatedEntityState>);

@@ -215,6 +215,19 @@ TEST_CASE("Prediction movement config signature covers every behavior input",
     check_changed([](auto& value) { value.stop_epsilon += 0.01; });
     check_changed([](auto& value) { value.air_wish_speed_cap += 1.0; });
     check_changed([](auto& value) { value.jump_impulse += 1.0; });
+    check_changed([](auto& value) {
+        value.crouch_jump = goldsrc_movement::ReferenceCrouchJumpPolicy{560.0F, 299.0F, 50.0F};
+    });
+    auto boost_config = goldsrc_movement::GoldSrcLocalMovementConfig{};
+    boost_config.crouch_jump = goldsrc_movement::ReferenceCrouchJumpPolicy{560.0F, 299.0F, 50.0F};
+    const auto boost_signature = prediction::prediction_movement_config_signature(boost_config);
+    for (const auto member : {&goldsrc_movement::ReferenceCrouchJumpPolicy::forward_speed,
+            &goldsrc_movement::ReferenceCrouchJumpPolicy::vertical_impulse,
+            &goldsrc_movement::ReferenceCrouchJumpPolicy::minimum_speed}) {
+        auto changed = boost_config;
+        changed.crouch_jump.value().*member += 1.0F;
+        CHECK(prediction::prediction_movement_config_signature(changed) != boost_signature);
+    }
     check_changed([](auto& value) { value.standing_view_offset.x += 1.0F; });
     check_changed([](auto& value) { value.standing_view_offset.y += 1.0F; });
     check_changed([](auto& value) { value.standing_view_offset.z += 1.0F; });

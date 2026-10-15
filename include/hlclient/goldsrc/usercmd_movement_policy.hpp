@@ -23,6 +23,7 @@ enum class GoldSrcReferenceButtonPolicy : std::uint8_t {
     jump_duck,
     jump_duck_primary_reload,
     jump_duck_primary_reload_use,
+    jump_duck_primary_secondary_reload_use,
 };
 
 } // namespace hlclient::goldsrc

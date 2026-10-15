@@ -1,12 +1,53 @@
 #include <hlclient/goldsrc/reference_prediction_seed.hpp>
+#include <hlclient/goldsrc/reference_prediction_command.hpp>
 #include <hlclient/goldsrc/reference_client_move.hpp>
 #include <hlclient/goldsrc/reference_brush_collision.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
 
 namespace hlclient::goldsrc {
 namespace {
+
+// A completed reference command can add upward velocity after its movement
+// categorization. Match its complete wire-derived value, not merely the slot
+// number or a currently selected game effect, before probing that endpoint.
+[[nodiscard]] bool witnessed_post_movement_ground_boundary(
+    const ReferencePredictionSeed& seed,
+    const GoldSrcWireUserCmd& wire,
+    const GoldSrcUserCmdState* command) noexcept
+{
+    if (!command || command->command_sequence() != seed.command_boundary ||
+        command->post_velocity_impulse()[2U] <= 0.0F)
+        return false;
+    const auto profile = command->compatibility_profile();
+    auto adapted = profile == GoldSrcUserCmdCompatibilityProfile::
+            public_goldsrc48_jump_duck_weapon_use_prediction_v4
+        ? reference_jump_duck_secondary_weapon_use_movement_command(seed.command_boundary, wire)
+        : profile == GoldSrcUserCmdCompatibilityProfile::
+            public_goldsrc48_jump_duck_weapon_prediction_v3
+        ? reference_jump_duck_weapon_movement_command(seed.command_boundary, wire)
+        : reference_jump_duck_movement_command(seed.command_boundary, wire);
+    if (!adapted || !adapted.state) return false;
+    const auto& expected = *adapted.state;
+    return profile == expected.compatibility_profile() &&
+        command->input_mapping_profile() == expected.input_mapping_profile() &&
+        command->schema_binding_profile() == expected.schema_binding_profile() &&
+        command->lerp_msec() == expected.lerp_msec() &&
+        command->msec() == expected.msec() &&
+        command->view_angles() == expected.view_angles() &&
+        command->forward_move() == expected.forward_move() &&
+        command->side_move() == expected.side_move() &&
+        command->up_move() == expected.up_move() &&
+        command->buttons() == expected.buttons() &&
+        command->impulse() == expected.impulse() &&
+        command->weapon_select() == expected.weapon_select() &&
+        command->light_level() == expected.light_level() &&
+        command->impact_index() == expected.impact_index() &&
+        command->impact_position() == expected.impact_position();
+}
 
 [[nodiscard]] bool zero_vector(
     const client::RuntimeVector3Observation& value) noexcept
@@ -22,13 +63,166 @@ namespace {
         std::isfinite(*value.y) && std::isfinite(*value.z);
 }
 
+// Clientdata and a committed brush transform use different wire grids. A
+// coherent grounded seed can therefore sit just below a brush's top even
+// though no single binary32 neighbour is free. Recover only the witnessed
+// walkable top, never a side wall, world solid, airborne seed or deeper
+// penetration. The 1/8-unit envelope is a local-compatible reseed policy;
+// it does not relax the collision kernel or alter canonical observations.
+[[nodiscard]] std::optional<assets::AssetVector3> quantized_brush_support_boundary(
+    const assets::AssetVector3& origin,
+    const hlclient::movement::PlayerMovementHull hull,
+    const movement::LocalMovementPositionTest& position,
+    const movement::ILocalMovementCollision& collision,
+    hlclient::collision::CollisionQueryScratch& scratch,
+    const movement::GoldSrcLocalMovementConfig& config)
+{
+    namespace player = hlclient::movement;
+    constexpr double kMaximumCorrection = 1.0 / 8.0;
+    if (collision.profile() != movement::LocalMovementCollisionProfile::reference_brush_scene_v1 ||
+        position.contents.category != player::PlayerMovementContents::solid ||
+        !position.hit || position.hit->kind != player::PlayerMovementHitKind::brush_entity ||
+        position.hit->source_model_index == 0U ||
+        !position.hit->stable_instance_ordinal || !position.hit->source_entity_index)
+        return {};
+    const auto free_position = [&](const assets::AssetVector3& candidate) {
+        const double correction = static_cast<double>(candidate.z) - origin.z;
+        if (!std::isfinite(candidate.z) || correction <= 0.0 || correction > kMaximumCorrection)
+            return false;
+        const auto tested = collision.test_position(candidate, hull, scratch, config.collision_query);
+        return tested && tested.result &&
+            tested.result->status == movement::LocalMovementPositionStatus::free &&
+            tested.result->contents.category == player::PlayerMovementContents::empty &&
+            !tested.result->hit;
+    };
+    const auto witnessed_support = [&](const movement::LocalMovementTraceQueryResult& traced) {
+        if (!traced || !traced.result) return false;
+        const auto& trace = *traced.result;
+        if (trace.start_solid || trace.all_solid || trace.in_liquid ||
+            !std::isfinite(trace.fraction) || trace.fraction < 0.0 || trace.fraction >= 1.0 ||
+            trace.collision_profile != collision.profile() ||
+            trace.hit != position.hit || !trace.collision_plane)
+            return false;
+        const auto& plane = *trace.collision_plane;
+        return std::isfinite(plane.normal.x) && std::isfinite(plane.normal.y) &&
+            std::isfinite(plane.normal.z) && std::isfinite(plane.distance) &&
+            plane.normal.z >= config.minimum_walkable_normal_z;
+    };
+    auto free_side = origin;
+    free_side.z = static_cast<float>(static_cast<double>(origin.z) + kMaximumCorrection);
+    if (static_cast<double>(free_side.z) - origin.z > kMaximumCorrection)
+        free_side.z = std::nextafter(free_side.z, origin.z);
+    if (!free_position(free_side)) return {};
+    const auto entry = collision.trace_hull(
+        free_side, origin, hull, scratch, config.collision_query);
+    if (!witnessed_support(entry)) return {};
+
+    // The trace's existing epsilon can leave its endpoint above the plane.
+    // Solve the witnessed hull plane itself, then verify occupancy again.
+    const auto& plane = *entry.result->collision_plane;
+    auto candidate = origin;
+    candidate.z = static_cast<float>((plane.distance -
+        static_cast<double>(plane.normal.x) * origin.x -
+        static_cast<double>(plane.normal.y) * origin.y) / plane.normal.z);
+    if (!free_position(candidate)) {
+        candidate.z = std::nextafter(candidate.z, std::numeric_limits<float>::infinity());
+        if (!free_position(candidate)) return {};
+    }
+    auto down = candidate;
+    down.z = static_cast<float>(static_cast<double>(down.z) - config.ground_probe_distance);
+    const auto support = collision.trace_hull(
+        candidate, down, hull, scratch, config.collision_query);
+    if (!witnessed_support(support)) return {};
+    return candidate;
+}
+
+// The public entity bounds/origin grid is coarser than clientdata origin.
+// A grounded coherent seed may overlap a reconstructed box boundary. Move
+// only to the closest free face within a local-compatible 1/8-unit envelope,
+// retaining every collider and witnessing that exact box from the free side.
+// Deeper/airborne penetration is rejected; canonical wire fields are intact.
+[[nodiscard]] std::optional<assets::AssetVector3> quantized_box_boundary(
+    const assets::AssetVector3& origin, const hlclient::movement::PlayerMovementHull hull,
+    const movement::LocalMovementPositionTest& position,
+    const movement::ILocalMovementCollision& collision,
+    hlclient::collision::CollisionQueryScratch& scratch,
+    const movement::GoldSrcLocalMovementConfig& config)
+{
+    if (!position.hit || position.hit->kind!=hlclient::movement::PlayerMovementHitKind::server_entity_box ||
+        !position.hit->source_entity_index) return {};
+    const auto* scene=dynamic_cast<const movement::BrushSceneMovementCollision*>(&collision);
+    if (!scene) return {};
+    const auto boxes=scene->entity_boxes();
+    const auto found=std::find_if(boxes.begin(),boxes.end(),[&](const auto& box){return box.entity==position.hit->source_entity_index;});
+    const auto ordinal=movement::local_movement_collision_hull(hull);
+    const auto shape=ordinal ? hlclient::collision::standard_collision_hull_profile(*ordinal) : std::nullopt;
+    if (found==boxes.end() || !shape) return {};
+    const std::array<float,3> low{found->bounds.minimum.x-shape->clip_maxs.x,
+        found->bounds.minimum.y-shape->clip_maxs.y,found->bounds.minimum.z-shape->clip_maxs.z};
+    const std::array<float,3> high{found->bounds.maximum.x-shape->clip_mins.x,
+        found->bounds.maximum.y-shape->clip_mins.y,found->bounds.maximum.z-shape->clip_mins.z};
+    std::optional<assets::AssetVector3> best;float best_distance=.125F;
+    for (std::size_t axis=0;axis<3;++axis) for (const float boundary:{low[axis],high[axis]}) {
+        auto candidate=origin;
+        float* coordinate=axis==0 ? &candidate.x : axis==1 ? &candidate.y : &candidate.z;
+        const float distance=std::abs(boundary-*coordinate);*coordinate=boundary;
+        if (!std::isfinite(boundary) || distance<=0 || distance>best_distance) continue;
+        const auto clear=collision.test_position(candidate,hull,scratch,config.collision_query);
+        if (!clear || !clear.result || clear.result->status!=movement::LocalMovementPositionStatus::free || clear.result->hit ||
+            clear.result->contents.category!=hlclient::movement::PlayerMovementContents::empty) continue;
+        const auto probe=collision.trace_hull(candidate,origin,hull,scratch,config.collision_query);
+        if (!probe || !probe.result || probe.result->start_solid || probe.result->all_solid || probe.result->in_liquid ||
+            !std::isfinite(probe.result->fraction) || probe.result->fraction<0.0 || probe.result->fraction>=1.0 ||
+            !probe.result->hit || !probe.result->collision_plane || probe.result->collision_profile!=collision.profile() ||
+            probe.result->hit->kind!=hlclient::movement::PlayerMovementHitKind::server_entity_box ||
+            probe.result->hit->source_entity_index!=position.hit->source_entity_index) continue;
+        auto down=candidate;down.z=static_cast<float>(static_cast<double>(down.z)-config.ground_probe_distance);
+        const auto support=collision.trace_hull(candidate,down,hull,scratch,config.collision_query);
+        if (!support || !support.result || support.result->start_solid || support.result->all_solid ||
+            support.result->in_liquid || !std::isfinite(support.result->fraction) ||
+            support.result->fraction<0.0 || support.result->fraction>=1.0 ||
+            !support.result->hit || !support.result->collision_plane ||
+            support.result->collision_plane->normal.z<config.minimum_walkable_normal_z) continue;
+        best=candidate;best_distance=distance;
+    }
+    return best;
+}
+
+// Read only the selected exact key from the bounded public key/value syntax.
+// Malformed text never grants a movement capability. No previous-life cache.
+[[nodiscard]] bool enabled_physics_key(std::string_view text,
+    const std::string_view selected_key) noexcept
+{
+    if (selected_key.empty() || text.size() >= 256U) return false;
+    if (text.starts_with('\\')) text.remove_prefix(1U);
+    bool enabled = false, found = false;
+    while (!text.empty()) {
+        const auto key_end = text.find('\\');
+        if (key_end == std::string_view::npos || key_end == 0U) return false;
+        const auto key = text.substr(0U, key_end);
+        text.remove_prefix(key_end + 1U);
+        const auto value_end = text.find('\\');
+        const auto value = text.substr(0U, value_end);
+        if (key == selected_key && !found) {
+            found = true;
+            // Normal server representation is the public integer boolean 1.
+            enabled = value == "1";
+        }
+        if (value_end == std::string_view::npos) break;
+        text.remove_prefix(value_end + 1U);
+        if (text.empty()) return false;
+    }
+    return enabled;
+}
+
 } // namespace
 
 ReferencePredictionSeedResult inspect_reference_prediction_seed(
     const client::RuntimeClientObservationState& observation,
     const std::uint8_t receiving_client_slot,
     const ReferencePredictionAnchorResult& anchor,
-    const std::optional<ReferenceRetainedPredictionButtons> retained) noexcept
+    const std::optional<ReferenceRetainedPredictionButtons> retained,
+    const std::string_view crouch_jump_physics_key) noexcept
 {
     if (!anchor.bound() || !anchor.last_new_value ||
         observation.generation == 0U)
@@ -157,7 +351,8 @@ ReferencePredictionSeedResult inspect_reference_prediction_seed(
     } else if ((anchor.last_new_value->buttons & kReferenceGoldSrcButtonUse) != 0U) {
         old_buttons_origin = ReferencePredictionFieldOrigin::reference_anchored_use_non_edge_policy;
     } else if ((anchor.last_new_value->buttons &
-                (kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload)) != 0U) {
+                (kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload |
+                 kReferenceGoldSrcButtonAttack2)) != 0U) {
         old_buttons_origin = ReferencePredictionFieldOrigin::
             reference_anchored_weapon_only_policy;
     }
@@ -185,6 +380,8 @@ ReferencePredictionSeedResult inspect_reference_prediction_seed(
     seed.use_hull = *player->use_hull;
     seed.water_level = *client.water_level;
     seed.in_duck = in_duck;
+    seed.crouch_jump_enabled = client.physics_info &&
+        enabled_physics_key(*client.physics_info, crouch_jump_physics_key);
     seed.in_duck_origin = client.in_duck
         ? ReferencePredictionFieldOrigin::clientdata_observed
         : ReferencePredictionFieldOrigin::exact_retained_prediction_slot;
@@ -216,7 +413,8 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
     movement::GoldSrcLocalMovementScratch& scratch,
     const movement::GoldSrcLocalMovementConfig& config,
     const hlclient::movement::GoldSrcMovementCommandProfile command_profile,
-    const ReferenceBrushCollisionContext* ladder_context)
+    const ReferenceBrushCollisionContext* ladder_context,
+    const GoldSrcUserCmdState* exact_post_boundary_command)
 {
     namespace player = hlclient::movement;
     const auto identity = collision.session_identity();
@@ -237,7 +435,7 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         return {ReferencePredictionGroundStatus::unsupported_hull};
     const auto hull = seed.use_hull == 0U ? player::PlayerMovementHull::standing
                                            : player::PlayerMovementHull::ducked;
-    const assets::AssetVector3 origin{
+    assets::AssetVector3 origin{
         static_cast<float>(*seed.origin.x), static_cast<float>(*seed.origin.y),
         static_cast<float>(*seed.origin.z)};
     const assets::AssetVector3 velocity{
@@ -245,28 +443,66 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         static_cast<float>(*seed.velocity.y),
         static_cast<float>(*seed.velocity.z)};
     const bool server_ladder = seed.move_type == 5U;
+    constexpr std::uint32_t kValveOnGroundFlag = 1U << 9U;
+    const bool server_grounded=(seed.flags & kValveOnGroundFlag)!=0U;
+    const bool post_movement_ground_boundary =
+        command_profile == player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2 &&
+        server_grounded && witnessed_post_movement_ground_boundary(
+            seed, boundary_command, exact_post_boundary_command);
     if (seed.move_type != 3U && !server_ladder)
         return {ReferencePredictionGroundStatus::invalid_movement_state};
     if (server_ladder && (!ladder_context || !query_reference_ladder_contact(
             *ladder_context, origin, hull, scratch.collision, config.collision_query)))
         return {ReferencePredictionGroundStatus::invalid_movement_state};
-    const auto position = collision.test_position(
+    auto position = collision.test_position(
         origin, hull, scratch.collision, config.collision_query);
+    if (command_profile == player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2 &&
+        position && position.result &&
+        position.result->status != movement::LocalMovementPositionStatus::free) {
+        if (const auto resolved = movement::resolve_movement_boundary_position(
+                origin, hull, collision, scratch.collision, config.collision_query)) {
+            origin = *resolved;
+            position = collision.test_position(origin, hull, scratch.collision, config.collision_query);
+        }
+    }
+    if (command_profile==player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2 &&
+        server_grounded && velocity.z<=config.maximum_ground_snap_upward_velocity && position && position.result &&
+        position.result->status==movement::LocalMovementPositionStatus::blocking) {
+        auto resolved = quantized_brush_support_boundary(
+            origin, hull, *position.result, collision, scratch.collision, config);
+        if (!resolved)
+            resolved = quantized_box_boundary(origin,hull,*position.result,collision,scratch.collision,config);
+        if (resolved) {
+            origin=*resolved;
+            position=collision.test_position(origin,hull,scratch.collision,config.collision_query);
+        }
+    }
+    std::optional<movement::LocalMovementTrace> observed_trace;
+    const auto failure_with_evidence = [&](const ReferencePredictionGroundStatus status) {
+        ReferencePredictionGroundResult result;
+        result.status = status;
+        result.collision_identity = identity;
+        result.position_evidence = position.result;
+        result.trace_evidence = observed_trace;
+        result.queried_hull = hull;
+        result.queried_origin = origin;
+        return result;
+    };
     if (!position || !position.result)
-        return {ReferencePredictionGroundStatus::collision_query_failed};
+        return failure_with_evidence(ReferencePredictionGroundStatus::collision_query_failed);
     if (position.result->status != movement::LocalMovementPositionStatus::free)
-        return {ReferencePredictionGroundStatus::solid_start};
+        return failure_with_evidence(ReferencePredictionGroundStatus::solid_start);
     const auto contents = collision.point_contents(
         origin, scratch.collision, config.collision_query);
     if (!contents || !contents.result)
-        return {ReferencePredictionGroundStatus::collision_query_failed};
+        return failure_with_evidence(ReferencePredictionGroundStatus::collision_query_failed);
     if (contents.result->contents.category != player::PlayerMovementContents::empty ||
         position.result->contents.category != player::PlayerMovementContents::empty)
-        return {ReferencePredictionGroundStatus::unsupported_contents};
+        return failure_with_evidence(ReferencePredictionGroundStatus::unsupported_contents);
 
     player::PlayerGroundStateCreateInfo ground;
     ground.contact_position = origin;
-    if (velocity.z <= config.maximum_ground_snap_upward_velocity) {
+    if (velocity.z <= config.maximum_ground_snap_upward_velocity || post_movement_ground_boundary) {
         const assets::AssetVector3 end{
             origin.x, origin.y,
             static_cast<float>(static_cast<double>(origin.z) -
@@ -274,24 +510,26 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         const auto trace = collision.trace_hull(
             origin, end, hull, scratch.collision, config.collision_query);
         if (!trace || !trace.result)
-            return {ReferencePredictionGroundStatus::collision_query_failed};
+            return failure_with_evidence(ReferencePredictionGroundStatus::collision_query_failed);
         const auto& hit = *trace.result;
+        observed_trace = hit;
         if (hit.start_solid || hit.all_solid)
-            return {ReferencePredictionGroundStatus::solid_start};
+            return failure_with_evidence(ReferencePredictionGroundStatus::solid_start);
         if (!std::isfinite(hit.fraction) || hit.fraction < 0.0 ||
             hit.fraction > 1.0 ||
             hit.collision_profile != collision.profile())
-            return {ReferencePredictionGroundStatus::invalid_ground_trace};
+            return failure_with_evidence(ReferencePredictionGroundStatus::invalid_ground_trace);
         if (hit.in_liquid)
-            return {ReferencePredictionGroundStatus::unsupported_contents};
+            return failure_with_evidence(ReferencePredictionGroundStatus::unsupported_contents);
         if (hit.fraction < 1.0) {
             if (!hit.hit || !hit.collision_plane ||
                 !std::isfinite(hit.collision_plane->normal.z))
-                return {ReferencePredictionGroundStatus::invalid_ground_trace};
+                return failure_with_evidence(ReferencePredictionGroundStatus::invalid_ground_trace);
             if (hit.hit->kind != player::PlayerMovementHitKind::world &&
                 !(identity->profile == movement::LocalMovementCollisionProfile::reference_brush_scene_v1 &&
-                  hit.hit->kind == player::PlayerMovementHitKind::brush_entity))
-                return {ReferencePredictionGroundStatus::unsupported_contents};
+                  (hit.hit->kind == player::PlayerMovementHitKind::brush_entity ||
+                   hit.hit->kind == player::PlayerMovementHitKind::server_entity_box)))
+                return failure_with_evidence(ReferencePredictionGroundStatus::unsupported_contents);
             if (hit.collision_plane->normal.z >=
                 config.minimum_walkable_normal_z) {
                 ground.grounded = true;
@@ -303,9 +541,15 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
             }
         }
     }
-    constexpr std::uint32_t kValveOnGroundFlag = 1U << 9U;
-    if (!server_ladder && ((seed.flags & kValveOnGroundFlag) != 0U) != ground.grounded)
-        return {ReferencePredictionGroundStatus::ground_flag_disagreement};
+    if (!server_ladder && server_grounded != ground.grounded) {
+        if (command_profile==player::GoldSrcMovementCommandProfile::reference_wire_jump_duck_v2 &&
+            !server_grounded && ground.grounded) {
+            // The server publishes a post-command airborne state. A short
+            // local proximity probe is not permission to replace that fact;
+            // the next real command re-categorizes it normally.
+            ground={};
+        } else return failure_with_evidence(ReferencePredictionGroundStatus::ground_flag_disagreement);
+    }
     if (server_ladder) ground = {};
 
     player::LocalPlayerMovementStateCreateInfo state;
@@ -327,6 +571,7 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
         static_cast<float>(*seed.view_offset.z)};
     state.old_buttons = seed.old_buttons;
     state.duck_time_milliseconds = seed.duck_time_milliseconds;
+    state.crouch_jump_enabled = seed.crouch_jump_enabled;
     state.in_duck_transition = seed.in_duck;
     state.source_command_sequence = seed.command_boundary.value();
     state.last_valid_contents = player::PlayerMovementContents::empty;
@@ -341,9 +586,9 @@ ReferencePredictionGroundResult derive_reference_prediction_ground(
     const auto created = player::LocalPlayerMovementState::create(
         state, config.state_limits);
     if (!created)
-        return {ReferencePredictionGroundStatus::invalid_movement_state};
+        return failure_with_evidence(ReferencePredictionGroundStatus::invalid_movement_state);
     return {ReferencePredictionGroundStatus::ready, std::move(created.state),
-            identity, ground};
+            identity, ground, position.result, observed_trace, hull, origin};
 }
 
 } // namespace hlclient::goldsrc

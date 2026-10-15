@@ -62,6 +62,7 @@ namespace {
         exact_ground(left.ground_state(), right.ground_state()) &&
         exact_vector(left.view_offset(), right.view_offset()) &&
         left.old_buttons() == right.old_buttons() &&
+        left.crouch_jump_enabled() == right.crouch_jump_enabled() &&
         left.source_command_sequence() == right.source_command_sequence() &&
         left.simulation_time_nanoseconds() ==
             right.simulation_time_nanoseconds() &&

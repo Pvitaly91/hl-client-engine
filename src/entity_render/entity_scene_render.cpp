@@ -13,6 +13,7 @@
 #include <new>
 #include <stdexcept>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
 namespace hlclient::entity_render {
@@ -249,9 +250,9 @@ enum class CullResult {
     case assets::SpriteOrientation::view_parallel:
     case assets::SpriteOrientation::view_parallel_upright:
     case assets::SpriteOrientation::oriented:
+    case assets::SpriteOrientation::view_parallel_oriented:
         return true;
     case assets::SpriteOrientation::facing_upright:
-    case assets::SpriteOrientation::view_parallel_oriented:
         return false;
     }
     return false;
@@ -345,6 +346,8 @@ EntitySceneRenderPackage::EntitySceneRenderPackage(
     const std::optional<EntityRenderResourceIdentity> world_scene_association,
     std::vector<std::shared_ptr<const StudioModelRenderAsset>> studio_assets,
     std::vector<std::shared_ptr<const SpriteRenderAsset>> sprite_assets,
+    std::vector<EntitySceneRenderPackageCreateInfo::PresentationStudioSource> presentation_studio_sources,
+    std::vector<EntitySceneRenderPackageCreateInfo::PresentationSpriteSource> presentation_sprite_sources,
     const EntitySceneRenderStatistics statistics) noexcept
     : asset_source_(asset_source),
       asset_library_(std::move(asset_library)),
@@ -354,6 +357,8 @@ EntitySceneRenderPackage::EntitySceneRenderPackage(
       world_scene_association_(world_scene_association),
       studio_assets_(std::move(studio_assets)),
       sprite_assets_(std::move(sprite_assets)),
+      presentation_studio_sources_(std::move(presentation_studio_sources)),
+      presentation_sprite_sources_(std::move(presentation_sprite_sources)),
       statistics_(statistics)
 {
 }
@@ -609,7 +614,10 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
         };
         std::sort(input.studio_instances.begin(),
             input.studio_instances.end(),
-            by_entity);
+            [](const auto& a,const auto& b) {
+                return a.entity_number!=b.entity_number ? a.entity_number<b.entity_number :
+                    a.subinstance_ordinal<b.subinstance_ordinal;
+            });
         std::sort(input.sprite_instances.begin(),
             input.sprite_instances.end(),
             by_entity);
@@ -623,12 +631,17 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
                                             const std::uint32_t number) {
             return number != 0U && entity_numbers.insert(number).second;
         };
+        std::unordered_set<std::uint32_t> attachment_owners;
         for (const auto& instance : input.studio_instances) {
-            if (!retain_entity_number(instance.entity_number)) {
+            const bool primary=instance.subinstance_ordinal==0U;
+            const bool attached=instance.subinstance_ordinal==1U &&
+                entity_numbers.contains(instance.entity_number) &&
+                attachment_owners.insert(instance.entity_number).second;
+            if (!(primary ? retain_entity_number(instance.entity_number) : attached)) {
                 return frame_fail(
                     EntityRenderFrameErrorCode::duplicate_entity_number,
                     instance.entity_number,
-                    "Entity number is zero or repeated across frame candidates");
+                    "Invalid primary/attached Studio instance identity");
             }
         }
         for (const auto& instance : input.sprite_instances) {
@@ -757,7 +770,22 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
              ++index) {
             auto& instance = input.sprite_instances[index];
             if (!finite_entity_render_transform(instance.transform) ||
-                !finite_entity_render_bounds(instance.bounds)) {
+                !finite_entity_render_bounds(instance.bounds) ||
+                !std::isfinite(instance.opacity) || instance.opacity < 0.0F || instance.opacity > 1.0F ||
+                instance.blend_mode > SpriteBlendMode::glow ||
+                !std::isfinite(instance.ribbon_glow_width_scale) || instance.ribbon_glow_width_scale<1 || instance.ribbon_glow_width_scale>8 ||
+                !std::isfinite(instance.ribbon_glow_opacity) || instance.ribbon_glow_opacity<0 || instance.ribbon_glow_opacity>1 ||
+                (instance.ribbon_glow_opacity>0 && (!instance.ribbon_end || instance.blend_mode!=SpriteBlendMode::additive)) ||
+                (instance.surface_aligned &&
+                    (instance.orientation != assets::SpriteOrientation::oriented ||
+                        instance.blend_mode != SpriteBlendMode::additive || instance.ribbon_end)) ||
+                !std::ranges::all_of(instance.tint,[](float v){return std::isfinite(v)&&v>=0&&v<=1;}) ||
+                (instance.ribbon_end && (!std::isfinite(instance.ribbon_end->x) ||
+                    !std::isfinite(instance.ribbon_end->y) || !std::isfinite(instance.ribbon_end->z) ||
+                    !std::isfinite(instance.ribbon_width) || instance.ribbon_width<=0 || instance.ribbon_width>25.5F ||
+                    !std::isfinite(instance.ribbon_noise_amplitude) || instance.ribbon_noise_amplitude<0 || instance.ribbon_noise_amplitude>25.5F ||
+                    !std::isfinite(instance.ribbon_scroll_cycles_per_second) || std::abs(instance.ribbon_scroll_cycles_per_second)>25.5F ||
+                    !std::isfinite(instance.ribbon_phase_seconds) || instance.ribbon_phase_seconds<0))) {
                 return frame_fail(EntityRenderFrameErrorCode::invalid_instance,
                     instance.entity_number,
                     "Sprite entity transform or bounds are invalid");
@@ -770,8 +798,12 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             }
             const auto& asset =
                 *scene_package.sprite_assets()[instance.sprite_asset_index];
+            const bool surface_orientation_override = instance.surface_aligned &&
+                asset.orientation() == assets::SpriteOrientation::view_parallel;
             if (static_cast<std::size_t>(instance.selected_frame_index) >=
-                asset.frames().size() || instance.orientation != asset.orientation()) {
+                asset.frames().size() ||
+                (instance.surface_aligned ? !surface_orientation_override :
+                    instance.orientation != asset.orientation())) {
                 return frame_fail(
                     EntityRenderFrameErrorCode::invalid_asset_reference,
                     instance.entity_number,
@@ -834,15 +866,33 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
                 std::nullopt,
                 "Entity draw count exceeds the configured limit");
         }
+        std::unordered_map<std::uint32_t,EntityDrawClass> owner_classes;
+        for(const auto& instance:input.studio_instances)
+            if(instance.subinstance_ordinal==0U && attachment_owners.contains(instance.entity_number))
+                owner_classes.emplace(instance.entity_number,
+                    instance.material_support_status==StudioEntityMaterialSupportStatus::supported_masked ?
+                    EntityDrawClass::studio_masked : EntityDrawClass::studio_opaque);
+        const auto grouped_class=[&](const EntityDrawCommand& command) {
+            if(command.visual_kind!=RuntimeEntityVisualKind::studio_model ||
+                !attachment_owners.contains(command.entity_number)) return command.draw_class;
+            return owner_classes.at(command.entity_number);
+        };
         std::sort(draw_commands.begin(),
             draw_commands.end(),
-            [](const EntityDrawCommand& left, const EntityDrawCommand& right) {
-                if (left.draw_class != right.draw_class) {
-                    return left.draw_class < right.draw_class;
+            [&](const EntityDrawCommand& left, const EntityDrawCommand& right) {
+                const auto lc=grouped_class(left), rc=grouped_class(right);
+                if (lc != rc) {
+                    return lc < rc;
                 }
                 if (left.entity_number != right.entity_number) {
                     return left.entity_number < right.entity_number;
                 }
+                if(left.visual_kind==RuntimeEntityVisualKind::studio_model && right.visual_kind==left.visual_kind) {
+                    const auto lo=input.studio_instances[left.instance_index].subinstance_ordinal;
+                    const auto ro=input.studio_instances[right.instance_index].subinstance_ordinal;
+                    if(lo!=ro) return lo<ro;
+                }
+                if(left.draw_class!=right.draw_class) return left.draw_class<right.draw_class;
                 return left.instance_index < right.instance_index;
             });
 
@@ -888,6 +938,9 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
         }
         for (const auto& instance : input.studio_instances) {
             signature.add(instance.entity_number);
+            if(instance.subinstance_ordinal) {
+                signature.add(std::uint32_t{0x41545443U});signature.add(instance.subinstance_ordinal);
+            }
             signature.add(instance.studio_asset_index);
             signature.add(instance.pose_index);
             hash_transform(signature, instance.transform);
@@ -909,8 +962,30 @@ EntityRenderFrameBuildResult EntityRenderFrameBuilder::build(
             signature.add(instance.selected_frame_index);
             hash_transform(signature, instance.transform);
             signature.add(static_cast<std::uint32_t>(instance.orientation));
+            if (instance.surface_aligned) signature.add(std::uint32_t{0x53555246U});
             signature.add(static_cast<std::uint32_t>(
                 instance.texture_format_support));
+            if (instance.blend_mode != SpriteBlendMode::source_asset_default || instance.opacity != 1.0F) {
+                signature.add(std::uint32_t{0x53505242U});
+                signature.add(static_cast<std::uint32_t>(instance.blend_mode));
+                signature.add(instance.opacity);
+            }
+            if(instance.tint!=std::array<float,3>{1,1,1} || instance.ribbon_end) {
+                signature.add(std::uint32_t{0x20});
+                for(const auto channel:instance.tint) signature.add(channel);
+                if(instance.ribbon_end) {
+                    signature.add(instance.ribbon_end->x);signature.add(instance.ribbon_end->y);
+                    signature.add(instance.ribbon_end->z);signature.add(instance.ribbon_width);
+                    if(instance.ribbon_glow_opacity>0) {
+                        signature.add(std::uint32_t{0x474c4f57U});
+                        signature.add(instance.ribbon_glow_width_scale);signature.add(instance.ribbon_glow_opacity);
+                    }
+                    if(instance.ribbon_noise_amplitude || instance.ribbon_scroll_cycles_per_second) {
+                        signature.add(instance.ribbon_noise_amplitude);signature.add(instance.ribbon_scroll_cycles_per_second);
+                        signature.add(instance.ribbon_phase_seconds);signature.add(static_cast<std::uint32_t>(instance.ribbon_sine_noise));
+                    }
+                }
+            }
             hash_bounds(signature, instance.bounds);
             signature.add(static_cast<std::uint32_t>(
                 instance.visibility_status));

@@ -1468,7 +1468,17 @@ TEST_CASE("E9 same-host listener and mover share exact bounded job cleanup", "[e
         auto [mover,b]=job.launch(fake_server_spec(identity,reserve_then_release_loopback_port(),30000)); REQUIRE(b);
         CHECK(listener.process_id()!=mover.process_id()); CHECK(job.active_process_count()==2);
         if(close_early) {job.close(); REQUIRE(listener.wait(std::chrono::seconds{5})); REQUIRE(mover.wait(std::chrono::seconds{5}));}
-        else {mover.terminate(0);REQUIRE(mover.wait(std::chrono::seconds{5}));listener.terminate(0);REQUIRE(listener.wait(std::chrono::seconds{5}));CHECK(job.active_process_count()==0);}
+        else {
+            mover.terminate(0);REQUIRE(mover.wait(std::chrono::seconds{5}));
+            listener.terminate(0);REQUIRE(listener.wait(std::chrono::seconds{5}));
+            // A signalled process handle does not synchronously flush Windows
+            // Job accounting. Await that independent observation, still bounded
+            // and still requiring exact zero (not unavailable or best effort).
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+            while(job.active_process_count()!=0 && std::chrono::steady_clock::now()<deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            CHECK(job.active_process_count()==0);
+        }
     }
 }
 
@@ -1551,8 +1561,134 @@ TEST_CASE("E9 peer diagnostic contract retains error evidence without launching 
     REQUIRE(windows::bounded_process_log_snapshot_complete(snapshot));
     CHECK(snapshot.bytes.find("remote-audio-peer-contract=passed") !=
           std::string::npos);
+    CHECK(snapshot.bytes.find("peer-exit-monitor=passed") !=
+          std::string::npos);
+    CHECK(snapshot.bytes.find("voluntary-peer-exit=continue-listener") !=
+          std::string::npos);
+    CHECK(snapshot.bytes.find("peer-crash=bounded-owned-cleanup") !=
+          std::string::npos);
+    CHECK(snapshot.bytes.find("cleanup-exit-observation=passed") !=
+          std::string::npos);
     CHECK(snapshot.bytes.find("process-launches=0") != std::string::npos);
     CHECK(job.active_process_count() == 0U);
+}
+
+TEST_CASE("E28 voluntary peer leave and crash cleanup retain exact owned process exit codes",
+          "[e28][peer-disconnect][platform][windows][orchestrator][job][fake-integration]")
+{
+    const auto identity=observe_fake_server();
+    for(const auto peer_code:{0U,2U}) {
+        CAPTURE(peer_code);
+        auto [job,created]=windows::KillOnCloseProcessJob::create(3U);REQUIRE(created);
+        const auto main_port=reserve_then_release_loopback_port();
+        auto server_port=reserve_then_release_loopback_port();
+        while(server_port==main_port) server_port=reserve_then_release_loopback_port();
+        auto peer_port=reserve_then_release_loopback_port();
+        while(peer_port==main_port || peer_port==server_port) peer_port=reserve_then_release_loopback_port();
+        auto [main,main_created]=job.launch(fake_server_spec(identity,main_port,30'000U));REQUIRE(main_created);
+        auto [server,server_created]=job.launch(fake_server_spec(identity,server_port,30'000U));REQUIRE(server_created);
+        auto [peer,peer_created]=job.launch(fake_server_spec(identity,peer_port,200U,nullptr,0U,false,0U,{},25U,peer_code));REQUIRE(peer_created);
+        const auto peer_exit=peer.wait_result(std::chrono::seconds{5});
+        REQUIRE(peer_exit.status==windows::OwnedProcess::WaitStatus::exited);REQUIRE(peer_exit.exit_code==peer_code);
+        REQUIRE(main.running());REQUIRE(server.running()); // B alone left or failed.
+        if(peer_code==0U) {main.terminate(0U);REQUIRE(main.wait(std::chrono::seconds{5})==0U);}
+        const auto cleanup=job.terminate_and_wait(120U,std::chrono::seconds{5});REQUIRE(cleanup);
+        const auto main_exit=main.wait_result(std::chrono::milliseconds{100});
+        const auto server_exit=server.wait_result(std::chrono::milliseconds{100});
+        REQUIRE(main_exit.status==windows::OwnedProcess::WaitStatus::exited);
+        REQUIRE(server_exit.status==windows::OwnedProcess::WaitStatus::exited);
+        CHECK(main_exit.exit_code==(peer_code==0U ? 0U : 120U));CHECK(server_exit.exit_code==120U);
+        CHECK(peer.wait(std::chrono::milliseconds{100})==peer_code); // Not rewritten by cleanup.
+        CHECK(cleanup.active_process_count==0U);CHECK(job.active_process_count()==0U);
+    }
+}
+
+TEST_CASE("E28.1 production runner consumes durable receipts after bounded log eviction",
+          "[e281][session-receipts][peer-disconnect][platform][windows][orchestrator][diagnostics]")
+{
+    const auto identity = observe_active_orchestrator();
+    auto log = windows::BoundedProcessLogCapture::create({});
+    REQUIRE(log);
+    auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+    REQUIRE(created);
+    windows::OwnedProcessLaunchSpec spec;
+    spec.executable = identity.canonical_path;
+    spec.working_directory = identity.canonical_path.parent_path();
+    spec.expected_identity = identity;
+    spec.stdout_handle = log->inherited_write_handle();
+    spec.stderr_handle = log->inherited_write_handle();
+    spec.arguments = {L"--validate-session-receipt-contract"};
+    auto [child, launched] = job.launch(spec);
+    REQUIRE(launched);
+    log->close_parent_write_handle();
+    REQUIRE(child.wait(std::chrono::seconds{10}) == 0U);
+    const auto snapshot = log->finish();
+    REQUIRE(windows::bounded_process_log_snapshot_complete(snapshot));
+    CHECK(snapshot.bytes.find("session-receipt-contract=passed") != std::string::npos);
+    CHECK(snapshot.bytes.find("bounded-log-original-markers-evicted=passed") != std::string::npos);
+    CHECK(snapshot.bytes.find("durable-map-receipt-after-eviction=passed") != std::string::npos);
+    CHECK(snapshot.bytes.find("server-text-receipt-spoof=rejected") != std::string::npos);
+    CHECK(snapshot.bytes.find("peer-close-removal-qpc-correlation=passed") != std::string::npos);
+    CHECK(snapshot.bytes.find("receipt-reader-caller-network-boundary=passed") != std::string::npos);
+    CHECK(snapshot.bytes.find("healthy-terminal-close-receipt=passed") != std::string::npos);
+    CHECK(snapshot.bytes.find("effective-duration-manifest-contract=passed") != std::string::npos);
+    CHECK(snapshot.bytes.find("process-launches=0") != std::string::npos);
+    CHECK(job.active_process_count() == 0U);
+}
+
+TEST_CASE("E28.2 normal close preserves accepted establishment and committed map evidence",
+          "[e282][normal-close-verdict][platform][windows][orchestrator][reporting][no-stock]")
+{
+    const auto identity = observe_active_orchestrator();
+    auto log = windows::BoundedProcessLogCapture::create({});
+    REQUIRE(log);
+    auto [job, created] = windows::KillOnCloseProcessJob::create(1U);
+    REQUIRE(created);
+    windows::OwnedProcessLaunchSpec spec;
+    spec.executable = identity.canonical_path;
+    spec.working_directory = identity.canonical_path.parent_path();
+    spec.expected_identity = identity;
+    spec.stdout_handle = log->inherited_write_handle();
+    spec.stderr_handle = log->inherited_write_handle();
+    spec.arguments = {L"--validate-normal-close-verdict"};
+    auto [child, launched] = job.launch(spec);
+    REQUIRE(launched);
+    log->close_parent_write_handle();
+    CHECK(child.wait(std::chrono::seconds{10}) == 0U);
+    const auto snapshot = log->finish();
+    REQUIRE(windows::bounded_process_log_snapshot_complete(snapshot));
+    for (const auto key : {"normal-close-verdict-contract=passed", "connection-status=accepted",
+             "connection-establishment=accepted", "session-terminal-state=normal_close_completed",
+             "connection-accepted=true", "client-map-entry-status=observed",
+             "client-world-state-published=true", "orchestrator=success", "result=success",
+             "application-result=completed", "application-primary-error=none",
+             "application-scripted-coverage=not_evaluated", "evidence-eligible=false",
+             "authentication-status=pending-or-unknown", "job-cleanup=exact",
+             "negative-controls=passed", "bounded-log-receipt-readiness=passed",
+             "usercmd-generated=7250", "usercmd-new=7250", "usercmd-packets=7188",
+             "usercmd-server-samples=3626", "stock-processes-started=0", "capture-files-written=0"})
+        CHECK(snapshot.bytes.find(key) != std::string::npos);
+    CHECK(job.active_process_count() == 0U);
+}
+
+TEST_CASE("E28 peer server log observation selects the owned listener before stable userid",
+          "[e28][peer-disconnect][platform][windows][orchestrator][reporting][no-stock]")
+{
+    const auto identity=observe_active_orchestrator();
+    auto log=windows::BoundedProcessLogCapture::create({});REQUIRE(log);
+    auto [job,created]=windows::KillOnCloseProcessJob::create(1U);REQUIRE(created);
+    windows::OwnedProcessLaunchSpec spec;spec.executable=identity.canonical_path;
+    spec.working_directory=identity.canonical_path.parent_path();spec.expected_identity=identity;
+    spec.stdout_handle=log->inherited_write_handle();spec.stderr_handle=log->inherited_write_handle();
+    spec.arguments={L"--validate-functional-log-observation"};
+    auto [child,launched]=job.launch(spec);REQUIRE(launched);log->close_parent_write_handle();
+    REQUIRE(child.wait(std::chrono::seconds{5})==0U);
+    const auto snapshot=log->finish();REQUIRE(windows::bounded_process_log_snapshot_complete(snapshot));
+    for(const auto key:{"peer-log-first-a=passed","peer-log-first-b=passed","peer-log-b-leave=passed",
+        "peer-log-a-leave=passed","peer-log-a-reconnect=passed","peer-log-observation=passed",
+        "functional-log-observation=valid","stock-processes-started=0","capture-files-written=0"})
+        CHECK(snapshot.bytes.find(key)!=std::string::npos);
+    CHECK(job.active_process_count()==0U);
 }
 
 TEST_CASE("Owned launch denies child process creation without side effects",

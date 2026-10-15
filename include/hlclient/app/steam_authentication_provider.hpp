@@ -31,11 +31,18 @@ enum class SteamAuthenticationTraceStatus {
     cancelled,
 };
 
+enum class SteamAuthenticationPhase {
+    initialization,
+    material_acquisition,
+};
+
 struct SteamAuthenticationTraceEvent {
     SteamAuthenticationTraceStatus status{
         SteamAuthenticationTraceStatus::api_initializing};
     std::optional<auth::AuthenticationErrorCode> error;
     std::size_t material_size{0U};
+    std::optional<SteamAuthenticationPhase> phase;
+    std::chrono::milliseconds elapsed{0};
 };
 
 using SteamAuthenticationTraceCallback =
@@ -72,7 +79,11 @@ using SteamAuthenticationNow =
 struct SteamAuthenticationProviderConfig {
     std::filesystem::path runtime_library;
     std::uint32_t required_app_id{kHalfLifeSteamAppId};
+    // Fresh-material polling starts after successful API/context readiness.
+    // Initialization has a separate acceptance deadline; the synchronous ABI
+    // cannot be preempted here, so the managed process host retains its bound.
     std::chrono::milliseconds timeout{5'000};
+    std::chrono::milliseconds initialization_timeout{30'000};
     SteamLegacyClientApiFactory api_factory;
     SteamAuthenticationNow now;
     SteamAuthenticationTraceCallback trace;
@@ -80,6 +91,18 @@ struct SteamAuthenticationProviderConfig {
 
 [[nodiscard]] std::unique_ptr<ISteamLegacyClientApi>
 create_dynamic_steam_legacy_client_api(const std::filesystem::path& runtime_library);
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const SteamAuthenticationPhase phase) noexcept
+{
+    switch (phase) {
+    case SteamAuthenticationPhase::initialization:
+        return "initialization";
+    case SteamAuthenticationPhase::material_acquisition:
+        return "material_acquisition";
+    }
+    return "unknown";
+}
 
 class SteamAuthenticationProvider final : public auth::IAuthenticationProvider {
 public:

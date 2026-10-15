@@ -74,6 +74,16 @@ enum class ConnectRequestStageState {
     protocol_error,
 };
 
+// Every text value is a fixed engine token, never a server string. Allows
+// applications to retain the exact early failure after the driver is gone.
+struct HandshakeEarlyFailureDiagnostic {
+    std::string_view phase;
+    std::string_view category;
+    std::string_view code;
+    std::optional<std::size_t> byte_offset;
+    std::string_view field{"not_observed"};
+};
+
 enum class ConnectRequestStageErrorCategory {
     configuration,
     network,
@@ -340,6 +350,8 @@ public:
     [[nodiscard]] bool start(ChallengeExchangeTimePoint now);
     void update(ChallengeExchangeTimePoint now);
     void cancel(ChallengeExchangeTimePoint now);
+    [[nodiscard]] bool request_graceful_close(ChallengeExchangeTimePoint now);
+    [[nodiscard]] GracefulCloseSummary graceful_close_snapshot() const noexcept;
 
     [[nodiscard]] GoldSrcHandshakeState state() const noexcept;
     [[nodiscard]] bool terminal() const noexcept;
@@ -395,6 +407,7 @@ public:
     [[nodiscard]] bool live_visual_input_ready() const noexcept;
     [[nodiscard]] const ResourceListState* live_resource_list() const noexcept;
     [[nodiscard]] const ServerInfoState* live_server_info() const noexcept;
+    [[nodiscard]] std::string_view live_sky_name() const noexcept;
     [[nodiscard]] bool submit_live_visual_input(
         const LiveVisualControlInput& input,
         ChallengeExchangeTimePoint now) noexcept;
@@ -412,6 +425,8 @@ public:
         std::shared_ptr<const world_scene_render::WorldSceneRenderPackage> package);
     [[nodiscard]] LiveReferencePredictionSnapshot
     live_reference_prediction_snapshot(ChallengeExchangeTimePoint now) const;
+    [[nodiscard]] LiveRuntimeMovementDiagnostics
+    movement_diagnostics_snapshot() const noexcept;
     [[nodiscard]] const std::optional<PrecacheManifestSignonState>&
     precache_manifest_result() const noexcept;
     [[nodiscard]] const std::optional<PrecacheManifestStageError>&
@@ -449,6 +464,8 @@ public:
     [[nodiscard]] const std::optional<auth::AuthenticationError>&
     authentication_error() const noexcept;
     [[nodiscard]] std::string_view error_context() const noexcept;
+    [[nodiscard]] std::optional<HandshakeEarlyFailureDiagnostic>
+    early_failure_diagnostic() const noexcept;
 
 private:
     friend class detail::GoldSrcHandshakeCoordinatorTestAccess;
@@ -504,6 +521,7 @@ private:
     std::unique_ptr<WorldRenderPackageStage> world_render_package_stage_;
     std::optional<auth::AuthenticationSession> authentication_session_;
     GoldSrcHandshakeState state_{GoldSrcHandshakeState::idle};
+    GracefulCloseSummary graceful_close_;
     std::string configuration_error_;
 };
 

@@ -224,3 +224,61 @@ Fast default, Strict explicit, reference/off, map/scenario and optional 50 HP
 remain unchanged. E2 does not depend on 50 HP. Dry-fire, secondary attack,
 other weapons, predicted footsteps/landing, damage/trace/decal/shells,
 remote .sc events and complete GoldSrc event/client.dll APIs are deferred.
+
+## Python/MP5 audio cache correction — 2026-10-06
+
+`attribution=user_report`: .357 and MP5 primary/secondary shot audio is absent
+in both shooter and observer clients. Historical E2/E15/E16/E18 acceptance
+entries remain unchanged. The latest retained manual run
+`23651237d38947ecbf43f536db767a39` completed with both exits 0; its firing peer
+records 62 fire cues and 56 audio-invalid/limit outcomes. These are diagnostic
+observations, not listening confirmation or proof of every rejected sample.
+
+The shared approved loader admitted only 64 unique local/profile names. The
+current Half-Life startup preparation (movement, material/ricochet/contact,
+temporary effects and the supported event/weapon profiles) needs 74 unique
+names in the owned complete-profile control. A later uncached weapon sample was
+therefore permanently rejected as `SoundAssetStatus::limit`, despite an available
+WAV and a valid accepted shot. The before-fix production-module/approved-loader
+regression fills 64 ready entries, fires Python and fails at
+`weapons/357_shot1.wav`, status limit, before voice allocation.
+
+`kMaximumApprovedLocalSoundEntries` is now 128 within the existing shared 512
+entries and unchanged 32 MiB PCM byte cap. Exact-root authorization, one worker,
+deduplication by virtual sample, cancellation, no-eviction/shared ownership and
+voice/output limits are unchanged. No installation, SDK or sample file was
+modified; the existing original `357_shot1/2`, `hks1/2` and `glauncher/2` choices,
+gain, pitch and channel policies are retained. The fix is in generic resource
+admission; Half-Life sample selection remains inside the game module.
+
+Three new offline cases cover the full 74-name production preparation set;
+local and observer .357/MP5 primary/MP5 secondary after 64 ready samples; and
+the 128-entry positive boundary, rejection of entry 129, ready PCM reuse,
+unsafe-reference rejection and independent sparse server binding admission.
+Each of the six weapon paths produces exactly one voice with finite nonzero
+isolated PCM; duplicate command/event/delivery creates no additional voice.
+This is decoded/mixed signal evidence, not an own listening confirmation.
+
+Final verification after the production change:
+
+- New capacity cases: 3 passed, 568 assertions. Scoped Release audio/E15/E16/E18
+  plus startup/stack regressions: 207 passed, 1 explicit device-playback opt-in
+  skip, 115483 assertions; original read-only assets and relevant GL controls
+  included. Debug: 199 passed, 9 explicit asset/device opt-in skips,
+  114423 assertions, no failures.
+- Normal Release and affected Debug targets built. One missing standard include
+  in a new test was corrected and that test target rebuilt; production source
+  did not change after the final cache correction.
+- Core-only all Release targets built with Half-Life disabled; 41/41 tests and
+  architecture guard passed. The generic capacity case itself instantiates no
+  Half-Life module. Launcher CheckOnly and normal Release Null startup passed.
+- Eight scoped source snapshots hash-verified under
+  `manual-artifacts/task-records/weapon-audio-cache-capacity-20261006`;
+  `git diff --check` passed, index empty. No new live/Steam/HLDS/WFP/capture,
+  staging, commit or push. ASan runtime remains historically unverified.
+
+Prepared normal Release `build/bin/Release/hlclient.exe`, 3781632 bytes,
+SHA-256 `2ED8B3992B70E09DCB8617A56C34550696B54AD13E538086B02CDA4DE756F79F`.
+Launcher SHA remains unchanged. New-build manual/listening validation is
+`not_run`; repeat .357, MP5 primary and RMB M203 in the shooter and observer
+with the existing reference/RemoteAudioPeer/NoTimeLimit command.

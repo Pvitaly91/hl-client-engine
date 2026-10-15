@@ -1,6 +1,9 @@
 #include <hlclient/goldsrc/stock_runtime_capture.hpp>
 #include <hlclient/core/remote_audio_peer_plan.hpp>
 #include <hlclient/core/manual_session_timing.hpp>
+#include <hlclient/app/session_receipt.hpp>
+#include <hlclient/app/intentional_session_close.hpp>
+#include <hlclient/platform/windows/session_receipt_file.hpp>
 #include <hlclient/goldsrc/stock_runtime_reconnect_lifecycle.hpp>
 #include <hlclient/platform/windows/binary_identity.hpp>
 #include <hlclient/platform/windows/network_isolation.hpp>
@@ -11,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <hlclient/goldsrc/user_info_update.hpp>
 #include <cmath>
 #include <chrono>
 #include <cctype>
@@ -46,6 +50,7 @@ namespace {
 namespace fs = std::filesystem;
 namespace goldsrc = hlclient::goldsrc;
 namespace windows = hlclient::platform::windows;
+namespace app = hlclient::app;
 
 constexpr std::wstring_view kConfirmationToken =
     L"HLCLIENT_STOCK_RUNTIME_ACTIVE_CAPTURE_V1";
@@ -111,7 +116,7 @@ constexpr std::array<std::string_view, 7U> kWeaponPredictionFlags{
     "server_fire_verified", "server_reload_verified", "glock_fire_animation_presented",
     "glock_reload_animation_presented", "glock_recoil_presented",
     "crowbar_swing_presented", "hud_server_state_updated"};
-constexpr std::array<std::string_view, 131U> kApplicationMetrics{
+constexpr std::array<std::string_view, 139U> kApplicationMetrics{
     "result", "primary_error", "runtime_error", "parser_error", "opcode",
     "cursor", "record", "source_sequence", "scripted_coverage",
     "prediction_coverage", "inventory_notifications", "feedback_rows",
@@ -162,10 +167,38 @@ constexpr std::array<std::string_view, 131U> kApplicationMetrics{
     "weapon_audio_actions", "weapon_audio_fire", "weapon_audio_reload", "weapon_audio_deploy", "weapon_audio_swing",
     "weapon_audio_markers", "weapon_audio_duplicates", "weapon_audio_late", "weapon_audio_cancelled", "weapon_audio_missing",
     "weapon_audio_submitted", "weapon_audio_started", "weapon_audio_invalid", "weapon_audio_muted",
-    "weapon_audio_marker_duplicates", "weapon_audio_delivery_duplicates", "weapon_audio_timeline_corrections"};
+    "weapon_audio_marker_duplicates", "weapon_audio_delivery_duplicates", "weapon_audio_timeline_corrections",
+    "temporary_entity_type", "packet_entity", "packet_schema_boundary",
+    "user_info_error", "user_info_string_error", "user_info_string_length",
+    "user_info_empty", "user_info_private_id_present"};
 using ApplicationEvidence = std::array<std::optional<std::string>, kApplicationMetrics.size()>;
 bool valid_application_metric(std::string_view name, std::string_view value) {
     if (value.empty() || value.size()>64U) return false;
+    if(name=="user_info_error") {
+        using Code=hlclient::goldsrc::UserInfoUpdateErrorCode;
+        constexpr std::array codes{Code::invalid_configuration,Code::empty_input,Code::wrong_opcode,
+            Code::message_too_large,Code::truncated_client_index,Code::invalid_client_index,
+            Code::truncated_user_id,Code::invalid_user_id,Code::unterminated_info_string,
+            Code::info_string_too_large,Code::invalid_info_string,Code::truncated_opaque_suffix,
+            Code::unexpected_trailing_bytes,Code::size_overflow};
+        return value=="unavailable" || std::any_of(codes.begin(),codes.end(),
+            [&](Code code){return value==hlclient::goldsrc::to_string(code);});
+    }
+    if(name=="user_info_string_error") {
+        using Code=hlclient::goldsrc::UserInfoStringErrorCode;
+        constexpr std::array codes{Code::missing_leading_separator,Code::empty_key,Code::empty_value,
+            Code::malformed_key_value_sequence,Code::duplicate_key,Code::key_too_long,
+            Code::value_too_long,Code::too_many_entries};
+        return value=="unavailable" || std::any_of(codes.begin(),codes.end(),
+            [&](Code code){return value==hlclient::goldsrc::to_string(code);});
+    }
+    if(name=="user_info_empty" || name=="user_info_private_id_present")
+        return value=="unavailable" || value=="0" || value=="1";
+    if(name=="user_info_string_length" && value!="unavailable") {
+        std::uint64_t length{};const auto parsed=std::from_chars(value.data(),value.data()+value.size(),length);
+        return parsed.ec==std::errc{} && parsed.ptr==value.data()+value.size() &&
+            length<=hlclient::goldsrc::kMaximumUserInfoStringSize;
+    }
     const bool decimal=name=="ground_normal_x" || name=="ground_normal_y" ||
         name=="ground_normal_z" || name=="prediction_raw_error" || name=="prediction_camera_jump";
     if (decimal && value!="unavailable") {
@@ -263,7 +296,11 @@ struct LifeEvidence final {
 struct Options final {
     bool validate_test_start_health_contract{false};
     bool validate_remote_audio_peer_contract{false};
+    bool validate_session_receipt_contract{false};
+    bool validate_normal_close_verdict{false};
+    bool normal_close_verdict_projection{false};
     bool remote_audio_peer{false};
+    bool external_manual_map{false};
     std::optional<std::uint32_t> manual_duration_seconds;
     bool manual_no_time_limit{false};
     bool validate_config{false};
@@ -285,6 +322,7 @@ struct Options final {
         ProjectClientLiveInput::scripted_check};
     bool project_client_reference_prediction{false};
     bool project_client_mute_glock_fire_sound{false};
+    bool project_client_debug_freeze_tracer{false};
     bool test_start_health{false};
     bool validate_wrapper_startup{false};
     windows::HldsRuntimeProfile::Id server_profile_id{
@@ -428,6 +466,14 @@ template<typename Integer>
     return output;
 }
 
+[[nodiscard]] std::optional<std::string> configured_client_log_name(
+    const std::vector<std::wstring>& arguments)
+{
+    const auto at=std::find(arguments.begin(),arguments.end(),L"--name");
+    return at!=arguments.end() && std::next(at)!=arguments.end()
+        ? narrow_safe_token(*std::next(at)) : std::nullopt;
+}
+
 [[nodiscard]] std::optional<Options> parse_options(
     const int argc,
     wchar_t** argv)
@@ -437,6 +483,16 @@ template<typename Integer>
     }
     if (argc == 2 && std::wstring_view{argv[1]} == L"--validate-remote-audio-peer-contract") {
         Options options; options.validate_remote_audio_peer_contract=true; return options;
+    }
+    if (argc == 2 && std::wstring_view{argv[1]} == L"--validate-session-receipt-contract") {
+        Options options; options.validate_session_receipt_contract=true; return options;
+    }
+    if ((argc == 2 || (argc == 3 && std::wstring_view{argv[2]} == L"--projection")) &&
+        std::wstring_view{argv[1]} == L"--validate-normal-close-verdict") {
+        Options options;
+        options.validate_normal_close_verdict = true;
+        options.normal_close_verdict_projection = argc == 3;
+        return options;
     }
     if (argc == 2 && std::wstring_view{argv[1]} == L"--validate-config") {
         Options options;
@@ -458,7 +514,7 @@ template<typename Integer>
         return options;
     }
     Options options;
-    std::array<bool, 58U> seen{};
+    std::array<bool, 60U> seen{};
     const auto mark = [&seen](const std::size_t index) {
         if (seen[index]) return false;
         seen[index] = true;
@@ -492,6 +548,11 @@ template<typename Integer>
             options.remote_audio_peer=true;
             continue;
         }
+        if (name == L"--external-manual-map") {
+            if (!mark(59U)) return std::nullopt;
+            options.external_manual_map = true;
+            continue;
+        }
         if (name == L"--manual-no-time-limit") {
             if (!mark(56U)) return std::nullopt;
             options.manual_no_time_limit = true;
@@ -500,6 +561,11 @@ template<typename Integer>
         if (name == L"--project-client-stock-signon") {
             if (!mark(47U)) return std::nullopt;
             options.project_client_stock_signon = true;
+            continue;
+        }
+        if (name == L"--project-client-debug-freeze-tracer") {
+            if (!mark(58U)) return std::nullopt;
+            options.project_client_debug_freeze_tracer = true;
             continue;
         }
         if (name == L"--project-client-mute-glock-fire-sound") {
@@ -821,14 +887,26 @@ template<typename Integer>
          options.project_client_stop != ProjectClientStop::live_visual_control ||
          options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse ||
          (options.manual_no_time_limit && options.manual_duration_seconds))) return std::nullopt;
+    if (options.project_client_debug_freeze_tracer &&
+        (!options.manual_validation || !options.project_client_stock_signon ||
+         options.project_client_stop != ProjectClientStop::live_visual_control ||
+         options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse))
+        return std::nullopt;
     if (options.project_client_mute_glock_fire_sound &&
         (!options.manual_validation || !options.project_client_stock_signon ||
          options.project_client_stop != ProjectClientStop::live_visual_control ||
          options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse))
         return std::nullopt;
+    if (options.external_manual_map &&
+        (!options.functional_smoke || !options.manual_validation || !options.fast_manual ||
+         !options.project_client_stock_signon ||
+         options.project_client_stop != ProjectClientStop::live_visual_control ||
+         options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse ||
+         options.test_start_health)) return std::nullopt;
     if (options.remote_audio_peer && (!options.manual_validation || !options.functional_smoke ||
         !options.project_client_stock_signon || options.project_client_stop!=ProjectClientStop::live_visual_control ||
-        options.project_client_live_input!=ProjectClientLiveInput::keyboard_mouse || options.map!="crossfire" || options.test_start_health)) return std::nullopt;
+        options.project_client_live_input!=ProjectClientLiveInput::keyboard_mouse ||
+        (options.map!="crossfire" && !options.external_manual_map) || options.test_start_health)) return std::nullopt;
     if (options.test_start_health &&
         (!options.functional_smoke || !options.project_client_stock_signon ||
          options.project_client_stop != ProjectClientStop::live_visual_control ||
@@ -1799,6 +1877,22 @@ struct ProjectResponsePayloadDiagnostic final {
 };
 
 struct ActiveSummary final {
+    std::string client_launch_sha256;
+    std::optional<std::string> client_final_sha256;
+    std::string client_binary_change_status{"not_observed"};
+    std::string runner_build_sha256;
+    std::string runner_source_identity;
+    bool launch_manifest_published{false};
+    std::optional<std::uint64_t> client_creation_filetime;
+    std::optional<std::uint64_t> peer_creation_filetime;
+    std::optional<std::uint32_t> guard_exit_code;
+    std::optional<app::SessionReceiptSnapshot> listener_receipt;
+    std::optional<app::SessionReceiptSnapshot> peer_receipt;
+    std::string listener_receipt_status{"legacy_evidence_unavailable"};
+    std::string peer_receipt_status{"not_applicable"};
+    bool listener_terminal_receipt_valid{false};
+    bool peer_terminal_receipt_valid{false};
+    bool peer_runner_terminated{false};
     bool success{false};
     std::string failure{"unknown"};
     std::size_t processes_started{0U};
@@ -1811,7 +1905,9 @@ struct ActiveSummary final {
     bool functional_client_resume_succeeded{false};
     bool functional_connect_requested{false};
     bool functional_server_connection_accepted{false};
+    // Explicit establishment rejection is not a later server-log lifecycle end.
     bool functional_connection_rejected{false};
+    bool functional_connection_lost{false};
     bool functional_connection_timeout_observed{false};
     bool functional_steam_authentication_error_observed{false};
     bool functional_client_entered_game_observed{false};
@@ -1952,6 +2048,242 @@ struct ActiveSummary final {
         windows::HldsRuntimeProfile::Id::legacy_stdio_hlds_banner_v1
 };
 };
+
+struct PeerDisconnectTiming final {
+    std::string_view status{"not_observed"};
+    std::optional<double> close_to_postcommit_removal_ms;
+    std::optional<std::uint8_t> receiving_entity;
+    std::optional<std::uint64_t> close_requested_host_qpc_ticks;
+    std::optional<std::uint64_t> removal_host_qpc_ticks;
+    std::optional<std::uint64_t> removal_source_ordinal;
+    std::optional<std::uint64_t> host_qpc_frequency;
+};
+
+// Measured B close intent to A's server-derived committed absence observation;
+// not packet delivery, ACK latency or server gameplay cleanup confirmation.
+[[nodiscard]] PeerDisconnectTiming observe_peer_disconnect_timing(
+    const Options& options, const ActiveSummary& summary)
+{
+    PeerDisconnectTiming result;
+    if (!options.remote_audio_peer) { result.status = "not_applicable"; return result; }
+    if (!summary.launch_manifest_published || summary.functional_server_process_id == 0U) {
+        result.status = "owned_server_identity_unavailable"; return result;
+    }
+    if (!summary.listener_terminal_receipt_valid || !summary.peer_terminal_receipt_valid ||
+        !summary.listener_receipt || !summary.peer_receipt ||
+        !summary.client_creation_filetime || !summary.peer_creation_filetime) {
+        result.status = "terminal_receipts_unavailable"; return result;
+    }
+    const auto& listener = *summary.listener_receipt;
+    const auto& peer = *summary.peer_receipt;
+    const auto run_id = options.run_root.filename().string();
+    const auto expected_map = "maps/" + options.map + ".bsp";
+    const app::SessionReceiptIdentity expected_a{
+        run_id, app::SessionReceiptRole::A, summary.functional_client_process_id, *summary.client_creation_filetime};
+    const app::SessionReceiptIdentity expected_b{
+        run_id, app::SessionReceiptRole::B, summary.remote_audio_peer_process_id, *summary.peer_creation_filetime};
+    if (listener.identity != expected_a || peer.identity != expected_b ||
+        listener.stage != app::SessionReceiptStage::terminal || peer.stage != app::SessionReceiptStage::terminal ||
+        !app::valid_session_receipt(listener) || !app::valid_session_receipt(peer) ||
+        listener.generation.map_identifier != expected_map || peer.generation.map_identifier != expected_map) {
+        result.status = "receipt_identity_mismatch"; return result;
+    }
+    // This launcher owns one established channel per process. Map epochs are
+    // separately derived from this same owned HLDS's server_count + 1.
+    if (listener.generation.network_generation != 1U || peer.generation.network_generation != 1U ||
+        listener.generation.map_generation != peer.generation.map_generation) {
+        result.status = "receipt_epoch_mismatch"; return result;
+    }
+    if (!listener.receiving_entity || !peer.receiving_entity ||
+        listener.receiving_entity == peer.receiving_entity) {
+        result.status = "receiving_entity_unavailable"; return result;
+    }
+    result.receiving_entity = peer.receiving_entity;
+    if (!peer.close.requested || (peer.close.reason != app::SessionCloseReason::window_close &&
+            peer.close.reason != app::SessionCloseReason::duration_limit) ||
+        !peer.close.requested_host_qpc_ticks || !listener.host_qpc_frequency ||
+        *peer.close.requested_host_qpc_ticks == 0U ||
+        !peer.host_qpc_frequency || *listener.host_qpc_frequency == 0U ||
+        listener.host_qpc_frequency != peer.host_qpc_frequency) {
+        result.status = "shared_monotonic_clock_unavailable"; return result;
+    }
+    result.close_requested_host_qpc_ticks = peer.close.requested_host_qpc_ticks;
+    result.host_qpc_frequency = listener.host_qpc_frequency;
+    for (std::size_t i = 0U; i < listener.peer_removal_count; ++i) {
+        const auto& removal = listener.peer_removals[i];
+        if (removal.entity != *peer.receiving_entity || removal.host_qpc_ticks == 0U ||
+            removal.host_qpc_ticks < *peer.close.requested_host_qpc_ticks) continue;
+        if (!result.removal_host_qpc_ticks || removal.host_qpc_ticks < *result.removal_host_qpc_ticks) {
+            result.removal_host_qpc_ticks = removal.host_qpc_ticks;
+            result.removal_source_ordinal = removal.source_ordinal;
+        }
+    }
+    if (!result.removal_host_qpc_ticks) {
+        result.status = "matching_committed_removal_not_observed"; return result;
+    }
+    const auto elapsed_ticks = *result.removal_host_qpc_ticks - *peer.close.requested_host_qpc_ticks;
+    result.close_to_postcommit_removal_ms = static_cast<double>(elapsed_ticks) * 1'000.0 /
+        static_cast<double>(*listener.host_qpc_frequency);
+    result.status = "observed";
+    return result;
+}
+
+[[nodiscard]] std::string peer_disconnect_timing_json(const Options& options,
+    const ActiveSummary& summary)
+{
+    const auto timing = observe_peer_disconnect_timing(options, summary);
+    std::ostringstream out;
+    const auto number = [&](const auto& value) {
+        if (value) out << *value; else out << "null";
+    };
+    out << std::setprecision(12) << "{\"status\":\"" << timing.status
+        << "\",\"measurement\":\"B_close_intent_to_A_server_derived_postcommit_absence_observation\""
+        << ",\"clock\":\"same_host_query_performance_counter\",\"server_process_id\":"
+        << summary.functional_server_process_id << ",\"receiving_entity\":";
+    if (timing.receiving_entity) out << static_cast<unsigned int>(*timing.receiving_entity);
+    else out << "null";
+    out << ",\"host_qpc_frequency\":"; number(timing.host_qpc_frequency);
+    out << ",\"B_close_requested_host_qpc_ticks\":"; number(timing.close_requested_host_qpc_ticks);
+    out << ",\"A_removal_host_qpc_ticks\":"; number(timing.removal_host_qpc_ticks);
+    out << ",\"A_removal_source_ordinal\":"; number(timing.removal_source_ordinal);
+    out << ",\"close_to_postcommit_removal_ms\":"; number(timing.close_to_postcommit_removal_ms);
+    out << ",\"packet_delivery_or_gameplay_cleanup_confirmation\":\"not_proven_by_this_interval\"}";
+    return out.str();
+}
+
+[[nodiscard]] std::string binary_sha256_hex(const windows::WindowsBinaryIdentity& identity)
+{
+    constexpr std::string_view digits{"0123456789ABCDEF"};
+    std::string result;
+    result.reserve(64U);
+    for (const auto byte : identity.sha256) {
+        const auto value = std::to_integer<unsigned int>(byte);
+        result.push_back(digits[value >> 4U]);
+        result.push_back(digits[value & 15U]);
+    }
+    return result;
+}
+
+// Private run manifests may retain the resolved project executable path.
+// Paths are JSON data, never commands, and are not emitted in runtime logs.
+[[nodiscard]] std::string json_windows_path(const fs::path& path)
+{
+    std::ostringstream output;
+    output << '"';
+    for (const auto character : path.wstring()) {
+        if (character == L'"' || character == L'\\') {
+            output << '\\' << static_cast<char>(character);
+        } else if (character >= 0x20 && character <= 0x7e) {
+            output << static_cast<char>(character);
+        } else {
+            output << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                   << static_cast<std::uint16_t>(character) << std::dec;
+        }
+    }
+    output << '"';
+    return output.str();
+}
+
+[[nodiscard]] std::optional<std::uint64_t> owned_process_creation_time(
+    const windows::OwnedProcess& process) noexcept
+{
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    if (!process.valid() || ::GetProcessTimes(
+            process.native_process_handle(), &creation, &exit, &kernel, &user) == FALSE)
+        return std::nullopt;
+    return (static_cast<std::uint64_t>(creation.dwHighDateTime) << 32U) |
+           creation.dwLowDateTime;
+}
+
+[[nodiscard]] std::optional<std::uint32_t> effective_manual_game_duration(
+    const Options& options) noexcept
+{
+    if (!options.project_client_stock_signon ||
+        options.project_client_stop != ProjectClientStop::live_visual_control ||
+        options.project_client_live_input != ProjectClientLiveInput::keyboard_mouse ||
+        options.manual_no_time_limit) return std::nullopt;
+    const auto fallback = (std::min)(options.maximum_duration_seconds > 10U
+        ? options.maximum_duration_seconds - 10U : 1U, 45U);
+    return options.manual_duration_seconds.value_or(fallback);
+}
+
+[[nodiscard]] bool publish_client_launch_manifest(const Options& options,
+    const Environment& environment, ActiveSummary& summary)
+{
+    auto directory = windows::open_secure_output_directory(options.run_root);
+    const auto runner = observe_project_binary(
+        sibling_executable(L"hlclient_stock_runtime_orchestrator.exe"));
+    if (!directory || !runner) return false;
+    summary.client_launch_sha256 = binary_sha256_hex(environment.client);
+    summary.runner_build_sha256 = binary_sha256_hex(*runner.identity);
+#ifdef HLCLIENT_RUNNER_SOURCE_ID
+    summary.runner_source_identity = HLCLIENT_RUNNER_SOURCE_ID;
+#else
+    summary.runner_source_identity = "unavailable";
+#endif
+    std::ostringstream json;
+    json << "{\n\"schema\":\"hlclient.client-launch-identity.v1\",\n"
+         << "\"run_id\":\"" << options.run_root.filename().string() << "\",\n"
+         << "\"publication_phase\":\"before_client_execution\",\n"
+         << "\"client_executable_path\":" << json_windows_path(environment.client.canonical_path) << ",\n"
+         << "\"client_sha256_at_launch\":\"" << summary.client_launch_sha256 << "\",\n"
+         << "\"runner_build_sha256\":\"" << summary.runner_build_sha256 << "\",\n"
+         << "\"runner_source_identity\":\"" << summary.runner_source_identity << "\",\n"
+         << "\"client_roles\":[\"A\"" << (options.remote_audio_peer ? ",\"B\"" : "") << "],\n"
+         << "\"process_binding\":\"separate_immutable_owned_handle_manifest\",\n"
+         << "\"configuration\":{\"map\":\"" << options.map << "\",\"game\":\"" << options.game
+         << "\",\"server_port\":" << options.server_port
+         << ",\"prediction\":\"" << (options.project_client_reference_prediction ? "reference" : "off")
+         << "\",\"input\":\"" << (options.project_client_live_input == ProjectClientLiveInput::keyboard_mouse
+             ? "keyboard_mouse" : "scripted")
+         << "\",\"peer\":" << (options.remote_audio_peer ? "true" : "false")
+         << ",\"no_time_limit\":" << (options.manual_no_time_limit ? "true" : "false")
+         << ",\"duration_seconds\":" << (options.manual_duration_seconds
+             ? std::to_string(*options.manual_duration_seconds) : "null")
+         << ",\"effective_duration_seconds\":" << (effective_manual_game_duration(options)
+             ? std::to_string(*effective_manual_game_duration(options)) : "null") << "}}\n";
+    summary.launch_manifest_published = write_bounded_file(*directory.directory,
+        L"client-launch-identity.json", json.str(), 16U * 1'024U);
+    return summary.launch_manifest_published;
+}
+
+[[nodiscard]] bool publish_client_process_binding(const Options& options,
+    const windows::OwnedProcess& process, const char role, ActiveSummary& summary)
+{
+    const auto creation = owned_process_creation_time(process);
+    if (!creation || (role != 'A' && role != 'B')) return false;
+    auto directory = windows::open_secure_output_directory(options.run_root);
+    if (!directory) return false;
+    std::ostringstream json;
+    json << "{\"schema\":\"hlclient.client-process-binding.v1\",\"run_id\":\""
+         << options.run_root.filename().string() << "\",\"client_role\":\"" << role
+         << "\",\"process_id\":" << process.process_id() << ",\"process_creation_filetime\":"
+         << *creation << ",\"client_sha256_at_launch\":\"" << summary.client_launch_sha256 << "\"}\n";
+    const auto leaf = role == 'A' ? L"client-A-process-binding.json" : L"client-B-process-binding.json";
+    if (!write_bounded_file(*directory.directory, leaf, json.str(), 4U * 1'024U)) return false;
+    if (role == 'A') summary.client_creation_filetime = creation;
+    else summary.peer_creation_filetime = creation;
+    return true;
+}
+
+void observe_final_client_binary(const Environment& environment, ActiveSummary& summary)
+{
+    if (!summary.launch_manifest_published) return;
+    const auto observed = observe_project_binary(environment.client.canonical_path);
+    if (observed) {
+        summary.client_final_sha256 = binary_sha256_hex(*observed.identity);
+        summary.client_binary_change_status = summary.client_final_sha256 != summary.client_launch_sha256
+            ? "changed" : windows::same_windows_file_identity(environment.client, *observed.identity)
+                ? "unchanged" : "identity_changed_same_digest";
+    } else {
+        summary.client_binary_change_status = "final_observation_unavailable";
+    }
+    if (summary.client_binary_change_status != "unchanged" && summary.success) {
+        summary.success = false;
+        summary.failure = summary.client_binary_change_status == "final_observation_unavailable"
+            ? "client-executable-final-observation-failed" : "client-executable-changed-during-run";
+    }
+}
 
 [[nodiscard]] bool safe_relay_diagnostic_value(
     const std::string_view value) noexcept
@@ -3106,6 +3438,108 @@ observe_project_client_signon_log(const std::string_view bytes)
     return observation;
 }
 
+[[nodiscard]] bool manual_receipt_mode(const Options& options) noexcept
+{
+    return options.project_client_stock_signon &&
+        options.project_client_stop == ProjectClientStop::live_visual_control &&
+        options.project_client_live_input == ProjectClientLiveInput::keyboard_mouse;
+}
+
+void refresh_client_receipt(const windows::SecureOutputDirectory& directory,
+    const Options& options, ActiveSummary& summary, const app::SessionReceiptRole role,
+    const bool require_terminal)
+{
+    const bool listener = role == app::SessionReceiptRole::A;
+    const auto pid = listener ? summary.functional_client_process_id : summary.remote_audio_peer_process_id;
+    const auto creation = listener ? summary.client_creation_filetime : summary.peer_creation_filetime;
+    auto& snapshot = listener ? summary.listener_receipt : summary.peer_receipt;
+    auto& status = listener ? summary.listener_receipt_status : summary.peer_receipt_status;
+    auto& final_valid = listener ? summary.listener_terminal_receipt_valid : summary.peer_terminal_receipt_valid;
+    if (pid == 0U || !creation) {
+        status = "identity_unavailable";
+        final_valid = false;
+        snapshot.reset();
+        return;
+    }
+    const app::SessionReceiptIdentity identity{
+        options.run_root.filename().string(), role, pid, *creation};
+    const auto read = windows::read_latest_session_receipt(directory, identity,
+        "maps/" + options.map + ".bsp", require_terminal, 1U);
+    snapshot = read.snapshot;
+    status = std::string{windows::to_string(read.status)};
+    final_valid = require_terminal && static_cast<bool>(read) &&
+        snapshot->stage == app::SessionReceiptStage::terminal;
+    if (!listener) summary.remote_audio_peer_entered = snapshot &&
+        snapshot->milestones[2U].has_value();
+}
+
+void apply_receipt_observation(ProjectClientSignonObservation& observation,
+    const app::SessionReceiptSnapshot& snapshot)
+{
+    const auto fact = [&](const app::SessionReceiptFact value) {
+        return (snapshot.fact_mask & app::receipt_fact(value)) != 0U;
+    };
+    observation.steam_api_initialized = fact(app::SessionReceiptFact::steam_api_initialized);
+    observation.fresh_material_acquired = fact(app::SessionReceiptFact::fresh_material_acquired);
+    observation.connect_sent = fact(app::SessionReceiptFact::connect_sent);
+    observation.connection_accepted = fact(app::SessionReceiptFact::connection_accepted);
+    observation.serverinfo_received = fact(app::SessionReceiptFact::serverinfo_received);
+    observation.schema_registry_received = fact(app::SessionReceiptFact::schema_registry_received);
+    observation.resource_continuation_sent = fact(app::SessionReceiptFact::resource_continuation_sent);
+    observation.spawn_request_transmitted = fact(app::SessionReceiptFact::spawn_request_transmitted);
+    observation.spawn_request_acknowledged = fact(app::SessionReceiptFact::spawn_request_acknowledged);
+    observation.signon_reply_transmitted = fact(app::SessionReceiptFact::signon_reply_transmitted);
+    observation.signon_reply_acknowledged = fact(app::SessionReceiptFact::signon_reply_acknowledged);
+    observation.live_service_payloads_received = fact(app::SessionReceiptFact::live_service_payloads_received);
+    observation.client_world_state_published = fact(app::SessionReceiptFact::world_published);
+    observation.live_visual_verified = fact(app::SessionReceiptFact::live_visual_verified);
+    observation.usercmd_transmitted = fact(app::SessionReceiptFact::usercmd_transmitted);
+    observation.usercmd_zero_observed = snapshot.counters.usercmd_zero_observed;
+    observation.live_visual_input = fact(app::SessionReceiptFact::keyboard_mouse)
+        ? std::optional{ProjectClientLiveInput::keyboard_mouse} : std::nullopt;
+    const auto count = [](const std::optional<std::uint64_t>& value) -> std::optional<std::size_t> {
+        if (!value || *value > (std::numeric_limits<std::size_t>::max)()) return std::nullopt;
+        return static_cast<std::size_t>(*value);
+    };
+    observation.new_usercmd_count = count(snapshot.counters.new_usercmd_count);
+    observation.transmitted_usercmd_packet_count = count(snapshot.counters.transmitted_usercmd_packet_count);
+    observation.server_sample_count = count(snapshot.counters.server_sample_count);
+    if (snapshot.generation.map_identifier != "not_observed")
+        observation.serverinfo_map = snapshot.generation.map_identifier;
+}
+
+void refresh_manual_readiness_receipts(const windows::SecureOutputDirectory& directory,
+    const Options& options, ActiveSummary& summary)
+{
+    refresh_client_receipt(directory, options, summary, app::SessionReceiptRole::A, true);
+    if (options.remote_audio_peer)
+        refresh_client_receipt(directory, options, summary, app::SessionReceiptRole::B,
+            summary.remote_audio_peer_exit == 0U && !summary.peer_runner_terminated);
+}
+
+[[nodiscard]] bool peer_receipts_share_owned_map_epoch(const ActiveSummary& summary) noexcept
+{
+    return summary.listener_receipt && summary.peer_receipt &&
+        summary.listener_receipt->milestones[2U] && summary.peer_receipt->milestones[2U] &&
+        summary.listener_receipt->generation.network_generation == 1U &&
+        summary.peer_receipt->generation.network_generation == 1U &&
+        summary.listener_receipt->generation.map_generation > 0U &&
+        summary.listener_receipt->generation.map_generation == summary.peer_receipt->generation.map_generation &&
+        summary.listener_receipt->generation.map_identifier == summary.peer_receipt->generation.map_identifier;
+}
+
+[[nodiscard]] bool durable_manual_ready(const ActiveSummary& summary,
+    const ProjectClientSignonObservation& observation, const Options& options) noexcept
+{
+    return summary.listener_terminal_receipt_valid && summary.listener_receipt &&
+        !app::session_close_failed(summary.listener_receipt->close) &&
+        summary.listener_receipt->generation.network_generation == 1U &&
+        (!options.remote_audio_peer || peer_receipts_share_owned_map_epoch(summary)) &&
+        app::session_receipt_keyboard_ready(*summary.listener_receipt) &&
+        observation.complete(options.project_client_stop, options.project_client_live_input,
+            options.project_client_reference_prediction);
+}
+
 // Peer evidence is independent of the listener's outcome. In particular an
 // early listener failure must not turn a missing peer observation into a
 // claimed peer startup failure, or replace the listener's primary error.
@@ -3116,6 +3550,45 @@ void apply_remote_audio_peer_observation(
     const auto observed = observe_project_client_signon_log(peer_log.bytes);
     summary.remote_audio_peer_entered = summary.remote_audio_peer_entered ||
         (observed.connection_accepted && observed.client_world_state_published);
+}
+
+// The main client owns the manual session. A voluntary peer leave continues
+// that session; an actual peer crash/query failure requires bounded cleanup.
+// This decision retains the exact owned-process exit rather than translating
+// crash into normal exit or treating cleanup termination of A as its cause.
+bool observe_manual_peer_exit(ActiveSummary& summary,
+    const windows::OwnedProcess::WaitResult& observed)
+{
+    using Status=windows::OwnedProcess::WaitStatus;
+    if(observed.status==Status::timeout) return true;
+    if(observed.status==Status::exited && observed.exit_code) {
+        summary.remote_audio_peer_exit=observed.exit_code;
+        if(*observed.exit_code==0U) return true;
+        summary.failure="remote-audio-peer-nonzero-exit";
+    } else {
+        summary.failure="remote-audio-peer-exit-query-failed";
+    }
+    summary.client_ready=false;
+    return false;
+}
+
+// Observed after peer-triggered owned Job termination. These are cleanup
+// outcomes, not a new root cause; retain the already recorded peer failure.
+void observe_peer_cleanup_exits(ActiveSummary& summary,
+    const windows::OwnedProcess::WaitResult& client,
+    const windows::OwnedProcess::WaitResult& server)
+{
+    using Status=windows::OwnedProcess::WaitStatus;
+    summary.client_exit_code=client.status==Status::exited ? client.exit_code : std::nullopt;
+    summary.server_exit_code=server.status==Status::exited ? server.exit_code : std::nullopt;
+    summary.client_wait_native_error=client.native_error;
+    switch(client.status) {
+    case Status::exited:summary.client_wait_result="exited";break;
+    case Status::timeout:summary.client_wait_result="timeout";break;
+    case Status::wait_failed:summary.client_wait_result="wait-failed";break;
+    case Status::exit_query_failed:summary.client_wait_result="exit-query-failed";break;
+    case Status::invalid_process:summary.client_wait_result="invalid-process";break;
+    }
 }
 
 void apply_project_client_observation(
@@ -3288,11 +3761,41 @@ void apply_project_client_observation(
     return result;
 }
 
+[[nodiscard]] std::optional<std::string_view> connected_client_log_identity(
+    const std::string_view line) noexcept
+{
+    constexpr std::string_view connected_event=" connected, address \"127.0.0.1:";
+    const auto connected=line.find(connected_event);
+    if(connected==std::string_view::npos || connected<=1U || line[connected-1U]!='"') return std::nullopt;
+    const auto start=line.rfind('"',connected-2U);
+    if(start==std::string_view::npos || connected-start>512U) return std::nullopt;
+    return line.substr(start,connected-start);
+}
+
+[[nodiscard]] bool client_identity_matches_configured_name(
+    const std::string_view identity,const std::string_view name) noexcept
+{
+    if(identity.size()<2U || identity.front()!='"' || identity.back()!='"') return false;
+    std::size_t cursor=identity.size();
+    // The role name precedes the same three descriptor groups parsed for
+    // server userid; embedded '<' in a display name cannot shift that boundary.
+    for(std::size_t group=0U;group<3U;++group) {
+        if(!cursor) return false;
+        const auto close=identity.rfind('>',cursor-1U);
+        if(close==std::string_view::npos || !close) return false;
+        const auto open=identity.rfind('<',close-1U);
+        if(open==std::string_view::npos) return false;
+        cursor=open;
+    }
+    return cursor>0U && identity.substr(1U,cursor-1U)==name;
+}
+
 [[nodiscard]] FunctionalClientLogObservation
-observe_functional_client_log(const std::string_view bytes)
+observe_functional_client_log(const std::string_view bytes,
+    const std::string_view configured_name={})
 {
     FunctionalClientLogObservation observation;
-    observation.name_observed =
+    observation.name_observed = configured_name.empty() &&
         bytes.find("HLC_SMOKE") != std::string_view::npos;
     std::optional<std::uint32_t> player_userid;
     std::size_t lifecycle_offset = 0U;
@@ -3302,22 +3805,15 @@ observe_functional_client_log(const std::string_view bytes)
         const auto end = newline == std::string_view::npos
             ? bytes.size() : newline;
         const auto line = bytes.substr(offset, end - offset);
-        constexpr std::string_view connected_event =
-            " connected, address \"127.0.0.1:";
-        const auto connected = line.find(connected_event);
-        if (connected != std::string_view::npos && connected > 1U &&
-            line[connected - 1U] == '"') {
-            const auto identity_start = line.rfind('"', connected - 2U);
-            if (identity_start != std::string_view::npos &&
-                connected - identity_start <= 512U) {
-                player_userid = player_userid_from_identity(line.substr(
-                    identity_start, connected - identity_start));
-                if (player_userid) {
-                    observation.connection_accepted = true;
-                    lifecycle_offset = newline == std::string_view::npos
-                        ? bytes.size() : newline + 1U;
-                    break;
-                }
+        if(const auto identity=connected_client_log_identity(line);
+            identity && (configured_name.empty() || client_identity_matches_configured_name(*identity,configured_name))) {
+            player_userid = player_userid_from_identity(*identity);
+            if (player_userid) {
+                observation.connection_accepted = true;
+                if(!configured_name.empty()) observation.name_observed=true;
+                lifecycle_offset = newline == std::string_view::npos
+                    ? bytes.size() : newline + 1U;
+                break;
             }
         }
         if (newline == std::string_view::npos) break;
@@ -3339,7 +3835,15 @@ observe_functional_client_log(const std::string_view bytes)
             " connected, address \"127.0.0.1:";
         const auto later_connected = line.find(connected_event);
         if (later_connected != std::string_view::npos) {
-            observation.connection_lost = true;
+            if(configured_name.empty()) observation.connection_lost=true;
+            else if(const auto identity=connected_client_log_identity(line)) {
+                const auto userid=player_userid_from_identity(*identity);
+                // B can connect/leave before or after A. Only a renewed A
+                // identity (same userid or configured role name) ends A's
+                // original connection lifecycle; unrelated peer rows do not.
+                if(userid && (userid==player_userid || client_identity_matches_configured_name(*identity,configured_name)))
+                    observation.connection_lost=true;
+            }
         }
         const auto entered = line.find(" entered the game");
         const auto rejected = ascii_lower(line);
@@ -3382,6 +3886,16 @@ observe_functional_client_log(const std::string_view bytes)
         offset = newline + 1U;
     }
     return observation;
+}
+
+void apply_functional_client_observation(ActiveSummary& summary,
+    const FunctionalClientLogObservation& observation)
+{
+    summary.functional_client_name_observed = observation.name_observed;
+    summary.functional_server_connection_accepted = observation.connection_accepted;
+    summary.functional_connection_lost = summary.functional_connection_lost ||
+        observation.connection_lost;
+    summary.functional_client_entered_game_observed = observation.entered_game;
 }
 
 [[nodiscard]] bool contains_any(
@@ -3572,14 +4086,154 @@ fixed_visibility_fields(const std::string_view line,
     });
 }
 
+[[nodiscard]] bool valid_blood_effects_summary(const std::string_view line) noexcept
+{
+    constexpr std::array keys{
+        std::string_view{"wire"}, std::string_view{"forwarded"},
+        std::string_view{"clock_dropped"}, std::string_view{"received"},
+        std::string_view{"accepted"}, std::string_view{"duplicate"},
+        std::string_view{"invalid"}, std::string_view{"stale"},
+        std::string_view{"palette"}, std::string_view{"capacity"},
+        std::string_view{"delivery_stale"}, std::string_view{"materialized"},
+        std::string_view{"absent"}, std::string_view{"unsupported"},
+        std::string_view{"frame_rejected"}, std::string_view{"draw_batches"}};
+    // All sixteen maximum uint64 values fit (522 bytes); the raw line is
+    // still bounded below 1KiB and never truncated into valid evidence.
+    const auto fields = fixed_visibility_fields(
+        line, "[blood-effects-summary] ", keys, 639U);
+    return fields && std::ranges::all_of(*fields, [](const auto value) {
+        return visibility_unsigned(value, 0U,
+            (std::numeric_limits<std::uint64_t>::max)()).has_value();
+    });
+}
+
+[[nodiscard]] bool valid_blood_profile_summary(const std::string_view line) noexcept
+{
+    constexpr std::array keys{
+        std::string_view{"red_accepted"}, std::string_view{"yellow_small_accepted"},
+        std::string_view{"yellow_large_accepted"}, std::string_view{"yellow_large_stale"},
+        std::string_view{"yellow_large_invalid"}, std::string_view{"yellow_large_evicted"},
+        std::string_view{"yellow_large_materialized"}, std::string_view{"yellow_large_absent"},
+        std::string_view{"yellow_large_unsupported"}, std::string_view{"yellow_large_expired"},
+        std::string_view{"yellow_large_frame_rejected"}, std::string_view{"yellow_large_draw_batches"}};
+    const auto fields = fixed_visibility_fields(
+        line, "[blood-profile-summary] ", keys, 768U);
+    return fields && std::ranges::all_of(*fields, [](const auto value) {
+        return visibility_unsigned(value, 0U,
+            (std::numeric_limits<std::uint64_t>::max)()).has_value();
+    });
+}
+
+[[nodiscard]] std::optional<bool> blood_server_setting(
+    const std::string_view line) noexcept
+{
+    // Engine console spelling is not an open-ended raw-log allowlist. Only
+    // these exact bounded 0/1 forms can become typed server-setting evidence.
+    constexpr std::array forms{
+        std::pair{std::string_view{"[blood-server-setting] violence_ablood=0"}, false},
+        std::pair{std::string_view{"[blood-server-setting] violence_ablood=1"}, true},
+        std::pair{std::string_view{"\"violence_ablood\" is \"0\""}, false},
+        std::pair{std::string_view{"\"violence_ablood\" is \"1\""}, true},
+        std::pair{std::string_view{"\"violence_ablood\" is \"0.000000\""}, false},
+        std::pair{std::string_view{"\"violence_ablood\" is \"1.000000\""}, true}};
+    for (const auto& [form, enabled] : forms)
+        if (line == form) return enabled;
+    return {};
+}
+
+[[nodiscard]] std::optional<bool> observed_server_blood_presentation(
+    const windows::BoundedProcessLogSnapshot& snapshot) noexcept
+{
+    // Only a complete fresh owned-server stdout snapshot supplies session
+    // evidence. No config-file/default inference or partial console line.
+    if (!windows::bounded_process_log_snapshot_complete(snapshot)) return {};
+    std::optional<bool> observed;
+    std::size_t offset = 0U;
+    while (offset < snapshot.bytes.size()) {
+        const auto newline = snapshot.bytes.find('\n', offset);
+        if (newline == std::string::npos) break;
+        auto line = std::string_view{snapshot.bytes}.substr(offset, newline - offset);
+        constexpr std::string_view logger_prefix{"[info] "};
+        if (line.starts_with(logger_prefix)) line.remove_prefix(logger_prefix.size());
+        if (line.ends_with('\r')) line.remove_suffix(1U);
+        if (const auto setting = blood_server_setting(line)) observed = *setting;
+        offset = newline + 1U;
+    }
+    return observed;
+}
+
+void append_observed_server_blood_presentation(
+    std::vector<std::wstring>& arguments,
+    const windows::BoundedProcessLogSnapshot& snapshot)
+{
+    if (const auto observed = observed_server_blood_presentation(snapshot)) {
+        arguments.insert(arguments.end(), {L"--server-blood-presentation",
+            *observed ? L"enabled" : L"disabled"});
+    }
+}
+
 [[nodiscard]] bool contains_fixed_numeric_marker(const std::string_view line) noexcept
 {
     return line.find("[remote-player-visibility") != std::string_view::npos ||
-        line.find("[remote-effects-summary") != std::string_view::npos;
+        line.find("[remote-effects-summary") != std::string_view::npos ||
+        line.find("[blood-effects-summary") != std::string_view::npos ||
+        line.find("[blood-profile-summary") != std::string_view::npos ||
+        line.find("[blood-server-setting") != std::string_view::npos ||
+        line.find("violence_ablood") != std::string_view::npos ||
+        line.find("[effect-wire") != std::string_view::npos ||
+        line.find("[effect-sample") != std::string_view::npos;
+}
+
+// Separate bounded numeric effect evidence, so verbose frame summaries cannot
+// evict a pop event. Never retains raw service bytes or arbitrary sample names.
+[[nodiscard]] std::string effect_diagnostic_excerpt(const std::string_view bytes)
+{
+    constexpr std::array wire_keys{std::string_view{"record"},std::string_view{"bit"},
+        std::string_view{"svc"},std::string_view{"detail"},std::string_view{"color"},
+        std::string_view{"amount"},std::string_view{"entity"},std::string_view{"flags"}};
+    constexpr std::array sample_keys{std::string_view{"slot"},std::string_view{"fingerprint"}};
+    std::array<std::string_view,128> visuals{};
+    std::array<std::string_view,64> sounds{},samples{};
+    std::size_t visual_count{},sound_count{},sample_count{};
+    for(std::size_t at=0;at<bytes.size();) {
+        const auto newline=bytes.find('\n',at);
+        auto line=bytes.substr(at,(newline==std::string_view::npos?bytes.size():newline)-at);
+        if(line.starts_with("[info] ")) line.remove_prefix(7);
+        if(line.ends_with('\r')) line.remove_suffix(1);
+        if(const auto fields=fixed_visibility_fields(line,"[effect-wire] ",wire_keys,256)) {
+            bool valid=true;
+            for(std::size_t i=0;i<fields->size();++i)
+                valid=valid && visibility_unsigned((*fields)[i],0,
+                    i<2?(std::numeric_limits<std::uint64_t>::max)():65535).has_value();
+            const auto svc=(*fields)[2];
+            if(valid && (svc=="6" || svc=="18" || svc=="23")) {
+                if(svc=="6") sounds[sound_count++%sounds.size()]=line;
+                else visuals[visual_count++%visuals.size()]=line;
+            }
+        } else if(const auto sample_fields=fixed_visibility_fields(line,"[effect-sample] ",sample_keys,128)) {
+            if(visibility_unsigned((*sample_fields)[0],0,511) && visibility_unsigned((*sample_fields)[1],0,
+                (std::numeric_limits<std::uint64_t>::max)())) samples[sample_count++%samples.size()]=line;
+        }
+        if(newline==std::string_view::npos) break;
+        at=newline+1;
+    }
+    if(!visual_count && !sound_count && !sample_count) return {};
+    std::string output="[effect-retention] visuals="+std::to_string(visual_count)+
+        " sounds="+std::to_string(sound_count)+" samples="+std::to_string(sample_count)+
+        " limits=128,64,64\n";
+    const auto append=[&](const auto& rows,std::size_t count) {
+        for(std::size_t i=count>rows.size()?count-rows.size():0;i<count;++i) {
+            const auto row=rows[i%rows.size()];
+            if(output.size()+row.size()+1>64U*1024U) break;
+            output.append(row);output.push_back('\n');
+        }
+    };
+    append(visuals,visual_count);append(sounds,sound_count);append(samples,sample_count);
+    return output;
 }
 
 [[nodiscard]] std::string functional_diagnostic_excerpt(
-    const std::string_view bytes)
+    const std::string_view bytes, const bool server_setting_evidence = false)
 {
     constexpr std::size_t maximum_lines = 64U;
     constexpr std::size_t maximum_line_bytes = 4U * 1'024U;
@@ -3641,12 +4295,21 @@ fixed_visibility_fields(const std::string_view line,
     std::size_t visibility_count = 0U;
     std::string_view visibility_summary;
     std::string_view remote_effects_summary;
+    std::string_view blood_effects_summary;
+    std::string_view blood_profile_summary;
+    std::optional<bool> blood_server_setting_value;
     std::size_t visibility_offset = 0U;
     while (visibility_offset < bytes.size()) {
         const auto newline = bytes.find('\n', visibility_offset);
         const auto end = newline == std::string_view::npos ? bytes.size() : newline;
         const auto line = summary_view(bytes.substr(visibility_offset, end - visibility_offset));
+        if (server_setting_evidence) {
+            if (const auto setting = blood_server_setting(line))
+                blood_server_setting_value = *setting;
+        }
         if (valid_remote_effects_summary(line)) remote_effects_summary = line;
+        else if (valid_blood_effects_summary(line)) blood_effects_summary = line;
+        else if (valid_blood_profile_summary(line)) blood_profile_summary = line;
         else if (valid_visibility_summary(line)) visibility_summary = line;
         else if (valid_visibility_row(line) &&
             std::ranges::find(visibility_rows, line) == visibility_rows.end()) {
@@ -3657,6 +4320,11 @@ fixed_visibility_fields(const std::string_view line,
         visibility_offset = newline + 1U;
     }
     if (!remote_effects_summary.empty()) append_summary(remote_effects_summary);
+    if (!blood_effects_summary.empty()) append_summary(blood_effects_summary);
+    if (!blood_profile_summary.empty()) append_summary(blood_profile_summary);
+    if (blood_server_setting_value.has_value()) append_summary(*blood_server_setting_value
+        ? "[blood-server-setting] violence_ablood=1"
+        : "[blood-server-setting] violence_ablood=0");
     if (!visibility_summary.empty()) append_summary(visibility_summary);
     const auto first_visibility = visibility_count > visibility_rows.size()
         ? visibility_count - visibility_rows.size() : 0U;
@@ -3862,6 +4530,27 @@ fixed_visibility_fields(const std::string_view line,
     return "unknown";
 }
 
+[[nodiscard]] std::string_view functional_terminal_session_state(
+    const ActiveSummary& summary) noexcept
+{
+    if (summary.client_exit_code && *summary.client_exit_code != 0U) return "failed";
+    if (summary.listener_terminal_receipt_valid && summary.listener_receipt) {
+        const auto& close = summary.listener_receipt->close;
+        if (close.reason == app::SessionCloseReason::fatal_failure ||
+            app::session_close_failed(close)) return "failed";
+        if (close.reason == app::SessionCloseReason::runner_termination)
+            return "runner_terminated";
+        if (close.reason == app::SessionCloseReason::server_disconnect)
+            return "server_disconnected";
+        if (summary.client_exit_code == 0U &&
+            (close.reason == app::SessionCloseReason::window_close ||
+             close.reason == app::SessionCloseReason::duration_limit))
+            return "normal_close_completed";
+    }
+    if (summary.functional_connection_lost) return "disconnected";
+    return "not_observed";
+}
+
 [[nodiscard]] std::string_view functional_last_confirmed_stage(
     const ActiveSummary& summary) noexcept
 {
@@ -3928,6 +4617,94 @@ fixed_visibility_fields(const std::string_view line,
     return "unknown";
 }
 
+[[nodiscard]] std::string client_session_receipt_json(
+    const std::optional<app::SessionReceiptSnapshot>& snapshot,
+    const std::string_view status, const bool final_valid,
+    const std::uint32_t process_id, const std::optional<std::uint64_t> creation,
+    const bool runner_terminated = false)
+{
+    std::ostringstream out;
+    const auto optional_number = [&](const auto& value) {
+        if (value) out << *value; else out << "null";
+    };
+    out << "{\"status\":\"" << status << "\",\"terminal_valid\":"
+        << (final_valid ? "true" : "false") << ",\"process_id\":" << process_id
+        << ",\"process_creation_filetime\":";
+    optional_number(creation);
+    out << ",\"runner_terminated\":" << (runner_terminated ? "true" : "false");
+    if (snapshot) {
+        const auto& receipt = *snapshot;
+        out << ",\"run_id\":\"" << receipt.identity.run_id
+            << "\",\"role\":\"" << (receipt.identity.role == app::SessionReceiptRole::A ? "A" : "B")
+            << "\",\"network_generation\":" << receipt.generation.network_generation
+            << ",\"map_generation\":" << receipt.generation.map_generation
+            << ",\"generation_ordinal\":" << receipt.generation_ordinal
+            << ",\"map_identifier\":\"" << receipt.generation.map_identifier
+            << "\",\"stage\":\"" << app::to_string(receipt.stage)
+            << "\",\"fact_mask\":" << receipt.fact_mask
+            << ",\"receiving_entity\":";
+        if (receipt.receiving_entity) out << static_cast<unsigned int>(*receipt.receiving_entity);
+        else out << "null";
+        out << ",\"map_entry_observed\":" << (receipt.milestones[2U] ? "true" : "false")
+            << ",\"keyboard_readiness\":" << (app::session_receipt_keyboard_ready(receipt) ? "true" : "false")
+            << ",\"counters\":{\"new_usercmd_count\":";
+        optional_number(receipt.counters.new_usercmd_count);
+        out << ",\"transmitted_usercmd_packet_count\":";
+        optional_number(receipt.counters.transmitted_usercmd_packet_count);
+        out << ",\"server_sample_count\":";
+        optional_number(receipt.counters.server_sample_count);
+        out << ",\"usercmd_zero_observed\":" << (receipt.counters.usercmd_zero_observed ? "true" : "false")
+            << "}"
+            << ",\"milestone_clock\":\"process_steady_relative_ms\",\"host_qpc_frequency\":";
+        optional_number(receipt.host_qpc_frequency);
+        out << ",\"milestones\":[";
+        for (std::size_t i = 0U; i < receipt.milestones.size(); ++i) {
+            if (i != 0U) out << ',';
+            if (!receipt.milestones[i]) { out << "null"; continue; }
+            const auto& stamp = *receipt.milestones[i];
+            out << "{\"process_ms\":" << stamp.process_ms << ",\"source_sequence\":";
+            optional_number(stamp.source_sequence);
+            out << ",\"publication_ordinal\":"; optional_number(stamp.publication_ordinal);
+            out << ",\"host_qpc_ticks\":"; optional_number(stamp.host_qpc_ticks);
+            out << '}';
+        }
+        out << "],\"close\":{\"reason\":\"" << app::to_string(receipt.close.reason)
+            << "\",\"outcome\":\"" << app::to_string(receipt.close.outcome)
+            << "\",\"operation_identity\":" << receipt.close.operation_identity
+            << ",\"session_generation\":" << receipt.close.session_generation
+            << ",\"requested\":" << (receipt.close.requested ? "true" : "false")
+            << ",\"eligible\":" << (receipt.close.eligible ? "true" : "false")
+            << ",\"queued\":" << (receipt.close.queued ? "true" : "false")
+            << ",\"send_attempt_count\":" << receipt.close.send_attempt_count
+            << ",\"successful_send_count\":" << receipt.close.successful_send_count
+            << ",\"support_send_attempt_count\":" << receipt.close.support_send_attempt_count
+            << ",\"successful_support_send_count\":" << receipt.close.successful_support_send_count
+            << ",\"transport_error\":\"" << app::to_string(receipt.close.transport_error)
+            << "\",\"ack_observed\":" << (receipt.close.ack_observed ? "true" : "false")
+            << ",\"server_disconnect_observed\":" << (receipt.close.server_disconnect_observed ? "true" : "false")
+            << ",\"deadline_reached\":" << (receipt.close.deadline_reached ? "true" : "false")
+            << ",\"requested_process_ms\":"; optional_number(receipt.close.requested_process_ms);
+        out << ",\"deadline_process_ms\":"; optional_number(receipt.close.deadline_process_ms);
+        out << ",\"first_send_process_ms\":"; optional_number(receipt.close.first_send_process_ms);
+        out << ",\"last_send_process_ms\":"; optional_number(receipt.close.last_send_process_ms);
+        out << ",\"transport_closed_process_ms\":"; optional_number(receipt.close.transport_closed_process_ms);
+        out << ",\"requested_host_qpc_ticks\":"; optional_number(receipt.close.requested_host_qpc_ticks);
+        out << ",\"transport_closed_host_qpc_ticks\":"; optional_number(receipt.close.transport_closed_host_qpc_ticks);
+        out << "},\"peer_removals\":[";
+        for (std::size_t i = 0U; i < receipt.peer_removal_count; ++i) {
+            if (i != 0U) out << ',';
+            const auto& removal = receipt.peer_removals[i];
+            out << "{\"entity\":" << static_cast<unsigned int>(removal.entity)
+                << ",\"source_ordinal\":" << removal.source_ordinal
+                << ",\"host_qpc_ticks\":" << removal.host_qpc_ticks
+                << ",\"process_ms\":" << removal.process_ms << '}';
+        }
+        out << ']';
+    } else out << ",\"map_entry_observed\":false,\"close\":null";
+    out << '}';
+    return out.str();
+}
+
 [[nodiscard]] bool write_functional_diagnostics(
     const Options& options,
     const ActiveSummary& summary,
@@ -3971,15 +4748,17 @@ fixed_visibility_fields(const std::string_view line,
         }
     };
     write_supporting(L"server-diagnostic-redacted.log",
-                     functional_diagnostic_excerpt(server_log.bytes));
+                     functional_diagnostic_excerpt(server_log.bytes, true));
     write_supporting(L"client-diagnostic-redacted.log",
                      functional_diagnostic_excerpt(client_log.bytes));
+    write_supporting(L"client-effects-numeric.log",effect_diagnostic_excerpt(client_log.bytes));
     write_supporting(L"guard-diagnostic-redacted.log",
                      functional_diagnostic_excerpt(guard_log.bytes));
     write_supporting(L"server-metadata.json", log_metadata_json(server_log));
     write_supporting(L"client-metadata.json", log_metadata_json(client_log));
     write_supporting(L"guard-metadata.json", log_metadata_json(guard_log));
     if (peer_log) {
+        write_supporting(L"peer-effects-numeric.log",effect_diagnostic_excerpt(peer_log->bytes));
         write_supporting(L"peer-diagnostic-redacted.log",
                          functional_diagnostic_excerpt(peer_log->bytes));
         write_supporting(L"peer-metadata.json", log_metadata_json(*peer_log));
@@ -4096,7 +4875,9 @@ fixed_visibility_fields(const std::string_view line,
         << (options.project_client_reference_prediction
                 ? ";prediction=reference" : "")
         << (options.project_client_mute_glock_fire_sound
-                ? ";glock-fire-sound=muted" : "") << "\",\n"
+                ? ";glock-fire-sound=muted" : "")
+        << (options.project_client_debug_freeze_tracer
+                ? ";tracer-geometry=frozen-debug" : "") << "\",\n"
         << "  \"server_process_created\": \""
         << stage(summary.functional_server_process_id != 0U) << "\",\n"
         << "  \"server_process_id\": "
@@ -4111,6 +4892,19 @@ fixed_visibility_fields(const std::string_view line,
         << "  \"remote_audio_peer_process_id\": " << summary.remote_audio_peer_process_id << ",\n"
         << "  \"remote_audio_peer_runtime_published\": " << (summary.remote_audio_peer_entered ? "true" : "false") << ",\n"
         << "  \"remote_audio_peer_exit_code\": " << (summary.remote_audio_peer_exit ? std::to_string(*summary.remote_audio_peer_exit) : "null") << ",\n"
+        << "  \"client_sha256_at_launch\": " << (summary.client_launch_sha256.empty() ? "null" : '"' + summary.client_launch_sha256 + '"') << ",\n"
+        << "  \"client_sha256_after_run\": " << (summary.client_final_sha256 ? '"' + *summary.client_final_sha256 + '"' : "null") << ",\n"
+        << "  \"client_binary_change_status\": \"" << summary.client_binary_change_status << "\",\n"
+        << "  \"runner_build_sha256\": " << (summary.runner_build_sha256.empty() ? "null" : '"' + summary.runner_build_sha256 + '"') << ",\n"
+        << "  \"runner_source_identity\": \"" << summary.runner_source_identity << "\",\n"
+        << "  \"session_receipts\":{\"schema\":\"" << app::kSessionReceiptSchema << "\",\"A\":"
+        << client_session_receipt_json(summary.listener_receipt, summary.listener_receipt_status,
+            summary.listener_terminal_receipt_valid, summary.functional_client_process_id, summary.client_creation_filetime)
+        << ",\"B\":" << (options.remote_audio_peer
+            ? client_session_receipt_json(summary.peer_receipt, summary.peer_receipt_status,
+                summary.peer_terminal_receipt_valid, summary.remote_audio_peer_process_id,
+                summary.peer_creation_filetime, summary.peer_runner_terminated) : "null") << "},\n"
+        << "  \"peer_disconnect_timing\":" << peer_disconnect_timing_json(options, summary) << ",\n"
         << "  \"image_identity_verified\": \""
         << result_stage(summary.functional_client_image_identity_verified,
                         summary.functional_client_process_created) << "\",\n"
@@ -4136,6 +4930,12 @@ fixed_visibility_fields(const std::string_view line,
         << stage(summary.functional_connect_requested) << "\",\n"
         << "  \"connection_status\": \""
         << functional_connection_status(summary) << "\",\n"
+        << "  \"connection_establishment\": \""
+        << functional_connection_status(summary) << "\",\n"
+        << "  \"session_terminal_state\": \""
+        << functional_terminal_session_state(summary) << "\",\n"
+        << "  \"server_connection_lost_observed\": "
+        << (summary.functional_connection_lost ? "true" : "false") << ",\n"
         << "  \"client_map_entry\": \""
         << stage(summary.client_ready) << "\",\n"
         << "  \"map_entry_source\": \""
@@ -4612,6 +5412,12 @@ fixed_visibility_fields(const std::string_view line,
         << "  \"server_exit_code\": ";
     if (summary.server_exit_code) functional << *summary.server_exit_code;
     else functional << "null";
+    functional << ",\n  \"guard_exit_status\":\""
+        << (summary.guard_exit_code ? "observed" : summary.cleanup_exact
+            ? "owned_job_cleanup_without_individual_exit_code" : "not_observed")
+        << "\",\n  \"guard_exit_code\":";
+    if (summary.guard_exit_code) functional << *summary.guard_exit_code;
+    else functional << "null";
     functional
         << ",\n  \"primary_failure\": \""
         << (summary.project_transition_failure.primary_error
@@ -4625,6 +5431,8 @@ fixed_visibility_fields(const std::string_view line,
         << "  \"diagnostic_window_status\": \"" << (diagnostic_windows_usable ? "ready" : "incomplete") << "\",\n"
         << "  \"game_time_limit_mode\": \"" << (options.manual_no_time_limit ? "unlimited" : options.manual_duration_seconds ? "timed" : "legacy") << "\",\n"
         << "  \"game_duration_seconds\": " << (options.manual_duration_seconds ? std::to_string(*options.manual_duration_seconds) : "null") << ",\n"
+        << "  \"effective_game_duration_seconds\": " << (effective_manual_game_duration(options)
+            ? std::to_string(*effective_manual_game_duration(options)) : "null") << ",\n"
         << "  \"supporting_diagnostics\": \""
         << (supporting_files_written ? "complete" : "incomplete") << "\",\n"
         << "  \"restoration_status\": \"wrapper_pending\",\n"
@@ -5024,7 +5832,8 @@ private:
             L"-console", L"-game", L"valve", L"-port",
             std::to_wstring(options.server_port), L"+ip", L"127.0.0.1",
             L"+log", L"on", L"+map", to_wide_ascii(options.map),
-            L"+maxplayers", L"8", L"+sv_lan", L"1", L"+status"};
+            L"+maxplayers", L"8", L"+sv_lan", L"1", L"+status",
+            L"+violence_ablood"}; // Value-less cvar query, never an assignment.
         std::wstring test_player_name;
         if (options.test_start_health) {
             const auto launch = test_start_health_launch(options.run_root, options.fast_manual);
@@ -5130,6 +5939,9 @@ private:
                 return summary;
             }
         }
+        // The value-less query belongs to this owned server launch. Take the
+        // evidence after readiness, immediately before composing either client.
+        const auto server_blood_snapshot = server_log->snapshot();
         manual_phase(options, "client-startup");
         windows::OwnedProcessLaunchSpec client_spec;
         client_spec.executable = environment.client.canonical_path;
@@ -5184,6 +5996,8 @@ private:
                         {L"--prediction", L"reference"});
                 if (options.project_client_mute_glock_fire_sound)
                     client_spec.arguments.push_back(L"--mute-glock-fire-sound");
+                if (options.project_client_debug_freeze_tracer)
+                    client_spec.arguments.push_back(L"--debug-freeze-tracer");
                 client_spec.arguments.insert(
                     client_spec.arguments.end(),
                     {L"--live-input",
@@ -5216,22 +6030,17 @@ private:
                      L"valve"});
                 if (options.project_client_live_input ==
                     ProjectClientLiveInput::keyboard_mouse) {
-                    const auto client_duration =
-                        (std::min)(
-                            options.maximum_duration_seconds > 10U
-                                ? options.maximum_duration_seconds - 10U
-                                : 1U,
-                            45U);
                     if (options.manual_no_time_limit) {
                         client_spec.arguments.push_back(L"--live-session-unlimited");
                     } else {
                         client_spec.arguments.insert(
                             client_spec.arguments.end(),
                             {L"--live-session-seconds",
-                             std::to_wstring(options.manual_duration_seconds.value_or(client_duration))});
+                             std::to_wstring(*effective_manual_game_duration(options))});
                     }
                 }
             }
+            append_observed_server_blood_presentation(client_spec.arguments, server_blood_snapshot);
         } else {
             client_spec.arguments = {
                 L"-steam", L"-game", L"valve", L"-windowed", L"-w", L"800",
@@ -5245,11 +6054,26 @@ private:
             }
         }
         std::optional<hlclient::core::RemoteAudioPeerPlan> peer_plan;
+        std::optional<std::string> listener_server_name;
         if(options.remote_audio_peer) {
             peer_plan=hlclient::core::remote_audio_peer_plan(client_spec.arguments);
             if(!peer_plan || !peer_log) {summary.failure="remote-audio-peer-plan-or-log-failed"; finalize_duration(); return summary;}
             client_spec.arguments=peer_plan->listener;
+            listener_server_name=configured_client_log_name(peer_plan->listener);
+            if(!listener_server_name) {summary.failure="remote-audio-peer-listener-name-missing";finalize_duration();return summary;}
         }
+        if (options.project_client_stock_signon &&
+            !publish_client_launch_manifest(options, environment, summary)) {
+            summary.failure = "client-launch-identity-publication-failed";
+            finalize_duration();
+            return summary;
+        }
+        const auto append_receipt_arguments = [&](std::vector<std::wstring>& arguments,
+                                                  const wchar_t* role) {
+            arguments.insert(arguments.end(), {L"--session-receipt-root", options.run_root.wstring(),
+                L"--session-run-id", options.run_root.filename().wstring(), L"--session-role", role});
+        };
+        if (options.project_client_stock_signon) append_receipt_arguments(client_spec.arguments, L"A");
         auto [client, client_result] = campaign_job.launch(client_spec);
         summary.functional_client_process_created =
             client_result.process_id != 0U;
@@ -5267,9 +6091,15 @@ private:
             return summary;
         }
         ++summary.processes_started;
+        if (options.project_client_stock_signon &&
+            !publish_client_process_binding(options, client, 'A', summary)) {
+            summary.failure = "client-process-binding-publication-failed";
+            campaign_job.terminate(120U); finalize_duration(); return summary;
+        }
         if(peer_plan) {
             auto peer_spec=client_spec;
             peer_spec.arguments=peer_plan->mover;
+            append_receipt_arguments(peer_spec.arguments, L"B");
             peer_spec.stdout_handle=peer_log->inherited_write_handle();
             peer_spec.stderr_handle=peer_log->inherited_write_handle();
             auto launched=campaign_job.launch(peer_spec);
@@ -5278,6 +6108,10 @@ private:
             peer_log->close_parent_write_handle();
             if(!launched.second) {summary.failure="remote-audio-peer-launch-failed"; campaign_job.terminate(120U); finalize_duration(); return summary;}
             ++summary.processes_started;
+            if (!publish_client_process_binding(options, peer, 'B', summary)) {
+                summary.failure = "peer-process-binding-publication-failed";
+                campaign_job.terminate(120U); finalize_duration(); return summary;
+            }
             const std::array<std::uint32_t,2> expected{client.process_id(),peer.process_id()};
             if(!exact_process_snapshot_matches(environment.client,expected,summary.failure)) {campaign_job.terminate(120U); finalize_duration(); return summary;}
         }
@@ -5295,6 +6129,13 @@ private:
             return summary;
         }
 
+        auto receipt_directory = options.project_client_stock_signon
+            ? windows::open_secure_output_directory(options.run_root)
+            : windows::SecureOutputDirectoryOpenResult{};
+        if (options.project_client_stock_signon && !receipt_directory) {
+            summary.failure = "session-receipt-directory-unavailable";
+            campaign_job.terminate(120U); finalize_duration(); return summary;
+        }
         bool runtime_phase_reported = false;
         const auto client_wait_started = std::chrono::steady_clock::now();
         const auto client_deadline = client_wait_started +
@@ -5309,6 +6150,16 @@ private:
         };
         while (client_wait_allowed() &&
                client.running() && server.running() && guard.running()) {
+            if(options.remote_audio_peer && !summary.remote_audio_peer_exit &&
+                !observe_manual_peer_exit(summary,peer.wait_result(std::chrono::milliseconds{0}))) {
+                begin_manual_cleanup();
+                campaign_job.terminate(120U);
+                const auto client_cleanup=client.wait_result(std::chrono::seconds{5});
+                const auto server_cleanup=server.wait_result(std::chrono::seconds{5});
+                observe_peer_cleanup_exits(summary,client_cleanup,server_cleanup);
+                finalize_duration();
+                return summary;
+            }
             const auto server_snapshot = server_log->snapshot();
             const auto client_snapshot = client_log->snapshot();
             const auto post_launch_server_log = std::string_view{
@@ -5316,7 +6167,7 @@ private:
                     server_log_offset_before_client_launch,
                     server_snapshot.bytes.size()));
             const auto server_client = observe_functional_client_log(
-                post_launch_server_log);
+                post_launch_server_log,listener_server_name.value_or(""));
             const auto client_lower = ascii_lower(client_snapshot.bytes);
             const bool timed_out = contains_any(
                 client_lower, {"connection timed out", "connect timeout"});
@@ -5325,28 +6176,27 @@ private:
                 {"failed to initialize authentication",
                  "steam authentication failed",
                  "steam validation rejected"});
-            summary.functional_client_name_observed =
-                server_client.name_observed;
-            summary.functional_server_connection_accepted =
-                server_client.connection_accepted;
-            summary.functional_connection_rejected =
-                server_client.connection_lost;
+            apply_functional_client_observation(summary, server_client);
             summary.functional_connection_timeout_observed = timed_out;
             summary.functional_steam_authentication_error_observed =
                 steam_authentication_error;
-            summary.functional_client_entered_game_observed =
-                server_client.entered_game;
-            const auto project_client = options.project_client_stock_signon
+            auto project_client = options.project_client_stock_signon
                 ? observe_project_client_signon_log(client_snapshot.bytes)
                 : ProjectClientSignonObservation{};
             if (options.project_client_stock_signon) {
+                refresh_client_receipt(*receipt_directory.directory, options, summary,
+                    app::SessionReceiptRole::A, false);
+                if (manual_receipt_mode(options) && summary.listener_receipt)
+                    apply_receipt_observation(project_client, *summary.listener_receipt);
                 apply_project_client_observation(summary, project_client);
                 if (summary.project_live_service_payloads_received && !runtime_phase_reported) {
                     manual_phase(options, "runtime-observed");
                     runtime_phase_reported = true;
                 }
             }
-            if ((options.project_client_stock_signon &&
+            // A durable readiness milestone is evidence, not a request to
+            // stop an unlimited manual child which is still running.
+            if ((options.project_client_stock_signon && !manual_receipt_mode(options) &&
                  project_client.complete(options.project_client_stop,
                                          options.project_client_live_input,
                                          options.project_client_reference_prediction)) ||
@@ -5366,10 +6216,15 @@ private:
                 observed_exit = client.wait(std::chrono::seconds{1});
                 std::this_thread::sleep_for(std::chrono::milliseconds{50});
             }
-            const auto final_project = observe_project_client_signon_log(
+            auto final_project = observe_project_client_signon_log(
                 client_log->snapshot().bytes);
+            refresh_manual_readiness_receipts(*receipt_directory.directory, options, summary);
+            if (manual_receipt_mode(options) && summary.listener_receipt)
+                apply_receipt_observation(final_project, *summary.listener_receipt);
             apply_project_client_observation(summary, final_project);
-            if (final_project.complete(options.project_client_stop,
+            if (manual_receipt_mode(options)
+                    ? durable_manual_ready(summary, final_project, options)
+                    : final_project.complete(options.project_client_stop,
                                        options.project_client_live_input,
                                        options.project_client_reference_prediction)) {
                 summary.client_ready = true;
@@ -5474,9 +6329,9 @@ private:
                     server_log_offset_before_client_launch,
                     server_snapshot.bytes.size()));
             const auto server_client = observe_functional_client_log(
-                post_launch_server_log);
+                post_launch_server_log,listener_server_name.value_or(""));
             if (server_client.connection_lost) {
-                summary.functional_connection_rejected = true;
+                summary.functional_connection_lost = true;
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{50});
@@ -5485,13 +6340,13 @@ private:
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - stable_started_at).count());
         if (!client.running() || !server.running() || !guard.running() ||
-            summary.functional_connection_rejected ||
+            summary.functional_connection_rejected || summary.functional_connection_lost ||
             summary.stable_duration_ms < 30'000U) {
             summary.failure = !guard.running()
                 ? "isolation-guard-exited-during-stability"
                 : !server.running()
                     ? "server-exited-during-stability"
-                : summary.functional_connection_rejected
+                : summary.functional_connection_rejected || summary.functional_connection_lost
                     ? "client-disconnected-during-stability"
                     : "client-exited-during-stability";
             campaign_job.terminate(120U);
@@ -5517,10 +6372,35 @@ private:
             summary.client_exit_code = client.wait(std::chrono::seconds{5});
         }
         if(options.remote_audio_peer) {
-            if(peer.running()) peer.terminate(0U);
+            // A close owns campaign shutdown, but a simultaneous normal B
+            // close is allowed to finish its short transport-close budget.
+            if (peer.running()) {
+                const auto closing_peer = peer.wait_result(std::chrono::seconds{2});
+                if (closing_peer.status == windows::OwnedProcess::WaitStatus::timeout) {
+                    summary.peer_runner_terminated = true;
+                    peer.terminate(0U); // existing owned-session termination policy
+                } else if (!observe_manual_peer_exit(summary, closing_peer)) {
+                    finalize_duration(); return summary;
+                }
+            }
             summary.remote_audio_peer_exit=peer.wait(std::chrono::seconds{5});
             if(!summary.remote_audio_peer_exit || *summary.remote_audio_peer_exit!=0U) {
                 summary.failure="remote-audio-peer-finalization-failed"; finalize_duration(); return summary;
+            }
+            refresh_client_receipt(*receipt_directory.directory, options, summary,
+                app::SessionReceiptRole::B, !summary.peer_runner_terminated);
+            if (manual_receipt_mode(options) &&
+                (!summary.peer_receipt || !summary.peer_receipt->milestones[2U] ||
+                 !peer_receipts_share_owned_map_epoch(summary))) {
+                summary.failure = "peer-map-entry-not-observed";
+                finalize_duration(); return summary;
+            }
+            if (manual_receipt_mode(options) && !summary.peer_runner_terminated &&
+                (!summary.peer_terminal_receipt_valid || !summary.peer_receipt ||
+                 app::session_close_failed(summary.peer_receipt->close) ||
+                 !app::session_receipt_keyboard_ready(*summary.peer_receipt))) {
+                summary.failure = "peer-terminal-session-receipt-unavailable";
+                finalize_duration(); return summary;
             }
         }
         server.terminate(0U);
@@ -5548,6 +6428,7 @@ private:
             guard.terminate(0U);
             guard_exit = guard.wait(std::chrono::seconds{2});
         }
+        summary.guard_exit_code = guard_exit;
         const auto guard_process_count = guard_job.active_process_count();
         summary.cleanup_exact = summary.client_exit_code &&
             *summary.client_exit_code == 0U && summary.server_exit_code &&
@@ -6877,6 +7758,7 @@ private:
                 ? final_guard_cleanup->code
                 : windows::OwnedJobCleanupErrorCode::timeout)};
     }
+    observe_final_client_binary(environment, summary);
     if (options.functional_smoke) {
         std::optional<windows::BoundedProcessLogSnapshot> peer_snapshot;
         if (options.remote_audio_peer &&
@@ -6921,6 +7803,33 @@ private:
         } else {
             guard_snapshot.capture_failed = true;
             guard_snapshot.native_error = ERROR_NOT_ENOUGH_MEMORY;
+        }
+        if (options.project_client_stock_signon && summary.launch_manifest_published) {
+            auto receipt_directory = windows::open_secure_output_directory(options.run_root);
+            if (receipt_directory) {
+                refresh_client_receipt(*receipt_directory.directory, options, summary,
+                    app::SessionReceiptRole::A, true);
+                if (options.remote_audio_peer)
+                    refresh_client_receipt(*receipt_directory.directory, options, summary,
+                        app::SessionReceiptRole::B, !summary.peer_runner_terminated);
+            } else {
+                summary.listener_terminal_receipt_valid = false;
+                summary.listener_receipt_status = "receipt_directory_unavailable";
+            }
+            if (manual_receipt_mode(options) && summary.success &&
+                (!summary.listener_terminal_receipt_valid ||
+                 !summary.listener_receipt || !app::session_receipt_keyboard_ready(*summary.listener_receipt) ||
+                 app::session_close_failed(summary.listener_receipt->close) ||
+                 (options.remote_audio_peer && !summary.peer_runner_terminated &&
+                  (!summary.peer_terminal_receipt_valid || !summary.peer_receipt ||
+                   app::session_close_failed(summary.peer_receipt->close) ||
+                   !app::session_receipt_keyboard_ready(*summary.peer_receipt))) ||
+                 (options.remote_audio_peer && (!summary.peer_receipt || !summary.peer_receipt->milestones[2U] ||
+                  !peer_receipts_share_owned_map_epoch(summary))))) {
+                summary.success = false;
+                summary.client_ready = false;
+                summary.failure = "session-receipt-final-verification-failed";
+            }
         }
         summary.functional_diagnostic_published = write_functional_diagnostics(
             options, summary, server_snapshot, client_snapshot, guard_snapshot,
@@ -7457,8 +8366,500 @@ void print_key_value(const std::string_view key, const std::string_view value)
     std::cout << kPrefix << key << '=' << value << '\n';
 }
 
-void print_application_evidence(const ApplicationEvidence& values) {
+[[nodiscard]] bool validate_receipt_reader_caller(const app::SessionReceiptSnapshot& fixture)
+{
+    const auto process = windows::query_current_session_receipt_process_identity();
+    if (!process || process->process_id == (std::numeric_limits<std::uint32_t>::max)()) return false;
+    const auto parent = fs::temp_directory_path() / (L"hlclient-e281-reader-caller-" +
+        std::to_wstring(process->process_id) + L"-" + std::to_wstring(::GetTickCount64()));
+    UniqueHandle parent_guard;
+    if (!secure_create_and_hold_empty_run_root(parent, parent_guard)) return false;
+    bool valid = true;
+    for (std::uint32_t scenario = 1U; scenario <= 3U; ++scenario) {
+        const std::uint64_t network = scenario == 2U ? 2U : 1U;
+        auto id = fixture.identity.run_id;
+        id.back() = static_cast<char>('0' + scenario); // loop bounds are 1..3
+        const auto run_root = parent / to_wide_ascii(id);
+        UniqueHandle run_guard;
+        if (!secure_create_and_hold_empty_run_root(run_root, run_guard)) { valid = false; break; }
+        {
+            auto directory = windows::open_secure_output_directory(run_root);
+            if (!directory) { valid = false; break; }
+            auto written = fixture;
+            written.identity = {id, app::SessionReceiptRole::A,
+                process->process_id, process->process_creation};
+            written.generation.network_generation = network;
+            written.close.session_generation = network;
+            if (!windows::publish_session_receipt(*directory.directory, written)) { valid = false; break; }
+            Options options;
+            options.run_root = run_root;
+            options.map = "crossfire";
+            options.project_client_stock_signon = true;
+            options.project_client_stop = ProjectClientStop::live_visual_control;
+            options.project_client_live_input = ProjectClientLiveInput::keyboard_mouse;
+            ActiveSummary summary;
+            summary.functional_client_process_id = process->process_id;
+            summary.client_creation_filetime = process->process_creation;
+            refresh_manual_readiness_receipts(*directory.directory, options, summary);
+            ProjectClientSignonObservation observed;
+            if (summary.listener_receipt) apply_receipt_observation(observed, *summary.listener_receipt);
+            valid = (network == 1U ? durable_manual_ready(summary, observed, options)
+                : !summary.listener_terminal_receipt_valid && summary.listener_receipt_status == "invalid_identity" &&
+                  !durable_manual_ready(summary, observed, options)) && valid;
+            if (scenario != 2U) {
+                // A's final map evidence must be usable while B is still live.
+                // Publish only a nonterminal committed B snapshot, then invoke
+                // the exact production pre-peer-cleanup ordering from scratch.
+                auto live_peer = written;
+                live_peer.identity.role = app::SessionReceiptRole::B;
+                live_peer.identity.process_id = process->process_id + 1U; // fixture identity, no other process is queried
+                live_peer.stage = app::SessionReceiptStage::first_gameplay_update;
+                live_peer.close = {};
+                live_peer.fact_mask &= ~app::receipt_fact(app::SessionReceiptFact::live_visual_verified);
+                if (scenario == 3U) live_peer.generation.map_generation = 2U;
+                if (!windows::publish_session_receipt(*directory.directory, live_peer)) { valid = false; break; }
+                options.remote_audio_peer = true;
+                ActiveSummary ordered;
+                ordered.functional_client_process_id = process->process_id;
+                ordered.client_creation_filetime = process->process_creation;
+                ordered.remote_audio_peer_process_id = live_peer.identity.process_id;
+                ordered.peer_creation_filetime = live_peer.identity.process_creation;
+                refresh_manual_readiness_receipts(*directory.directory, options, ordered);
+                ProjectClientSignonObservation ready_observation;
+                if (ordered.listener_receipt) apply_receipt_observation(ready_observation, *ordered.listener_receipt);
+                valid = ordered.listener_terminal_receipt_valid && ordered.peer_receipt &&
+                    !ordered.peer_terminal_receipt_valid &&
+                    (scenario == 1U ? durable_manual_ready(ordered, ready_observation, options)
+                        : !durable_manual_ready(ordered, ready_observation, options)) && valid;
+            }
+        }
+        // Delete only the exact one ordinary file/directory created by this
+        // no-stock fixture, after the capabilities have released their locks.
+        run_guard.reset();
+        const auto leaf = run_root / app::session_receipt_leaf(app::SessionReceiptRole::A,
+            fixture.generation_ordinal, app::SessionReceiptStage::terminal);
+        valid = (::DeleteFileW(leaf.c_str()) != FALSE) && valid;
+        if (scenario != 2U) {
+            const auto peer_leaf = run_root / app::session_receipt_leaf(app::SessionReceiptRole::B,
+                fixture.generation_ordinal, app::SessionReceiptStage::first_gameplay_update);
+            valid = (::DeleteFileW(peer_leaf.c_str()) != FALSE) && valid;
+        }
+        valid = (::RemoveDirectoryW(run_root.c_str()) != FALSE) && valid;
+    }
+    parent_guard.reset();
+    valid = (::RemoveDirectoryW(parent.c_str()) != FALSE) && valid;
+    return valid;
+}
+
+[[nodiscard]] int validate_session_receipt_contract()
+{
+    const app::SessionReceiptIdentity identity{
+        "0123456789abcdef0123456789abcdef", app::SessionReceiptRole::A, 42U, 100U};
+    app::SessionReceiptJournal journal{identity};
+    bool valid = journal.begin_generation({1U, 1U, "maps/crossfire.bsp"});
+    const app::SessionReceiptCounters counters{350U, 175U, 70U, false};
+    valid = journal.observe_facts(app::kSessionReceiptKnownFacts, counters) && valid;
+    for (std::uint32_t i = 1U; i <= 5U; ++i)
+        valid = journal.record(static_cast<app::SessionReceiptStage>(i),
+            {i, i, i, std::nullopt}) && valid;
+    app::SessionCloseReceipt close;
+    close.reason = app::SessionCloseReason::window_close;
+    close.outcome = app::SessionCloseOutcome::sent_but_unconfirmed;
+    close.operation_identity = 1U;
+    close.session_generation = 1U;
+    close.requested = true;
+    close.eligible = true;
+    close.queued = true;
+    close.send_attempt_count = 1U;
+    close.successful_send_count = 1U;
+    close.requested_process_ms = 10U;
+    close.deadline_process_ms = 1'510U;
+    close.first_send_process_ms = 11U;
+    close.last_send_process_ms = 11U;
+    close.transport_closed_process_ms = 20U;
+    valid = journal.finish(close) && valid;
+    const auto* recorded = journal.snapshot();
+    if (!recorded) return 1;
+    const auto encoded = app::encode_session_receipt(*recorded);
+    valid = encoded && app::decode_session_receipt(*encoded) == *recorded && valid;
+    const bool reader_caller_valid = validate_receipt_reader_caller(*recorded);
+    valid = reader_caller_valid && valid;
+    constexpr std::string_view original_markers =
+        "steam_api_initialized=true fresh_material_acquired=true connect_sent=true connection_accepted=true\n"
+        "serverinfo_received=true schema_registry_received=true resource_continuation_sent=true "
+        "spawn_request_transmitted=true spawn_request_acknowledged=true live_service_payloads_received=true\n"
+        "[live-runtime] signon_reply=sendents transmitted=true\n"
+        "[live-runtime] signon_reply=sendents acknowledged=true\n"
+        "live_visual_control result=fresh_project_client_live_visual_control_integrated input=keyboard-mouse "
+        "new=350 sent_packets=175 server_samples=70 world_draws=25 world_uploads=3 "
+        "non_clear_framebuffers=32 view_status=ready gl_errors=0 cleanup=complete\n";
+    Options options;
+    options.project_client_stock_signon = true;
+    options.project_client_stop = ProjectClientStop::live_visual_control;
+    options.project_client_live_input = ProjectClientLiveInput::keyboard_mouse;
+    options.project_client_reference_prediction = true;
+    options.manual_no_time_limit = true;
+    auto duration_options = options;
+    duration_options.maximum_duration_seconds = 90U;
+    duration_options.manual_no_time_limit = false;
+    bool duration_valid = effective_manual_game_duration(duration_options) == 45U;
+    duration_options.manual_duration_seconds = 180U;
+    duration_valid = effective_manual_game_duration(duration_options) == 180U && duration_valid;
+    duration_options.manual_duration_seconds.reset();
+    duration_options.manual_no_time_limit = true;
+    duration_valid = !effective_manual_game_duration(duration_options) && duration_valid;
+    valid = duration_valid && valid;
+    const auto before = observe_project_client_signon_log(original_markers);
+    valid = before.complete(options.project_client_stop, options.project_client_live_input, true) && valid;
+    auto capture = windows::BoundedProcessLogCapture::create({64U * 1'024U, 4'096U, 256U, 4'096U});
+    if (!capture) return 1;
+    const auto write = [&](const std::string_view bytes) {
+        DWORD written{};
+        return ::WriteFile(capture->inherited_write_handle(), bytes.data(),
+            static_cast<DWORD>(bytes.size()), &written, nullptr) != FALSE && written == bytes.size();
+    };
+    std::string initial;
+    std::string long_tail;
+    for (std::size_t i = 0U; i < 300U; ++i) initial += "ordinary_prefix_no_session_markers\n";
+    for (std::size_t i = 0U; i < 8'000U; ++i) long_tail += "ordinary_frame_counters_only_no_map_or_signon_receipt\n";
+    valid = write(initial) && write(original_markers) && write(long_tail) && valid;
+    const auto evicted = capture->finish();
+    auto after = observe_project_client_signon_log(evicted.bytes);
+    const bool old_false_negative = evicted.retained_window && evicted.line_count_truncated &&
+        evicted.bytes.find("spawn_request_transmitted=true") == std::string::npos &&
+        !after.complete(options.project_client_stop, options.project_client_live_input, true);
+    valid = old_false_negative && valid;
+    ActiveSummary summary;
+    summary.listener_receipt = *recorded;
+    summary.listener_terminal_receipt_valid = true;
+    apply_receipt_observation(after, *recorded);
+    const bool durable_ready = durable_manual_ready(summary, after, options);
+    valid = durable_ready && valid;
+    // Even a perfectly forged server-text log cannot replace a bound receipt.
+    ActiveSummary missing;
+    const bool spoof_rejected = !durable_manual_ready(missing, before, options);
+    valid = spoof_rejected && valid;
+    auto partial = *recorded;
+    partial.fact_mask = app::kSessionReceiptConnectionFacts;
+    partial.counters = {};
+    partial.milestones = {};
+    partial.close = {};
+    partial.stage = app::SessionReceiptStage::connection_established;
+    auto connection_only = before;
+    apply_receipt_observation(connection_only, partial);
+    summary.listener_receipt = partial;
+    valid = !durable_manual_ready(summary, connection_only, options) && valid;
+    summary.listener_receipt = *recorded;
+    summary.listener_terminal_receipt_valid = false;
+    valid = !durable_manual_ready(summary, after, options) && valid;
+    bool close_failure_valid = true;
+    for (const auto outcome : {app::SessionCloseOutcome::send_failed,
+             app::SessionCloseOutcome::fatal_failure, app::SessionCloseOutcome::cancelled,
+             app::SessionCloseOutcome::pending, app::SessionCloseOutcome::not_requested,
+             app::SessionCloseOutcome::cancel_without_protocol_disconnect}) {
+        ActiveSummary closing = summary;
+        closing.listener_terminal_receipt_valid = true;
+        closing.client_exit_code = 0U; // never substitutes for a healthy close receipt
+        closing.listener_receipt->close.outcome = outcome;
+        closing.listener_receipt->close.successful_send_count = 0U;
+        closing.listener_receipt->close.first_send_process_ms.reset();
+        closing.listener_receipt->close.last_send_process_ms.reset();
+        close_failure_valid = !durable_manual_ready(closing, after, options) && close_failure_valid;
+    }
+    valid = close_failure_valid && valid;
+    ActiveSummary crash;
+    crash.listener_receipt = *recorded;
+    crash.listener_terminal_receipt_valid = true;
+    crash.client_exit_code = 2U;
+    crash.failure = "project-client-nonzero-exit";
+    crash.success = false;
+    valid = durable_manual_ready(crash, after, options) && !crash.success &&
+        crash.client_exit_code == 2U && valid;
+    ActiveSummary peer_crash;
+    valid = !observe_manual_peer_exit(peer_crash,
+        {windows::OwnedProcess::WaitStatus::exited, 2U, std::nullopt}) &&
+        peer_crash.remote_audio_peer_exit == 2U && valid;
+    // Launch and ending identity are separate; a mismatch never rewrites launch SHA.
+    const auto own_binary = observe_project_binary(sibling_executable(L"hlclient_stock_runtime_orchestrator.exe"));
+    if (!own_binary) return 1;
+    Environment environment;
+    environment.client = *own_binary.identity;
+    ActiveSummary changed;
+    changed.launch_manifest_published = true;
+    changed.client_launch_sha256 = std::string(64U, 'F');
+    changed.success = true;
+    observe_final_client_binary(environment, changed);
+    valid = changed.client_launch_sha256 == std::string(64U, 'F') &&
+        changed.client_final_sha256 == binary_sha256_hex(*own_binary.identity) &&
+        changed.client_binary_change_status == "changed" && !changed.success && valid;
+    Options timing_options = options;
+    timing_options.remote_audio_peer = true;
+    timing_options.run_root = fs::path{L"C:/receipt-fixture/0123456789abcdef0123456789abcdef"};
+    timing_options.map = "crossfire";
+    ActiveSummary timing_summary;
+    timing_summary.launch_manifest_published = true;
+    timing_summary.functional_server_process_id = 99U;
+    timing_summary.functional_client_process_id = identity.process_id;
+    timing_summary.remote_audio_peer_process_id = 43U;
+    timing_summary.client_creation_filetime = identity.process_creation;
+    timing_summary.peer_creation_filetime = 101U;
+    timing_summary.listener_terminal_receipt_valid = true;
+    timing_summary.peer_terminal_receipt_valid = true;
+    timing_summary.listener_receipt = *recorded;
+    timing_summary.peer_receipt = *recorded;
+    timing_summary.listener_receipt->receiving_entity = std::uint8_t{1U};
+    timing_summary.listener_receipt->host_qpc_frequency = 1'000U;
+    timing_summary.listener_receipt->peer_removal_count = 1U;
+    timing_summary.listener_receipt->peer_removals[0U] = {2U, 50U, 2'000U, 200U};
+    auto& timing_peer = *timing_summary.peer_receipt;
+    timing_peer.identity.role = app::SessionReceiptRole::B;
+    timing_peer.identity.process_id = 43U;
+    timing_peer.identity.process_creation = 101U;
+    timing_peer.receiving_entity = std::uint8_t{2U};
+    timing_peer.host_qpc_frequency = 1'000U;
+    timing_peer.close.requested_host_qpc_ticks = 1'500U;
+    // The current production profile owns one channel per process and derives
+    // both map epochs from the same owned server's committed server_count + 1.
+    const auto observed_timing = observe_peer_disconnect_timing(timing_options, timing_summary);
+    bool timing_valid = observed_timing.status == "observed" &&
+        observed_timing.close_to_postcommit_removal_ms == 500.0 &&
+        observed_timing.receiving_entity == std::optional<std::uint8_t>{std::uint8_t{2U}} &&
+        observed_timing.removal_source_ordinal == 50U;
+    auto peer_observation = after;
+    auto peer_readiness = timing_summary;
+    apply_receipt_observation(peer_observation, *peer_readiness.listener_receipt);
+    timing_valid = durable_manual_ready(peer_readiness, peer_observation, timing_options) && timing_valid;
+    peer_readiness.peer_receipt->generation.map_generation = 2U;
+    timing_valid = !durable_manual_ready(peer_readiness, peer_observation, timing_options) && timing_valid;
+    for (std::size_t mutation = 0U; mutation < 11U; ++mutation) {
+        auto bad = timing_summary;
+        switch (mutation) {
+        case 0U: bad.peer_receipt->identity.run_id = std::string(32U, 'f'); break;
+        case 1U: bad.peer_receipt->identity.role = app::SessionReceiptRole::A; break;
+        case 2U: ++bad.peer_receipt->identity.process_creation; break;
+        case 3U: bad.peer_receipt->generation.map_identifier = "maps/boot_camp.bsp"; break;
+        case 4U: bad.peer_receipt->host_qpc_frequency = 1'001U; break;
+        case 5U: bad.listener_receipt->peer_removals[0U].host_qpc_ticks = 1'400U; break;
+        case 6U: bad.peer_receipt->receiving_entity = std::uint8_t{3U}; break;
+        case 7U: bad.peer_terminal_receipt_valid = false; break;
+        case 8U: bad.functional_server_process_id = 0U; break;
+        case 9U: bad.peer_receipt->generation.map_generation = 2U; break;
+        case 10U:
+            bad.peer_receipt->generation.network_generation = 2U;
+            bad.peer_receipt->close.session_generation = 2U;
+            break;
+        default: break;
+        }
+        timing_valid = !observe_peer_disconnect_timing(timing_options, bad).close_to_postcommit_removal_ms && timing_valid;
+    }
+    valid = timing_valid && valid;
+    print_key_value("session-receipt-contract", valid ? "passed" : "failed");
+    print_key_value("bounded-log-original-markers-evicted", old_false_negative ? "passed" : "failed");
+    print_key_value("durable-map-receipt-after-eviction", durable_ready ? "passed" : "failed");
+    print_key_value("server-text-receipt-spoof", spoof_rejected ? "rejected" : "accepted");
+    print_key_value("peer-close-removal-qpc-correlation", timing_valid ? "passed" : "failed");
+    print_key_value("receipt-reader-caller-network-boundary", reader_caller_valid ? "passed" : "failed");
+    print_key_value("healthy-terminal-close-receipt", close_failure_valid ? "passed" : "failed");
+    print_key_value("effective-duration-manifest-contract", duration_valid ? "passed" : "failed");
+    print_key_value("process-launches", "0");
+    return valid ? 0 : 1;
+}
+
+// E28.2 sanitized numeric replay of run 01993393570741b3b1b3dc638d7fe2dd.
+// Private userinfo/auth strings are replaced; the public numeric process
+// identity, committed counters, clocks and typed shutdowns remain run facts.
+// This mode executes the production codec, receipt predicates, log observer
+// and connection projection. It neither launches a process nor reads assets.
+[[nodiscard]] int validate_normal_close_verdict(const bool projection_only)
+{
+    const auto receipt = [](const bool peer) -> std::optional<app::SessionReceiptSnapshot> {
+        const app::SessionReceiptIdentity identity{"01993393570741b3b1b3dc638d7fe2dd",
+            peer ? app::SessionReceiptRole::B : app::SessionReceiptRole::A,
+            peer ? 38'280U : 5'712U,
+            peer ? 134'360'570'596'811'361U : 134'360'570'596'579'820U};
+        app::SessionReceiptJournal journal{identity, 10'000'000U};
+        bool valid = journal.begin_generation({});
+        valid = journal.begin_generation({1U, 2U, "maps/crossfire.bsp"}) && valid;
+        valid = journal.observe_receiving_entity(static_cast<std::uint8_t>(peer ? 2U : 1U)) && valid;
+        valid = journal.observe_facts(131'071U, peer
+            ? app::SessionReceiptCounters{1'744U, 1'734U, 910U, false}
+            : app::SessionReceiptCounters{7'250U, 7'188U, 3'626U, false}) && valid;
+        constexpr std::array<std::uint64_t, 5U> a_ms{2'588U, 2'637U, 2'637U, 5'180U, 5'203U};
+        constexpr std::array<std::uint64_t, 5U> b_ms{2'577U, 2'624U, 2'624U, 5'176U, 5'192U};
+        constexpr std::array<std::uint64_t, 5U> publications{2U, 3U, 3U, 65U, 66U};
+        constexpr std::array<std::uint64_t, 5U> a_ticks{
+            2'036'670'271'811U, 2'036'670'756'323U, 2'036'670'756'323U,
+            2'036'696'185'749U, 2'036'696'421'835U};
+        constexpr std::array<std::uint64_t, 5U> b_ticks{
+            2'036'670'272'418U, 2'036'670'749'629U, 2'036'670'749'629U,
+            2'036'696'266'767U, 2'036'696'429'884U};
+        for (std::size_t i = 0U; i < a_ms.size(); ++i) {
+            valid = journal.record(static_cast<app::SessionReceiptStage>(i + 1U),
+                {peer ? b_ms[i] : a_ms[i], std::nullopt, publications[i],
+                 peer ? b_ticks[i] : a_ticks[i]}) && valid;
+        }
+        if (!peer)
+            valid = journal.observe_peer_removal({2U, 992U, 2'037'064'256'533U, 41'987U}) && valid;
+        app::SessionCloseReceipt close;
+        close.reason = app::SessionCloseReason::window_close;
+        close.outcome = app::SessionCloseOutcome::transport_acknowledged;
+        close.operation_identity = 1U;
+        close.session_generation = 1U;
+        close.requested = close.eligible = close.queued = close.ack_observed = true;
+        close.send_attempt_count = close.successful_send_count = 1U;
+        close.requested_process_ms = peer ? 41'936U : 150'290U;
+        close.deadline_process_ms = peer ? 43'436U : 151'790U;
+        close.first_send_process_ms = close.last_send_process_ms = close.requested_process_ms;
+        close.transport_closed_process_ms = peer ? 41'959U : 150'311U;
+        close.requested_host_qpc_ticks = peer ? 2'037'063'869'909U : 2'038'147'292'573U;
+        close.transport_closed_host_qpc_ticks = peer ? 2'037'064'098'918U : 2'038'147'500'375U;
+        valid = journal.finish(close) && valid;
+        const auto* snapshot = journal.snapshot();
+        const auto encoded = snapshot ? app::encode_session_receipt(*snapshot) : std::nullopt;
+        const auto decoded = encoded ? app::decode_session_receipt(*encoded) : std::nullopt;
+        return valid && decoded ? decoded : std::nullopt;
+    };
+    Options options;
+    options.project_client_stock_signon = true;
+    options.project_client_stop = ProjectClientStop::live_visual_control;
+    options.project_client_live_input = ProjectClientLiveInput::keyboard_mouse;
+    options.project_client_reference_prediction = true;
+    options.remote_audio_peer = true;
+    options.manual_no_time_limit = true;
+    options.fast_manual = true;
+    options.map = "crossfire";
+    ActiveSummary summary;
+    summary.server_ready = true;
+    summary.functional_server_process_id = 99U;
+    summary.functional_client_process_id = 5'712U;
+    summary.remote_audio_peer_process_id = 38'280U;
+    summary.client_creation_filetime = 134'360'570'596'579'820U;
+    summary.peer_creation_filetime = 134'360'570'596'811'361U;
+    summary.client_exit_code = summary.remote_audio_peer_exit = 0U;
+    summary.server_exit_code = summary.guard_exit_code = 0U;
+    summary.listener_receipt = receipt(false);
+    summary.peer_receipt = receipt(true);
+    summary.listener_terminal_receipt_valid = summary.listener_receipt.has_value();
+    summary.peer_terminal_receipt_valid = summary.peer_receipt.has_value();
+    summary.listener_receipt_status = summary.peer_receipt_status = "ready";
+    if (!summary.listener_receipt || !summary.peer_receipt) return 1;
+    auto observation = observe_project_client_signon_log(
+        "live_application_outcome result=completed primary_error=none runtime_error=unavailable "
+        "parser_error=unavailable scripted_coverage=not_evaluated prediction_coverage=verified\n"
+        "live_visual_control result=fresh_project_client_live_visual_control_integrated input=keyboard-mouse "
+        "generated=7250 new=7250 backup=14374 sent_packets=7188 server_samples=3626 "
+        "world_draws=2166808 world_uploads=1 non_clear_framebuffers=1 "
+        "view_status=ready primary_error=none gl_errors=0 cleanup=complete client_world_state_published=false\n"
+        "server_info protocol=48 max-clients=8 game=0 map=maps/crossfire.bsp\n"
+        "delta registry ready: schemas=7, fields=219\n");
+    const bool tail_lacks_signon = !observation.complete(options.project_client_stop,
+        options.project_client_live_input, options.project_client_reference_prediction);
+    apply_receipt_observation(observation, *summary.listener_receipt);
+    apply_project_client_observation(summary, observation);
+    constexpr std::string_view server_log =
+        "L sanitized: \"FixtureA<17><SYNTHETIC_ID><>\" connected, address \"127.0.0.1:27015\"\n"
+        "L sanitized: \"FixtureA<17><SYNTHETIC_ID><>\" entered the game\n"
+        "L sanitized: \"FixtureB<18><SYNTHETIC_ID><>\" connected, address \"127.0.0.1:27016\"\n"
+        "L sanitized: \"FixtureB<18><SYNTHETIC_ID><>\" entered the game\n"
+        "L sanitized: \"FixtureB<18><SYNTHETIC_ID><>\" disconnected\n"
+        "L sanitized: \"FixtureA<17><SYNTHETIC_ID><>\" disconnected\n";
+    const auto server = observe_functional_client_log(server_log, "FixtureA");
+    apply_functional_client_observation(summary, server);
+    summary.client_ready = durable_manual_ready(summary, observation, options);
+    summary.cleanup_exact = true;
+    summary.success = summary.client_ready && server.entered_game &&
+        summary.peer_terminal_receipt_valid &&
+        !app::session_close_failed(summary.peer_receipt->close);
+    summary.failure = summary.success ? "none" : "fixture-not-ready";
+    bool negative_controls = true;
+    auto incomplete = summary;
+    incomplete.listener_terminal_receipt_valid = false;
+    negative_controls = !durable_manual_ready(incomplete, observation, options) && negative_controls;
+    incomplete = summary;
+    incomplete.listener_receipt->fact_mask = app::kSessionReceiptConnectionFacts;
+    incomplete.listener_receipt->milestones = {};
+    auto before_map = observation;
+    apply_receipt_observation(before_map, *incomplete.listener_receipt);
+    negative_controls = !durable_manual_ready(incomplete, before_map, options) && negative_controls;
+    incomplete = summary;
+    incomplete.peer_receipt->generation.map_generation = 3U;
+    negative_controls = !durable_manual_ready(incomplete, observation, options) && negative_controls;
+    auto peer_crash = summary;
+    negative_controls = !observe_manual_peer_exit(peer_crash,
+        {windows::OwnedProcess::WaitStatus::exited, 0xC0000005U, std::nullopt}) &&
+        !peer_crash.client_ready && peer_crash.failure == "remote-audio-peer-nonzero-exit" && negative_controls;
+    const auto encoded = app::encode_session_receipt(*summary.listener_receipt);
+    negative_controls = encoded && !app::decode_session_receipt(encoded->substr(0U, encoded->size() - 1U)) && negative_controls;
+    ActiveSummary rejected;
+    apply_project_client_observation(rejected, observe_project_client_signon_log("goldsrc connect-rejected\n"));
+    negative_controls = functional_connection_status(rejected) == "rejected" && negative_controls;
+    ActiveSummary timeout;
+    apply_project_client_observation(timeout, observe_project_client_signon_log("connect-response wait timed out\n"));
+    negative_controls = functional_connection_status(timeout) == "timeout" && negative_controls;
+    auto crash = summary;
+    crash.client_exit_code = 0xC0000005U;
+    negative_controls = functional_terminal_session_state(crash) == "failed" && negative_controls;
+    auto fatal = summary;
+    fatal.listener_receipt->close.outcome = app::SessionCloseOutcome::fatal_failure;
+    negative_controls = functional_terminal_session_state(fatal) == "failed" && negative_controls;
+    const bool accepted = functional_connection_status(summary) == "accepted";
+    const bool phases = functional_terminal_session_state(summary) == "normal_close_completed" &&
+        summary.functional_connection_lost && !summary.functional_connection_rejected;
+    const bool bounded_log_ready = tail_lacks_signon && summary.client_ready;
+    print_key_value("normal-close-verdict-contract", accepted && phases && summary.success && negative_controls && bounded_log_ready ? "passed" : "failed");
+    print_key_value("orchestrator", summary.success ? "success" : "failed");
+    print_key_value("result", summary.success ? "success" : "failed");
+    print_key_value("failure-category", summary.failure);
+    print_key_value("server-ready", summary.server_ready ? "true" : "false");
+    print_key_value("client-ready", summary.client_ready ? "true" : "false");
+    print_key_value("connection-status", functional_connection_status(summary));
+    print_key_value("connection-establishment", functional_connection_status(summary));
+    print_key_value("session-terminal-state", functional_terminal_session_state(summary));
+    print_key_value("connection-accepted", summary.project_connection_accepted ? "true" : "false");
+    print_key_value("client-map-entry-status", summary.client_ready ? "observed" : "unknown");
+    print_key_value("client-world-state-published", summary.project_client_world_state_published ? "true" : "false");
+    print_key_value("usercmd-transmitted", summary.project_usercmd_transmitted ? "true" : "false");
+    print_key_value("live-visual-verified", summary.project_live_visual_verified ? "true" : "false");
+    const auto print_count = [](const std::string_view name, const auto& count) {
+        print_key_value(name, count ? std::to_string(*count) : "not-observed");
+    };
+    print_count("usercmd-generated", summary.project_usercmd_generated_count);
+    print_count("usercmd-new", summary.project_usercmd_new_count);
+    print_count("usercmd-packets", summary.project_usercmd_packet_count);
+    print_count("usercmd-server-samples", summary.project_usercmd_server_sample_count);
+    print_count("serverinfo-protocol", summary.project_serverinfo_protocol);
+    print_count("serverinfo-max-clients", summary.project_serverinfo_max_clients);
+    print_count("schema-count", summary.project_schema_count);
+    print_count("schema-field-count", summary.project_schema_field_count);
+    print_key_value("serverinfo-map", summary.project_serverinfo_map.value_or("not-observed"));
+    print_key_value("application-result", summary.project_application[0U].value_or("unavailable"));
+    print_key_value("application-primary-error", summary.project_application[1U].value_or("unavailable"));
+    print_key_value("application-scripted-coverage", summary.project_application[8U].value_or("unavailable"));
+    print_key_value("application-runtime-error", summary.project_application[2U].value_or("unavailable"));
+    print_key_value("application-parser-error", summary.project_application[3U].value_or("unavailable"));
+    print_key_value("application-prediction-coverage", summary.project_application[9U].value_or("unavailable"));
+    print_key_value("authentication-status", "pending-or-unknown");
+    print_key_value("evidence-eligible", "false");
+    print_key_value("stable-duration-ms", std::to_string(summary.stable_duration_ms));
+    print_count("client-exit-code", summary.client_exit_code);
+    print_count("remote-audio-peer-exit-code", summary.remote_audio_peer_exit);
+    print_count("server-exit-code", summary.server_exit_code);
+    print_count("guard-exit-code", summary.guard_exit_code);
+    print_key_value("job-cleanup", "exact");
+    print_key_value("receipt-json-A", client_session_receipt_json(summary.listener_receipt, "ready", true,
+        summary.functional_client_process_id, summary.client_creation_filetime));
+    print_key_value("receipt-json-B", client_session_receipt_json(summary.peer_receipt, "ready", true,
+        summary.remote_audio_peer_process_id, summary.peer_creation_filetime));
+    print_key_value("negative-controls", negative_controls ? "passed" : "failed");
+    print_key_value("bounded-log-receipt-readiness", bounded_log_ready ? "passed" : "failed");
+    print_key_value("stock-processes-started", "0");
+    print_key_value("capture-files-written", "0");
+    return (projection_only ? summary.success : accepted && phases && summary.success && negative_controls && bounded_log_ready) ? 0 : 1;
+}
+
+void print_application_evidence(const ApplicationEvidence& values, bool only_present = false) {
     for (std::size_t i = 0U; i < values.size(); ++i) {
+        if (only_present && !values[i]) continue;
         std::string key{"application-"};
         key += kApplicationMetrics[i];
         std::replace(key.begin(), key.end(), '_', '-');
@@ -7490,6 +8891,9 @@ int wmain(const int argc, wchar_t** argv)
                       "<active options>\n";
         return 2;
     }
+    if (options->validate_session_receipt_contract) return validate_session_receipt_contract();
+    if (options->validate_normal_close_verdict)
+        return validate_normal_close_verdict(options->normal_close_verdict_projection);
     if (options->validate_remote_audio_peer_contract) {
         const std::vector<std::wstring> args{L"--renderer",L"opengl",L"--connect",L"127.0.0.1:27243",
             L"--stop-after",L"live-visual-control",L"--live-input",L"keyboard-mouse",L"--game",L"valve",
@@ -7506,6 +8910,21 @@ int wmain(const int argc, wchar_t** argv)
         unlimited_args.resize(unlimited_args.size() - 2U);
         unlimited_args.push_back(L"--live-session-unlimited");
         ok = ok && hlclient::core::remote_audio_peer_plan(unlimited_args).has_value();
+        for (const auto enabled : {false, true}) {
+            windows::BoundedProcessLogSnapshot setting;
+            setting.bytes = enabled ? "\"violence_ablood\" is \"1\"\n" : "\"violence_ablood\" is \"0\"\n";
+            auto blood_args = args;
+            append_observed_server_blood_presentation(blood_args, setting);
+            const auto blood_plan = hlclient::core::remote_audio_peer_plan(blood_args);
+            ok = ok && blood_plan.has_value();
+            if (blood_plan) for (const auto& client : {blood_plan->listener, blood_plan->mover}) {
+                const auto found = std::find(client.begin(), client.end(), L"--server-blood-presentation");
+                ok = ok && found != client.end() && std::next(found) != client.end() &&
+                    *std::next(found) == (enabled ? L"enabled" : L"disabled") &&
+                    std::ranges::count(client, L"--server-blood-presentation") == 1 &&
+                    std::ranges::count(client, L"--audio-on-focus-loss") == 0;
+            }
+        }
         std::vector<std::wstring> timing_fixture{L"fixture", L"--functional-smoke", L"--project-client-stock-signon",
             L"--functional-confirmation-token", std::wstring{kFunctionalSmokeToken},
             L"--research-root",L"D:/fixture/research",L"--client",L"D:/fixture/hlclient.exe",
@@ -7521,6 +8940,88 @@ int wmain(const int argc, wchar_t** argv)
             for (auto& part : timing_fixture) pointers.push_back(part.data());
             return parse_options(static_cast<int>(pointers.size()), pointers.data());
         };
+        const auto parse_peer_cli = [](std::vector<std::wstring> fixture) {
+            std::vector<wchar_t*> pointers;
+            for (auto& part : fixture) pointers.push_back(part.data());
+            return parse_options(static_cast<int>(pointers.size()), pointers.data());
+        };
+        const auto replace_cli_value = [](std::vector<std::wstring>& fixture,
+            const std::wstring_view flag, std::wstring value) {
+            const auto at = std::find(fixture.begin(), fixture.end(), flag);
+            *std::next(at) = std::move(value);
+        };
+        const auto remove_cli_option = [](std::vector<std::wstring>& fixture,
+            const std::wstring_view flag, const std::ptrdiff_t argument_count = 1) {
+            const auto at = std::find(fixture.begin(), fixture.end(), flag);
+            fixture.erase(at, std::next(at, argument_count));
+        };
+        auto peer_cli_fixture = timing_fixture;
+        peer_cli_fixture.push_back(L"--remote-audio-peer");
+        const auto old_crossfire_peer = parse_peer_cli(peer_cli_fixture);
+        ok = ok && old_crossfire_peer && old_crossfire_peer->remote_audio_peer &&
+            !old_crossfire_peer->external_manual_map;
+        auto strict_crossfire_peer = peer_cli_fixture;
+        replace_cli_value(strict_crossfire_peer, L"--validation-mode", L"strict");
+        ok = ok && parse_peer_cli(strict_crossfire_peer).has_value();
+        replace_cli_value(peer_cli_fixture, L"--map", L"gentest");
+        ok = ok && !parse_peer_cli(peer_cli_fixture);
+        peer_cli_fixture.push_back(L"--external-manual-map");
+        for (const bool reference_prediction : {false, true}) {
+            for (const bool unlimited : {false, true}) {
+                auto fixture = peer_cli_fixture;
+                // Prediction off is represented by the existing default, not
+                // a new native value for --project-client-prediction.
+                if (reference_prediction) {
+                    fixture.insert(fixture.end(),
+                        {L"--project-client-prediction", L"reference"});
+                }
+                if (unlimited) {
+                    remove_cli_option(fixture, L"--manual-duration-seconds", 2);
+                    fixture.push_back(L"--manual-no-time-limit");
+                }
+                const auto parsed = parse_peer_cli(fixture);
+                ok = ok && parsed && parsed->external_manual_map &&
+                    parsed->remote_audio_peer && parsed->map == "gentest" &&
+                    parsed->project_client_reference_prediction == reference_prediction &&
+                    parsed->manual_no_time_limit == unlimited &&
+                    parsed->manual_duration_seconds.has_value() == !unlimited;
+            }
+        }
+        auto external_single_client = peer_cli_fixture;
+        remove_cli_option(external_single_client, L"--remote-audio-peer");
+        ok = ok && parse_peer_cli(external_single_client).has_value();
+        const auto rejected_peer_value = [&](const std::wstring_view flag,
+            std::wstring value) {
+            auto fixture = peer_cli_fixture;
+            replace_cli_value(fixture, flag, std::move(value));
+            return !parse_peer_cli(fixture);
+        };
+        for (const auto map : {L"../gentest", L"gentest.bsp", L"gentest;quit", L"D:/gentest"}) {
+            ok = ok && rejected_peer_value(L"--map", map);
+        }
+        ok = ok && rejected_peer_value(L"--validation-mode", L"strict") &&
+            rejected_peer_value(L"--project-client-stop", L"live-runtime-state");
+        for (const auto input : {L"scripted-check", L"scripted-fire-reload-check",
+                L"scripted-damage-respawn-check"}) {
+            ok = ok && rejected_peer_value(L"--project-client-live-input", input);
+        }
+        for (const auto flag : {L"--functional-smoke", L"--project-client-stock-signon",
+                L"--validation-mode", L"--external-manual-map"}) {
+            auto fixture = peer_cli_fixture;
+            remove_cli_option(fixture, flag,
+                std::wstring_view{flag} == L"--validation-mode" ? 2 : 1);
+            ok = ok && !parse_peer_cli(fixture);
+        }
+        for (const auto map : {L"gentest", L"crossfire"}) {
+            auto fixture = peer_cli_fixture;
+            replace_cli_value(fixture, L"--map", map);
+            fixture.insert(fixture.end(), {L"--project-client-prediction", L"reference",
+                L"--test-start-health", L"50"});
+            ok = ok && !parse_peer_cli(fixture);
+        }
+        auto duplicate_external_flag = peer_cli_fixture;
+        duplicate_external_flag.push_back(L"--external-manual-map");
+        ok = ok && !parse_peer_cli(duplicate_external_flag);
         for (const auto seconds : {L"1", L"45", L"300", L"86400"}) {
             timing_fixture.back() = seconds;
             const auto timing = parse_timing();
@@ -7560,6 +9061,48 @@ int wmain(const int argc, wchar_t** argv)
         ActiveSummary unobserved_peer;
         apply_remote_audio_peer_observation(unobserved_peer, no_peer_evidence);
         ok = ok && !unobserved_peer.remote_audio_peer_entered;
+        bool peer_monitor_ok=true;
+        using PeerStatus=windows::OwnedProcess::WaitStatus;
+        ActiveSummary running_peer;
+        peer_monitor_ok=peer_monitor_ok && observe_manual_peer_exit(running_peer,{PeerStatus::timeout,{},{}}) &&
+            !running_peer.remote_audio_peer_exit;
+        ActiveSummary voluntary_peer;
+        const auto voluntary_failure_before=voluntary_peer.failure;
+        peer_monitor_ok=peer_monitor_ok && observe_manual_peer_exit(voluntary_peer,{PeerStatus::exited,0U,{}}) &&
+            voluntary_peer.remote_audio_peer_exit==0U && voluntary_peer.failure==voluntary_failure_before;
+        for(const auto code:{2U,0xc0000005U,0xc0000135U}) {
+            ActiveSummary crashed_peer;crashed_peer.client_ready=true;
+            peer_monitor_ok=peer_monitor_ok && !observe_manual_peer_exit(crashed_peer,{PeerStatus::exited,code,{}}) &&
+                crashed_peer.remote_audio_peer_exit==code && !crashed_peer.client_ready &&
+                crashed_peer.failure=="remote-audio-peer-nonzero-exit" && !crashed_peer.client_exit_code;
+        }
+        ActiveSummary query_failure;
+        peer_monitor_ok=peer_monitor_ok && !observe_manual_peer_exit(query_failure,{PeerStatus::exit_query_failed,{},ERROR_INVALID_HANDLE}) &&
+            query_failure.failure=="remote-audio-peer-exit-query-failed" && !query_failure.remote_audio_peer_exit;
+        bool cleanup_observation_ok=true;
+        for(const auto client_code:{0U,120U,37U}) {
+            ActiveSummary observed_cleanup;
+            (void)observe_manual_peer_exit(observed_cleanup,{PeerStatus::exited,2U,{}});
+            observe_peer_cleanup_exits(observed_cleanup,{PeerStatus::exited,client_code,{}},
+                {PeerStatus::exited,73U,{}});
+            cleanup_observation_ok=cleanup_observation_ok && observed_cleanup.client_exit_code==client_code &&
+                observed_cleanup.server_exit_code==73U && observed_cleanup.client_wait_result=="exited" &&
+                observed_cleanup.remote_audio_peer_exit==2U && observed_cleanup.failure=="remote-audio-peer-nonzero-exit";
+        }
+        ActiveSummary incomplete_cleanup;
+        (void)observe_manual_peer_exit(incomplete_cleanup,{PeerStatus::exited,2U,{}});
+        observe_peer_cleanup_exits(incomplete_cleanup,{PeerStatus::wait_failed,{},ERROR_INVALID_HANDLE},
+            {PeerStatus::timeout,{},{}});
+        cleanup_observation_ok=cleanup_observation_ok && !incomplete_cleanup.client_exit_code &&
+            !incomplete_cleanup.server_exit_code && incomplete_cleanup.client_wait_result=="wait-failed" &&
+            incomplete_cleanup.client_wait_native_error==static_cast<std::uint32_t>(ERROR_INVALID_HANDLE) &&
+            incomplete_cleanup.failure=="remote-audio-peer-nonzero-exit";
+        peer_monitor_ok=peer_monitor_ok && cleanup_observation_ok;
+        ok=ok && peer_monitor_ok;
+        print_key_value("cleanup-exit-observation",cleanup_observation_ok ? "passed" : "failed");
+        print_key_value("peer-exit-monitor",peer_monitor_ok ? "passed" : "failed");
+        print_key_value("voluntary-peer-exit",peer_monitor_ok ? "continue-listener" : "failed");
+        print_key_value("peer-crash",peer_monitor_ok ? "bounded-owned-cleanup" : "failed");
         print_key_value("remote-audio-peer-contract",ok ? "passed" : "failed");
         print_key_value("process-launches","0");
         return ok ? 0 : 2;
@@ -7604,6 +9147,14 @@ int wmain(const int argc, wchar_t** argv)
         parser_good = parser_good && !parse_fixture();
         change(L"--project-client-live-input",L"keyboard-mouse");
         fixture.pop_back();
+        fixture.push_back(L"--project-client-debug-freeze-tracer");
+        const auto frozen_options = parse_fixture();
+        parser_good = parser_good && frozen_options && frozen_options->project_client_debug_freeze_tracer;
+        fixture.push_back(L"--project-client-debug-freeze-tracer");
+        parser_good = parser_good && !parse_fixture(); fixture.pop_back();
+        change(L"--project-client-live-input",L"scripted-fire-reload-check");
+        parser_good = parser_good && !parse_fixture();
+        change(L"--project-client-live-input",L"keyboard-mouse"); fixture.pop_back();
         change(L"--validation-mode",L"strict");
         const auto strict_options = parse_fixture();
         parser_good = parser_good && strict_options && !strict_options->fast_manual;
@@ -7663,7 +9214,17 @@ int wmain(const int argc, wchar_t** argv)
             L"localinfo hlc_test_run 0123456789abcdef0123456789abcdef",
             L"localinfo hlc_test_profile test_server_assisted",L"map crossfire",L"meta require HLC50",L"status"};
         std::vector<std::wstring> complete_server_args{L"-console",L"-game",L"valve",L"-port",L"27243",
-            L"+ip",L"127.0.0.1",L"+log",L"on",L"+map",L"crossfire",L"+maxplayers",L"8",L"+sv_lan",L"1",L"+status"};
+            L"+ip",L"127.0.0.1",L"+log",L"on",L"+map",L"crossfire",L"+maxplayers",L"8",L"+sv_lan",L"1",L"+status",
+            L"+violence_ablood"};
+        const auto queried_commands=stock_startup_commands(complete_server_args);
+        good=good && complete_server_args.back()==L"+violence_ablood" &&
+            complete_server_args[complete_server_args.size()-2U]==L"+status" &&
+            std::ranges::count(complete_server_args,L"+violence_ablood")==1 &&
+            queried_commands.back()==L"violence_ablood" &&
+            std::ranges::none_of(queried_commands,[](const auto& command) {
+                return command.starts_with(L"violence_ablood ") ||
+                    command.starts_with(L"set ") || command.starts_with(L"exec ");
+            });
         auto fast_server_args=complete_server_args;
         // The installed stock launcher's CheckParm uses strstr: even a quoted
         // path containing "-steam" forces GUI/AdminServer before -console is
@@ -7689,14 +9250,14 @@ int wmain(const int argc, wchar_t** argv)
             good=good && stock_startup_commands(fast_server_args)==std::vector<std::wstring>{
                 L"ip 127.0.0.1",L"log on",L"localinfo hlc_test_run 0123456789abcdef0123456789abcdef",
                 L"localinfo hlc_test_profile test_server_assisted",L"map crossfire",L"maxplayers 8",L"sv_lan 1",
-                L"meta require HLC50",L"status"};
+                L"meta require HLC50",L"status",L"violence_ablood"};
         } else { good=false; }
         good=good && test_start_health_server_arguments(complete_server_args,*launch) &&
             stock_startup_commands(complete_server_args)==std::vector<std::wstring>{L"ip 127.0.0.1",L"log on",
                 L"localinfo mm_configfile addons/hlclient_test50/0123456789abcdef0123456789abcdef/config.ini",
                 L"localinfo hlc_test_run 0123456789abcdef0123456789abcdef",
                 L"localinfo hlc_test_profile test_server_assisted",L"map crossfire",L"maxplayers 8",L"sv_lan 1",
-                L"meta require HLC50",L"status"};
+                L"meta require HLC50",L"status",L"violence_ablood"};
         constexpr std::string_view server_evidence="L fixture: [hlclient-test-health] run=0123456789abcdef0123456789abcdef requested_start_health=50 server_setup_applied=true max_health=100 max_health_source=server_entvars\n";
         const auto retained=functional_diagnostic_excerpt(server_evidence);
         good=good && retained.find("run=0123456789abcdef0123456789abcdef requested_start_health=50 server_setup_applied=true")!=std::string::npos;
@@ -7879,6 +9440,59 @@ int wmain(const int argc, wchar_t** argv)
             reconnect_fixture);
         const auto preconnection = observe_functional_client_log(
             preconnection_fixture);
+        // Regression input is the exact configured name from the same pure
+        // peer plan used by normal launching, then the server-assigned userid.
+        const std::vector<std::wstring> observer_arguments{L"--renderer",L"opengl",L"--connect",L"127.0.0.1:27243",
+            L"--stop-after",L"live-visual-control",L"--live-input",L"keyboard-mouse",L"--game",L"valve",
+            L"--name",L"fixture",L"--auth-provider",L"steam",L"--steam-api-runtime",L"D:/fixture/api.dll",
+            L"--basedir",L"D:/fixture",L"--live-session-unlimited"};
+        const auto observer_plan=hlclient::core::remote_audio_peer_plan(observer_arguments);
+        const auto listener_name=observer_plan ? configured_client_log_name(observer_plan->listener) : std::nullopt;
+        const auto mover_name=observer_plan ? configured_client_log_name(observer_plan->mover) : std::nullopt;
+        const auto listener_connected="L synthetic: \""+listener_name.value_or("missing")+
+            "<17><SYNTHETIC_ID><>\" connected, address \"127.0.0.1:27015\"\n";
+        const std::string listener_entered="L synthetic: \"RenamedAfterAuth<17><SYNTHETIC_ID><>\" entered the game\n";
+        const auto mover_connected="L synthetic: \""+mover_name.value_or("missing")+
+            "<18><SYNTHETIC_ID><>\" connected, address \"127.0.0.1:27015\"\n";
+        const std::string mover_entered="L synthetic: \"MoverRenamed<18><SYNTHETIC_ID><>\" entered the game\n";
+        const std::string mover_left="L synthetic: \"MoverRenamed<18><SYNTHETIC_ID><>\" disconnected\n";
+        const std::string listener_left="L synthetic: \"RenamedAgain<17><SYNTHETIC_ID><>\" disconnected\n";
+        const auto listener_reconnected="L synthetic: \""+listener_name.value_or("missing")+
+            "<19><SYNTHETIC_ID><>\" connected, address \"127.0.0.1:27015\"\n";
+        const auto observe_peer_fixture=[](std::string_view bytes,std::string_view configured_name) {
+            return observe_functional_client_log(bytes,configured_name);
+        };
+        const auto peer_first_a=observe_peer_fixture(listener_connected+listener_entered+mover_connected+mover_entered,
+            listener_name.value_or("missing"));
+        const auto peer_first_b=observe_peer_fixture(mover_connected+mover_entered+listener_connected+listener_entered,
+            listener_name.value_or("missing"));
+        const auto peer_b_leave=observe_peer_fixture(listener_connected+listener_entered+mover_connected+mover_entered+mover_left,
+            listener_name.value_or("missing"));
+        const auto peer_a_leave=observe_peer_fixture(listener_connected+listener_entered+mover_connected+mover_entered+listener_left,
+            listener_name.value_or("missing"));
+        const auto peer_a_reconnect=observe_peer_fixture(listener_connected+listener_entered+mover_connected+listener_reconnected,
+            listener_name.value_or("missing"));
+        const auto prefix_only="L synthetic: \""+listener_name.value_or("missing")+
+            "_suffix<19><SYNTHETIC_ID><>\" connected, address \"127.0.0.1:27015\"\n";
+        const auto peer_wrong_name=observe_peer_fixture(prefix_only,listener_name.value_or("missing"));
+        const bool peer_observer_valid=listener_name && mover_name &&
+            peer_first_a.name_observed && peer_first_a.connection_accepted && peer_first_a.entered_game && !peer_first_a.connection_lost &&
+            peer_first_b.name_observed && peer_first_b.connection_accepted && peer_first_b.entered_game && !peer_first_b.connection_lost &&
+            peer_b_leave.connection_accepted && peer_b_leave.entered_game && !peer_b_leave.connection_lost &&
+            peer_a_leave.connection_accepted && peer_a_leave.entered_game && peer_a_leave.connection_lost &&
+            peer_a_reconnect.connection_accepted && peer_a_reconnect.entered_game && peer_a_reconnect.connection_lost &&
+            !peer_wrong_name.name_observed && !peer_wrong_name.connection_accepted && !peer_wrong_name.entered_game;
+        // The shared runtime roundtrip branch publishes either one JSON
+        // document or its existing status rows. Keep fixture diagnostics in
+        // the standalone log-observation check so they cannot corrupt JSON.
+        if(!options->runtime_failure_fixture) {
+            print_key_value("peer-log-first-a",peer_first_a.connection_lost ? "failed" : "passed");
+            print_key_value("peer-log-first-b",peer_first_b.connection_lost ? "failed" : "passed");
+            print_key_value("peer-log-b-leave",peer_b_leave.connection_lost ? "failed" : "passed");
+            print_key_value("peer-log-a-leave",peer_a_leave.connection_lost ? "passed" : "failed");
+            print_key_value("peer-log-a-reconnect",peer_a_reconnect.connection_lost ? "passed" : "failed");
+            print_key_value("peer-log-observation",peer_observer_valid ? "passed" : "failed");
+        }
         constexpr std::string_view application_fixture =
             "[info] live_application_outcome result=error primary_error=runtime_record_failed "
             "runtime_error=decoder_failed parser_error=unsupported_opcode opcode=255 cursor=1032 "
@@ -7927,6 +9541,16 @@ int wmain(const int argc, wchar_t** argv)
             valid_application_metric("prediction_raw_error","../private") ||
             valid_application_metric("prediction_raw_error","nan") ||
             valid_application_metric("primary_error","private.config") ||
+            !valid_application_metric("user_info_error","invalid_info_string") ||
+            !valid_application_metric("user_info_string_error","missing_leading_separator") ||
+            !valid_application_metric("user_info_string_length","0") ||
+            !valid_application_metric("user_info_empty","1") ||
+            !valid_application_metric("user_info_private_id_present","0") ||
+            valid_application_metric("user_info_error","private_fixture") ||
+            valid_application_metric("user_info_string_error","private_fixture") ||
+            valid_application_metric("user_info_string_length","999999") ||
+            valid_application_metric("user_info_empty","true") ||
+            valid_application_metric("user_info_private_id_present","12") ||
             application_retained.find(application_fixture.substr(7U)) == std::string::npos ||
             observe_project_client_signon_log("live_application_outcome result=error primary_error=\"private\"\n")
                 .application[1U]) {
@@ -7935,6 +9559,20 @@ int wmain(const int argc, wchar_t** argv)
         }
         const auto project_complete = observe_project_client_signon_log(
             project_complete_fixture);
+        const std::string auth_failure_fixture=
+            "live_application_outcome result=error primary_error=authentication_timed_out "
+            "error_domain=authentication_provider failure_stage=authentication "
+            "scripted_coverage=not_evaluated prediction_coverage=limited\n";
+        const auto auth_failure=observe_project_client_signon_log(auth_failure_fixture);
+        const auto auth_excerpt=functional_diagnostic_excerpt(auth_failure_fixture);
+        if(auth_failure.application[0U]!="error" ||
+            auth_failure.application[1U]!="authentication_timed_out" ||
+            auth_failure.application[12U]!="authentication_provider" ||
+            auth_failure.application[13U]!="authentication" ||
+            auth_excerpt.find("primary_error=authentication_timed_out")==std::string::npos) {
+            std::cerr << "Authentication startup failure retention contract failed\n";
+            return 1;
+        }
         const auto project_incomplete = observe_project_client_signon_log(
             project_incomplete_fixture);
         const auto project_live_complete = observe_project_client_signon_log(
@@ -8486,8 +10124,333 @@ int wmain(const int argc, wchar_t** argv)
             functional_diagnostic_excerpt(reordered_fields).empty() &&
             functional_diagnostic_excerpt("[info] " + crlf_remote_effects) == remote_effects_fixture &&
             functional_diagnostic_excerpt(remote_effects_fixture + trailing_private) == remote_effects_fixture;
+        const std::string blood_effects_fixture{
+            "[blood-effects-summary] wire=12 forwarded=10 clock_dropped=2 received=10 accepted=8 duplicate=1 invalid=1 stale=0 palette=0 capacity=0 delivery_stale=0 materialized=6 absent=1 unsupported=1 frame_rejected=0 draw_batches=3\n"};
+        constexpr std::array blood_fixture_fields{
+            std::string_view{"wire=12"}, std::string_view{"forwarded=10"},
+            std::string_view{"clock_dropped=2"}, std::string_view{"received=10"},
+            std::string_view{"accepted=8"}, std::string_view{"duplicate=1"},
+            std::string_view{"invalid=1"}, std::string_view{"stale=0"},
+            std::string_view{"palette=0"}, std::string_view{"capacity=0"},
+            std::string_view{"delivery_stale=0"}, std::string_view{"materialized=6"},
+            std::string_view{"absent=1"}, std::string_view{"unsupported=1"},
+            std::string_view{"frame_rejected=0"}, std::string_view{"draw_batches=3"}};
+        auto newer_blood_effects = blood_effects_fixture;
+        replace_all(newer_blood_effects, "wire=12", "wire=20");
+        const auto blood_effects_excerpt = functional_diagnostic_excerpt(
+            blood_effects_fixture + remote_effects_fixture + competing_visibility +
+            "[info] " + newer_blood_effects);
+        bool blood_effects_retention_valid =
+            blood_effects_excerpt.starts_with(remote_effects_fixture + newer_blood_effects) &&
+            occurrence_count(blood_effects_excerpt, "[blood-effects-summary] ") == 1U &&
+            occurrence_count(blood_effects_excerpt, "[remote-effects-summary] ") == 1U &&
+            occurrence_count(blood_effects_excerpt, "[remote-player-visibility] ") == 16U &&
+            occurrence_count(blood_effects_excerpt, "live_application_outcome result=") == 1U &&
+            blood_effects_excerpt.find("wire=12") == std::string::npos &&
+            blood_effects_excerpt.find("primary_error=fixture_runtime_error") != std::string::npos &&
+            blood_effects_excerpt.size() <= 16U * 1'024U &&
+            std::ranges::count(blood_effects_excerpt, '\n') <= 64 &&
+            functional_diagnostic_excerpt(blood_effects_fixture) == blood_effects_fixture &&
+            functional_diagnostic_excerpt(std::string_view{blood_effects_fixture}.substr(
+                0U, blood_effects_fixture.size() - 1U)) == blood_effects_fixture;
+        auto maximum_blood_counters = blood_effects_fixture;
+        for (const auto field : blood_fixture_fields) {
+            const auto key = field.substr(0U, field.find('=') + 1U);
+            replace_all(maximum_blood_counters, " " + std::string{field},
+                " " + std::string{key} + "18446744073709551615");
+        }
+        const auto maximum_blood_excerpt = functional_diagnostic_excerpt(
+            remote_effects_fixture + maximum_blood_counters + competing_visibility);
+        blood_effects_retention_valid = blood_effects_retention_valid &&
+            maximum_blood_counters.size() == 523U &&
+            functional_diagnostic_excerpt(maximum_blood_counters) == maximum_blood_counters &&
+            maximum_blood_excerpt.starts_with(remote_effects_fixture + maximum_blood_counters) &&
+            maximum_blood_excerpt.find("primary_error=fixture_runtime_error") != std::string::npos &&
+            maximum_blood_excerpt.size() <= 16U * 1'024U &&
+            std::ranges::count(maximum_blood_excerpt, '\n') <= 64;
+        for (const auto field : blood_fixture_fields) {
+            const auto key = field.substr(0U, field.find('=') + 1U);
+            for (const auto value : {"-1", "18446744073709551616", "1.0",
+                     "failed_private_path", "C:\\private\\failed", "auth_ticket=private_token",
+                     "+1", "", "nan", "1 1"}) {
+                auto invalid = blood_effects_fixture;
+                replace_all(invalid, " " + std::string{field},
+                    " " + std::string{key} + value);
+                blood_effects_retention_valid = blood_effects_retention_valid &&
+                    functional_diagnostic_excerpt(invalid).empty();
+            }
+        }
+        for (const auto injection : {
+                 std::string{"[info] [info] "} + blood_effects_fixture,
+                 std::string{"failed private prefix "} + blood_effects_fixture,
+                 std::string{"failed auth_ticket prefix "} + blood_effects_fixture,
+                 std::string{"live_application_outcome result=error "} + blood_effects_fixture,
+                 std::string{"live_weapon_observation generation=1 "} + blood_effects_fixture,
+                 std::string{"[blood-effects-summary] failed_private_path="} + std::string(1'000U, 'x') + "\n",
+                 std::string{"[blood-effects-summary-private] failed path=C:\\private auth_ticket=private_token\n"},
+                 std::string{"failed private oversized marker injection "} + std::string(5'000U, 'x') + blood_effects_fixture})
+            blood_effects_retention_valid = blood_effects_retention_valid &&
+                functional_diagnostic_excerpt(injection).empty();
+        auto trailing_blood_private = blood_effects_fixture;
+        replace_all(trailing_blood_private, "draw_batches=3\n",
+            "draw_batches=3 path=failed_private_path auth_ticket=private_token\n");
+        auto missing_blood_field = blood_effects_fixture;
+        replace_all(missing_blood_field, " delivery_stale=0", "");
+        auto duplicate_blood_field = blood_effects_fixture;
+        replace_all(duplicate_blood_field, "wire=12", "wire=12 wire=12");
+        auto reordered_blood_fields = blood_effects_fixture;
+        replace_all(reordered_blood_fields, "wire=12 forwarded=10", "forwarded=10 wire=12");
+        auto doubled_blood_space = blood_effects_fixture;
+        replace_all(doubled_blood_space, " clock_dropped=2", "  clock_dropped=2");
+        auto malformed_blood_marker = blood_effects_fixture;
+        replace_all(malformed_blood_marker, "[blood-effects-summary]", "[blood-effects-summary-private]");
+        auto crlf_blood_effects = blood_effects_fixture;
+        crlf_blood_effects.insert(crlf_blood_effects.size() - 1U, "\r");
+        blood_effects_retention_valid = blood_effects_retention_valid &&
+            functional_diagnostic_excerpt(trailing_blood_private).empty() &&
+            functional_diagnostic_excerpt(missing_blood_field).empty() &&
+            functional_diagnostic_excerpt(duplicate_blood_field).empty() &&
+            functional_diagnostic_excerpt(reordered_blood_fields).empty() &&
+            functional_diagnostic_excerpt(doubled_blood_space).empty() &&
+            functional_diagnostic_excerpt(malformed_blood_marker).empty() &&
+            functional_diagnostic_excerpt(crlf_blood_effects) == blood_effects_fixture &&
+            functional_diagnostic_excerpt("[info] " + crlf_blood_effects) == blood_effects_fixture &&
+            functional_diagnostic_excerpt(blood_effects_fixture + trailing_blood_private) == blood_effects_fixture;
+        const std::string effect_wire_fixture{
+            "[effect-wire] record=91 bit=32 svc=18 detail=0 color=195 amount=160 entity=0 flags=0\n"};
+        const std::string effect_sample_fixture{
+            "[effect-sample] slot=61 fingerprint=18446744073709551615\n"};
+        const auto effect_excerpt=effect_diagnostic_excerpt("[info] "+effect_wire_fixture+effect_sample_fixture);
+        bool effect_retention_valid=effect_excerpt.find(effect_wire_fixture)!=std::string::npos &&
+            effect_excerpt.find(effect_sample_fixture)!=std::string::npos &&
+            functional_diagnostic_excerpt(effect_wire_fixture+effect_sample_fixture).empty();
+        for(const auto bad:{" auth_ticket=private", " path=C:\\private", " failed_private"}) {
+            auto invalid=effect_wire_fixture;
+            invalid.insert(invalid.size()-1,bad);
+            effect_retention_valid=effect_retention_valid && effect_diagnostic_excerpt(invalid).empty() && functional_diagnostic_excerpt(invalid).empty();
+        }
+        for(const auto value:{"-1","nan","18446744073709551616","1 2","private"}) {
+            auto invalid=effect_wire_fixture;
+            replace_all(invalid,"record=91",std::string{"record="}+value);
+            effect_retention_valid=effect_retention_valid && effect_diagnostic_excerpt(invalid).empty();
+        }
+        effect_retention_valid=effect_retention_valid && effect_diagnostic_excerpt("failed_private "+effect_wire_fixture).empty() &&
+            effect_diagnostic_excerpt("[info] [info] "+effect_wire_fixture).empty();
+        std::string effect_flood;
+        for(unsigned i=0;i<300;++i) {
+            auto row=effect_wire_fixture;
+            replace_all(row,"record=91","record="+std::to_string(i));
+            effect_flood+=row;
+        }
+        const auto bounded_effects=effect_diagnostic_excerpt(effect_flood);
+        effect_retention_valid=effect_retention_valid && bounded_effects.size()<=64U*1024U &&
+            occurrence_count(bounded_effects,"[effect-wire] ")==128 &&
+            bounded_effects.find("record=299 ")!=std::string::npos &&
+            bounded_effects.find("record=0 ")==std::string::npos;
+        const std::string blood_profile_fixture{
+            "[blood-profile-summary] red_accepted=3 yellow_small_accepted=2 yellow_large_accepted=5 yellow_large_stale=1 yellow_large_invalid=0 yellow_large_evicted=0 yellow_large_materialized=8 yellow_large_absent=0 yellow_large_unsupported=0 yellow_large_expired=2 yellow_large_frame_rejected=0 yellow_large_draw_batches=4\n"};
+        constexpr std::array blood_profile_fixture_fields{
+            std::string_view{"red_accepted=3"}, std::string_view{"yellow_small_accepted=2"},
+            std::string_view{"yellow_large_accepted=5"}, std::string_view{"yellow_large_stale=1"},
+            std::string_view{"yellow_large_invalid=0"}, std::string_view{"yellow_large_evicted=0"},
+            std::string_view{"yellow_large_materialized=8"}, std::string_view{"yellow_large_absent=0"},
+            std::string_view{"yellow_large_unsupported=0"}, std::string_view{"yellow_large_expired=2"},
+            std::string_view{"yellow_large_frame_rejected=0"}, std::string_view{"yellow_large_draw_batches=4"}};
+        auto newer_blood_profile = blood_profile_fixture;
+        replace_all(newer_blood_profile, "yellow_large_accepted=5", "yellow_large_accepted=7");
+        const auto blood_profile_excerpt = functional_diagnostic_excerpt(
+            blood_profile_fixture + blood_effects_fixture + remote_effects_fixture +
+            competing_visibility + "[info] " + newer_blood_profile);
+        bool blood_profile_retention_valid =
+            blood_profile_excerpt.starts_with(
+                remote_effects_fixture + blood_effects_fixture + newer_blood_profile) &&
+            occurrence_count(blood_profile_excerpt, "[blood-profile-summary] ") == 1U &&
+            occurrence_count(blood_profile_excerpt, "[blood-effects-summary] ") == 1U &&
+            occurrence_count(blood_profile_excerpt, "[remote-player-visibility] ") == 16U &&
+            occurrence_count(blood_profile_excerpt, "live_application_outcome result=") == 1U &&
+            blood_profile_excerpt.find("yellow_large_accepted=5") == std::string::npos &&
+            blood_profile_excerpt.find("primary_error=fixture_runtime_error") != std::string::npos &&
+            blood_profile_excerpt.size() <= 16U * 1'024U &&
+            std::ranges::count(blood_profile_excerpt, '\n') <= 64 &&
+            functional_diagnostic_excerpt(blood_profile_fixture) == blood_profile_fixture &&
+            functional_diagnostic_excerpt(std::string_view{blood_profile_fixture}.substr(
+                0U, blood_profile_fixture.size() - 1U)) == blood_profile_fixture;
+        auto maximum_blood_profile = blood_profile_fixture;
+        auto zero_blood_profile = blood_profile_fixture;
+        for (const auto field : blood_profile_fixture_fields) {
+            const auto key = field.substr(0U, field.find('=') + 1U);
+            replace_all(maximum_blood_profile, " " + std::string{field},
+                " " + std::string{key} + "18446744073709551615");
+            replace_all(zero_blood_profile, " " + std::string{field},
+                " " + std::string{key} + "0");
+            for (const auto value : {"-1", "18446744073709551616", "1.0", "+1", "",
+                     "nan", "1 1", "failed_private_path", "C:\\private\\failed",
+                     "auth_ticket=private_token"}) {
+                auto invalid = blood_profile_fixture;
+                replace_all(invalid, " " + std::string{field},
+                    " " + std::string{key} + value);
+                blood_profile_retention_valid = blood_profile_retention_valid &&
+                    functional_diagnostic_excerpt(invalid).empty();
+            }
+        }
+        const auto maximum_blood_profile_excerpt = functional_diagnostic_excerpt(
+            remote_effects_fixture + maximum_blood_counters + maximum_blood_profile +
+            competing_visibility);
+        blood_profile_retention_valid = blood_profile_retention_valid &&
+            maximum_blood_profile.size() == 540U &&
+            functional_diagnostic_excerpt(maximum_blood_profile) == maximum_blood_profile &&
+            functional_diagnostic_excerpt(zero_blood_profile) == zero_blood_profile &&
+            maximum_blood_profile_excerpt.starts_with(
+                remote_effects_fixture + maximum_blood_counters + maximum_blood_profile) &&
+            maximum_blood_profile_excerpt.find("primary_error=fixture_runtime_error") != std::string::npos &&
+            maximum_blood_profile_excerpt.size() <= 16U * 1'024U &&
+            std::ranges::count(maximum_blood_profile_excerpt, '\n') <= 64;
+        for (const auto injection : {
+                 std::string{"[info] [info] "} + blood_profile_fixture,
+                 std::string{"failed private prefix "} + blood_profile_fixture,
+                 std::string{"failed auth_ticket prefix "} + blood_profile_fixture,
+                 std::string{"live_application_outcome result=error "} + blood_profile_fixture,
+                 std::string{"live_weapon_observation generation=1 "} + blood_profile_fixture,
+                 std::string{"[blood-profile-summary] failed_private_path="} + std::string(1'000U, 'x') + "\n",
+                 std::string{"[blood-profile-summary-private] failed path=C:\\private auth_ticket=private_token\n"},
+                 std::string{"failed private oversized marker injection "} + std::string(5'000U, 'x') + blood_profile_fixture})
+            blood_profile_retention_valid = blood_profile_retention_valid &&
+                functional_diagnostic_excerpt(injection).empty();
+        auto trailing_blood_profile_private = blood_profile_fixture;
+        replace_all(trailing_blood_profile_private, "yellow_large_draw_batches=4\n",
+            "yellow_large_draw_batches=4 path=failed_private_path auth_ticket=private_token\n");
+        auto missing_blood_profile_field = blood_profile_fixture;
+        replace_all(missing_blood_profile_field, " yellow_large_expired=2", "");
+        auto duplicate_blood_profile_field = blood_profile_fixture;
+        replace_all(duplicate_blood_profile_field, "red_accepted=3", "red_accepted=3 red_accepted=3");
+        auto reordered_blood_profile_fields = blood_profile_fixture;
+        replace_all(reordered_blood_profile_fields, "red_accepted=3 yellow_small_accepted=2",
+            "yellow_small_accepted=2 red_accepted=3");
+        auto doubled_blood_profile_space = blood_profile_fixture;
+        replace_all(doubled_blood_profile_space, " yellow_large_stale=1", "  yellow_large_stale=1");
+        auto malformed_blood_profile_marker = blood_profile_fixture;
+        replace_all(malformed_blood_profile_marker, "[blood-profile-summary]", "[blood-profile-summary-private]");
+        auto crlf_blood_profile = blood_profile_fixture;
+        crlf_blood_profile.insert(crlf_blood_profile.size() - 1U, "\r");
+        blood_profile_retention_valid = blood_profile_retention_valid &&
+            functional_diagnostic_excerpt(trailing_blood_profile_private).empty() &&
+            functional_diagnostic_excerpt(missing_blood_profile_field).empty() &&
+            functional_diagnostic_excerpt(duplicate_blood_profile_field).empty() &&
+            functional_diagnostic_excerpt(reordered_blood_profile_fields).empty() &&
+            functional_diagnostic_excerpt(doubled_blood_profile_space).empty() &&
+            functional_diagnostic_excerpt(malformed_blood_profile_marker).empty() &&
+            functional_diagnostic_excerpt(crlf_blood_profile) == blood_profile_fixture &&
+            functional_diagnostic_excerpt("[info] " + crlf_blood_profile) == blood_profile_fixture &&
+            functional_diagnostic_excerpt(blood_profile_fixture + trailing_blood_profile_private) == blood_profile_fixture;
+        const std::string blood_server_off{
+            "[blood-server-setting] violence_ablood=0\n"};
+        const std::string blood_server_on{
+            "[blood-server-setting] violence_ablood=1\n"};
+        constexpr std::array blood_server_forms{
+            std::pair{std::string_view{"[blood-server-setting] violence_ablood=0\n"}, false},
+            std::pair{std::string_view{"[blood-server-setting] violence_ablood=1\n"}, true},
+            std::pair{std::string_view{"\"violence_ablood\" is \"0\"\n"}, false},
+            std::pair{std::string_view{"\"violence_ablood\" is \"1\"\n"}, true},
+            std::pair{std::string_view{"\"violence_ablood\" is \"0.000000\"\n"}, false},
+            std::pair{std::string_view{"\"violence_ablood\" is \"1.000000\"\n"}, true}};
+        bool blood_server_setting_retention_valid = true;
+        const auto blood_snapshot_fixture = [](std::string bytes) {
+            windows::BoundedProcessLogSnapshot snapshot;
+            snapshot.observed_bytes = bytes.size();
+            snapshot.observed_line_count = static_cast<std::size_t>(std::ranges::count(bytes, '\n'));
+            snapshot.bytes = std::move(bytes);
+            return snapshot;
+        };
+        for (const auto& [form, enabled] : blood_server_forms) {
+            const auto& expected = enabled ? blood_server_on : blood_server_off;
+            auto crlf_form = std::string{form};
+            crlf_form.insert(crlf_form.size() - 1U, "\r");
+            blood_server_setting_retention_valid = blood_server_setting_retention_valid &&
+                functional_diagnostic_excerpt(form, true) == expected &&
+                functional_diagnostic_excerpt("[info] " + std::string{form}, true) == expected &&
+                functional_diagnostic_excerpt("[info] " + crlf_form, true) == expected &&
+                functional_diagnostic_excerpt(form).empty(); // Never client/peer evidence.
+            for (const auto& observed_form : {std::string{form}, "[info] " + std::string{form}, "[info] " + crlf_form}) {
+                const auto snapshot = blood_snapshot_fixture(observed_form);
+                std::vector<std::wstring> forwarded{L"--renderer", L"null"};
+                append_observed_server_blood_presentation(forwarded, snapshot);
+                blood_server_setting_retention_valid = blood_server_setting_retention_valid &&
+                    observed_server_blood_presentation(snapshot) == std::optional<bool>{enabled} &&
+                    forwarded == std::vector<std::wstring>{L"--renderer", L"null",
+                        L"--server-blood-presentation", enabled ? L"enabled" : L"disabled"};
+            }
+            // A pipe-reader partial line is not a complete queried value.
+            const auto partial = blood_snapshot_fixture(std::string{form.substr(0U, form.size() - 1U)});
+            blood_server_setting_retention_valid = blood_server_setting_retention_valid &&
+                !observed_server_blood_presentation(partial).has_value();
+        }
+        for (const auto bytes : {std::string{}, std::string{"server ready\n"},
+                 std::string{"config.cfg violence_ablood 0\n"}, std::string{"+violence_ablood\n"}}) {
+            const auto snapshot = blood_snapshot_fixture(bytes);
+            std::vector<std::wstring> arguments{L"--renderer", L"null"};
+            append_observed_server_blood_presentation(arguments, snapshot);
+            blood_server_setting_retention_valid = blood_server_setting_retention_valid &&
+                !observed_server_blood_presentation(snapshot).has_value() &&
+                arguments == std::vector<std::wstring>{L"--renderer", L"null"};
+        }
+        for (const auto flag : {0U, 1U, 2U, 3U}) {
+            auto incomplete = blood_snapshot_fixture(blood_server_off);
+            incomplete.capture_failed = flag == 0U;
+            incomplete.byte_truncated = flag == 1U;
+            incomplete.line_count_truncated = flag == 2U;
+            incomplete.line_length_truncated = flag == 3U;
+            blood_server_setting_retention_valid = blood_server_setting_retention_valid &&
+                !observed_server_blood_presentation(incomplete).has_value();
+        }
+        blood_server_setting_retention_valid = blood_server_setting_retention_valid &&
+            observed_server_blood_presentation(blood_snapshot_fixture(blood_server_off + blood_server_on)) == true &&
+            observed_server_blood_presentation(blood_snapshot_fixture(blood_server_on + blood_server_off)) == false;
+        const auto blood_server_excerpt = functional_diagnostic_excerpt(
+            blood_server_off + remote_effects_fixture + maximum_blood_counters + maximum_blood_profile + competing_visibility +
+            "[info] \"violence_ablood\" is \"1.000000\"\r\n", true);
+        blood_server_setting_retention_valid = blood_server_setting_retention_valid &&
+            blood_server_excerpt.starts_with(
+                remote_effects_fixture + maximum_blood_counters + maximum_blood_profile + blood_server_on) &&
+            occurrence_count(blood_server_excerpt, "[blood-server-setting] ") == 1U &&
+            blood_server_excerpt.find(blood_server_off) == std::string::npos &&
+            blood_server_excerpt.find("\"violence_ablood\"") == std::string::npos &&
+            blood_server_excerpt.find("primary_error=fixture_runtime_error") != std::string::npos &&
+            blood_server_excerpt.size() <= 16U * 1'024U &&
+            std::ranges::count(blood_server_excerpt, '\n') <= 64;
+        for (const auto invalid : {
+                 std::string{"\"violence_ablood\" is \"-1\"\n"},
+                 std::string{"\"violence_ablood\" is \"2\"\n"},
+                 std::string{"\"violence_ablood\" is \"0.5\"\n"},
+                 std::string{"\"violence_ablood\" is \"nan\"\n"},
+                 std::string{"\"violence_ablood\" is \"inf\"\n"},
+                 std::string{"\"violence_ablood\" is \"18446744073709551616\"\n"},
+                 std::string{"\"violence_ablood\" is \"C:\\private\\failed\"\n"},
+                 std::string{"\"violence_ablood\" is \"auth_ticket=private_token\"\n"},
+                 std::string{"\"violence_ablood\" is \"1\" path=C:\\private auth_ticket=private_token\n"},
+                 std::string{"\"violence_ablood\" is \"1\" (default \"0\")\n"},
+                 std::string{"failed private prefix \"violence_ablood\" is \"1\"\n"},
+                 std::string{"live_application_outcome result=error \"violence_ablood\" is \"1\"\n"},
+                 std::string{"[info] [info] \"violence_ablood\" is \"1\"\n"},
+                 std::string{"violence_ablood = 1\n"},
+                 std::string{"+violence_ablood 1\n"},
+                 std::string{"\"violence_ablood_private\" is \"1\" failed auth_ticket=private_token\n"},
+                 std::string{"[blood-server-setting] violence_ablood=1 path=failed_private_path\n"},
+                 std::string{"[blood-server-setting] violence_ablood=1 auth_ticket=private_token\n"},
+                 std::string{"[blood-server-setting] violence_ablood=1 violence_ablood=0\n"},
+                 std::string{"[blood-server-setting] violence_ablood=1.000000\n"},
+                 std::string{"[blood-server-setting] violence_ablood=\"1\"\n"},
+                 std::string{"[blood-server-setting-private] violence_ablood=1 failed auth_ticket=private_token\n"},
+                 std::string{"failed private oversized prefix "} + std::string(5'000U, 'x') +
+                     "\"violence_ablood\" is \"1\"\n"}) {
+            blood_server_setting_retention_valid = blood_server_setting_retention_valid &&
+                functional_diagnostic_excerpt(invalid, true).empty() &&
+                functional_diagnostic_excerpt(blood_server_off + invalid, true) == blood_server_off &&
+                !observed_server_blood_presentation(blood_snapshot_fixture(invalid)).has_value() &&
+                observed_server_blood_presentation(blood_snapshot_fixture(blood_server_off + invalid)) == false;
+        }
         const bool valid =
             visibility_retention_valid && remote_effects_retention_valid &&
+            blood_effects_retention_valid && blood_profile_retention_valid && blood_server_setting_retention_valid && effect_retention_valid &&
             emits_jump_duck_native_status(
                 ProjectClientLiveInput::scripted_jump_duck_check) &&
             !emits_jump_duck_native_status(
@@ -8500,7 +10463,7 @@ int wmain(const int argc, wchar_t** argv)
                 ProjectClientLiveInput::scripted_jump_duck_check) &&
             !emits_speed_native_status(
                 ProjectClientLiveInput::scripted_check) &&
-            accepted.connection_accepted &&
+            peer_observer_valid && accepted.connection_accepted &&
             accepted.entered_game && !accepted.name_observed &&
             !accepted.connection_lost && mismatched.connection_accepted &&
             !mismatched.entered_game && reconnect.connection_accepted &&
@@ -8830,12 +10793,18 @@ int wmain(const int argc, wchar_t** argv)
             const auto first = observe_project_client_signon_log(log).application;
             log += "\nlive_application_outcome result=error primary_error=cleanup_failed\n";
             const bool exact_cause =
+                (first[12U] == "protocol_decoder" && first[15U] == "unsupported_temporary_entity_type" &&
+                    first[30U] == "5" && first[32U] == "7" && first[131U] == "12") ||
                 (first[12U] == "protocol_decoder" && first[15U] == "unsupported_opcode" &&
                     first[30U] == "5" && first[32U] == "6") ||
                 (first[12U] == "protocol_decoder" && first[15U] == "truncated_body" &&
                     first[34U] == "Health" && first[36U] == "1" && first[37U] == "0") ||
                 (first[12U] == "game_module" && first[18U] == "invalid_token" &&
-                    first[34U] == "ItemPickup" && first[32U] == "4");
+                    first[34U] == "ItemPickup" && first[32U] == "4") ||
+                (first[12U] == "protocol_decoder" && first[15U] == "user_info_update_failed" &&
+                    first[30U] == "54" && first[32U] == "60" &&
+                    first[134U] == "invalid_info_string" && first[135U] == "missing_leading_separator" &&
+                    first[136U] == "15" && first[137U] == "0" && first[138U] == "1");
             if (observe_project_client_signon_log(log).application != first || !exact_cause ||
                 first[1U] != "runtime_record_failed" ||
                 first[39U] != "3" || first[40U] != "2") return 1;
@@ -8849,8 +10818,11 @@ int wmain(const int argc, wchar_t** argv)
             if (!identity || !created || !capture) return 1;
             std::string terminal{"live_application_outcome"};
             for (std::size_t i = 0U; i < first.size(); ++i) {
+                // Preserve missing versus an explicit unavailable token in the
+                // offline roundtrip; do not fabricate absent application fields.
+                if (!first[i]) continue;
                 terminal += " "; terminal += kApplicationMetrics[i]; terminal += "=";
-                terminal += first[i].value_or("unavailable");
+                terminal += *first[i];
             }
             windows::OwnedProcessLaunchSpec spec;
             spec.executable = identity.identity->canonical_path;
@@ -8870,7 +10842,7 @@ int wmain(const int argc, wchar_t** argv)
                 !windows::bounded_process_log_snapshot_complete(captured) ||
                 observe_project_client_signon_log(captured.bytes).application != first) return 1;
             if (options->runtime_failure_status_fixture) {
-                print_application_evidence(first);
+                print_application_evidence(first, true);
                 print_key_value("client-exit-code", std::to_string(*waited.exit_code));
                 print_key_value("job-cleanup", "exact");
                 print_key_value("result", "failed");
@@ -9074,6 +11046,8 @@ int wmain(const int argc, wchar_t** argv)
                             ? "observed" : "unknown");
         print_key_value("connection-status",
                         functional_connection_status(summary));
+        print_key_value("connection-establishment", functional_connection_status(summary));
+        print_key_value("session-terminal-state", functional_terminal_session_state(summary));
         print_key_value("client-map-entry-status",
                         summary.client_ready ? "observed" : "unknown");
         print_key_value(

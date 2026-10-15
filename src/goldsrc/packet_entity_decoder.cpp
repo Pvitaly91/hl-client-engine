@@ -161,6 +161,129 @@ resolve_base_reference(const NetchanSequence current,
                right.maximum_source_payload_bytes;
 }
 
+struct EntityBaseCategoryPair {
+    bool normal{false};
+    bool custom{false};
+};
+
+[[nodiscard]] EntityBaseCategoryPair entity_base_category_pair(
+    const EntitySchemaCategory source_category,
+    const EntitySchemaCategory target_category,
+    const DeltaSchema* source_schema,
+    const DeltaSchema& target_schema)
+{
+    const auto normal = [](const EntitySchemaCategory category) {
+        return category == EntitySchemaCategory::ordinary_entity ||
+               category == EntitySchemaCategory::player_entity;
+    };
+    const auto* custom_schema =
+        target_category == EntitySchemaCategory::custom_entity && normal(source_category)
+            ? &target_schema
+            : source_category == EntitySchemaCategory::custom_entity && normal(target_category)
+                ? source_schema : nullptr;
+    const auto custom_member = [&](const std::string_view name,
+                                   const DeltaFieldBaseType type,
+                                   const bool sign) {
+        if (!custom_schema) return false;
+        const auto field = std::ranges::find(custom_schema->fields(), name,
+                                            &DeltaFieldDefinition::name);
+        return field != custom_schema->fields().end() &&
+               field->type_flags().base_type() == type &&
+               field->type_flags().signed_value() == sign;
+    };
+    // A category bit or a schema name alone does not authorize projection.
+    // Only negotiated common entity-state members and the public beam grammar
+    // bridge normal/custom descriptors. Alternate slots remain exact.
+    return {normal(source_category) && normal(target_category),
+            custom_member("rendermode", DeltaFieldBaseType::integer_value, false) &&
+            custom_member("skin", DeltaFieldBaseType::integer_value, false) &&
+            custom_member("angles[0]", DeltaFieldBaseType::float_value, true)};
+}
+
+struct EntityBaseProjection {
+    std::optional<DeltaObjectState> state;
+    const char* error{nullptr};
+    bool allocation_failed{false};
+};
+
+[[nodiscard]] EntityBaseProjection project_entity_state_base(
+    const DeltaObjectState& source,
+    const DeltaSchema* source_schema,
+    const DeltaSchema& target_schema,
+    const bool custom_pair,
+    const std::span<const std::byte> bytes,
+    const std::size_t delta_start)
+{
+    try {
+        auto defaults = DeltaObjectBuilder{{}, kDeltaProfile}.build_default(target_schema);
+        if (!source_schema || !source.matches_schema(*source_schema) || !defaults)
+            return {{}, "intra-message normal base has invalid source descriptors"};
+        std::vector<DeltaScalarValue> values;
+        values.reserve(defaults.state->field_count());
+        const auto floating = [](const DeltaFieldBaseType type) {
+            return type == DeltaFieldBaseType::float_value || type == DeltaFieldBaseType::angle ||
+                   type == DeltaFieldBaseType::time_window_8 || type == DeltaFieldBaseType::time_window_big;
+        };
+        const auto integer = [](const DeltaFieldBaseType type) {
+            return type == DeltaFieldBaseType::integer_value || type == DeltaFieldBaseType::short_value ||
+                   type == DeltaFieldBaseType::byte_value;
+        };
+        for (const auto& field : defaults.state->fields()) {
+            const auto* inherited = source.find_exact(field.name());
+            if (!inherited) { values.push_back(field.value()); continue; }
+            const auto& from = source_schema->fields()[inherited->wire_index()];
+            const auto& to = target_schema.fields()[field.wire_index()];
+            const bool compatible_custom = custom_pair &&
+                ((floating(from.type_flags().base_type()) && floating(to.type_flags().base_type())) ||
+                 (integer(from.type_flags().base_type()) && integer(to.type_flags().base_type())));
+            if ((!compatible_custom && from.type_flags().wire_value() != to.type_flags().wire_value()) ||
+                from.offset() != to.offset() || from.storage_size() != to.storage_size())
+                return {{}, "intra-message normal base member type or storage differs"};
+            auto value = inherited->value();
+            if (compatible_custom && integer(to.type_flags().base_type())) {
+                if (from.type_flags().signed_value() != to.type_flags().signed_value()) {
+                    if (to.type_flags().signed_value()) value = static_cast<std::int32_t>(std::get<std::uint32_t>(value));
+                    else if (field.name() == "skin" && from.type_flags().base_type() == DeltaFieldBaseType::short_value)
+                        value = static_cast<std::uint32_t>(static_cast<std::uint16_t>(std::get<std::int32_t>(value)));
+                    else value = static_cast<std::uint32_t>(std::get<std::int32_t>(value));
+                }
+                const auto width = to.significant_bits();
+                bool fits = true;
+                if (width < 32) {
+                    if (to.type_flags().signed_value()) {
+                        const auto n = std::get<std::int32_t>(value);
+                        fits = n >= -(std::int32_t{1} << (width - 1)) && n <= (std::int32_t{1} << (width - 1)) - 1;
+                    } else fits = std::get<std::uint32_t>(value) <= (std::uint32_t{1} << width) - 1;
+                }
+                if (!fits) {
+                    // Peek, never consume. An inherited member outside the
+                    // target wire range is temporary only if this exact field
+                    // is replaced; the real decoder validates its value/tail.
+                    BitReader mask_reader{bytes, delta_start, bytes.size() * 8U - delta_start};
+                    const auto count = mask_reader.read_bits(3);
+                    bool replaced = false, valid = static_cast<bool>(count);
+                    if (valid && count.value > (target_schema.fields().size() + 7) / 8) valid = false;
+                    if (valid) for (std::uint32_t byte = 0; byte < count.value; ++byte) {
+                        const auto mask = mask_reader.read_bits(8);
+                        if (!mask) { valid = false; break; }
+                        if (byte == field.wire_index() / 8)
+                            replaced = (mask.value & (1U << (field.wire_index() % 8))) != 0;
+                    }
+                    if (!valid || !replaced)
+                        return {{}, "intra-message custom member exceeds selected descriptor without replacement"};
+                    value = field.value();
+                }
+            }
+            values.push_back(std::move(value));
+        }
+        auto projected = DeltaObjectBuilder{{}, kDeltaProfile}.build(target_schema, values);
+        if (!projected) return {{}, "intra-message normal base cannot retain selected member values"};
+        return {std::optional<DeltaObjectState>{std::move(*projected.state)}};
+    } catch (const std::bad_alloc&) {
+        return {{}, "unable to retain projected entity baseline", true};
+    }
+}
+
 } // namespace
 
 bool valid_packet_entity_profile(
@@ -198,7 +321,7 @@ PacketEntitySnapshotState::PacketEntitySnapshotState(
       schemas_{std::move(schemas)},
       baselines_{std::move(baselines)}
 {
-    const auto published = EntitySnapshotHistoryBuilder{
+    auto published = EntitySnapshotHistoryBuilder{
         limits_, kSnapshotProfile}.publish();
     if (published) {
         history_ = std::make_shared<const EntitySnapshotHistoryState>(
@@ -505,10 +628,12 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
 
         const bool delta_message =
             opcode == kGoldSrcSvcDeltaPacketEntitiesOpcode;
+        const bool unanchored_completion = input.payload.normal_fragment_completion;
         const auto existing = std::find_if(
             next.fingerprints_.begin(), next.fingerprints_.end(),
-            [source_sequence](const PacketEntitySnapshotState::FrameFingerprint& item) {
-                return item.sequence == source_sequence->value();
+            [source_sequence, unanchored_completion](const PacketEntitySnapshotState::FrameFingerprint& item) {
+                return item.sequence == source_sequence->value() &&
+                    item.unanchored_completion == unanchored_completion;
             });
         if (existing != next.fingerprints_.end()) {
             return failure(
@@ -890,21 +1015,36 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
                 }
                 const auto& prior =
                     decoded_updates[decoded_updates.size() - intra_offset];
-                if (prior.schema_category() != category) {
+                const auto* prior_schema=next.schemas_->find_exact(prior.object().schema_name());
+                const auto pair = entity_base_category_pair(
+                    prior.schema_category(), category, prior_schema, *selected_schema);
+                if (prior.schema_category() != category && !pair.normal && !pair.custom) {
                     return failure(PacketEntityDecodeErrorCode::schema_mismatch,
                                    "intra-message baseline has another schema category",
                                    PacketEntityRecoveryStatus::none,
                                    cursor_at(record_start, bytes.size()), opcode,
                                    *number);
                 }
-                if (!prior.object().matches_schema(*selected_schema)) {
+                if (prior.object().matches_schema(*selected_schema)) {
+                    delta_base = &prior.object();
+                } else if ((pair.normal || pair.custom) && prior.schema_category() != category) {
+                    auto projected = project_entity_state_base(
+                        prior.object(), prior_schema, *selected_schema,
+                        pair.custom, bytes, bit_cursor);
+                    if (!projected.state) return failure(
+                        projected.allocation_failed ? PacketEntityDecodeErrorCode::unable_to_retain_output
+                                                    : PacketEntityDecodeErrorCode::schema_mismatch,
+                        projected.error, PacketEntityRecoveryStatus::none,
+                        cursor_at(record_start, bytes.size()), opcode, *number);
+                    null_baseline.emplace(std::move(*projected.state));
+                    delta_base = &*null_baseline;
+                } else {
                     return failure(PacketEntityDecodeErrorCode::schema_mismatch,
                                    "intra-message baseline descriptor differs from the selected schema",
                                    PacketEntityRecoveryStatus::none,
                                    cursor_at(record_start, bytes.size()), opcode,
                                    *number);
                 }
-                delta_base = &prior.object();
                 // The owning entity identity remains its own; the exact wire
                 // source is recorded separately by state_base_reference.
                 baseline_key.emplace(EntityBaselineKey::for_entity(*number));
@@ -940,18 +1080,42 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
             }
             if (baseline != nullptr) {
                 if (baseline->source_geometry().source_generation !=
-                        input.source_generation ||
-                    (baseline->schema_category() != category &&
-                     baseline->schema_category() !=
-                         EntitySchemaCategory::alternate_explicit_schema) ||
-                    !baseline->object().matches_schema(*selected_schema)) {
+                        input.source_generation) {
                     return failure(PacketEntityDecodeErrorCode::schema_mismatch,
                                    "selected baseline does not match generation and entity schema",
                                    PacketEntityRecoveryStatus::none,
                                    cursor_at(record_start, bytes.size()), opcode,
                                    *number);
                 }
-                delta_base = &baseline->object();
+                const bool same_category = baseline->schema_category() == category ||
+                    baseline->schema_category() == EntitySchemaCategory::alternate_explicit_schema;
+                if (same_category && baseline->object().matches_schema(*selected_schema)) {
+                    delta_base = &baseline->object();
+                } else {
+                    const auto* source_schema = next.schemas_->find_exact(baseline->object().schema_name());
+                    const auto pair = entity_base_category_pair(
+                        baseline->schema_category(), category, source_schema, *selected_schema);
+                    // A retained signon slot describes common entity-state
+                    // memory, not the lifetime/type of a later occupant. Use
+                    // the same descriptor-checked bridge as intra-message
+                    // bases. Never relax explicit alternate or delta bases.
+                    if (baseline->key().kind() != EntityBaselineKeyKind::entity_number ||
+                        same_category || (!pair.normal && !pair.custom))
+                        return failure(PacketEntityDecodeErrorCode::schema_mismatch,
+                            "selected baseline does not match generation and entity schema",
+                            PacketEntityRecoveryStatus::none, cursor_at(record_start, bytes.size()), opcode, *number);
+                    auto projected = project_entity_state_base(
+                        baseline->object(), source_schema, *selected_schema,
+                        pair.custom, bytes, bit_cursor);
+                    if (!projected.state) return failure(
+                        projected.allocation_failed ? PacketEntityDecodeErrorCode::unable_to_retain_output
+                                                    : PacketEntityDecodeErrorCode::schema_mismatch,
+                        projected.allocation_failed ? projected.error
+                            : "selected baseline does not match generation and entity schema",
+                        PacketEntityRecoveryStatus::none, cursor_at(record_start, bytes.size()), opcode, *number);
+                    null_baseline.emplace(std::move(*projected.state));
+                    delta_base = &*null_baseline;
+                }
             }
             if (delta_base == nullptr || !baseline_key || !state_base) {
                 return failure(PacketEntityDecodeErrorCode::invalid_baseline_reference,
@@ -1195,41 +1359,52 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
                         unchanged_count,
                         accounted_value_bytes},
                     kSnapshotProfile}};
-            history_builder.emplace(*next.history_, limits_.snapshots);
+            if (!unanchored_completion)
+                history_builder.emplace(*next.history_, limits_.snapshots);
         } catch (const std::bad_alloc&) {
             return failure(PacketEntityDecodeErrorCode::unable_to_retain_output,
                            "unable to retain snapshot or transactional history",
                            PacketEntityRecoveryStatus::none, current, opcode);
         }
 
-        const auto inserted = history_builder->insert(*snapshot);
-        if (!inserted) {
-            const auto history_code = inserted.error
-                                          ? inserted.error->code
-                                          : EntitySnapshotHistoryErrorCode::
-                                                unable_to_retain_history;
-            const auto code =
-                history_code == EntitySnapshotHistoryErrorCode::duplicate_snapshot
-                    ? PacketEntityDecodeErrorCode::duplicate_source_frame
-                    : history_code == EntitySnapshotHistoryErrorCode::old_snapshot
-                          ? PacketEntityDecodeErrorCode::old_source_frame
-                          : PacketEntityDecodeErrorCode::history_publish_failed;
-            return failure(code,
-                           inserted.error ? inserted.error->context
-                                          : "snapshot history insertion failed",
-                           PacketEntityRecoveryStatus::none, current, opcode);
-        }
-        const auto published = history_builder->publish();
-        if (!published) {
-            return failure(PacketEntityDecodeErrorCode::history_publish_failed,
-                           published.error ? published.error->context
-                                           : "snapshot history publication failed",
-                           PacketEntityRecoveryStatus::none, current, opcode);
+        if (!unanchored_completion) {
+            const auto inserted = history_builder->insert(*snapshot);
+            if (!inserted) {
+                const auto history_code = inserted.error
+                                              ? inserted.error->code
+                                              : EntitySnapshotHistoryErrorCode::
+                                                    unable_to_retain_history;
+                const auto code =
+                    history_code == EntitySnapshotHistoryErrorCode::duplicate_snapshot
+                        ? PacketEntityDecodeErrorCode::duplicate_source_frame
+                        : history_code == EntitySnapshotHistoryErrorCode::old_snapshot
+                              ? PacketEntityDecodeErrorCode::old_source_frame
+                              : PacketEntityDecodeErrorCode::history_publish_failed;
+                return failure(code,
+                               inserted.error ? inserted.error->context
+                                              : "snapshot history insertion failed",
+                               PacketEntityRecoveryStatus::none, current, opcode);
+            }
+            auto published = history_builder->publish();
+            if (!published) {
+                return failure(PacketEntityDecodeErrorCode::history_publish_failed,
+                               published.error ? published.error->context
+                                               : "snapshot history publication failed",
+                               PacketEntityRecoveryStatus::none, current, opcode);
+            }
+            try {
+                next.history_ =
+                    std::make_shared<const EntitySnapshotHistoryState>(
+                        std::move(*published.state));
+            } catch (const std::bad_alloc&) {
+                return failure(PacketEntityDecodeErrorCode::unable_to_retain_output,
+                               "unable to publish packet-entity history",
+                               PacketEntityRecoveryStatus::none, current, opcode);
+            }
         }
         try {
-            next.history_ =
-                std::make_shared<const EntitySnapshotHistoryState>(
-                    std::move(*published.state));
+            // The canonical completion snapshot is retained independently of
+            // authoritative transport delta-base history ownership.
             next.current_snapshot_ = snapshot;
             if (next.fingerprints_.size() ==
                 limits_.snapshots.maximum_snapshot_history) {
@@ -1237,7 +1412,7 @@ PacketEntityDecodeResult GoldSrcPacketEntityDecoder::decode_and_apply(
             }
             next.fingerprints_.push_back(
                 PacketEntitySnapshotState::FrameFingerprint{
-                    source_sequence->value(), hash});
+                    source_sequence->value(), hash, unanchored_completion});
             events.emplace_back(PacketEntityMessageEvent{
                 delta_message ? PacketEntityMessageKind::delta
                               : PacketEntityMessageKind::full,

@@ -1244,24 +1244,62 @@ InterpolatedEntityFrameResult EntitySnapshotInterpolator::interpolate(
     }
 }
 
-RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime(
+std::uint32_t runtime_animation_only_effect_mask(const RuntimeEntityInterpolationOptions& options,
+    const std::uint32_t entity,const std::size_t ordinal) noexcept {
+    const auto key=std::pair{entity,ordinal};
+    const auto found=std::lower_bound(options.animation_only_effect_exceptions.begin(),
+        options.animation_only_effect_exceptions.end(),key,[](const auto& row,const auto& value) {
+            return std::pair{row.entity,row.record_ordinal}<value;
+        });
+    return found!=options.animation_only_effect_exceptions.end() && found->entity==entity &&
+        found->record_ordinal==ordinal ? found->ignored_effect_mask : 0U;
+}
+
+namespace {
+[[nodiscard]] bool bounded_runtime_origin(const client::RuntimeVector3Observation& value,
+    const double maximum_position) noexcept {
+    const auto component=[&](const std::optional<double>& v) {
+        return !v || (std::isfinite(*v) && std::abs(*v)<=maximum_position);
+    };
+    return component(value.x) && component(value.y) && component(value.z);
+}
+
+// The buffered presentation owners need the identical input and working-set
+// checks, but no validation-only copy of every entity, HUD row and life event.
+// Keep this shared with the public interpolator so validation never drifts.
+[[nodiscard]] std::optional<EntityInterpolationError> validate_runtime_interpolation(
     const client::RuntimeClientObservationState& previous,
     const client::RuntimeClientObservationState& current, const double target,
-    const RuntimeEntityInterpolationOptions& options) const
+    const RuntimeEntityInterpolationOptions& options)
 {
     const auto fail = [](const EntityInterpolationErrorCode code) {
-        RuntimeEntityInterpolationResult result;
-        result.error = EntityInterpolationError{code, {}, {}, "Runtime presentation sample rejected"};
-        return result;
+        return EntityInterpolationError{code, {}, {}, "Runtime presentation sample rejected"};
     };
     const auto& limits = options.limits;
     if (!valid_entity_interpolation_limits(limits) || !std::isfinite(target) ||
+        options.animation_only_effect_exceptions.size()>RuntimePlayerSnapshotPresentation::maximum_history*
+            RuntimePlayerSnapshotPresentation::maximum_players ||
+        std::ranges::any_of(options.animation_only_effect_exceptions,[&](const auto& row) {
+            return row.entity==0U || row.entity>RuntimePlayerSnapshotPresentation::maximum_players ||
+                row.record_ordinal==0U || row.ignored_effect_mask==0U ||
+                (row.ignored_effect_mask&~options.no_interpolation_effect_mask)!=0U;
+        }) ||
+        std::adjacent_find(options.animation_only_effect_exceptions.begin(),options.animation_only_effect_exceptions.end(),
+            [](const auto& a,const auto& b){return std::pair{a.entity,a.record_ordinal}>=std::pair{b.entity,b.record_ordinal};})
+            !=options.animation_only_effect_exceptions.end() ||
+        options.ordinary_entities.size() > limits.maximum_entities ||
+        (!options.ordinary_entities.empty() && options.ordinary_entities.front() == 0U) ||
+        std::adjacent_find(options.ordinary_entities.begin(), options.ordinary_entities.end(),
+            [](auto a, auto b) { return a >= b; }) != options.ordinary_entities.end() ||
         (options.teleport_distance && (!std::isfinite(*options.teleport_distance) ||
-                                      *options.teleport_distance <= 0.0))) {
+                                      *options.teleport_distance <= 0.0)) ||
+        (options.ordinary_teleport_distance && (!std::isfinite(*options.ordinary_teleport_distance) ||
+                                               *options.ordinary_teleport_distance <= 0.0))) {
         return fail(EntityInterpolationErrorCode::invalid_configuration);
     }
     if (!client::valid_runtime_observation(previous) ||
-        !client::valid_runtime_observation(current) || !current.server_time_seconds) {
+        (&previous!=&current && !client::valid_runtime_observation(current)) ||
+        !current.server_time_seconds) {
         return fail(EntityInterpolationErrorCode::invalid_projection);
     }
     if (current.packet_entities.size() > limits.maximum_entities ||
@@ -1285,19 +1323,35 @@ RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime
     for (const auto& event : current.life_events) {
         if (!account(event.weapon_text.size(), 1U)) return fail(EntityInterpolationErrorCode::result_byte_limit_exceeded);
     }
-    const auto bounded = [&](const client::RuntimeVector3Observation& value) {
-        const auto component = [&](const std::optional<double>& v) {
-            return !v || (std::isfinite(*v) && std::abs(*v) <= limits.maximum_position_magnitude);
-        };
-        return component(value.x) && component(value.y) && component(value.z);
-    };
     for (const auto& entity : current.packet_entities) {
-        if (!bounded(entity.origin)) return fail(EntityInterpolationErrorCode::position_limit_exceeded);
+        if (!bounded_runtime_origin(entity.origin,limits.maximum_position_magnitude))
+            return fail(EntityInterpolationErrorCode::position_limit_exceeded);
     }
     const double latest = *current.server_time_seconds;
     const bool new_generation = previous.generation != current.generation || !previous.server_time_seconds;
     const double oldest = new_generation ? latest : *previous.server_time_seconds;
     if (oldest > latest) return fail(EntityInterpolationErrorCode::invalid_snapshot_time_order);
+    return {};
+}
+} // namespace
+
+RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime(
+    const client::RuntimeClientObservationState& previous,
+    const client::RuntimeClientObservationState& current, const double target,
+    const RuntimeEntityInterpolationOptions& options) const
+{
+    const auto fail = [](const EntityInterpolationErrorCode code) {
+        RuntimeEntityInterpolationResult result;
+        result.error = EntityInterpolationError{code, {}, {}, "Runtime presentation sample rejected"};
+        return result;
+    };
+    if(auto error=validate_runtime_interpolation(previous,current,target,options)) {
+        RuntimeEntityInterpolationResult result;result.error=std::move(error);return result;
+    }
+    const auto& limits=options.limits;
+    const double latest=*current.server_time_seconds;
+    const bool new_generation=previous.generation!=current.generation || !previous.server_time_seconds;
+    const double oldest=new_generation ? latest : *previous.server_time_seconds;
     const bool held = new_generation || latest == oldest ||
                       latest - oldest > limits.maximum_snapshot_gap_seconds;
     try {
@@ -1313,8 +1367,11 @@ RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime
         auto sampled = std::make_shared<client::RuntimeClientObservationState>(current);
         std::size_t old_index{};
         for (auto& entity : sampled->packet_entities) {
-            // E10 changes players only. Brush/non-player presentation keeps its existing owner.
-            if (!entity.player_movement_schema) continue;
+            // Non-player visuals opt in by neutral identity; no model filename,
+            // projectile simulation, or brush ownership is inferred here.
+            const bool ordinary = !entity.player_movement_schema && entity.ordinary_visual_schema &&
+                std::binary_search(options.ordinary_entities.begin(), options.ordinary_entities.end(), entity.entity_number);
+            if (!entity.player_movement_schema && !ordinary) continue;
             while (old_index < previous.packet_entities.size() &&
                    previous.packet_entities[old_index].entity_number < entity.entity_number) ++old_index;
             const auto* old = old_index < previous.packet_entities.size() &&
@@ -1322,15 +1379,23 @@ RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime
                                   ? &previous.packet_entities[old_index] : nullptr;
             bool reset = held || options.no_interpolation || !old ||
                          std::ranges::find(options.discontinuous_entities,entity.entity_number)!=options.discontinuous_entities.end() ||
-                         (entity.effects.value_or(0U) & options.no_interpolation_effect_mask) != 0U;
+                         (entity.effects.value_or(0U) & options.no_interpolation_effect_mask &
+                          ~(entity.player_movement_schema && current.entity_metadata.source ?
+                            runtime_animation_only_effect_mask(options,entity.entity_number,
+                                current.entity_metadata.source->record_ordinal) : 0U)) != 0U;
             if (old) {
-                if (!bounded(old->origin)) return fail(EntityInterpolationErrorCode::position_limit_exceeded);
+                if (!bounded_runtime_origin(old->origin,limits.maximum_position_magnitude))
+                    return fail(EntityInterpolationErrorCode::position_limit_exceeded);
                 reset = reset || old->model_index != entity.model_index ||
                         old->player_movement_schema != entity.player_movement_schema ||
                         old->ordinary_visual_schema != entity.ordinary_visual_schema;
-                if (options.teleport_distance && old->origin.complete() && entity.origin.complete()) {
+                if (ordinary) reset = reset || old->sequence != entity.sequence ||
+                    old->brush_move_type != entity.brush_move_type;
+                const auto distance_limit = ordinary && options.ordinary_teleport_distance ?
+                    options.ordinary_teleport_distance : options.teleport_distance;
+                if (distance_limit && old->origin.complete() && entity.origin.complete()) {
                     reset = reset || std::hypot(*entity.origin.x - *old->origin.x,
-                        *entity.origin.y - *old->origin.y, *entity.origin.z - *old->origin.z) > *options.teleport_distance;
+                        *entity.origin.y - *old->origin.y, *entity.origin.z - *old->origin.z) > *distance_limit;
                 }
             }
             if (reset) { ++result.reset_count; continue; }
@@ -1351,7 +1416,9 @@ RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime
             bytes_lerp(entity.controllers, old->controllers); bytes_lerp(entity.blending, old->blending);
             const auto step = [](auto& now, const auto& before) { if (now && before) now = before; };
             step(entity.sequence, old->sequence); step(entity.body, old->body); step(entity.skin, old->skin);
-            step(entity.frame, old->frame); step(entity.animation_time_seconds, old->animation_time_seconds);
+            if (ordinary) linear(entity.frame, old->frame);
+            else step(entity.frame, old->frame);
+            step(entity.animation_time_seconds, old->animation_time_seconds);
             step(entity.frame_rate, old->frame_rate); step(entity.gait_sequence, old->gait_sequence);
             step(entity.weapon_model_index, old->weapon_model_index);
             ++result.interpolated_count;
@@ -1362,6 +1429,524 @@ RuntimeEntityInterpolationResult EntitySnapshotInterpolator::interpolate_runtime
         return result;
     } catch (const std::bad_alloc&) { return fail(EntityInterpolationErrorCode::unable_to_retain_result); }
       catch (const std::length_error&) { return fail(EntityInterpolationErrorCode::unable_to_retain_result); }
+}
+
+void RuntimeOrdinarySnapshotPresentation::reset() noexcept {
+    history_.clear(); lifetimes_.clear();
+    application_anchor_.reset(); server_anchor_.reset(); last_application_.reset(); cadence_delay_.reset();
+}
+
+void RuntimeOrdinarySnapshotPresentation::observe(
+    std::shared_ptr<const client::RuntimeClientObservationState> observation) {
+    if (!observation || !observation->entity_metadata.source ||
+        !client::valid_runtime_observation(*observation)) return;
+    if (!observation->server_time_seconds) {
+        // An otherwise valid newer entity publication can authoritatively
+        // remove/reuse a slot without supplying a render clock. Keep its
+        // current discrete publication, but never bridge unknown continuity.
+        // Invalid, duplicate and older untimed input cannot erase a live sample.
+        if (history_.empty() || history_.back()->generation<observation->generation ||
+            (history_.back()->generation==observation->generation &&
+             history_.back()->entity_metadata.source->record_ordinal<
+                observation->entity_metadata.source->record_ordinal)) reset();
+        return;
+    }
+    if (!history_.empty()) {
+        const auto& previous=*history_.back();
+        if (previous.generation==observation->generation &&
+            previous.entity_metadata.source==observation->entity_metadata.source) return;
+        if (previous.generation!=observation->generation ||
+            *previous.server_time_seconds>=*observation->server_time_seconds ||
+            previous.entity_metadata.source->record_ordinal>=observation->entity_metadata.source->record_ordinal)
+            reset(); // Same/backward clocks or source ordering are not a new interpolation interval.
+    }
+    auto retained=history_;
+    if (retained.size()==maximum_history) retained.erase(retained.begin());
+    retained.push_back(std::move(observation));
+    history_=std::move(retained);
+}
+
+RuntimeEntityInterpolationResult RuntimeOrdinarySnapshotPresentation::sample(
+    const client::RuntimeClientObservationState& current, double application_seconds,
+    const RuntimeEntityInterpolationOptions& options, double selected_delay) {
+    const auto fail=[](EntityInterpolationErrorCode code) {
+        RuntimeEntityInterpolationResult result;
+        result.error=EntityInterpolationError{code,{}, {},"Ordinary presentation sample rejected"};
+        return result;
+    };
+    if (!std::isfinite(application_seconds) || !std::isfinite(selected_delay) || selected_delay<0.0 ||
+        selected_delay>maximum_delay_seconds || selected_delay>options.limits.maximum_snapshot_gap_seconds)
+        return fail(EntityInterpolationErrorCode::invalid_configuration);
+    // With no history the original discrete result is still the public result.
+    // Otherwise validate without allocating a full state that would be discarded.
+    if(history_.empty())return EntitySnapshotInterpolator{}.interpolate_runtime(current,current,
+        current.server_time_seconds.value_or(0.0),options);
+    RuntimeEntityInterpolationResult result;
+    if(auto error=validate_runtime_interpolation(current,current,
+            current.server_time_seconds.value_or(0.0),options)) {
+        result.error=std::move(error);return result;
+    }
+    const auto& latest=*history_.back();
+    if (latest.generation!=current.generation || latest.entity_metadata.source!=current.entity_metadata.source)
+        return fail(EntityInterpolationErrorCode::invalid_projection);
+    try {
+        auto history=history_;
+        auto lifetimes=lifetimes_;
+        auto app_anchor=application_anchor_, server_anchor=server_anchor_, cadence=cadence_delay_;
+        const double latest_seconds=*latest.server_time_seconds;
+        const auto gap_limit=options.limits.maximum_snapshot_gap_seconds;
+        bool clock_reset=!app_anchor || !server_anchor;
+        // A backwards render clock holds the last sample; it cannot replay or rewind.
+        const double app=last_application_ ? std::max(application_seconds,*last_application_) : application_seconds;
+        const double pair_gap=history.size()>1U ? latest_seconds-*history[history.size()-2U]->server_time_seconds : 0.0;
+        const bool source_gap=pair_gap>gap_limit;
+        clock_reset=clock_reset || source_gap || (last_application_ && app-*last_application_>gap_limit);
+        if (!clock_reset) {
+            const auto mapped=*server_anchor+(app-*app_anchor);
+            clock_reset=!std::isfinite(mapped) || std::abs(mapped-latest_seconds)>gap_limit;
+        }
+        if (clock_reset) {
+            app_anchor=app;server_anchor=latest_seconds;
+            if (application_anchor_) lifetimes.clear();
+            if (source_gap) {history={history.back()};cadence.reset();}
+        }
+        if (!cadence && pair_gap>0.0 && !source_gap) cadence=std::min(selected_delay,pair_gap);
+        // One observed cadence, rather than a full100ms spawn delay. The actual
+        // retained time span is also a bound when RX cadence exceeds sixteen slots.
+        const double delay=std::min({selected_delay,cadence.value_or(0.0),
+            latest_seconds-*history.front()->server_time_seconds});
+        const double mapped=*server_anchor+(app-*app_anchor);
+        const double desired=std::min(latest_seconds,mapped-delay);
+        if (!std::isfinite(desired)) return fail(EntityInterpolationErrorCode::non_finite_result);
+        auto sampled=std::make_shared<client::RuntimeClientObservationState>(current);
+        result.reset_count=0U;result.interpolated_count=0U;result.sample_seconds=desired;
+        result.alpha=0.0;result.selection_status=EntitySnapshotPairSelectionStatus::held_newest;
+        const auto find=[](const auto& state,std::uint32_t number) -> const client::RuntimePacketEntityObservation* {
+            const auto row=std::lower_bound(state.packet_entities.begin(),state.packet_entities.end(),number,
+                [](const auto& entity,auto id){return entity.entity_number<id;});
+            return row!=state.packet_entities.end() && row->entity_number==number ? &*row : nullptr;
+        };
+        const auto discontinuity=[&](const auto& before,const auto& now) {
+            if (before.model_index!=now.model_index || before.sequence!=now.sequence ||
+                before.brush_move_type!=now.brush_move_type || before.ordinary_visual_schema!=now.ordinary_visual_schema ||
+                before.player_movement_schema!=now.player_movement_schema ||
+                !before.origin.complete() || !now.origin.complete() || !before.angles.complete() || !now.angles.complete() ||
+                ((before.effects.value_or(0U)|now.effects.value_or(0U)) & options.no_interpolation_effect_mask)!=0U)
+                return true;
+            const auto distance_limit = options.ordinary_teleport_distance ?
+                options.ordinary_teleport_distance : options.teleport_distance;
+            return distance_limit && std::hypot(*now.origin.x-*before.origin.x,
+                *now.origin.y-*before.origin.y,*now.origin.z-*before.origin.z)>*distance_limit;
+        };
+        const auto apply_pose=[](auto& destination,const auto& before,const auto& after,double alpha) {
+            const auto linear=[&](auto& value,const auto& a,const auto& b) {
+                if (value && a && b) value=*a+(*b-*a)*alpha;
+            };
+            linear(destination.origin.x,before.origin.x,after.origin.x);
+            linear(destination.origin.y,before.origin.y,after.origin.y);
+            linear(destination.origin.z,before.origin.z,after.origin.z);
+            const auto angle=[&](auto& value,const auto& a,const auto& b) {
+                if (value && a && b) value=*a+shortest_degree_delta(*a,*b)*alpha;
+            };
+            angle(destination.angles.x,before.angles.x,after.angles.x);
+            angle(destination.angles.y,before.angles.y,after.angles.y);
+            angle(destination.angles.z,before.angles.z,after.angles.z);
+            // A wrapped frame cannot be interpolated backwards without imported
+            // loop metadata; its current discrete value is preserved instead.
+            if (destination.frame && before.frame && after.frame &&
+                *before.frame<=*after.frame && *destination.frame>=*after.frame)
+                linear(destination.frame,before.frame,after.frame);
+            const auto bytes=[&](auto& output,const auto& a,const auto& b) {
+                for(std::size_t i=0U;i<output.size();++i) if(output[i] && a[i] && b[i])
+                    output[i]=static_cast<std::uint32_t>(std::lround(*a[i]+(static_cast<double>(*b[i])-*a[i])*alpha));
+            };
+            bytes(destination.controllers,before.controllers,after.controllers);
+            bytes(destination.blending,before.blending,after.blending);
+        };
+        std::erase_if(lifetimes,[&](const auto& row) {
+            return !std::binary_search(options.ordinary_entities.begin(),options.ordinary_entities.end(),row.first) ||
+                !find(latest,row.first);
+        });
+        for (auto& entity:sampled->packet_entities) {
+            if (entity.player_movement_schema || !entity.ordinary_visual_schema ||
+                !std::binary_search(options.ordinary_entities.begin(),options.ordinary_entities.end(),entity.entity_number)) continue;
+            const auto* committed=find(latest,entity.entity_number);
+            if (!committed) continue;
+            auto found=lifetimes.find(entity.entity_number);
+            bool reset_life=options.no_interpolation || found==lifetimes.end() ||
+                std::ranges::find(options.discontinuous_entities,entity.entity_number)!=options.discontinuous_entities.end() ||
+                (committed->effects.value_or(0U)&options.no_interpolation_effect_mask)!=0U;
+            if (!reset_life) {
+                const auto& life=found->second;
+                // If a whole unseen interval was evicted, absence/reuse cannot
+                // be disproved. Do not bridge it merely because the slot matches.
+                reset_life=life.record_ordinal<history.front()->entity_metadata.source->record_ordinal;
+                auto before=&life.committed;
+                double before_seconds=life.committed_seconds;
+                for (const auto& snapshot:history) if (!reset_life && snapshot->entity_metadata.source->record_ordinal>life.record_ordinal) {
+                    const auto* after=find(*snapshot,entity.entity_number);
+                    if (!after || *snapshot->server_time_seconds-before_seconds>gap_limit || discontinuity(*before,*after)) {
+                        reset_life=true;break;
+                    }
+                    before=after;before_seconds=*snapshot->server_time_seconds;
+                }
+            }
+            if (reset_life) {
+                lifetimes[entity.entity_number]={latest.entity_metadata.source->record_ordinal,latest_seconds,
+                    latest_seconds,latest_seconds,app,*committed,*committed};
+                ++result.reset_count;continue;
+            }
+            auto& life=found->second;
+            // The stable session clock may lag a later birth by a valid phase
+            // below the recovery threshold. Its newest birth floor would then
+            // freeze the first pose until that whole phase elapsed. A lifetime
+            // anchor advances from its own birth after only the observed cadence;
+            // it never samples beyond the latest committed server observation.
+            const double birth_desired=std::min(latest_seconds,life.birth_server_seconds+
+                (app-life.birth_application_seconds)-delay);
+            if (!std::isfinite(birth_desired)) return fail(EntityInterpolationErrorCode::non_finite_result);
+            const double target=std::max({life.target_seconds,desired,birth_desired});
+            // Startup/underflow holds the last authoritative rendered pose.
+            // A newborn never jumps from a newest fallback into older history.
+            if (target<=life.target_seconds) apply_pose(entity,life.rendered,life.rendered,0.0);
+            else {
+                const client::RuntimePacketEntityObservation* before=nullptr;const client::RuntimePacketEntityObservation* after=nullptr;
+                double before_seconds{},after_seconds{};
+                for (const auto& snapshot:history) {
+                    const auto* row=find(*snapshot,entity.entity_number);if (!row) continue;
+                    const auto time=*snapshot->server_time_seconds;
+                    if (time<=target) {before=row;before_seconds=time;}
+                    if (time>=target) {after=row;after_seconds=time;break;}
+                }
+                if (before && after && after_seconds-before_seconds<=gap_limit) {
+                    const double alpha=after_seconds==before_seconds ? 1.0 : (target-before_seconds)/(after_seconds-before_seconds);
+                    apply_pose(entity,*before,*after,alpha);life.target_seconds=target;
+                    result.alpha=alpha;result.selection_status=EntitySnapshotPairSelectionStatus::bracketed;
+                    ++result.interpolated_count;
+                } else if (before && target>=latest_seconds) {
+                    apply_pose(entity,*committed,*committed,0.0);life.target_seconds=latest_seconds;
+                } else apply_pose(entity,life.rendered,life.rendered,0.0);
+            }
+            life.record_ordinal=latest.entity_metadata.source->record_ordinal;
+            life.committed_seconds=latest_seconds;life.committed=*committed;life.rendered=entity;
+        }
+        sampled->canonical_state_hash=client::runtime_observation_canonical_hash(*sampled);
+        if (!client::valid_runtime_observation(*sampled)) return fail(EntityInterpolationErrorCode::non_finite_result);
+        for (const auto& entity:sampled->packet_entities)
+            for(const auto* coordinate:{&entity.origin.x,&entity.origin.y,&entity.origin.z})
+                if (*coordinate && std::abs(**coordinate)>options.limits.maximum_position_magnitude)
+                    return fail(EntityInterpolationErrorCode::position_limit_exceeded);
+        result.state=std::move(sampled);
+        history_=std::move(history);lifetimes_=std::move(lifetimes);
+        application_anchor_=app_anchor;server_anchor_=server_anchor;cadence_delay_=cadence;last_application_=app;
+        return result;
+    } catch (const std::bad_alloc&) {return fail(EntityInterpolationErrorCode::unable_to_retain_result);}
+      catch (const std::length_error&) {return fail(EntityInterpolationErrorCode::unable_to_retain_result);}
+}
+
+void RuntimePlayerSnapshotPresentation::reset() noexcept {
+    history_.clear();players_.clear();application_anchor_.reset();server_anchor_.reset();
+    last_application_.reset();last_target_.reset();delay_.reset();
+    pending_clock_reasons_=static_cast<std::uint32_t>(entity_visual::PlayerClockReason::explicit_reset);
+}
+
+void RuntimePlayerSnapshotPresentation::observe(
+    std::shared_ptr<const client::RuntimeClientObservationState> value) {
+    if (!value || !value->entity_metadata.source || !client::valid_runtime_observation(*value)) return;
+    if (!history_.empty()) {
+        const auto& old=*history_.back();
+        if (value->generation<old.generation || (value->generation==old.generation &&
+            value->entity_metadata.source->record_ordinal<=old.entity_metadata.source->record_ordinal)) return;
+        if (value->generation!=old.generation || !value->server_time_seconds ||
+            *value->server_time_seconds<*old.server_time_seconds) {
+            std::uint32_t reason{};
+            if(value->generation!=old.generation)reason|=static_cast<std::uint32_t>(entity_visual::PlayerClockReason::generation_changed);
+            if(!value->server_time_seconds)reason|=static_cast<std::uint32_t>(entity_visual::PlayerClockReason::server_time_missing);
+            else if(*value->server_time_seconds<*old.server_time_seconds)
+                reason|=static_cast<std::uint32_t>(entity_visual::PlayerClockReason::server_time_regressed);
+            reset();pending_clock_reasons_=reason;
+        }
+    }
+    if (!value->server_time_seconds) {
+        const auto reasons=pending_clock_reasons_;
+        reset();pending_clock_reasons_=reasons|static_cast<std::uint32_t>(entity_visual::PlayerClockReason::server_time_missing);return;
+    }
+    // Equal-time publications are retained: removal/reuse and game continuity
+    // boundaries must not disappear merely because no render occurred there.
+    auto next=history_;
+    if(next.size()==maximum_history)next.erase(next.begin());
+    next.push_back(std::move(value));history_=std::move(next);
+}
+
+RuntimePlayerSnapshotPresentationResult RuntimePlayerSnapshotPresentation::sample(
+    const client::RuntimeClientObservationState& current, const double application_seconds,
+    const RuntimeEntityInterpolationOptions& options, const double selected_delay,
+    const std::span<const std::uint32_t> selected,
+    const std::span<const RuntimePlayerContinuityBoundary> boundaries) {
+    const auto fail=[](EntityInterpolationErrorCode code) {
+        RuntimePlayerSnapshotPresentationResult out;
+        out.presentation.error=EntityInterpolationError{code,{}, {},"Buffered player presentation rejected"};return out;
+    };
+    if (!std::isfinite(application_seconds) || !std::isfinite(selected_delay) || selected_delay<0.0 ||
+        selected_delay>maximum_delay_seconds || selected_delay>options.limits.maximum_snapshot_gap_seconds ||
+        selected.size()>maximum_players || boundaries.size()>maximum_players ||
+        (!selected.empty() && selected.front()==0U) ||
+        std::adjacent_find(selected.begin(),selected.end(),[](auto a,auto b){return a>=b;})!=selected.end())
+        return fail(EntityInterpolationErrorCode::invalid_configuration);
+    const auto anchor_bytes=selected.size()*sizeof(RuntimePlayerInterpolationAnchor);
+    if(anchor_bytes>=options.limits.maximum_result_bytes)
+        return fail(EntityInterpolationErrorCode::result_byte_limit_exceeded);
+    auto bounded_options=options;bounded_options.limits.maximum_result_bytes-=anchor_bytes;
+    if(auto error=validate_runtime_interpolation(current,current,
+            current.server_time_seconds.value_or(0.0),bounded_options)) {
+        RuntimePlayerSnapshotPresentationResult out;out.presentation.error=std::move(error);return out;
+    }
+    if(history_.empty() || history_.back()->generation!=current.generation ||
+        history_.back()->entity_metadata.source!=current.entity_metadata.source)
+        return fail(EntityInterpolationErrorCode::invalid_projection);
+    for(const auto& value:boundaries)if(!value.entity ||
+        value.record_ordinal>current.entity_metadata.source->record_ordinal)
+        return fail(EntityInterpolationErrorCode::invalid_configuration);
+    try {
+        using Continuity=entity_visual::PlayerContinuityReason;
+        using Hold=entity_visual::PlayerHoldReason;
+        using Clock=entity_visual::PlayerClockReason;
+        using Decision=entity_visual::PlayerPresentationDecision;
+        const auto bit=[](auto value){return static_cast<std::uint32_t>(value);};
+        auto history=history_;auto tracks=players_;
+        auto app_anchor=application_anchor_,server_anchor=server_anchor_,delay=delay_;
+        const auto latest=history.back();const double latest_seconds=*latest->server_time_seconds;
+        const auto raw_previous=history.size()>1U ? history[history.size()-2U] : latest;
+        const double gap=latest_seconds-*raw_previous->server_time_seconds;
+        const auto gap_limit=options.limits.maximum_snapshot_gap_seconds;
+        const double app=last_application_ ? std::max(application_seconds,*last_application_) : application_seconds;
+        bool reset_clock=!app_anchor || !server_anchor;
+        std::uint32_t clock_reasons=pending_clock_reasons_;
+        if(reset_clock)clock_reasons|=bit(Clock::initial_anchor);
+        if (!reset_clock) {
+            const auto mapped=*server_anchor+app-*app_anchor;
+            if(gap>gap_limit)clock_reasons|=bit(Clock::snapshot_gap);
+            if(last_application_ && app-*last_application_>gap_limit)clock_reasons|=bit(Clock::application_gap);
+            if(!std::isfinite(mapped))clock_reasons|=bit(Clock::mapped_time_invalid);
+            if(std::abs(mapped-latest_seconds)>gap_limit)clock_reasons|=bit(Clock::mapped_time_drift);
+            reset_clock=gap>gap_limit || (last_application_ && app-*last_application_>gap_limit) ||
+                !std::isfinite(mapped) || std::abs(mapped-latest_seconds)>gap_limit;
+        }
+        if(reset_clock) {
+            app_anchor=app;server_anchor=latest_seconds;
+            if(application_anchor_) {tracks.clear();history={latest};}
+            delay=std::min(selected_delay,gap<=gap_limit ? gap : 0.0);
+        } else if(history.size()>2U && last_application_) {
+            // Local-compatible startup fill: slow only the render clock by at
+            // most25% until its requested (<=100ms) reserve fits the history.
+            // Never subtract a new packet's arrival phase or rewind a sample.
+            const double available=latest_seconds-*history.front()->server_time_seconds;
+            const double wanted=std::min(selected_delay,available);
+            delay=std::min(wanted,delay.value_or(0.0)+.25*(app-*last_application_));
+        }
+        const double mapped=*server_anchor+app-*app_anchor;
+        // Match the existing endpoint snapping tolerance below: cancellation
+        // noise at an exact endpoint is not missing history coverage.
+        if(*history.front()->server_time_seconds-(mapped-delay.value_or(0.0))>1e-9)
+            clock_reasons|=bit(Clock::oldest_underflow);
+        if(mapped-delay.value_or(0.0)-latest_seconds>1e-9)clock_reasons|=bit(Clock::newest_underflow);
+        double target=std::clamp(mapped-delay.value_or(0.0),*history.front()->server_time_seconds,latest_seconds);
+        if(!reset_clock && last_target_)target=std::max(target,std::min(*last_target_,latest_seconds));
+        // Cancelling large application/server clock offsets can leave a sample
+        // infinitesimally before an exact endpoint. Preserve discrete endpoint
+        // identity without admitting a gameplay/collision epsilon.
+        for(const auto& source:history)if(std::abs(target-*source->server_time_seconds)<=1e-9)
+            target=*source->server_time_seconds;
+        std::shared_ptr<const client::RuntimeClientObservationState> before=history.front(),after=history.back();
+        for(const auto& source:history) {
+            const auto seconds=*source->server_time_seconds;
+            if(seconds<=target)before=source;
+            if(seconds>target) {after=source;break;}
+        }
+        // At an exact newest/duplicate timestamp retain the actual preceding
+        // interval when possible. Zero-time corrections themselves stay exact.
+        if(before==after && history.size()>1U)before=history[history.size()-2U];
+        for(std::size_t i=1;i<history.size();++i)if(*history[i]->server_time_seconds==target)
+            {before=history[i-1];after=history[i];}
+        auto mixed=EntitySnapshotInterpolator{}.interpolate_runtime(*before,*after,target,bounded_options);
+        if(!mixed) {RuntimePlayerSnapshotPresentationResult out;out.presentation=std::move(mixed);return out;}
+        auto output=std::make_shared<client::RuntimeClientObservationState>(current);
+        RuntimePlayerSnapshotPresentationResult result;
+        result.previous=before;result.current=after;result.presentation=mixed;
+        result.players.reserve(selected.size());
+        const auto find=[](const auto& source,std::uint32_t id) -> const client::RuntimePacketEntityObservation* {
+            const auto row=std::lower_bound(source.packet_entities.begin(),source.packet_entities.end(),id,
+                [](const auto& entity,auto number){return entity.entity_number<number;});
+            return row!=source.packet_entities.end() && row->entity_number==id ? &*row : nullptr;
+        };
+        const auto motion_effects=[&](const auto& row,std::size_t ordinal) {
+            return row.effects.value_or(0U)&options.no_interpolation_effect_mask&
+                ~runtime_animation_only_effect_mask(options,row.entity_number,ordinal);
+        };
+        const auto boundary_reasons=[&](const auto& a,std::size_t a_ordinal,const auto& b,std::size_t b_ordinal) {
+            std::uint32_t reasons{};
+            if(a.model_index!=b.model_index)reasons|=bit(Continuity::model_changed);
+            if(a.player_movement_schema!=b.player_movement_schema)reasons|=bit(Continuity::schema_changed);
+            if((motion_effects(a,a_ordinal)|motion_effects(b,b_ordinal))!=0U)
+                reasons|=bit(Continuity::nointerp_effect);
+            if(options.teleport_distance && a.origin.complete() && b.origin.complete() &&
+                std::hypot(*a.origin.x-*b.origin.x,*a.origin.y-*b.origin.y,*a.origin.z-*b.origin.z)>*options.teleport_distance)
+                reasons|=bit(Continuity::teleport_distance);
+            return reasons;
+        };
+        const auto boundary=[&](const auto& a,std::size_t a_ordinal,const auto& b,std::size_t b_ordinal) {
+            return boundary_reasons(a,a_ordinal,b,b_ordinal)!=0U;
+        };
+        const auto pose=[](auto& destination,const auto& source) {
+            const auto field=[](auto& to,const auto& from){if(to && from)to=from;};
+            field(destination.origin.x,source.origin.x);field(destination.origin.y,source.origin.y);field(destination.origin.z,source.origin.z);
+            field(destination.angles.x,source.angles.x);field(destination.angles.y,source.angles.y);field(destination.angles.z,source.angles.z);
+            field(destination.sequence,source.sequence);field(destination.frame,source.frame);
+            field(destination.body,source.body);field(destination.skin,source.skin);
+            field(destination.animation_time_seconds,source.animation_time_seconds);field(destination.frame_rate,source.frame_rate);
+            field(destination.gait_sequence,source.gait_sequence);field(destination.weapon_model_index,source.weapon_model_index);
+            for(std::size_t i=0;i<destination.controllers.size();++i)field(destination.controllers[i],source.controllers[i]);
+            for(std::size_t i=0;i<destination.blending.size();++i)field(destination.blending[i],source.blending[i]);
+        };
+        std::erase_if(tracks,[&](const auto& item){return !std::binary_search(selected.begin(),selected.end(),item.first) || !find(current,item.first);});
+        bool common_bracket=false;
+        for(auto& entity:output->packet_entities) {
+            if(!entity.player_movement_schema || !std::binary_search(selected.begin(),selected.end(),entity.entity_number))continue;
+            auto [entry,inserted]=tracks.try_emplace(entity.entity_number);
+            auto& life=entry->second;
+            const auto old_floor=life.floor;
+            const auto old_floor_reasons=life.floor_reasons;
+            std::uint32_t causes=inserted ? bit(Continuity::first_observation) : 0U;
+            if(reset_clock)causes|=bit(Continuity::clock_reset);
+            if(options.no_interpolation)causes|=bit(Continuity::no_interpolation_option);
+            if(std::ranges::find(options.discontinuous_entities,entity.entity_number)!=options.discontinuous_entities.end())
+                causes|=bit(Continuity::explicit_discontinuity);
+            bool reset=options.no_interpolation ||
+                std::ranges::find(options.discontinuous_entities,entity.entity_number)!=options.discontinuous_entities.end();
+            if(!inserted && life.seen<history.front()->entity_metadata.source->record_ordinal) {
+                life.floor=latest->entity_metadata.source->record_ordinal;reset=true;
+                causes|=bit(Continuity::history_stale);
+            }
+            const client::RuntimePacketEntityObservation* prior=nullptr;
+            bool observed_absence=false;
+            double prior_time{};
+            std::size_t prior_ordinal{};
+            for(const auto& source:history) {
+                const auto ordinal=source->entity_metadata.source->record_ordinal;
+                const auto* row=find(*source,entity.entity_number);
+                if(inserted && !life.floor && row)life.floor=ordinal;
+                if(row && observed_absence && ordinal>life.seen)causes|=bit(Continuity::reentry);
+                if(ordinal>life.seen && prior) {
+                    if(!row || boundary(*prior,prior_ordinal,*row,ordinal)) {
+                        life.floor=ordinal;reset=true;
+                        causes|=!row ? bit(Continuity::removal) : boundary_reasons(*prior,prior_ordinal,*row,ordinal);
+                    }
+                    else if(*source->server_time_seconds==prior_time && prior->origin!=row->origin) {
+                        life.floor=ordinal; // Exact position correction, not an animation-only publication.
+                        causes|=bit(Continuity::same_time_origin_correction);
+                    }
+                }
+                observed_absence=!row;
+                prior=row;prior_time=*source->server_time_seconds;prior_ordinal=ordinal;
+            }
+            for(const auto& value:boundaries)if(value.entity==entity.entity_number && value.record_ordinal>life.floor)
+                {life.floor=value.record_ordinal;reset=true;causes|=bit(Continuity::game_boundary);}
+            if(reset)life.floor=std::max(life.floor,latest->entity_metadata.source->record_ordinal);
+            if(life.floor!=old_floor)life.floor_reasons=causes;
+            else life.floor_reasons|=causes;
+            auto floor=latest;
+            for(const auto& source:history)if(source->entity_metadata.source->record_ordinal>=life.floor) {floor=source;break;}
+            const auto* born=find(*floor,entity.entity_number);
+            // While held at an actual position/life boundary, consume a newer
+            // same-position publication at that boundary's timestamp. This
+            // preserves exact frame/anchor identity without advancing a
+            // delayed actor merely because its animation was updated.
+            for(const auto& source:history) if(source->entity_metadata.source->record_ordinal>
+                floor->entity_metadata.source->record_ordinal &&
+                *source->server_time_seconds==*floor->server_time_seconds) {
+                const auto* row=find(*source,entity.entity_number);
+                if(born && row && born->origin==row->origin && !boundary(*born,floor->entity_metadata.source->record_ordinal,
+                    *row,source->entity_metadata.source->record_ordinal)) {floor=source;born=row;}
+            }
+            const auto* selected_pose=find(*mixed.state,entity.entity_number);
+            RuntimePlayerInterpolationAnchor anchor{entity.entity_number,before,after,mixed.sample_seconds,reset};
+            auto& diagnostic=anchor.diagnostics;
+            diagnostic.floor_record_ordinal=life.floor;diagnostic.floor_reasons=life.floor_reasons;
+            diagnostic.resolved_floor_record_ordinal=floor->entity_metadata.source->record_ordinal;
+            diagnostic.new_boundary_reasons=life.floor!=old_floor ? causes : causes&~old_floor_reasons;
+            diagnostic.clock_reasons=clock_reasons;
+            if(!born)diagnostic.hold_reasons|=bit(Hold::floor_actor_missing);
+            if(!selected_pose)diagnostic.hold_reasons|=bit(Hold::bracket_actor_missing);
+            if(*floor->server_time_seconds>target)diagnostic.hold_reasons|=bit(Hold::target_before_floor);
+            if(after->entity_metadata.source->record_ordinal<life.floor)diagnostic.hold_reasons|=bit(Hold::bracket_before_floor);
+            if(selected_pose && selected_pose->model_index!=entity.model_index)diagnostic.hold_reasons|=bit(Hold::selected_model_mismatch);
+            if(after->entity_metadata.source->record_ordinal<life.presented)diagnostic.hold_reasons|=bit(Hold::bracket_regression);
+            if(!born || !selected_pose || *floor->server_time_seconds>target ||
+                after->entity_metadata.source->record_ordinal<life.floor ||
+                selected_pose->model_index!=entity.model_index || after->entity_metadata.source->record_ordinal<life.presented) {
+                const auto* held=born ? born : &entity;
+                pose(entity,*held);anchor.current=floor;anchor.previous=floor;
+                anchor.sample_seconds=*floor->server_time_seconds;
+                // Same-time updates preserve exact previous raw anchors at the
+                // game API; render metadata alone is a held-current pair.
+                if(floor==latest && raw_previous!=latest)anchor.previous=raw_previous;
+                diagnostic.decision=born ? Decision::held_floor : Decision::held_current;
+                diagnostic.position_previous_record_ordinal=diagnostic.position_current_record_ordinal=
+                    (born ? floor : latest)->entity_metadata.source->record_ordinal;
+            } else {
+                pose(entity,*selected_pose);common_bracket=true;
+                // Reconstruct only the already-selected neutral interpolation
+                // decision. A global bracket can still hold one actor at its
+                // newest row; it must not be reported as interpolated.
+                const auto* older=find(*before,entity.entity_number);
+                const auto* newer=find(*after,entity.entity_number);
+                const bool held_interval=before->generation!=after->generation ||
+                    *before->server_time_seconds==*after->server_time_seconds ||
+                    *after->server_time_seconds-*before->server_time_seconds>gap_limit;
+                const bool actor_reset=held_interval || options.no_interpolation || !older ||
+                    std::ranges::find(options.discontinuous_entities,entity.entity_number)!=options.discontinuous_entities.end() ||
+                    (newer && motion_effects(*newer,after->entity_metadata.source->record_ordinal)!=0U) ||
+                    (older && newer && (older->model_index!=newer->model_index ||
+                        older->player_movement_schema!=newer->player_movement_schema ||
+                        older->ordinary_visual_schema!=newer->ordinary_visual_schema ||
+                        (options.teleport_distance && older->origin.complete() && newer->origin.complete() &&
+                            std::hypot(*older->origin.x-*newer->origin.x,*older->origin.y-*newer->origin.y,
+                                *older->origin.z-*newer->origin.z)>*options.teleport_distance)));
+                diagnostic.position_previous_record_ordinal=before->entity_metadata.source->record_ordinal;
+                diagnostic.position_current_record_ordinal=after->entity_metadata.source->record_ordinal;
+                diagnostic.alpha=mixed.alpha;
+                if(actor_reset) {
+                    diagnostic.hold_reasons|=bit(Hold::per_actor_reset);
+                    diagnostic.decision=Decision::held_current;diagnostic.alpha=0.0;
+                    diagnostic.position_previous_record_ordinal=diagnostic.position_current_record_ordinal;
+                } else switch(mixed.selection_status) {
+                case EntitySnapshotPairSelectionStatus::bracketed:diagnostic.decision=Decision::interpolated;break;
+                case EntitySnapshotPairSelectionStatus::exact_previous:diagnostic.decision=Decision::exact_previous;break;
+                case EntitySnapshotPairSelectionStatus::exact_current:diagnostic.decision=Decision::exact_current;break;
+                case EntitySnapshotPairSelectionStatus::held_oldest:diagnostic.decision=Decision::held_oldest;break;
+                case EntitySnapshotPairSelectionStatus::held_newest:diagnostic.decision=Decision::held_newest;break;
+                case EntitySnapshotPairSelectionStatus::held_only:diagnostic.decision=Decision::held_only;break;
+                }
+            }
+            life.seen=latest->entity_metadata.source->record_ordinal;
+            life.presented=anchor.current->entity_metadata.source->record_ordinal;
+            result.players.push_back(std::move(anchor));
+        }
+        if(!common_bracket && !result.players.empty()) {
+            const auto& anchor=result.players.front();result.previous=anchor.current;result.current=anchor.current;
+            result.presentation.sample_seconds=anchor.sample_seconds;result.presentation.alpha=0.0;
+            result.presentation.selection_status=EntitySnapshotPairSelectionStatus::held_only;
+        }
+        output->canonical_state_hash=client::runtime_observation_canonical_hash(*output);
+        if(!client::valid_runtime_observation(*output))return fail(EntityInterpolationErrorCode::non_finite_result);
+        result.presentation.state=std::move(output);
+        history_=std::move(history);players_=std::move(tracks);
+        application_anchor_=app_anchor;server_anchor_=server_anchor;delay_=delay;
+        last_application_=app;last_target_=target;
+        pending_clock_reasons_=0U;
+        return result;
+    }catch(const std::bad_alloc&){return fail(EntityInterpolationErrorCode::unable_to_retain_result);}
+     catch(const std::length_error&){return fail(EntityInterpolationErrorCode::unable_to_retain_result);}
 }
 
 } // namespace hlclient::goldsrc

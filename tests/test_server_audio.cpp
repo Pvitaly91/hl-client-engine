@@ -173,6 +173,64 @@ TEST_CASE("E9 channels origins slot boundary and typed failure lifecycle stay bo
     pending.result={g::SoundAssetStatus::ready,sample(false)};deferred.update(&pending,g::SoundTime{}+251ms);
     CHECK(late.mixer.statistics().started==0);CHECK(deferred.statistics().expired==1);
 }
+TEST_CASE("E28 validated peer departure retires an unbound loop without stopping other player or one shots",
+          "[e28][peer-disconnect][audio][lifecycle]") {
+    a::OfflineOutput output; g::ServerAudio server{output}; FixtureAssets loader;
+    auto active_a=event(1);active_a.sound.entity_reference=1;
+    server.consume(active_a,{});server.update(&loader,{});
+    auto active_b=event(2);active_b.sound.entity_reference=2;
+    server.consume(active_b,{});server.update(&loader,{});
+    loader.result.asset=sample(false);
+    auto independent=event(3,0);independent.sound.entity_reference=2;
+    server.consume(independent,{});server.update(&loader,{});
+    REQUIRE(output.mixer.active()==3);
+    g::CommittedSoundQueue queue;g::RuntimeControlEvent boundary;
+    boundary.opcode=g::RuntimeControlOpcode::svc_updateuserinfo;
+    boundary.provenance.source_generation=1;
+    boundary.body=g::RuntimeControlUserInfoUpdate{1,0,0,16,false,{}};
+    queue.publish(104,4,boundary,{});g::CommittedSound departure;
+    REQUIRE(queue.pop(departure));server.consume(departure,{});
+    CHECK(output.mixer.active()==2); // A loop and B independent one-shot survive.
+    CHECK(server.statistics().stopped==1);
+    server.consume(departure,{});CHECK(output.mixer.active()==2);
+    std::array<float,8> pcm{};output.mixer.render(pcm);
+    CHECK(std::ranges::any_of(pcm,[](float value){return value!=0;}));
+}
+TEST_CASE("E28 pending peer loop is retired before its first source presentation while pending one shot may finish",
+          "[e28][peer-disconnect][audio][lifecycle]") {
+    for(const bool looping:{false,true}) {
+        CAPTURE(looping);a::OfflineOutput output;g::ServerAudio server{output};FixtureAssets loader;
+        loader.result={g::SoundAssetStatus::pending,{}};
+        auto pending=event();pending.sound.entity_reference=2;
+        server.consume(pending,{});server.update(&loader,{});
+        REQUIRE(output.mixer.active()==0);
+        g::CommittedSoundQueue queue;g::RuntimeControlEvent boundary;
+        boundary.opcode=g::RuntimeControlOpcode::svc_updateuserinfo;
+        boundary.provenance.source_generation=1;
+        boundary.body=g::RuntimeControlUserInfoUpdate{1,0,0,16,false,{}};
+        queue.publish(102,2,boundary,{});g::CommittedSound departure;
+        REQUIRE(queue.pop(departure));server.consume(departure,{});
+        loader.result={g::SoundAssetStatus::ready,sample(looping)};
+        server.update(&loader,g::SoundTime{}+10ms);
+        CHECK(output.mixer.active()==(looping ? 0U : 1U));
+        CHECK(server.statistics().started==(looping ? 0U : 1U));
+    }
+}
+TEST_CASE("E28 retired player loop cannot restart from a late sound and same-slot presence admits a new loop",
+          "[e28][peer-disconnect][audio][slot-reuse]") {
+    a::OfflineOutput output;g::ServerAudio server{output};FixtureAssets loader;
+    g::CommittedSoundQueue queue;g::RuntimeControlEvent boundary;
+    boundary.opcode=g::RuntimeControlOpcode::svc_updateuserinfo;boundary.provenance.source_generation=1;
+    boundary.body=g::RuntimeControlUserInfoUpdate{1,0,0,16,false,{}};
+    queue.publish(101,1,boundary,{});g::CommittedSound marker;REQUIRE(queue.pop(marker));server.consume(marker,{});
+    auto late=event(2);late.sound.entity_reference=2;server.consume(late,{});server.update(&loader,{});
+    CHECK(output.mixer.active()==0);CHECK(server.statistics().started==0);
+    auto stop=late;stop.ordinal=3;stop.sound.field_mask=32;server.consume(stop,{});CHECK(output.mixer.active()==0);
+    std::get<g::RuntimeControlUserInfoUpdate>(boundary.body).present=true;
+    queue.publish(104,4,boundary,{});REQUIRE(queue.pop(marker));server.consume(marker,{});
+    late.ordinal=5;server.consume(late,{});server.update(&loader,{});
+    CHECK(output.mixer.active()==1);CHECK(server.statistics().started==1);
+}
 TEST_CASE("PCM RIFF importer validates formats chunks and authored loop boundaries","[audio][asset]") {
     assets::AssetImporterRegistries registry;
     REQUIRE(g::register_builtin_asset_importers(registry));
@@ -367,6 +425,46 @@ TEST_CASE("No audio device is a nonfatal explicit silent policy","[audio][no-dev
     CHECK(hlclient::core::parse_command_line(std::array<std::string_view,2>{"--audio-volume","0"}));
     CHECK_FALSE(hlclient::core::parse_command_line(std::array<std::string_view,2>{"--audio-volume","101"}));
 }
+TEST_CASE("Approved local sound capacity stays bounded and preserves server bindings and ready PCM",
+          "[audio][asset][audio-capacity][core-only]") {
+    namespace f=hlclient::tests::readiness_fixture;
+    hlclient::tests::ScopedLocalResourceTestRoot root;
+    root.write("valve","maps/test.bsp","project fixture, metadata only");
+    root.write("valve","sound/weapons/server_sample.wav",wav());
+    const auto resources=f::parse_resource_list({{2,"maps/test.bsp",1,0xffffffU,0},
+        {0,"weapons/server_sample.wav",300,0xffffffU,0}});
+    auto env=std::shared_ptr<const hlclient::local_resources::LocalResourceEnvironment>{f::make_environment(root)};
+    auto inventory=f::build_inventory(resources,*env);
+    auto manifest=f::build_manifest(resources,inventory,f::parse_server_info("maps/test.bsp"),*env);REQUIRE(manifest);
+    g::ApprovedSoundAssets loader{{std::make_shared<const g::PrecacheManifestState>(std::move(*manifest.state)),env}};
+    CHECK(g::kMaximumApprovedLocalSoundEntries==128);
+    const auto reference=[](std::string_view name){
+        hlclient::game_api::LocalSoundReference r;r.source=hlclient::game_api::SoundReferenceSource::pinned_halflife_client_sound_profile;
+        std::copy(name.begin(),name.end(),r.sample.begin());return r;};
+    const auto wait=[&](const auto& ref){
+        auto result=loader.request_local(ref);const auto deadline=std::chrono::steady_clock::now()+2s;
+        while(result.status==g::SoundAssetStatus::pending && std::chrono::steady_clock::now()<deadline) {
+            std::this_thread::sleep_for(1ms);result=loader.request_local(ref);
+        }
+        return result;};
+    auto first_reference=reference("weapons/capacity_0.wav");
+    std::shared_ptr<const hlclient::assets::AudioAsset> first;
+    for(unsigned i=0;i<128;++i) {
+        const auto name="weapons/capacity_"+std::to_string(i)+".wav";
+        root.write("valve","sound/"+name,wav());auto ready=wait(reference(name));
+        REQUIRE(ready.status==g::SoundAssetStatus::ready);REQUIRE(ready.asset);
+        if(!i) first=ready.asset;
+    }
+    CHECK(wait(reference("weapons/one_more.wav")).status==g::SoundAssetStatus::limit);
+    first_reference.source=hlclient::game_api::SoundReferenceSource::validated_local_model_event;
+    CHECK(wait(first_reference).asset==first);
+    CHECK(loader.request_local(reference("weapons/../private.wav")).status==g::SoundAssetStatus::not_authorized);
+    auto server=loader.request(300);const auto deadline=std::chrono::steady_clock::now()+2s;
+    while(server.status==g::SoundAssetStatus::pending && std::chrono::steady_clock::now()<deadline) {
+        std::this_thread::sleep_for(1ms);server=loader.request(300);
+    }
+    CHECK(server.status==g::SoundAssetStatus::ready);CHECK(server.asset);
+}
 TEST_CASE("Approved async sparse sound binding uses rooted WAV registry with no model fallback","[audio][asset]") {
     namespace f=hlclient::tests::readiness_fixture;
     hlclient::tests::ScopedLocalResourceTestRoot root;
@@ -499,8 +597,55 @@ TEST_CASE("E8 approved startup preloads all step families without server slots a
     CHECK(b.cues[0].reference.name().starts_with("player/pl_slosh"));
     a::OfflineOutput output; output.set_listener({{0,0,64},{1,0,0},1,false});
     g::LocalAudio local(output); local.update(b,&loader,.02,true);
+    const auto first_delivery=local.statistics();
+    INFO("initial pending="<<first_delivery.resource_pending<<" submitted="<<first_delivery.submitted
+        <<" missing="<<first_delivery.missing<<" rejected="<<first_delivery.limits);
+    // The approved cache is nonblocking: even a decoded entry may briefly
+    // report pending while the worker publishes unrelated startup preloads.
+    // Pump the same owning cue at this fixture's unchanged logical instant;
+    // no second source event, semantic deadline change, or weaker PCM assertion.
+    auto retry=b;retry.count=retry.prepare_count=retry.control_count=0;
+    const auto delivery_deadline=std::chrono::steady_clock::now()+2s;
+    while(first_delivery.resource_pending && local.statistics().submitted==0 &&
+          std::chrono::steady_clock::now()<delivery_deadline) {
+        std::this_thread::sleep_for(1ms);local.update(retry,&loader,.02,true);
+    }
+    REQUIRE(local.statistics().submitted==1);
     std::array<float,8> pcm{}; output.mixer.render(pcm);
     CHECK(output.mixer.statistics().presentation_started==1); CHECK(pcm[4]>.2F);
+}
+TEST_CASE("E29 cached PCM transient readiness is retried without replaying a source event",
+          "[e29][audio][asset][readiness]") {
+    namespace api=hlclient::game_api;
+    struct PendingOnce final:g::SoundAssets {
+        std::shared_ptr<const assets::AudioAsset> pcm=sample(false);
+        unsigned requests{};
+        g::SoundAssetResult request(std::uint16_t) noexcept override {
+            return {g::SoundAssetStatus::unsupported,{}};
+        }
+        g::SoundAssetResult request_local(const api::LocalSoundReference&) noexcept override {
+            if(++requests==1U)return {};
+            return {g::SoundAssetStatus::ready,pcm};
+        }
+    } loader;
+    api::LocalAudioBatch batch;batch.session=batch.scope=batch.movement_epoch=1;batch.count=1;
+    auto& cue=batch.cues[0];cue.scope=cue.serial=1;cue.scheduled_seconds=.02;
+    cue.kind=api::LocalSoundKind::footstep;cue.channel=api::LocalSoundChannel::body;
+    cue.reference.source=api::SoundReferenceSource::pinned_halflife_client_sound_profile;
+    constexpr std::string_view name="player/pl_slosh1.wav";
+    std::copy(name.begin(),name.end(),cue.reference.sample.begin());
+    a::OfflineOutput output;output.set_listener({{}, {1,0,0},1,false});g::LocalAudio local(output);
+    local.update(batch,&loader,.02,true);
+    CHECK(local.statistics().resource_pending==1);CHECK(local.statistics().submitted==0);
+    CHECK(output.mixer.statistics().presentation_started==0);
+    auto retry=batch;retry.count=retry.prepare_count=retry.control_count=0;
+    local.update(retry,&loader,.02,true);REQUIRE(local.statistics().submitted==1);
+    local.update(retry,&loader,.02,true);local.update(batch,&loader,.02,true);
+    CHECK(local.statistics().submitted==1);CHECK(local.statistics().duplicates==1);CHECK(loader.requests==2);
+    std::array<float,8> pcm{};output.mixer.render(pcm);
+    CHECK(output.mixer.statistics().presentation_started==1);
+    CHECK(std::all_of(pcm.begin(),pcm.end(),[](float value){return std::isfinite(value);}));
+    CHECK(pcm[4]>.2F);
 }
 TEST_CASE("E8 opt in original step samples decode read only with distinct families", "[e8][audio][installed-materials]") {
     const auto* root=SDL_getenv("HLCLIENT_LOCAL_GAME_ROOT"); if(!root) SKIP("explicit read-only root not enabled");

@@ -1,16 +1,114 @@
+# Fast production-mechanism regression target; the same cases also belong to
+# normal full acceptance and core-only, not a replacement application/demo.
+add_executable(hlclient_remote_snapshot_buffer_tests test_remote_snapshot_buffer_e32.cpp test_remote_nointerp_motion.cpp)
+target_link_libraries(hlclient_remote_snapshot_buffer_tests PRIVATE
+    Catch2::Catch2WithMain hlclient::entity_interpolation hlclient::client)
+target_compile_features(hlclient_remote_snapshot_buffer_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_remote_snapshot_buffer_tests PRIVATE HLCLIENT_HAS_GAME_HALFLIFE=0)
+hlclient_enable_warnings(hlclient_remote_snapshot_buffer_tests)
+hlclient_enable_address_sanitizer(hlclient_remote_snapshot_buffer_tests)
+
+add_executable(hlclient_movement_effect_tests
+    test_post_movement_effect.cpp test_reference_brush_boundary_recovery.cpp)
+target_link_libraries(hlclient_movement_effect_tests PRIVATE Catch2::Catch2WithMain
+    hlclient::goldsrc_local_movement hlclient::goldsrc_usercmd_session
+    hlclient::prediction_api hlclient::local_prediction hlclient::client)
+target_compile_features(hlclient_movement_effect_tests PRIVATE cxx_std_20)
+target_compile_definitions(hlclient_movement_effect_tests PRIVATE HLCLIENT_HAS_GAME_HALFLIFE=0)
+hlclient_enable_warnings(hlclient_movement_effect_tests)
+hlclient_enable_address_sanitizer(hlclient_movement_effect_tests)
+
 add_executable(hlclient_tests
+    test_screen_effects.cpp
+    test_screen_effects_renderer.cpp
+    test_post_movement_effect.cpp
+    test_reference_brush_boundary_recovery.cpp
+    test_remote_snapshot_buffer_e32.cpp
+    test_remote_nointerp_motion.cpp
+    test_halflife_nointerp_motion.cpp
+    test_uneven_ground_e32.cpp
+    test_external_diagnostics_e31.cpp
+    test_external_session_e31.cpp
+    test_movement_diagnostics_e32.cpp
+    test_movement_session_diagnostics.cpp
+    test_remote_movement_diagnostics.cpp
+    test_video_image_e31.cpp
+    test_msaa_e311.cpp
+    test_hud_sprite_renderer_e29.cpp
+    test_hud_resources_e29.cpp
+    test_hud_resources_core_e29.cpp
+    test_hud_input_routing_e29.cpp
+    test_sdl_escape_owner_e29.cpp
+    test_hud_integration_e29.cpp
+    test_killfeed_sprite_e291.cpp
+    test_blood_sprite_scale_e30.cpp
+    test_server_decal_presentation_e30.cpp
+    test_decal_assets_e30.cpp
+    test_decal_assets_gl_e30.cpp
+    test_server_blood_module_e30.cpp
+    test_server_decal_birth_e30.cpp
+    test_server_decal_composition_e30.cpp
+    test_halflife_sprite_hud_e29.cpp
+    test_application_close_e281.cpp
+    test_session_receipt_e281.cpp
+    test_graceful_disconnect_e281.cpp
+    test_weapon_suite_lifecycle_e28.cpp
+    test_peer_disconnect_e28.cpp
+    test_weapon_suite_e28.cpp
+    test_effect_palette_preparation.cpp
+    test_snark_blood_asset_audit.cpp
+    test_snark_sound_pop.cpp
+    test_snark_local.cpp
+    test_snark_world.cpp
+    test_snark_pop_visibility.cpp
+    test_snark_assets.cpp
+    test_tripmine_local.cpp
+    test_tripmine_assets.cpp
+    test_tripmine_world.cpp
+    test_hand_grenade_local.cpp
+    test_satchel_local.cpp
+    test_satchel_observations.cpp
+    test_satchel_world.cpp
+    test_satchel_assets.cpp
+    test_hand_grenade_observations.cpp
+    test_hand_grenade_world.cpp
+    test_hand_grenade_assets.cpp
+    test_egon.cpp
+    test_hornet_local.cpp
+    test_hornet_remote.cpp
+    test_hornet_entities.cpp
+    test_hornet_assets.cpp
+    test_gauss.cpp
     test_audio_api.cpp
     test_local_weapon_audio.cpp
     test_local_weapon_visuals.cpp
     test_local_weapon_visuals_opengl.cpp
     test_remote_effect_presentation.cpp
     test_world_impact_presentation.cpp
+    test_render_line_geometry.cpp
+    test_impact_particle_pool.cpp
     test_halflife_movement_audio.cpp
     test_halflife_materials.cpp
     test_server_audio.cpp
     test_game_client_module.cpp
     test_game_camera_intent.cpp
     test_half_life_client_module.cpp
+    test_halflife_multiplayer.cpp
+    test_mp5_primary.cpp
+    test_mp5_secondary.cpp
+    test_shotgun_local.cpp
+    test_shotgun_remote.cpp
+    test_shotgun_composition.cpp
+    test_python_357_local.cpp
+    test_python_357_camera.cpp
+    test_python_357_remote.cpp
+    test_python_357_assets.cpp
+    test_crossbow_local.cpp
+    test_crossbow_remote.cpp
+    test_crossbow_assets.cpp
+    test_rpg_local.cpp
+    test_rpg_entities.cpp
+    test_temporary_effect_presentation.cpp
     test_remote_player_presentation.cpp
     test_remote_weapon_effects.cpp
     test_halflife_pickups.cpp
@@ -51,6 +149,9 @@ add_executable(hlclient_tests
     test_goldsrc_move_checksum.cpp
     test_reference_client_move.cpp
     test_reference_move_transmission.cpp
+    test_reference_lift_stability_e32.cpp
+    test_reference_lift_top_e32_1.cpp
+    test_convex_corner_stability_e321.cpp
     test_goldsrc_usercmd_delta_codec.cpp
     test_goldsrc_usercmd_duration.cpp
     test_goldsrc_usercmd_fake_hlds_integration.cpp
@@ -172,11 +273,13 @@ add_executable(hlclient_tests
     test_world_texture_resolution.cpp
     test_world_texture_set.cpp
     test_world_texture_import_stage.cpp
+    test_sky_assets.cpp
     test_world_lightmap_atlas.cpp
     test_world_render_package.cpp
     test_world_render_package_stage.cpp
     test_world_spatial_scene_stage.cpp
     test_render_camera_math.cpp
+    test_viewmodel_clipping.cpp
     test_world_view_frustum.cpp
     test_world_visibility_resolver.cpp
     test_world_visible_draw_list.cpp
@@ -271,7 +374,13 @@ add_executable(hlclient_tests
     test_user_info_update.cpp
 )
 
+if(HLCLIENT_BUILD_GAME_HALFLIFE)
+    target_sources(hlclient_tests PRIVATE test_player_appearance_e31.cpp)
+endif()
+
 if(WIN32)
+    add_dependencies(hlclient_tests hlclient_external_process_fixture)
+    set_source_files_properties(test_external_launcher_e31.cpp PROPERTIES COMPILE_OPTIONS /utf-8)
     target_sources(
         hlclient_tests
         PRIVATE
@@ -279,6 +388,8 @@ if(WIN32)
             test_windows_binary_identity.cpp
             test_windows_network_isolation.cpp
             test_windows_process_orchestrator.cpp
+            test_external_launcher_e31.cpp
+            test_external_launch_preflight_e31.cpp
             test_stock_external_target_approval.cpp
             test_stock_external_artifact_v2.cpp
             test_stock_external_reparse_diagnostics.cpp
@@ -293,7 +404,8 @@ endif()
 
 target_link_libraries(hlclient_tests
     PRIVATE
-        hlclient::audio_sdl hlclient::goldsrc_sound_assets
+        hlclient::session_receipts
+        hlclient::audio_sdl hlclient::goldsrc_sound_assets hlclient::goldsrc_hud_assets
         hlclient::game_halflife
         hlclient::game_client_host
         hlclient::game_policy
@@ -400,6 +512,7 @@ if(WIN32)
             hlclient::windows_binary_identity
             hlclient::windows_network_isolation
             hlclient::windows_process_orchestrator
+            hlclient::external_launcher
             hlclient::windows_reparse_provenance
             hlclient::windows_stock_external_target_api
             hlclient::windows_stock_research_copy
@@ -441,6 +554,10 @@ if(COMMAND catch_discover_tests)
         DISCOVERY_MODE PRE_TEST
         PROPERTIES TIMEOUT 30
     )
+    # This assertion checks a GLOBAL exact-image inventory. Other independently
+    # passing fake-peer tests legitimately use that same binary concurrently.
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/process_identity_test_serialization.cmake")
 else()
     add_test(NAME hlclient_tests COMMAND hlclient_tests)
     set_tests_properties(hlclient_tests PROPERTIES TIMEOUT 30)
@@ -577,6 +694,16 @@ set_tests_properties(
         WILL_FAIL TRUE
         TIMEOUT 30
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_test(
+    NAME hlclient_application_deferred_handshake_startup
+    COMMAND "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+        -NoProfile -NonInteractive -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/scripts/test_live_visual_startup.ps1"
+        -ToolPath $<TARGET_FILE:hlclient>
+        -FixtureRoot "${CMAKE_CURRENT_BINARY_DIR}/live-startup-fixture")
+set_tests_properties(hlclient_application_deferred_handshake_startup PROPERTIES
+    LABELS "offline;application;startup;no-stock" TIMEOUT 45)
 
 add_test(
     NAME hlclient_application_runtime_replay_capture_missing_fails_closed
@@ -823,3 +950,15 @@ set_tests_properties(
         FIXTURES_CLEANUP hlclient_collision_checker_fixture
         TIMEOUT 30
 )
+
+if(WIN32 AND HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE)
+    add_test(
+        NAME hlclient_normal_close_verdict_e282_no_stock
+        COMMAND "${HLCLIENT_STOCK_RUNTIME_POWERSHELL7_EXECUTABLE}"
+            -NoProfile -NonInteractive -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/scripts/test_normal_close_verdict_e282.ps1"
+            -OrchestratorPath $<TARGET_FILE:hlclient_stock_runtime_orchestrator>
+    )
+    set_tests_properties(hlclient_normal_close_verdict_e282_no_stock PROPERTIES
+        LABELS "offline;no-stock;reporting;e282" TIMEOUT 180)
+endif()

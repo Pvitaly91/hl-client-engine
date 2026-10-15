@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/studio/goldsrc_studio_pose.hpp>
+#include <hlclient/entity_render/studio_socket.hpp>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -222,6 +223,23 @@ TEST_CASE("Studio pose wraps or clamps frames and evaluates finite hierarchy",
               .quantized_values == std::vector<std::int16_t>{0, 10, 20});
 }
 
+TEST_CASE("Studio single-frame looping pose stays frame zero for every finite render time",
+          "[goldsrc-studio][pose][e22-single-frame][core-only]") {
+    for(const bool looping:{false,true}) {
+        auto model=pose_model(1U,looping,false);auto& sequence=model.sequences[0];sequence.frame_count=1;
+        for(auto& blend:sequence.animation_blends)for(auto& bone:blend.bone_tracks)for(auto& c:bone.channels)c.frame_coverage=1;
+        for(const double frame:{0.,.001,.25,.999,1.,1.25,7.1,4000.125}) {
+            CAPTURE(looping,frame);studio::StudioPoseInput input;input.frame_coordinate=frame;
+            const auto posed=studio::StudioPoseEvaluator{}.evaluate(model_identity(),model,input);REQUIRE(posed);
+            CHECK(posed.pose->frame_sample().frame_zero==0);CHECK(posed.pose->frame_sample().frame_one==0);CHECK(posed.pose->frame_sample().fraction==0);
+            CHECK(posed.pose->frame_sample().normalized_frame_coordinate==0);
+            for(const auto& bone:posed.pose->world_bones())CHECK(std::ranges::all_of(bone.transform.values,[](float v){return std::isfinite(v);}));
+        }
+        for(const auto frame:{std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity()}) {
+            studio::StudioPoseInput input;input.frame_coordinate=frame;CHECK_FALSE(studio::StudioPoseEvaluator{}.evaluate(model_identity(),model,input));
+        }
+    }
+}
 TEST_CASE("Studio fractional bone rotations take the shortest endpoint quaternion path",
           "[goldsrc-studio][pose][fractional][rotation-wrap]")
 {
@@ -572,6 +590,114 @@ TEST_CASE("Studio pose cache is bounded per explicit playback frame",
     CHECK(cache.statistics().frame_token == 101U);
 }
 
+TEST_CASE("E11 bone merge matches case-folded names and evaluates unmatched child hierarchy",
+          "[e11][pose][bone-merge]") {
+    const auto parent=pose_model(1U,true,true);
+    auto child=pose_model();
+    child.bones[0].name="ROOT";child.bones[1].name="weapon_tip";
+    studio::StudioBoneMergeCache cache;
+    const studio::StudioPoseModelIdentity child_id{"synthetic_child",{77U,88U}};
+    const auto mapping=cache.prepare(model_identity(),parent,child_id,child);
+    REQUIRE(mapping);CHECK(mapping.mapping->matched_bones==2U);
+    CHECK(mapping.mapping->parent_bones==std::vector<std::int32_t>{0,-1,2});
+    studio::StudioPoseInput input;input.frame_coordinate=1.5;
+    const auto parent_pose=evaluate(parent,input);
+    const auto merged=studio::StudioPoseEvaluator{}.merge(parent_pose,child,*mapping.mapping,{});
+    REQUIRE(merged);
+    CHECK(merged.pose->world_bones()[0].transform.values==parent_pose.world_bones()[0].transform.values);
+    CHECK(merged.pose->world_bones()[2].transform.values==parent_pose.world_bones()[2].transform.values);
+    // Root rotates +90 degrees: the unmatched local +X tip inherits +Y.
+    const auto& root=parent_pose.world_bones()[0].transform.values;
+    CHECK(merged.pose->world_bones()[1].transform.values[3]==Approx(root[3]+root[0]));
+    CHECK(merged.pose->world_bones()[1].transform.values[7]==Approx(root[7]+root[4]));
+    const auto again=cache.prepare(model_identity(),parent,child_id,child);
+    REQUIRE(again);CHECK(again.mapping.get()==mapping.mapping.get());CHECK(cache.hits()==1U);
+    const auto changed=cache.prepare(model_identity(),parent,{"synthetic_child",{77U,89U}},child);
+    REQUIRE(changed);CHECK(changed.mapping.get()!=mapping.mapping.get());
+    cache.reset();CHECK(cache.hits()==0U);
+    const auto after=cache.prepare(model_identity(),parent,child_id,child);
+    REQUIRE(after);CHECK(after.mapping.get()!=mapping.mapping.get());
+}
+TEST_CASE("E11 invalid ambiguous cyclic and unrelated bone mappings fail typed without parent mutation",
+          "[e11][pose][bone-merge]") {
+    const auto parent=pose_model();const auto pose=evaluate(parent);
+    studio::StudioBoneMergeCache cache;
+    for(const unsigned failure:{0U,1U,2U,3U}) {
+        auto child=pose_model();
+        if(failure==0U) child.bones[1].name="ROOT";
+        if(failure==1U) child.bones[0].parent_index=1;
+        if(failure==2U) for(auto& bone:child.bones) bone.name="absent_"+bone.name;
+        if(failure==3U) child.bones[0].name.clear();
+        const auto rejected=cache.prepare(model_identity(),parent,{"invalid",{failure+1U,1U}},child);
+        CHECK_FALSE(rejected);REQUIRE(rejected.error);
+    }
+    CHECK(pose.world_bones()[1].transform.values[7]==Approx(1.0F));
+}
+TEST_CASE("E11 merge cache stays bounded for repeated sixteen-player model pairs",
+          "[e11][pose][bone-merge][bounds]") {
+    const auto parent=pose_model(),child=pose_model();studio::StudioBoneMergeCache cache;
+    for(unsigned frame=0;frame<30U;++frame) for(unsigned player=0;player<16U;++player) {
+        const auto mapping=cache.prepare(model_identity(),parent,{"child",{player+1U,1U}},child);
+        REQUIRE(mapping);
+    }
+    CHECK(cache.hits()==16U*29U);
+    for(unsigned revision=0;revision<128U;++revision)
+        REQUIRE(cache.prepare(model_identity(),parent,{"child",{revision+100U,2U}},child));
+    cache.reset();CHECK(cache.hits()==0U);
+}
+TEST_CASE("E12 generic Studio socket uses the same bone and entity matrices as rendered vertices",
+          "[e12][pose][studio-socket][core-api]") {
+    namespace render=hlclient::entity_render;
+    auto model=pose_model();model.attachments.push_back({"owned_socket",0,1U,{2,0,0},{}});
+    const auto pose=evaluate(model);
+    for(const float scale:{1.0F,2.0F}) for(const float yaw:{0.0F,90.0F}) {
+        render::EntityRenderTransform transform{{10,20,30},{0,0,yaw},scale};
+        const auto socket=render::evaluate_studio_attachment(model_identity(),model,pose,0U,transform);
+        REQUIRE(socket);CHECK(socket.socket->origin.z==Approx(30));
+        CHECK(socket.socket->origin.x==Approx(yaw==0 ? 10.0F : 10.0F-3.0F*scale).margin(0.0001));
+        CHECK(socket.socket->origin.y==Approx(yaw==0 ? 20.0F+3.0F*scale : 20.0F).margin(0.0001));
+        const auto& b=pose.world_bones()[1].transform.values;
+        const auto matrix=render::entity_render_model_matrix(transform);
+        const assets::AssetVector3 vertex{b[0]*2+b[3],b[4]*2+b[7],b[8]*2+b[11]};
+        CHECK(socket.socket->origin.x==Approx(matrix[0]*vertex.x+matrix[4]*vertex.y+matrix[8]*vertex.z+matrix[12]));
+        CHECK(socket.socket->origin.y==Approx(matrix[1]*vertex.x+matrix[5]*vertex.y+matrix[9]*vertex.z+matrix[13]));
+        CHECK(socket.socket->origin.z==Approx(matrix[2]*vertex.x+matrix[6]*vertex.y+matrix[10]*vertex.z+matrix[14]));
+    }
+    auto definition=assets::ModelSocketDefinition{999,{}};
+    CHECK(render::evaluate_studio_socket(model_identity(),model,pose,definition,{}).error==render::StudioSocketError::bone);
+    definition={1,{std::numeric_limits<float>::quiet_NaN(),0,0}};
+    CHECK(render::evaluate_studio_socket(model_identity(),model,pose,definition,{}).error==render::StudioSocketError::non_finite);
+    definition={1,{2,0,0}};
+    auto wrong=model_identity();++wrong.revision.primary;
+    CHECK(render::evaluate_studio_socket(wrong,model,pose,definition,{}).error==render::StudioSocketError::identity);
+    CHECK(render::evaluate_studio_socket(model_identity(),model,pose,definition,{{},{},0}).error==render::StudioSocketError::invalid_transform);
+    CHECK(render::evaluate_studio_attachment(model_identity(),model,pose,10,{}).error==render::StudioSocketError::attachment);
+    definition.right=definition.forward;
+    CHECK(render::evaluate_studio_socket(model_identity(),model,pose,definition,{}).error==render::StudioSocketError::invalid_basis);
+    model.attachments[0].local_vectors[0]={1,0,0};
+    CHECK(render::evaluate_studio_attachment(model_identity(),model,pose,0,{}).error==render::StudioSocketError::invalid_basis);
+}
+TEST_CASE("E12 weapon socket follows final merged main gait and transition pose without mutating it",
+          "[e12][pose][bone-merge][studio-socket][core-api]") {
+    const auto parent=pose_model(1,true,true);auto child=pose_model();child.bones[1].name="weapon_tip";
+    const studio::StudioPoseModelIdentity child_id{"owned_weapon_socket",{177,188}};
+    studio::StudioBoneMergeCache cache;const auto mapping=cache.prepare(model_identity(),parent,child_id,child);REQUIRE(mapping);
+    for(unsigned mode=0;mode<5;++mode) {
+        studio::StudioPoseCompositionInput input;input.main.frame_coordinate=mode*0.25;
+        if(mode==3U) {input.previous=input.main;input.previous->frame_coordinate=0;input.previous_weight=0.5F;}
+        if(mode==4U) {input.layer=input.main;input.layer->frame_coordinate=0.75;input.lower_bone_indices={0};}
+        const auto composed=studio::StudioPoseEvaluator{}.compose(model_identity(),parent,input);REQUIRE(composed);
+        const auto before=composed.pose->world_bones()[0].transform.values;
+        const auto merged=studio::StudioPoseEvaluator{}.merge(*composed.pose,child,*mapping.mapping,{});REQUIRE(merged);
+        const assets::ModelSocketDefinition definition{1,{2,0,0}};
+        const auto socket=hlclient::entity_render::evaluate_studio_socket(child_id,child,*merged.pose,definition,{{4,5,6},{},1});
+        REQUIRE(socket);
+        CHECK(socket.socket->origin.x==Approx(4+before[3]+before[0]*3).margin(0.0001));
+        CHECK(socket.socket->origin.y==Approx(5+before[7]+before[4]*3).margin(0.0001));
+        CHECK(socket.socket->origin.z==Approx(6+before[11]+before[8]*3).margin(0.0001));
+        CHECK(composed.pose->world_bones()[0].transform.values==before);
+    }
+}
 static_assert(!std::is_copy_assignable_v<studio::StudioPoseState>);
 static_assert(std::is_same_v<decltype(studio::StudioPoseCacheResult{}.pose),
                              std::shared_ptr<const studio::StudioPoseState>>);

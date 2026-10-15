@@ -361,6 +361,11 @@ std::size_t UserInfoSignonStage::request_queue_count() const noexcept
     return movement_stage_.request_queue_count();
 }
 
+NetchanDriver* UserInfoSignonStage::close_driver() noexcept
+{
+    return movement_stage_.close_driver();
+}
+
 NetchanDriver* UserInfoSignonStage::retained_driver() noexcept
 {
     if (!retain_connection_at_boundary_) {

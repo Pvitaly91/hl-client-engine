@@ -357,11 +357,13 @@ GoldSrcIndexedTextureDecodeOperation::GoldSrcIndexedTextureDecodeOperation(
     const std::span<const std::byte> record,
     GoldSrcParsedMiptex parsed,
     assets::WorldTextureAsset texture,
-    const std::size_t total_rgba_bytes) noexcept
+    const std::size_t total_rgba_bytes,
+    const GoldSrcIndexedTextureInterpretation interpretation) noexcept
     : record_{record},
       parsed_{std::move(parsed)},
       texture_{std::move(texture)},
-      total_rgba_bytes_{total_rgba_bytes}
+      total_rgba_bytes_{total_rgba_bytes},
+      interpretation_{interpretation}
 {
 }
 
@@ -371,7 +373,8 @@ GoldSrcIndexedTextureDecodeStartResult GoldSrcIndexedTextureDecodeOperation::beg
     const assets::WorldTextureSourceKind source_kind,
     const std::optional<std::uint32_t> source_bsp_texture_index,
     const std::optional<std::uint32_t> source_archive_ordinal,
-    const GoldSrcIndexedTextureLimits& limits)
+    const GoldSrcIndexedTextureLimits& limits,
+    const GoldSrcIndexedTextureInterpretation interpretation)
 {
     auto parsed_result = GoldSrcMiptexParser::parse(record, source_profile, limits);
     if (!parsed_result) {
@@ -388,6 +391,29 @@ GoldSrcIndexedTextureDecodeStartResult GoldSrcIndexedTextureDecodeOperation::beg
         });
     }
 
+    if (interpretation != GoldSrcIndexedTextureInterpretation::palette_color &&
+        interpretation != GoldSrcIndexedTextureInterpretation::palette_tint_index_coverage) {
+        return begin_fail(GoldSrcMiptexError{GoldSrcMiptexErrorCode::invalid_configuration,
+            0U,std::nullopt,"Unsupported explicit indexed image interpretation"});
+    }
+    if (interpretation == GoldSrcIndexedTextureInterpretation::palette_tint_index_coverage) {
+        // The independently audited decal profile encodes coverage in the
+        // texel index and holds its color at palette255. Validate this exact
+        // grayscale inverse-ramp family; ordinary textures never enter here.
+        const auto palette=*parsed.palette_byte_offset;
+        std::uint8_t previous=255;
+        for (std::size_t index=0;index<255;++index) {
+            const auto shade=std::to_integer<std::uint8_t>(record[palette+index*3]);
+            if (record[palette+index*3]!=record[palette+index*3+1] ||
+                record[palette+index*3]!=record[palette+index*3+2] || shade>previous ||
+                (index==0 && shade!=255) || (index==254 && shade!=0)) {
+                return begin_fail(GoldSrcMiptexError{GoldSrcMiptexErrorCode::invalid_configuration,
+                    palette+index*3,std::nullopt,"Palette does not match explicit tint/index-coverage profile"});
+            }
+            previous=shade;
+        }
+    }
+
     std::size_t total_rgba_bytes = 0U;
     assets::WorldTextureAsset texture;
     try {
@@ -398,6 +424,8 @@ GoldSrcIndexedTextureDecodeStartResult GoldSrcIndexedTextureDecodeOperation::beg
         texture.alpha_mode = !parsed.name.empty() && parsed.name.front() == '{'
             ? assets::WorldTextureAlphaMode::masked_index_255
             : assets::WorldTextureAlphaMode::opaque;
+        if (interpretation == GoldSrcIndexedTextureInterpretation::palette_tint_index_coverage)
+            texture.alpha_mode=assets::WorldTextureAlphaMode::straight_alpha;
         texture.source_bsp_texture_index = source_bsp_texture_index;
         texture.source_archive_ordinal = source_archive_ordinal;
         for (std::size_t level = 0U; level < parsed.mip_levels.size(); ++level) {
@@ -437,7 +465,7 @@ GoldSrcIndexedTextureDecodeStartResult GoldSrcIndexedTextureDecodeOperation::beg
 
     return GoldSrcIndexedTextureDecodeStartResult{
         GoldSrcIndexedTextureDecodeOperation{
-            record, std::move(parsed), std::move(texture), total_rgba_bytes},
+            record, std::move(parsed), std::move(texture), total_rgba_bytes,interpretation},
         std::nullopt,
     };
 }
@@ -472,13 +500,16 @@ GoldSrcIndexedTextureDecodeState GoldSrcIndexedTextureDecodeOperation::update(
             const auto source_index = std::to_integer<std::uint8_t>(
                 record_[source_level.byte_offset + current_level_texel_ + index]);
             const auto palette_entry = palette_offset +
-                static_cast<std::size_t>(source_index) * 3U;
+                static_cast<std::size_t>(interpretation_ ==
+                    GoldSrcIndexedTextureInterpretation::palette_tint_index_coverage ? 255U : source_index) * 3U;
             const auto output_offset = (current_level_texel_ + index) * 4U;
             output[output_offset] = record_[palette_entry];
             output[output_offset + 1U] = record_[palette_entry + 1U];
             output[output_offset + 2U] = record_[palette_entry + 2U];
-            output[output_offset + 3U] =
-                texture_->alpha_mode == assets::WorldTextureAlphaMode::masked_index_255 &&
+            output[output_offset + 3U] = interpretation_ ==
+                GoldSrcIndexedTextureInterpretation::palette_tint_index_coverage
+                ? static_cast<std::byte>(source_index)
+                : texture_->alpha_mode == assets::WorldTextureAlphaMode::masked_index_255 &&
                     source_index == 255U
                 ? std::byte{0}
                 : std::byte{0xFF};
@@ -544,14 +575,16 @@ GoldSrcIndexedTextureDecodeResult GoldSrcIndexedTextureDecoder::decode(
     const assets::WorldTextureSourceKind source_kind,
     const std::optional<std::uint32_t> source_bsp_texture_index,
     const std::optional<std::uint32_t> source_archive_ordinal,
-    const GoldSrcIndexedTextureLimits& limits)
+    const GoldSrcIndexedTextureLimits& limits,
+    const GoldSrcIndexedTextureInterpretation interpretation)
 {
     auto started = GoldSrcIndexedTextureDecodeOperation::begin(record,
         source_profile,
         source_kind,
         source_bsp_texture_index,
         source_archive_ordinal,
-        limits);
+        limits,
+        interpretation);
     if (!started) {
         return GoldSrcIndexedTextureDecodeResult{
             std::nullopt,

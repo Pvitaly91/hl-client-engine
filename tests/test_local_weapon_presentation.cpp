@@ -97,6 +97,95 @@ TEST_CASE("Submitted Glock action predicts only visual state and fresh clip conf
   CHECK(fresh.weapon_slots.front().clip == 16);
 }
 
+TEST_CASE("Glock secondary is a server-confirmed ordinary bullet fire with the pinned last-round pose",
+          "[glock-secondary][weapon-presentation][glock]") {
+  app::LocalWeaponPresentationController controller;
+  const auto canonical=weapon_state(2U,59U,1,68U,1U);
+  observe(controller,canonical,0.0);
+  const auto submitted=command(1U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.02);
+  controller.submit(submitted,0.02);
+  const auto firing=controller.sample(0.02);
+  REQUIRE(firing.identity);REQUIRE(firing.visual);
+  CHECK(firing.action==app::LocalWeaponAction::primary_fire);
+  CHECK(firing.visual->sequence==3U);CHECK(firing.visual->body==2U);
+  CHECK(firing.primary_fire_starts==1U);CHECK(firing.secondary_launch_starts==0U);
+  CHECK(firing.local_punch_pitch_degrees==Catch::Approx(-2.0));
+  CHECK(canonical.weapon_slots.front().clip==1);
+  controller.submit(submitted,0.03);controller.submit(command(2U,submitted.buttons,0.04),0.04);
+  CHECK(controller.sample(0.04).actions_started==1U);
+  CHECK(controller.sample(0.04).duplicate_submissions==1U);
+  const auto fresh=weapon_state(2U,59U,0,68U,2U);
+  observe(controller,fresh,0.05);
+  const auto confirmed=controller.sample(0.05);REQUIRE(confirmed.visual);
+  CHECK(confirmed.status==app::LocalWeaponActionStatus::server_confirmed);
+  CHECK(confirmed.visual->sequence==3U); // EV_FireGlock2, not Glock1's SHOOT_EMPTY.
+  CHECK(confirmed.visual->restart_identity==firing.visual->restart_identity);
+  CHECK(confirmed.primary_fire_confirmed==1U);
+  controller.submit(command(3U,submitted.buttons,0.24),0.24);
+  CHECK(controller.sample(0.24).actions_started==1U); // Canonical empty clip stays empty.
+}
+
+TEST_CASE("Glock primary and secondary honor the preceding shared shot cycle and server timers",
+          "[glock-secondary][weapon-presentation][glock][cooldown]") {
+  app::LocalWeaponPresentationController controller;
+  observe(controller,weapon_state(2U,59U,17,68U,1U),0.0);
+  controller.submit(command(1U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack,0.02),0.02);
+  CHECK(controller.sample(0.02).primary_fire_starts==1U);
+  observe(controller,weapon_state(2U,59U,16,68U,2U),0.04);
+  controller.submit(command(2U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.24),0.24);
+  CHECK(controller.sample(0.24).primary_fire_starts==1U); // Prior primary owns its .3s cycle.
+  controller.submit(command(3U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.32),0.32);
+  CHECK(controller.sample(0.32).primary_fire_starts==2U);
+  observe(controller,weapon_state(2U,59U,15,68U,3U),0.34);
+  controller.submit(command(4U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack,0.50),0.50);
+  CHECK(controller.sample(0.50).primary_fire_starts==2U);
+  controller.submit(command(5U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack,0.52),0.52);
+  CHECK(controller.sample(0.52).primary_fire_starts==3U); // Prior secondary owns its .2s cycle.
+
+  app::LocalWeaponPresentationController priority;
+  observe(priority,weapon_state(2U,59U,17,68U,1U),0.0);
+  priority.submit(command(1U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack |
+      hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.02),0.02);
+  CHECK(priority.sample(0.02).primary_fire_starts==1U);
+  observe(priority,weapon_state(2U,59U,16,68U,2U),0.04);
+  priority.submit(command(2U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.22),0.22);
+  CHECK(priority.sample(0.22).primary_fire_starts==2U); // Both buttons select secondary first.
+
+  app::LocalWeaponPresentationController timer;
+  auto delayed=weapon_state(2U,59U,17,68U,1U);
+  delayed.weapon_slots.front().next_secondary_attack=0.5;
+  observe(timer,delayed,0.0);
+  timer.submit(command(1U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.02),0.02);
+  CHECK(timer.sample(0.02).primary_fire_starts==0U);
+  timer.submit(command(2U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.50),0.50);
+  CHECK(timer.sample(0.50).primary_fire_starts==1U);
+}
+
+TEST_CASE("Glock secondary shares existing empty reload model and life gates without an M203 water restriction",
+          "[glock-secondary][weapon-presentation][glock][lifecycle]") {
+  for(unsigned variant=0;variant<4;++variant) {
+    CAPTURE(variant);app::LocalWeaponPresentationController controller;
+    auto state=weapon_state(2U,59U,17,68U,1U);
+    if(variant==0U) state.weapon_slots.front().clip=0;
+    if(variant==1U) state.weapon_slots.front().in_reload=true;
+    if(variant==2U) state.receiving_client->next_weapon_attack=1.0;
+    if(variant==3U) state.receiving_client->health=0.0;
+    observe(controller,state,0.0);
+    controller.submit(command(1U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.02),0.02);
+    CHECK(controller.sample(0.02).primary_fire_starts==0U);
+    CHECK(controller.drain_audio().count==0U);
+  }
+  app::LocalWeaponPresentationController submerged;
+  auto underwater=weapon_state(2U,59U,17,68U,1U);underwater.receiving_client->water_level=3U;
+  observe(submerged,underwater,0.0);
+  submerged.submit(command(1U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.02),0.02);
+  CHECK(submerged.sample(0.02).primary_fire_starts==1U);
+  app::LocalWeaponPresentationController crowbar;
+  observe(crowbar,weapon_state(1U,60U,0,0U,1U),0.0);
+  crowbar.submit(command(1U,hlclient::goldsrc::kReferenceGoldSrcButtonAttack2,0.02),0.02);
+  CHECK(crowbar.sample(0.02).actions_started==0U);
+}
+
 TEST_CASE("R1 completed Glock action enters one continuous new idle timeline",
           "[r1-viewmodel-transition][weapon-presentation]") {
   app::LocalWeaponPresentationController controller;

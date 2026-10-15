@@ -26,7 +26,7 @@ void CommittedSoundQueue::publish(std::uint64_t record,std::size_t ordinal,const
     if(size_==events_.size()) {++dropped; overflow_=true; return;}
     auto routed=sound ? *sound : RuntimeControlSound{};
     if(user) routed.entity_reference=static_cast<std::uint16_t>(user->client_index+1U);
-    events_[(head_+size_++)%events_.size()]={generation,record,ordinal,cursor,event.provenance.message_ordinal,event.opcode,routed,now};
+    events_[(head_+size_++)%events_.size()]={generation,record,ordinal,cursor,event.provenance.message_ordinal,event.opcode,routed,now,user && !user->present};
 }
 bool CommittedSoundQueue::pop(CommittedSound& event) noexcept {
     if(!size_) return false;
@@ -35,6 +35,7 @@ bool CommittedSoundQueue::pop(CommittedSound& event) noexcept {
 void ServerAudio::reset(std::uint64_t generation) noexcept {
     (void)output_.submit(audio::Command{audio::Operation::reset});
     for(auto& slot:slots_) slot={};
+    retired_sources_.fill(false);
     generation_=generation; high_ordinal_=high_cursor_=0;
 }
 void ServerAudio::stop(Slot& s) noexcept {
@@ -49,12 +50,17 @@ void ServerAudio::consume(const CommittedSound& event,SoundTime now) noexcept {
     high_ordinal_=event.ordinal; high_cursor_=event.cursor;
     const auto& sound=event.sound;
     if(event.opcode==RuntimeControlOpcode::svc_updateuserinfo) {
-        // A committed slot update is a conservative attachment boundary, not
-        // proof of disconnect. Do not transfer an old loop to a new occupant.
+        if(sound.entity_reference && sound.entity_reference<=retired_sources_.size())
+            retired_sources_[sound.entity_reference-1U]=event.retire_source;
+        // Ordinary info updates conservatively invalidate attachment only.
+        // An exact vacant publication also retires a playing entity loop,
+        // including one that never obtained its first source-lifetime sample.
         for(auto& s:slots_) if(s.used && s.event.sound.entity_reference==sound.entity_reference) {
             s.attachment_valid=false;
             s.command.origin={s.event.sound.origin[0],s.event.sound.origin[1],s.event.sound.origin[2]};
             ++stats_.attachment_invalidated;
+            if(event.retire_source && s.playing && s.command.asset &&
+                s.command.loop_enabled && s.command.asset->loop) stop(s);
         }
         return;
     }
@@ -91,6 +97,8 @@ void ServerAudio::consume(const CommittedSound& event,SoundTime now) noexcept {
     if(static_voice && std::count_if(slots_.begin(),slots_.end(),[](const auto& s){return s.used && s.command.static_voice;})>=audio::maximum_static_voices) {++stats_.limits; return;}
     for(auto& s:slots_) if(!s.used) {
         s.used=true; s.event=event; s.seen=now;
+        if(sound.entity_reference && sound.entity_reference<=retired_sources_.size() &&
+            retired_sources_[sound.entity_reference-1U]) s.attachment_valid=false;
         s.command={audio::Operation::start,++next_voice_,{},
             {sound.origin[0],sound.origin[1],sound.origin[2]},volume,
             static_cast<float>(sound.attenuation.value_or(64))/64.0F,pitch,
@@ -116,6 +124,7 @@ void ServerAudio::update(SoundAssets* assets,SoundTime now) noexcept {
             s={}; continue;
         }
         const bool loop=loaded.asset->loop.has_value() && s.command.loop_enabled;
+        if(loop && !s.attachment_valid) {stop(s);++stats_.attachment_invalidated;continue;}
         if(!loop && now-s.event.received>std::chrono::milliseconds{250}) {s={}; ++stats_.expired; continue;}
         s.command.asset=loaded.asset;
         if(!output_.submit(s.command)) {s={}; ++stats_.voice_rejected; error("output_queue_rejected"); continue;}
@@ -132,6 +141,10 @@ void ServerAudio::present(std::span<const SoundSource> sources,audio::Listener l
     receiving_entity_=receiving; output_.set_listener(listener);
     for(auto& s:slots_) if(s.used && s.event.sound.entity_reference) {
         const auto found=std::find_if(sources.begin(),sources.end(),[&](const auto& p){return p.entity==s.event.sound.entity_reference;});
+        if(s.source_lifetime && (found==sources.end() || found->lifetime!=s.source_lifetime)) {
+            s.attachment_valid=false;
+            if(s.attached) {stop(s);++stats_.attachment_invalidated;continue;}
+        } else if(found!=sources.end() && found->lifetime) s.source_lifetime=found->lifetime;
         if(s.attached && s.attachment_valid) {
             if(found!=sources.end() && std::isfinite(found->position.x) && std::isfinite(found->position.y) && std::isfinite(found->position.z)) {s.command.origin=found->position; s.seen=now;}
             else if(now-s.seen>std::chrono::seconds{2}) s.command.origin={s.event.sound.origin[0],s.event.sound.origin[1],s.event.sound.origin[2]};

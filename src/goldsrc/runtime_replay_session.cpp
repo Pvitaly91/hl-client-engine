@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <new>
+#include <tuple>
 #include <utility>
 #include <variant>
 
@@ -25,6 +26,105 @@ using client::RuntimeWeaponSlotObservation;
 
 constexpr std::uint64_t kFnvOffset = 14'695'981'039'346'656'037ULL;
 constexpr std::uint64_t kFnvPrime = 1'099'511'628'211ULL;
+
+[[nodiscard]] assets::AssetVector3 temporary_position(
+    const std::array<std::int16_t, 3U>& eighths) noexcept {
+    return {static_cast<float>(eighths[0]) / 8.0F,
+            static_cast<float>(eighths[1]) / 8.0F,
+            static_cast<float>(eighths[2]) / 8.0F};
+}
+
+// All retained allocations occur before the record's single commit point.
+// One TE body is one provenance identity, irrespective of sprite availability,
+// flags, position proximity or how many presentation components it produces.
+[[nodiscard]] std::vector<client::CommittedTemporaryEffect> stage_temporary_effects(
+    const RuntimeReplayRecord& record, const PacketEntityDecodedBatch& batch,
+    const RuntimeClientObservationState& committed_candidate) {
+    std::vector<client::CommittedTemporaryEffect> effects;
+    effects.reserve(batch.events.size()); // Bounded by the decoder's message limit.
+    const auto received_at = std::chrono::duration<double>(
+        record.received_at.value_or(std::chrono::steady_clock::now()).time_since_epoch()).count();
+    for (const auto& item : batch.events) {
+        const auto* control = std::get_if<RuntimeControlEvent>(&item);
+        if (!control) continue;
+        client::CommittedTemporaryEffect effect;
+        effect.generation = record.generation;
+        effect.record = record.record_identity;
+        effect.record_ordinal = record.record_ordinal;
+        effect.message_bit_offset = static_cast<std::uint32_t>(
+            control->provenance.start_cursor.absolute_bit_offset());
+        effect.received_at_seconds = received_at;
+        if (const auto* explosion = std::get_if<RuntimeControlExplosion>(&control->body)) {
+            effect.kind = client::TemporaryEffectKind::explosion;
+            effect.origin = temporary_position(explosion->coordinate_eighths);
+            effect.sprite_index = static_cast<std::uint16_t>(explosion->sprite_reference);
+            effect.scale_tenths = explosion->scale_tenths;
+            effect.framerate = explosion->framerate;
+            effect.flags = explosion->flags;
+        } else if (const auto* smoke = std::get_if<RuntimeControlSmoke>(&control->body)) {
+            effect.kind = client::TemporaryEffectKind::smoke;
+            effect.origin = temporary_position(smoke->coordinate_eighths);
+            effect.sprite_index = static_cast<std::uint16_t>(smoke->sprite_reference);
+            effect.scale_tenths = smoke->scale_tenths;
+            effect.framerate = smoke->framerate;
+        } else if (const auto* sparks = std::get_if<RuntimeControlSparks>(&control->body)) {
+            effect.kind = client::TemporaryEffectKind::sparks;
+            effect.origin = temporary_position(sparks->coordinate_eighths);
+        } else if (const auto* blood = std::get_if<RuntimeControlBloodSprite>(&control->body)) {
+            effect.kind = client::TemporaryEffectKind::blood_sprite;
+            effect.origin = temporary_position(blood->coordinate_eighths);
+            effect.blood_sprite_indices = blood->sprite_references;
+            effect.palette_color = blood->palette_color;
+            effect.blood_scale = blood->scale;
+        } else if (const auto* decal = std::get_if<RuntimeControlDecal>(&control->body)) {
+            effect.kind = client::TemporaryEffectKind::decal;
+            effect.origin = temporary_position(decal->coordinate_eighths);
+            effect.decal_index = decal->decal_reference;
+            effect.decal_entity = decal->entity_reference;
+            effect.decal_subtype = decal->temporary_entity_type;
+        } else if (const auto* bsp_decal = std::get_if<RuntimeControlBspDecal>(&control->body)) {
+            effect.kind = client::TemporaryEffectKind::decal;
+            effect.origin = temporary_position(bsp_decal->coordinate_eighths);
+            effect.decal_index = bsp_decal->decal_reference;
+            effect.decal_entity = bsp_decal->entity_reference;
+            effect.decal_subtype = bsp_decal->temporary_entity_type;
+            effect.decal_model_reference = bsp_decal->model_reference;
+        } else if (const auto* follow = std::get_if<RuntimeControlBeamFollow>(&control->body)) {
+            effect.kind = client::TemporaryEffectKind::beam_follow;
+            effect.entity_attachment=follow->entity_attachment;
+            effect.sprite_index=static_cast<std::uint16_t>(follow->sprite_reference);
+            effect.life_tenths=follow->life_tenths;effect.width_tenths=follow->width_tenths;
+            effect.color=follow->color;effect.brightness=follow->brightness;
+        } else if (const auto* bubbles = std::get_if<RuntimeControlBubbles>(&control->body)) {
+            effect.kind = bubbles->trail ? client::TemporaryEffectKind::bubble_trail : client::TemporaryEffectKind::bubbles;
+            effect.minimum = temporary_position(bubbles->minimum_eighths);
+            effect.maximum = temporary_position(bubbles->maximum_eighths);
+            effect.height = static_cast<float>(bubbles->height_eighths) / 8.0F;
+            effect.speed = static_cast<float>(bubbles->speed_eighths) / 8.0F;
+            effect.sprite_index = static_cast<std::uint16_t>(bubbles->sprite_reference);
+            effect.count = bubbles->count;
+        } else continue;
+        if(effect.kind==client::TemporaryEffectKind::decal && effect.decal_entity>0) {
+            const auto target=std::ranges::find(committed_candidate.packet_entities,
+                static_cast<std::uint32_t>(effect.decal_entity),&RuntimePacketEntityObservation::entity_number);
+            if(target!=committed_candidate.packet_entities.end() && target->ordinary_visual_schema &&
+                !target->player_movement_schema && target->model_index && *target->model_index>0 &&
+                *target->model_index<=1023 && target->origin.complete() && target->angles.complete()) {
+                const auto finite=[](const RuntimeVector3Observation& vector) {
+                    return std::isfinite(*vector.x) && std::isfinite(*vector.y) && std::isfinite(*vector.z) &&
+                        std::abs(*vector.x)<=1'000'000 && std::abs(*vector.y)<=1'000'000 && std::abs(*vector.z)<=1'000'000;
+                };
+                if(finite(target->origin) && finite(target->angles)) {
+                    effect.decal_target_pose=client::CommittedDecalTargetPose{*target->model_index,
+                        {static_cast<float>(*target->origin.x),static_cast<float>(*target->origin.y),static_cast<float>(*target->origin.z)},
+                        {static_cast<float>(*target->angles.x),static_cast<float>(*target->angles.y),static_cast<float>(*target->angles.z)}};
+                }
+            }
+        }
+        effects.push_back(effect);
+    }
+    return effects;
+}
 
 // Neutral reconstruction of committed event arguments. A packet reference is
 // an ordinal in the exact preceding same-payload packet snapshot, never an
@@ -76,6 +176,7 @@ void publish_scripted_events(game_api::GameClientHost& host,
             const auto& wire=events->entries[ordinal];
             game_api::CommittedScriptedEvent event;
             event.generation=record.generation; event.record=record.record_identity;
+            event.record_ordinal=record.record_ordinal;
             event.message_bit_offset=static_cast<std::uint32_t>(control->provenance.start_cursor.absolute_bit_offset());
             event.entry_ordinal=static_cast<std::uint32_t>(ordinal); event.event_index=wire.event_index;
             event.received_at_seconds=std::chrono::duration<double>(
@@ -116,14 +217,43 @@ void publish_scripted_events(game_api::GameClientHost& host,
                 // inheritance is explicitly zero in this compatible profile.
                 event.velocity=event_vector(wire.arguments.get(),velocities).value_or(
                     event_vector(entity,velocities).value_or(assets::AssetVector3{}));
+                if(const auto weapon=event_number(entity,"weaponmodel"); weapon &&
+                    *weapon>=0 && *weapon<=65535 && std::floor(*weapon)==*weapon)
+                    event.weapon_model_index=static_cast<std::uint32_t>(*weapon);
                 const auto ducking=event_number(wire.arguments.get(),"ducking").value_or(0.0);
                 const auto spread_x=event_number(wire.arguments.get(),"fparam1").value_or(0.0);
                 const auto spread_y=event_number(wire.arguments.get(),"fparam2").value_or(0.0);
-                if((ducking!=0.0 && ducking!=1.0) || std::abs(spread_x)>1 || std::abs(spread_y)>1)
+                if((ducking!=0.0 && ducking!=1.0) || !std::isfinite(spread_x) || !std::isfinite(spread_y) ||
+                    std::abs(spread_x)>1.0e6 || std::abs(spread_y)>1.0e6)
                     event.resolution=Resolution::invalid_arguments;
                 event.ducking=ducking==1.0;
                 event.spread_x=static_cast<float>(spread_x);event.spread_y=static_cast<float>(spread_y);
-                if(wire.fire_delay_ticks.value_or(0)!=0) event.resolution=Resolution::unsupported_delay;
+                const auto integer=[&](std::string_view name)->std::optional<std::int32_t> {
+                    const auto* field=wire.arguments ? wire.arguments->find_exact(name) : nullptr;
+                    if(field && field->base_type()==DeltaFieldBaseType::integer_value &&
+                        std::holds_alternative<std::int32_t>(field->value()))
+                        return std::get<std::int32_t>(field->value());
+                    return {};
+                };
+                event.integer_parameter1=integer("iparam1");
+                event.integer_parameter2=integer("iparam2");
+                const auto parameter=[&](std::string_view name)->std::optional<float> {
+                    const auto* field=wire.arguments ? wire.arguments->find_exact(name) : nullptr;
+                    if(field && field->base_type()==DeltaFieldBaseType::float_value && std::holds_alternative<double>(field->value())) {
+                        const auto value=std::get<double>(field->value());
+                        if(std::isfinite(value) && std::abs(value)<=1.0e6)return static_cast<float>(value);
+                    } return {};
+                };
+                event.float_parameter1=parameter("fparam1");event.float_parameter2=parameter("fparam2");
+                const auto boolean=[&](std::string_view name)->std::optional<bool> {
+                    const auto value=event_number(wire.arguments.get(),name);
+                    if(!value) return {};
+                    if(*value!=0 && *value!=1) {event.resolution=Resolution::invalid_arguments;return {};}
+                    return *value==1;
+                };
+                event.boolean_parameter1=boolean("bparam1");event.boolean_parameter2=boolean("bparam2");
+                event.fire_delay_ticks=wire.fire_delay_ticks.value_or(0);
+                if(event.fire_delay_ticks!=0 && event.resolution==Resolution::ready) event.resolution=Resolution::unsupported_delay;
             }
             host.committed_scripted_event(event);
         }
@@ -203,6 +333,10 @@ void hash_unsigned(std::uint64_t& hash, const Value value) noexcept
     hash_unsigned(hash, record.initial_cursor.absolute_bit_offset());
     hash_byte(hash, record.payload.source_reliable ? 1U : 0U);
     hash_byte(hash, record.payload.reassembled ? 1U : 0U);
+    // Preserve historical fingerprints for legacy/default metadata while
+    // keeping distinct proven suffix ownership conflict-detectable.
+    if (record.payload.contemporaneous_fragment_suffix) hash_byte(hash, 0xf1U);
+    if (record.payload.normal_fragment_completion) hash_byte(hash, 0xf2U);
     hash_byte(hash, record.payload.decompressed ? 1U : 0U);
     hash_byte(hash, record.payload.acknowledgement_reliable ? 1U : 0U);
     hash_byte(hash, static_cast<std::uint8_t>(record.payload.direction));
@@ -225,7 +359,8 @@ void hash_unsigned(std::uint64_t& hash, const Value value) noexcept
         end.absolute_bit_offset(),
         record.payload.source_acknowledgement,
         record.payload.source_reliable,
-        record.payload.reassembled};
+        record.payload.reassembled,
+        record.payload.contemporaneous_fragment_suffix};
 }
 
 [[nodiscard]] RuntimeSubstateMetadata unavailable_metadata(
@@ -262,11 +397,30 @@ void hash_unsigned(std::uint64_t& hash, const Value value) noexcept
     std::vector<game_api::GameMessageView>& messages,
     const RuntimeReplayRecord& record,
     const PacketEntityDecodedBatch& batch,
-    std::span<const PostMoveVarsUserMessageDefinition> definitions)
+    std::span<const PostMoveVarsUserMessageDefinition> definitions,
+    std::array<std::shared_ptr<const UserInfoUpdateState>, 32U>& identities,
+    std::uint32_t maximum_clients)
 {
     for (const auto& item : batch.events) {
         const auto* event = std::get_if<RuntimeControlEvent>(&item);
         if (!event) continue;
+        if (const auto* identity = std::get_if<RuntimeControlUserInfoUpdate>(&event->body)) {
+            const auto slot = player_slot_from_client_index(identity->client_index, maximum_clients);
+            if (!slot) return failure(RuntimeReplayErrorCode::semantic_value_mismatch,
+                "player display slot exceeds negotiated clients");
+            auto& previous_identity = identities[identity->client_index];
+            const bool replacement = identity->present && previous_identity &&
+                identity->identity && !identity->identity->same_occupant(*previous_identity);
+            game_api::GameMessageView view;
+            view.kind = game_api::GameMessageKind::player_display;
+            view.source = source_for(record, event->provenance.start_cursor, event->provenance.end_cursor);
+            view.player_display = game_api::PlayerDisplayUpdate{*slot, identity->present,
+                replacement, identity->identity ? identity->identity->player_display_name() : std::string{}};
+            if(identity->identity) view.player_display->appearance=identity->identity->player_appearance();
+            previous_identity = identity->identity;
+            messages.push_back(std::move(view));
+            continue;
+        }
         const bool animation = event->opcode == RuntimeControlOpcode::svc_weaponanim;
         const auto* message = std::get_if<RuntimeControlUserMessage>(&event->body);
         if (!animation && !message) continue;
@@ -480,6 +634,7 @@ struct ProjectionResult final {
     std::shared_ptr<const RuntimeClientObservationState> state;
     std::optional<RuntimeReplayError> error;
     std::optional<game_api::GameRecordState> game_state;
+    std::array<std::shared_ptr<const UserInfoUpdateState>, 32U> player_identities;
 };
 
 [[nodiscard]] std::optional<RuntimeReplayError> project_visual_fields(
@@ -506,16 +661,23 @@ struct ProjectionResult final {
     for (const auto& [name, output] : std::array{
         std::pair{"modelindex", &target.model_index}, std::pair{"sequence", &target.sequence},
         std::pair{"body", &target.body}, std::pair{"rendermode", &target.render_mode},
-        std::pair{"effects", &target.effects}}) {
+        std::pair{"renderfx", &target.render_effect}, std::pair{"renderamt", &target.render_amount},
+        std::pair{"effects", &target.effects}, std::pair{"owner", &target.owner_entity_reference}}) {
         if (auto error = unsigned_field(name, DeltaFieldBaseType::integer_value, *output)) { return error; }
     }
     if (auto error = unsigned_field("solid", DeltaFieldBaseType::short_value, target.solid)) return error;
+    if (auto error = project_vector(schema, object, "mins[0]", "mins[1]", "mins[2]",
+            {DeltaFieldBaseType::float_value, true, {}, {}}, target.collision_mins)) return error;
+    if (auto error = project_vector(schema, object, "maxs[0]", "maxs[1]", "maxs[2]",
+            {DeltaFieldBaseType::float_value, true, {}, {}}, target.collision_maxs)) return error;
     const auto brush_move = optional_unsigned(schema, object, "movetype");
     if (brush_move.error) return brush_move.error;
     target.brush_move_type = brush_move.value;
     const auto frame = optional_double(schema, object, "frame", {DeltaFieldBaseType::float_value, false, {}, {}});
     if (frame.error) { return frame.error; }
     target.frame = frame.value;
+    const auto scale=optional_double(schema,object,"scale",{DeltaFieldBaseType::float_value,false,{},{}});
+    if(scale.error)return scale.error;target.visual_scale=scale.value;
     const auto animation_time = optional_double(schema, object, "animtime",
         {DeltaFieldBaseType::time_window_8, false, {}, {}});
     if (animation_time.error) return animation_time.error;
@@ -592,7 +754,10 @@ struct ProjectionResult final {
     const RuntimeReplayLimits& limits,
     std::span<const PostMoveVarsUserMessageDefinition> user_message_definitions,
     std::optional<std::uint32_t> receiving_player_entity = {},
-    game_api::GameClientHost* game_client = nullptr)
+    game_api::GameClientHost* game_client = nullptr,
+    std::array<std::shared_ptr<const UserInfoUpdateState>, 32U> identities = {},
+    std::span<const std::shared_ptr<const UserInfoUpdateState>> initial_identities = {},
+    std::uint32_t maximum_clients = 32U)
 {
     try {
         auto candidate = std::make_shared<RuntimeClientObservationState>();
@@ -655,6 +820,12 @@ struct ProjectionResult final {
                     static_cast<double>(angles->angle_shorts[2U]) * kAngleScale,
                     source_for(*record, view_angle_event->provenance.start_cursor,
                                view_angle_event->provenance.end_cursor)};
+        } else if (previous != nullptr &&
+                   previous->generation == candidate->generation) {
+            // A render/update may run after several committed RX records, or
+            // only after async world resources become ready. Retain one owning
+            // correction with its original identity, not a replayable queue.
+            candidate->view_angle_correction = previous->view_angle_correction;
         }
 
         if (const auto& snapshot = decoder_state.current_snapshot()) {
@@ -688,6 +859,43 @@ struct ProjectionResult final {
                         projected.angles)) {
                     return {{}, error};
                 }
+                if(entity.schema_category()==EntitySchemaCategory::custom_entity) {
+                    client::RuntimeCustomBeamObservation beam;
+                    const auto read=[&](std::string_view name,std::optional<std::uint32_t>& out) -> std::optional<RuntimeReplayError> {
+                        if(name.starts_with("rendercolor.")) {
+                            const auto* definition=find_definition(*schema,name);if(!definition)return {};
+                            const auto* field=entity.object().find_exact(name);
+                            if(!matches_expected(*definition,{DeltaFieldBaseType::byte_value,false,{},{}}) || !field || !std::holds_alternative<std::uint32_t>(field->value()))
+                                return failure(RuntimeReplayErrorCode::semantic_schema_mismatch,"custom beam color descriptor mismatch");
+                            out=std::get<std::uint32_t>(field->value());return {};
+                        }
+                        const auto value=optional_unsigned(*schema,entity.object(),name);
+                        out=value.value;return value.error;
+                    };
+                    std::optional<std::uint32_t> mode,sequence,skin,model,noise,amount,r,g,b;
+                    for(const auto entry:std::array{std::pair{"rendermode",&mode},std::pair{"sequence",&sequence},
+                        std::pair{"skin",&skin},std::pair{"modelindex",&model},std::pair{"body",&noise},
+                        std::pair{"renderamt",&amount},std::pair{"rendercolor.r",&r},std::pair{"rendercolor.g",&g},std::pair{"rendercolor.b",&b}})
+                        if(const auto error=read(entry.first,*entry.second))return {{},error};
+                    const auto width=optional_double(*schema,entity.object(),"scale",{DeltaFieldBaseType::float_value,false,{},{}});
+                    const auto scroll=optional_double(*schema,entity.object(),"animtime",{DeltaFieldBaseType::float_value,false,{},{}});
+                    const auto frame=optional_double(*schema,entity.object(),"frame",{DeltaFieldBaseType::float_value,false,{},{}});
+                    if(width.error)return {{},width.error};if(scroll.error)return {{},scroll.error};if(frame.error)return {{},frame.error};
+                    if((mode && *mode>255) || (sequence && *sequence>65535) || (skin && *skin>65535) ||
+                        (model && *model>1023) || (noise && *noise>255) || (amount && *amount>255) ||
+                        (r && *r>255) || (g && *g>255) || (b && *b>255))
+                        return {{},failure(RuntimeReplayErrorCode::semantic_value_mismatch,"custom beam field outside protocol bounds")};
+                    if(mode) {beam.type=static_cast<client::RuntimeCustomBeamObservation::Type>(*mode&15);beam.flags=static_cast<std::uint8_t>(*mode&240);}
+                    const auto endpoint=[](std::uint32_t packed){return client::RuntimeBeamEndpoint{packed&4095,static_cast<std::uint8_t>((packed>>12)&15)};};
+                    if(sequence)beam.start_reference=endpoint(*sequence);if(skin)beam.end_reference=endpoint(*skin);
+                    beam.sprite_model_index=model.value_or(0);beam.width_units=width.value.value_or(0);beam.noise_raw=noise.value_or(0);
+                    beam.scroll_rate=scroll.value.value_or(0);beam.frame=frame.value.value_or(0);
+                    beam.opacity=static_cast<std::uint8_t>(amount.value_or(0));
+                    beam.color={static_cast<std::uint8_t>(r.value_or(0)),static_cast<std::uint8_t>(g.value_or(0)),static_cast<std::uint8_t>(b.value_or(0))};
+                    beam.complete=mode && sequence && skin && model && width.value && scroll.value && frame.value && noise && amount && r && g && b;
+                    beam.supported=beam.complete && (*mode&15)<=2 && beam.sprite_model_index>0 && beam.width_units>0 && beam.width_units<=25.5;
+                    projected.custom_beam=beam;
+                }
                 if (const auto error = project_visual_fields(*schema, entity.object(), projected)) { return {{}, error}; }
                 if (const auto error = project_player_movement_fields(*schema, entity.object(), projected)) { return {{}, error}; }
                 candidate->packet_entities.push_back(std::move(projected));
@@ -719,6 +927,22 @@ struct ProjectionResult final {
                 {DeltaFieldBaseType::float_value, true, {}, {}});
             if (health.error) return {{}, health.error};
             receiving.health = health.value;
+            const auto fov = optional_double(*client_schema, client_frame->client_data(),
+                "fov", {DeltaFieldBaseType::float_value, false, {}, {}});
+            if (fov.error) return {{}, fov.error};
+            receiving.field_of_view = fov.value;
+            for(const auto& [name, output] : std::array{
+                std::pair{"fuser2", &receiving.auxiliary_float2},
+                std::pair{"fuser3", &receiving.auxiliary_float3}}) {
+                const auto value=optional_double(*client_schema, client_frame->client_data(), name,
+                    {DeltaFieldBaseType::float_value, true, {}, {}});
+                if(value.error) return {{},value.error};
+                *output=value.value;
+            }
+            if (const auto error = project_vector(*client_schema, client_frame->client_data(),
+                    "vuser2[0]", "vuser2[1]", "vuser2[2]",
+                    {DeltaFieldBaseType::float_value, true, {}, {}}, receiving.auxiliary_vector2))
+                return {{}, error};
             const auto viewmodel = optional_unsigned(*client_schema,
                 client_frame->client_data(), "viewmodel");
             if (viewmodel.error) return {{}, viewmodel.error};
@@ -783,6 +1007,18 @@ struct ProjectionResult final {
                 client_frame->client_data(), "bInDuck");
             if (in_duck.error) return {{}, in_duck.error};
             receiving.in_duck = in_duck.value;
+            if (const auto* definition = find_definition(*client_schema, "physinfo")) {
+                const auto* field = client_frame->client_data().find_exact("physinfo");
+                if (!matches_expected(*definition, {DeltaFieldBaseType::string, false, {}, {}}) ||
+                    !field || !std::holds_alternative<std::string>(field->value()))
+                    return {{}, failure(RuntimeReplayErrorCode::semantic_schema_mismatch,
+                        "client physics info descriptor mismatch")};
+                const auto& value = std::get<std::string>(field->value());
+                if (value.size() >= 256U)
+                    return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
+                        "client physics info exceeds public bound")};
+                receiving.physics_info = value;
+            }
             candidate->receiving_client = std::move(receiving);
             candidate->weapon_slots.reserve(client_frame->weapon_slots().size());
             for (const auto& slot : client_frame->weapon_slots()) {
@@ -826,6 +1062,38 @@ struct ProjectionResult final {
                     {DeltaFieldBaseType::float_value, true, {}, {}});
                 if (idle.error) return {{}, idle.error};
                 weapon.time_weapon_idle = idle.value;
+                const auto pump = optional_double(
+                    *weapon_schema, slot.object(), "m_flPumpTime",
+                    {DeltaFieldBaseType::float_value, true, {}, {}});
+                if (pump.error) return {{}, pump.error};
+                weapon.pump_time = pump.value;
+                const auto user2=optional_signed(*weapon_schema,slot.object(),"iuser2");
+                if(user2.error) return {{},user2.error};
+                weapon.auxiliary_integer2=user2.value;
+                const auto user3=optional_signed(*weapon_schema,slot.object(),"iuser3");
+                if(user3.error) return {{},user3.error};
+                weapon.auxiliary_integer3=user3.value;
+                const auto user1=optional_signed(*weapon_schema,slot.object(),"iuser1");
+                if(user1.error) return {{},user1.error};
+                weapon.auxiliary_integer1=user1.value;
+                weapon.auxiliary_integer1_updated_in_record=user1.value && client_event && record &&
+                    (!client_frame->base_reference() || slot.wire_field_updated("iuser1"));
+                for (const auto& [name, output, updated] : std::array{
+                    std::tuple{"fuser2", &weapon.auxiliary_float2, &weapon.auxiliary_float2_updated_in_record},
+                    std::tuple{"fuser3", &weapon.auxiliary_float3, &weapon.auxiliary_float3_updated_in_record}}) {
+                    const auto value = optional_double(*weapon_schema, slot.object(), name,
+                        {DeltaFieldBaseType::float_value, true, {}, {}});
+                    if (value.error) return {{}, value.error};
+                    *output = value.value;
+                    *updated = value.value && client_event && record &&
+                        (!client_frame->base_reference() || slot.wire_field_updated(name));
+                }
+                const auto special = optional_unsigned(
+                    *weapon_schema, slot.object(), "m_fInSpecialReload");
+                if (special.error) return {{}, special.error};
+                if(special.value && *special.value>static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
+                    return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,"numeric weapon state exceeds observation range")};
+                if(special.value) weapon.special_reload_state = static_cast<std::int32_t>(*special.value);
                 candidate->weapon_slots.push_back(std::move(weapon));
             }
             if (client_event != nullptr && record != nullptr) {
@@ -842,13 +1110,30 @@ struct ProjectionResult final {
         std::optional<game_api::GameRecordState> staged_game;
         if (game_client) {
             std::vector<game_api::GameMessageView> messages;
+            std::vector<game_api::PlayerDisplayUpdate> initial_players;
+            if (initial_identities.size() > maximum_clients)
+                return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
+                    "initial player display capacity exceeded")};
+            for (const auto& identity : initial_identities) {
+                if (!identity) return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
+                    "initial player display has no identity")};
+                const auto slot = player_slot_from_client_index(identity->client_index(), maximum_clients);
+                if (!slot || identities[identity->client_index()])
+                    return {{}, failure(RuntimeReplayErrorCode::semantic_value_mismatch,
+                        "initial player display has invalid or repeated slot")};
+                identities[identity->client_index()] = identity;
+                initial_players.push_back({*slot, true, true, identity->player_display_name()});
+                initial_players.back().appearance=identity->player_appearance();
+            }
             if (record != nullptr && batch != nullptr) {
                 if (auto error = frame_game_messages(
-                        messages, *record, *batch, user_message_definitions))
+                        messages, *record, *batch, user_message_definitions, identities, maximum_clients))
                     return {{}, std::move(error)};
             }
             auto result = game_client->stage_record(
-                {previous, *candidate, messages, receiving_player_entity});
+                {previous, *candidate, messages, receiving_player_entity, maximum_clients, initial_players,
+                 record && record->received_at ? game_client->presentation_seconds(
+                    std::chrono::duration<double>(record->received_at->time_since_epoch()).count()) : std::nullopt});
             if (!result || !result.state) {
                 auto rejected = failure(RuntimeReplayErrorCode::semantic_value_mismatch,
                     result.error ? std::move(*result.error) : "game module rejected staged record");
@@ -880,7 +1165,7 @@ struct ProjectionResult final {
                 RuntimeReplayErrorCode::bridge_rejected_candidate,
                 "projected runtime observation violates the client boundary")};
         }
-        return {std::move(candidate), std::nullopt, std::move(staged_game)};
+        return {std::move(candidate), std::nullopt, std::move(staged_game), std::move(identities)};
     } catch (const std::bad_alloc&) {
         return {{}, failure(RuntimeReplayErrorCode::unable_to_retain_candidate,
             "unable to retain the staged runtime projection")};
@@ -957,7 +1242,8 @@ RuntimeReplayInitializeResult RuntimeReplaySession::initialize(
         auto projected = project_candidate(
             decoder_state, *initialization.schemas, nullptr, nullptr, nullptr,
             1U, initialization.limits, initialization.user_message_definitions,
-            initialization.receiving_player_entity, initialization.game_client.get());
+            initialization.receiving_player_entity, initialization.game_client.get(), {},
+            initialization.initial_player_identities, initialization.max_clients);
         if (projected.error || !projected.state) {
             return {{}, projected.error ? std::move(projected.error)
                                         : std::optional<RuntimeReplayError>{
@@ -975,6 +1261,12 @@ RuntimeReplayInitializeResult RuntimeReplaySession::initialize(
                 std::move(initialization), std::move(decoder_state),
                 std::move(decoder), target, 1U,
                 projected.state->canonical_state_hash}};
+        // Reserve the configured bounded identity ledger before publishing.
+        // Successful records then append a trivial value at the commit point
+        // without reallocating or copying all earlier session identities.
+        session->record_fingerprints_.reserve(
+            session->initialization_.limits.maximum_record_fingerprints);
+        session->player_identities_ = std::move(projected.player_identities);
         if (session->initialization_.game_client && projected.game_state) {
             session->initialization_.game_client->reset({
                 session->initialization_.generation, session->initialization_.generation,
@@ -1107,6 +1399,25 @@ RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
                 error.decoder_cursor = decoded.error->cursor;
                 error.decoder_wire_opcode = decoded.error->wire_opcode;
                 error.control_error = decoded.error->control_error;
+                error.decoder_entity_number = decoded.error->entity_number;
+                if (decoded.error->code == PacketEntityDecodeErrorCode::schema_mismatch) {
+                    const auto& detail = decoded.error->context;
+                    if (detail == "existing delta entity changed schema category or selected an explicit baseline")
+                        error.decoder_schema_boundary = "existing_category_or_explicit_base";
+                    else if (detail == "intra-message baseline has another schema category")
+                        error.decoder_schema_boundary = "intra_category";
+                    else if (detail == "intra-message baseline descriptor differs from the selected schema")
+                        error.decoder_schema_boundary = "intra_descriptor";
+                    else if (detail == "selected baseline does not match generation and entity schema")
+                        error.decoder_schema_boundary = "baseline_generation_or_schema";
+                    else if (detail == "intra-message normal base has invalid source descriptors")
+                        error.decoder_schema_boundary = "intra_normal_source";
+                    else if (detail == "intra-message normal base member type or storage differs")
+                        error.decoder_schema_boundary = "intra_normal_member";
+                    else if (detail == "intra-message normal base cannot retain selected member values")
+                        error.decoder_schema_boundary = "intra_normal_value";
+                    else error.decoder_schema_boundary = "other_schema_boundary";
+                }
                 if (error.control_error) error.failure_cursor = error.control_error->failure_cursor;
                 // Other decoders expose a message boundary, not an exact
                 // failure checkpoint. Do not relabel it as the failure cursor.
@@ -1118,15 +1429,15 @@ RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
             &*decoded.batch, target_->runtime_observation().get(),
             publication_revision_ + 1U, initialization_.limits,
             initialization_.user_message_definitions,
-            initialization_.receiving_player_entity, initialization_.game_client.get());
+            initialization_.receiving_player_entity, initialization_.game_client.get(),
+            player_identities_, {}, initialization_.max_clients);
         if (projection.error || !projection.state) {
             return record_failure(projection.error
                     ? std::move(*projection.error)
                     : failure(RuntimeReplayErrorCode::bridge_rejected_candidate,
                         "runtime semantic projection failed"));
         }
-        auto staged_fingerprints = record_fingerprints_;
-        staged_fingerprints.push_back({record.record_identity, fingerprint});
+        auto temporary_effects = stage_temporary_effects(record, *decoded.batch, *projection.state);
         client::ClientWorldState staged_world = *target_;
         if (!staged_world.publish_runtime_observation(projection.state)) {
             return record_failure(failure(
@@ -1153,15 +1464,42 @@ RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
         if (initialization_.game_client && projection.game_state)
             initialization_.game_client->commit_record(std::move(*projection.game_state));
         decoder_state_ = std::move(staged_decoder);
+        player_identities_ = std::move(projection.player_identities);
         *target_ = std::move(staged_world);
-        record_fingerprints_ = std::move(staged_fingerprints);
+        // initialize/reset reserve this generation's full bounded capacity;
+        // the checked limit above guarantees this trivial append cannot allocate.
+        record_fingerprints_.push_back({record.record_identity, fingerprint});
         last_record_ordinal_ = record.record_ordinal;
         ++publication_revision_;
         ++committed_records_;
         committed_state_hash_ = projection.state->canonical_state_hash;
-        if(initialization_.game_client)
+        if(initialization_.game_client) {
+            if(observed_entities)
+                initialization_.game_client->remote_entities(projection.state->packet_entities,
+                    initialization_.max_clients,record.record_ordinal);
             publish_scripted_events(*initialization_.game_client,record,*decoded.batch,
                 initialization_.max_clients);
+            for (const auto& effect : temporary_effects)
+                initialization_.game_client->committed_temporary_effect(effect);
+            // Presentation evidence only, after the same atomic commit as TE
+            // and entity publication; independent of focus/device/audio queue.
+            for(const auto& item:decoded.batch->events) {
+                const auto* control=std::get_if<RuntimeControlEvent>(&item);
+                if(!control || control->opcode!=RuntimeControlOpcode::svc_sound)continue;
+                const auto* sound=std::get_if<RuntimeControlSound>(&control->body);
+                if(!sound || !record.received_at)continue;
+                game_api::CommittedSoundObservation observation;
+                observation.generation=record.generation;observation.record=record.record_identity;
+                observation.record_ordinal=record.record_ordinal;
+                observation.message_bit_offset=static_cast<std::uint32_t>(control->provenance.start_cursor.absolute_bit_offset());
+                observation.entry_ordinal=static_cast<std::uint32_t>(control->provenance.message_ordinal);
+                observation.entity=sound->entity_reference;observation.sample_slot=sound->sound_reference;
+                observation.flags=sound->field_mask;observation.channel=sound->channel;
+                observation.origin={sound->origin[0],sound->origin[1],sound->origin[2]};
+                observation.received_at_seconds=std::chrono::duration<double>(record.received_at->time_since_epoch()).count();
+                initialization_.game_client->committed_sound(observation);
+            }
+        }
         if (initialization_.sound_events)
             for (const auto& item : decoded.batch->events)
                 if (const auto* control = std::get_if<RuntimeControlEvent>(&item))
@@ -1176,7 +1514,8 @@ RuntimeReplayApplyResult RuntimeReplaySession::apply_record(
             observed_entities,
             publication_revision_,
             projection.state->canonical_state_hash,
-            std::move(*decoded.batch)};
+            std::move(*decoded.batch),
+            std::move(temporary_effects)};
         return {std::move(event), std::nullopt};
     } catch (const std::bad_alloc&) {
         return record_failure(failure(
@@ -1223,7 +1562,8 @@ std::optional<RuntimeReplayError> RuntimeReplaySession::reset_generation(
             staged_decoder, *initialization.schemas, nullptr, nullptr, nullptr,
             publication_revision_ + 1U, initialization.limits,
             initialization.user_message_definitions, initialization.receiving_player_entity,
-            initialization.game_client.get());
+            initialization.game_client.get(), {}, initialization.initial_player_identities,
+            initialization.max_clients);
         if (projection.error || !projection.state) {
             return projection.error ? std::move(projection.error)
                                     : std::optional<RuntimeReplayError>{failure(
@@ -1236,6 +1576,10 @@ std::optional<RuntimeReplayError> RuntimeReplaySession::reset_generation(
             return failure(RuntimeReplayErrorCode::bridge_rejected_candidate,
                 "ClientWorldState rejected generation reset");
         }
+        // A reset may select a larger or smaller capacity. Stage its owning
+        // ledger before any observable generation change, just like the decoder.
+        std::vector<RecordFingerprint> staged_fingerprints;
+        staged_fingerprints.reserve(initialization.limits.maximum_record_fingerprints);
         if (initialization.game_client && projection.game_state) {
             initialization.game_client->reset({initialization.generation,
                 initialization.generation, initialization.receiving_player_entity});
@@ -1243,10 +1587,11 @@ std::optional<RuntimeReplayError> RuntimeReplaySession::reset_generation(
         }
         decoder_state_ = std::move(staged_decoder);
         decoder_ = std::move(staged_parser);
+        player_identities_ = std::move(projection.player_identities);
         initialization_ = std::move(initialization);
         if (initialization_.sound_events) initialization_.sound_events->reset_generation(initialization_.generation);
         *target_ = std::move(staged_world);
-        record_fingerprints_.clear();
+        record_fingerprints_ = std::move(staged_fingerprints);
         last_record_ordinal_ = 0U;
         ++publication_revision_;
         committed_state_hash_ = projection.state->canonical_state_hash;
@@ -1349,6 +1694,17 @@ std::string runtime_failure_summary(const RuntimeReplayError& error) {
         error.decoder_error ? "service_dispatch" : "transaction_validation");
     field("replay_error", to_string(error.code));
     field("control_error", error.control_error ? to_string(error.control_error->code) : "unavailable");
+    field("user_info_error", error.control_error && error.control_error->user_info_error ?
+        to_string(*error.control_error->user_info_error) : "unavailable");
+    field("user_info_string_error", error.control_error && error.control_error->user_info_string_error ?
+        to_string(*error.control_error->user_info_string_error) : "unavailable");
+    field("user_info_string_length", scalar(error.control_error ? error.control_error->user_info_string_length : std::optional<std::size_t>{}));
+    field("user_info_empty", scalar(error.control_error ? error.control_error->user_info_empty : std::optional<bool>{}));
+    field("user_info_private_id_present", scalar(error.control_error ? error.control_error->user_info_private_id_present : std::optional<bool>{}));
+    field("packet_entity", scalar(error.decoder_entity_number));
+    field("packet_schema_boundary", token(error.decoder_schema_boundary));
+    field("temporary_entity_type", scalar(error.control_error ?
+        error.control_error->temporary_entity_type : std::optional<std::uint8_t>{}));
     field("clientdata_error", error.clientdata_error ? to_string(*error.clientdata_error) : "unavailable");
     field("delta_error", error.delta_error ? to_string(*error.delta_error) : "unavailable");
     field("module_error", error.module_error ? game_api::to_string(error.module_error->code) : "unavailable");

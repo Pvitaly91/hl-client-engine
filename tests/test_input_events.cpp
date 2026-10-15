@@ -52,6 +52,7 @@ TEST_CASE("Every required physical input has a closed identity", "[input][event]
         input::PhysicalKey::right,
         input::PhysicalKey::f1,
         input::PhysicalKey::f2,
+        input::PhysicalKey::f8,
     };
     constexpr input::PhysicalMouseButton buttons[]{
         input::PhysicalMouseButton::left,

@@ -85,6 +85,8 @@ enum class PlaneRelation : std::uint8_t {
         return PlayerMovementDiagnosticHitKind::world;
     case hlclient::movement::PlayerMovementHitKind::explicit_synthetic_brush:
         return PlayerMovementDiagnosticHitKind::explicit_synthetic_brush;
+    case hlclient::movement::PlayerMovementHitKind::server_entity_box:
+        return PlayerMovementDiagnosticHitKind::server_entity_box;
     }
     return PlayerMovementDiagnosticHitKind::none;
 }
@@ -215,6 +217,22 @@ void record_diagnostic(
     }
 }
 
+void record_solid_collision_failure(
+    GoldSrcLocalMovementScratch& scratch,
+    const LocalMovementTrace& trace,
+    const PlayerMovementHull hull,
+    const assets::AssetVector3& start,
+    const assets::AssetVector3& end) noexcept
+{
+    // Retain the actual failed query, not a new probe after the transaction.
+    // Successful speculative routes do not publish these failure observations.
+    scratch.last_reference_collision_trace = trace;
+    scratch.last_reference_collision_position.reset();
+    scratch.last_reference_collision_hull = hull;
+    scratch.last_reference_collision_start = start;
+    scratch.last_reference_collision_end = end;
+}
+
 [[nodiscard]] bool finite(const double value) noexcept
 {
     return std::isfinite(value);
@@ -276,6 +294,10 @@ void record_diagnostic(
     const LocalMovementCollisionProfile profile) noexcept
 {
     switch (hit.kind) {
+    case hlclient::movement::PlayerMovementHitKind::server_entity_box:
+        return profile != LocalMovementCollisionProfile::world_only_v1 &&
+            hit.source_model_index == 0U && hit.stable_instance_ordinal &&
+            hit.source_entity_index && *hit.source_entity_index>0U;
     case hlclient::movement::PlayerMovementHitKind::brush_entity:
         return profile == LocalMovementCollisionProfile::reference_brush_scene_v1 &&
             hit.source_model_index != 0U && hit.stable_instance_ordinal && hit.source_entity_index;
@@ -577,13 +599,13 @@ void record_diagnostic(
 }
 
 [[nodiscard]] std::optional<OperationError> validate_start_position(
-    const WorkingState& state,
+    WorkingState& state,
     const ILocalMovementCollision& collision,
     GoldSrcLocalMovementScratch& scratch,
     const GoldSrcLocalMovementConfig& config,
     PlayerMovementStatistics& statistics)
 {
-    const auto tested = collision.test_position(
+    auto tested = collision.test_position(
         state.origin, state.hull, scratch.collision, config.collision_query);
     if (!tested || !tested.result) {
         return collision_failure(
@@ -592,6 +614,15 @@ void record_diagnostic(
     if (auto error = validate_position_result(
             *tested.result, collision.profile(), config)) {
         return error;
+    }
+    if (state.reference_walk && tested.result->status != LocalMovementPositionStatus::free) {
+        if (const auto resolved = resolve_movement_boundary_position(
+                state.origin, state.hull, collision, scratch.collision, config.collision_query)) {
+            state.origin = *resolved;
+            tested = collision.test_position(state.origin, state.hull, scratch.collision, config.collision_query);
+            if (!tested || !tested.result) return collision_failure(tested.error, "boundary clearance query failed");
+            if (auto error = validate_position_result(*tested.result, collision.profile(), config)) return error;
+        }
     }
     if (tested.result->status == LocalMovementPositionStatus::free) {
         return std::nullopt;
@@ -609,6 +640,9 @@ void record_diagnostic(
             collision.profile(), config)) {
         return error;
     }
+    record_solid_collision_failure(scratch, *traced.result, state.hull,
+        state.origin, state.origin);
+    scratch.last_reference_collision_position = tested.result;
     if (traced.result->all_solid) {
         ++statistics.all_solid_count;
         return OperationError{
@@ -657,6 +691,33 @@ void record_diagnostic(
     return std::nullopt;
 }
 
+[[nodiscard]] assets::AssetVector3 outward_contact(
+    assets::AssetVector3 contact, const assets::AssetVector3& normal) noexcept;
+
+// Recover only a validated sweep endpoint rounded onto its solid side. Require
+// full-scene clearance AND a clear hull path from the original free start.
+[[nodiscard]] std::optional<assets::AssetVector3> reference_contact_endpoint(
+    const assets::AssetVector3& start, const LocalMovementTrace& contact,
+    const PlayerMovementHull hull, const ILocalMovementCollision& collision,
+    hlclient::collision::CollisionQueryScratch& scratch,
+    const GoldSrcLocalMovementConfig& config, PlayerMovementStatistics& statistics)
+{
+    if (!trace_has_contact(contact) || contact.start_solid || contact.all_solid) return {};
+    const auto candidate=outward_contact(contact.end_position,contact.collision_plane->normal);
+    const auto delta=subtract(candidate,contact.end_position);
+    if (!finite(candidate) || static_cast<double>(delta.x)*delta.x+
+        static_cast<double>(delta.y)*delta.y+static_cast<double>(delta.z)*delta.z>(1.0/64.0)*(1.0/64.0)) return {};
+    const auto clear=collision.test_position(candidate,hull,scratch,config.collision_query);
+    if (!clear || !clear.result || validate_position_result(*clear.result,collision.profile(),config) ||
+        clear.result->status!=LocalMovementPositionStatus::free ||
+        clear.result->contents.category!=PlayerMovementContents::empty) return {};
+    const auto path=collision.trace_hull(start,candidate,hull,scratch,config.collision_query);
+    ++statistics.trace_count;
+    if (!path || !path.result || validate_trace_result(*path.result,start,candidate,collision.profile(),config) ||
+        path.result->start_solid || path.result->all_solid || path.result->in_liquid || path.result->fraction!=1.0) return {};
+    return candidate;
+}
+
 [[nodiscard]] std::optional<OperationError> categorize_ground(
     WorkingState& state,
     const ILocalMovementCollision& collision,
@@ -695,6 +756,10 @@ void record_diagnostic(
         return error;
     }
     const auto& trace = *traced.result;
+    if (trace.start_solid || trace.all_solid) {
+        record_solid_collision_failure(scratch, trace, state.hull,
+            state.origin, end);
+    }
     if (trace.all_solid) {
         ++statistics.all_solid_count;
         return OperationError{
@@ -732,6 +797,11 @@ void record_diagnostic(
         if (clearance.result->status == LocalMovementPositionStatus::free) {
             contact_position = trace.end_position;
             state.origin = trace.end_position;
+        } else if (state.reference_walk) {
+            if (const auto resolved=reference_contact_endpoint(state.origin,trace,state.hull,
+                    collision,scratch.collision,config,statistics)) {
+                contact_position=*resolved;state.origin=*resolved;
+            }
         }
     }
     const auto into_ground = movement_dot(
@@ -923,7 +993,8 @@ void record_diagnostic(
     const GoldSrcLocalMovementConfig& config,
     const std::size_t maximum_touches,
     PlayerMovementStatistics& statistics,
-    std::vector<PlayerMovementTouch>& touches)
+    std::vector<PlayerMovementTouch>& touches,
+    const bool reference_walk)
 {
     SlideResult output;
     output.origin = start_origin;
@@ -964,6 +1035,10 @@ void record_diagnostic(
             return output;
         }
         const auto& trace = *traced.result;
+        if (trace.start_solid || trace.all_solid) {
+            record_solid_collision_failure(scratch, trace, hull,
+                output.origin, end);
+        }
         PlayerWallContactDiagnosticFrame diagnostic;
         diagnostic.command_sequence = command_sequence;
         diagnostic.phase = phase;
@@ -1091,6 +1166,11 @@ void record_diagnostic(
                 LocalMovementPositionStatus::free) {
                 output.origin = trace.end_position;
                 committed_fraction = trace.fraction;
+            } else if (reference_walk) {
+                if (const auto resolved=reference_contact_endpoint(output.origin,trace,hull,
+                        collision,query_scratch,config,statistics)) {
+                    output.origin=*resolved;committed_fraction=trace.fraction;
+                }
             }
         }
         if (auto error = append_touch(touches, PlayerMovementTouch{
@@ -1318,11 +1398,76 @@ void record_diagnostic(
         (!reference_walk && trace_has_contact(*up_trace.result))) {
         return output;
     }
+    auto raised_origin = up_trace.result->end_position;
+    if (reference_walk) {
+        const auto raised_clearance = collision.test_position(
+            raised_origin, hull, query_scratch, config.collision_query);
+        if (!raised_clearance || !raised_clearance.result) {
+            output.error = collision_failure(
+                raised_clearance.error, "step-up endpoint clearance query failed");
+            return output;
+        }
+        if (auto error = validate_position_result(
+                *raised_clearance.result, collision.profile(), config)) {
+            output.error = error;
+            return output;
+        }
+        if (raised_clearance.result->status != LocalMovementPositionStatus::free) {
+            if (!trace_has_contact(*up_trace.result)) {
+                output.error = invalid_collision_result(
+                    "no-contact step-up endpoint is blocking",
+                    LocalMovementCollisionErrorCode::invalid_collision_source);
+                return output;
+            }
+            // Like the other generated contact endpoints, a ceiling hit can
+            // round onto the BSP's solid child. Never begin a speculative
+            // horizontal slide there and invalidate an already safe direct
+            // route. Admit only one outward binary32 neighbour with full-scene
+            // clearance and a clear hull path; otherwise discard this route.
+            const auto candidate = outward_contact(raised_origin,
+                up_trace.result->collision_plane->normal);
+            const auto delta = subtract(candidate, raised_origin);
+            if (!finite(candidate) || static_cast<double>(delta.x) * delta.x +
+                    static_cast<double>(delta.y) * delta.y +
+                    static_cast<double>(delta.z) * delta.z > (1.0 / 64.0) * (1.0 / 64.0))
+                return output;
+            const auto clear = collision.test_position(
+                candidate, hull, query_scratch, config.collision_query);
+            if (!clear || !clear.result) {
+                output.error = collision_failure(
+                    clear.error, "step-up contact clearance query failed");
+                return output;
+            }
+            if (auto error = validate_position_result(*clear.result, collision.profile(), config)) {
+                output.error = error;
+                return output;
+            }
+            if (clear.result->status != LocalMovementPositionStatus::free ||
+                clear.result->contents.category != PlayerMovementContents::empty)
+                return output;
+            const auto path = collision.trace_hull(
+                start_origin, candidate, hull, query_scratch, config.collision_query);
+            ++statistics.trace_count;
+            if (!path || !path.result) {
+                output.error = collision_failure(path.error, "step-up contact path query failed");
+                return output;
+            }
+            if (auto error = validate_trace_result(
+                    *path.result, start_origin, candidate, collision.profile(), config)) {
+                output.error = error;
+                return output;
+            }
+            if (path.result->start_solid || path.result->all_solid ||
+                path.result->in_liquid || path.result->fraction != 1.0)
+                return output;
+            raised_origin = candidate;
+        }
+    }
     auto horizontal = slide_move(
-        up_trace.result->end_position, start_velocity, duration, hull,
+        raised_origin, start_velocity, duration, hull,
         PlayerMovementPhase::step_horizontal, command_sequence, collision,
         query_scratch, scratch, config, config.maximum_slide_bumps + 1U,
-        statistics, touches);
+        statistics, touches, reference_walk);
     if (horizontal.error) {
         output.error = horizontal.error;
         return output;
@@ -1534,7 +1679,7 @@ void record_diagnostic(
         start, velocity, duration, state.hull,
         PlayerMovementPhase::direct_slide, command.command_sequence().value(),
         collision, scratch.direct_candidate_collision, scratch, config,
-        config.maximum_slide_bumps, direct_statistics, direct_touches);
+        config.maximum_slide_bumps, direct_statistics, direct_touches, state.reference_walk);
     if (direct.error) {
         return direct.error;
     }
@@ -1650,7 +1795,7 @@ void record_diagnostic(
         PlayerMovementPhase::airborne_slide,
         command.command_sequence().value(), collision, scratch.collision,
         scratch, config, config.maximum_touches_per_command, statistics,
-        touches);
+        touches, state.reference_walk);
     if (moved.error) {
         return moved.error;
     }
@@ -1682,6 +1827,7 @@ void record_diagnostic(
     info.old_buttons = command.buttons();
     info.duck_time_milliseconds = state.duck_time_milliseconds;
     info.in_duck_transition = state.in_duck_transition;
+    info.crouch_jump_enabled = previous.crouch_jump_enabled();
     info.source_command_sequence = command.command_sequence().value();
     info.simulation_time_nanoseconds = simulation_time;
     info.last_valid_contents = state.last_contents;
@@ -1699,7 +1845,14 @@ void record_diagnostic(
 bool valid_goldsrc_local_movement_config(
     const GoldSrcLocalMovementConfig& config) noexcept
 {
-    return finite(config.ground_button_speed_limit_multiplier) &&
+    return (!config.crouch_jump ||
+        (finite(config.crouch_jump->forward_speed) && config.crouch_jump->forward_speed > 0.0F &&
+         config.crouch_jump->forward_speed <= 2000.0F &&
+         finite(config.crouch_jump->vertical_impulse) && config.crouch_jump->vertical_impulse > 0.0F &&
+         config.crouch_jump->vertical_impulse <= 2000.0F &&
+         finite(config.crouch_jump->minimum_speed) && config.crouch_jump->minimum_speed >= 0.0F &&
+         config.crouch_jump->minimum_speed <= 2000.0F)) &&
+        finite(config.ground_button_speed_limit_multiplier) &&
         config.ground_button_speed_limit_multiplier > 0.0F &&
         config.ground_button_speed_limit_multiplier <= 1.0F &&
         (config.ground_button_speed_limit_mask != 0U || config.ground_button_speed_limit_multiplier == 1.0F) &&
@@ -1821,6 +1974,11 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
             previous_state);
     scratch.last_diagnostic.reset();
     scratch.diagnostic_substep_ordinal = 0U;
+    scratch.last_reference_collision_trace.reset();
+    scratch.last_reference_collision_position.reset();
+    scratch.last_reference_collision_hull.reset();
+    scratch.last_reference_collision_start.reset();
+    scratch.last_reference_collision_end.reset();
     const auto fail = [&scratch, sequence, before_signature](
                           const LocalMovementSimulationErrorCode code,
                           const PlayerMovementStatistics& failure_statistics,
@@ -1951,7 +2109,7 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
         kSyntheticGoldSrcButtonJump | kSyntheticGoldSrcButtonDuck |
         (weapon_inert_profile
             ? kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload
-            : 0U) | (use_profile ? kReferenceGoldSrcButtonUse : 0U);
+            : 0U) | (use_profile ? kReferenceGoldSrcButtonUse | kReferenceGoldSrcButtonAttack2 : 0U);
     if (reference_actions &&
         (command.msec() > 50U || (command.buttons() & ~action_mask) != 0U ||
          command.up_move() != 0.0F || command.impulse() != 0U)) {
@@ -1986,6 +2144,11 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
     }
 
     WorkingState state = working_state(previous_state);
+    const auto& impulse=command.velocity_impulse();
+    if(!std::isfinite(impulse[0]) || !std::isfinite(impulse[1]) || !std::isfinite(impulse[2]) ||
+        std::hypot(impulse[0],impulse[1],impulse[2])>2000)
+        return fail(LocalMovementSimulationErrorCode::non_finite_result,statistics,"Invalid simulation velocity impulse");
+    state.velocity.x+=impulse[0];state.velocity.y+=impulse[1];state.velocity.z+=impulse[2];
     state.view_angles = {
         command.view_angles()[0U], command.view_angles()[1U],
         command.view_angles()[2U]};
@@ -2079,9 +2242,26 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
         }
         bool jumped = false;
         if (substep == 0U && jump_edge && state.ground.grounded) {
+            // Public PM_Jump sees velocity after the initial half-gravity step.
+            // This kernel performs that step in apply_air_move, after selecting
+            // the jump impulse, so sample the same pre-jump speed explicitly.
+            const auto jump_speed = std::hypot(state.velocity.x, state.velocity.y,
+                state.velocity.z - effective_gravity * dt * 0.5F);
             state.ground = airborne_ground();
             state.mode = PlayerMovementMode::airborne;
             state.velocity.z = static_cast<float>(config.jump_impulse);
+            if (reference_actions && config.crouch_jump && previous_state.crouch_jump_enabled() &&
+                (state.in_duck_transition || state.hull == PlayerMovementHull::ducked) &&
+                duck_requested && state.duck_time_milliseconds > 0U &&
+                jump_speed > config.crouch_jump->minimum_speed) {
+                constexpr double radians = 3.14159265358979323846 / 180.0;
+                const auto pitch = static_cast<double>(command.view_angles()[0]) * radians;
+                const auto yaw = static_cast<double>(command.view_angles()[1]) * radians;
+                const auto horizontal = config.crouch_jump->forward_speed * std::cos(pitch);
+                state.velocity.x = static_cast<float>(horizontal * std::cos(yaw));
+                state.velocity.y = static_cast<float>(horizontal * std::sin(yaw));
+                state.velocity.z = config.crouch_jump->vertical_impulse;
+            }
             ++statistics.jump_count;
             jumped = true;
         }
@@ -2116,6 +2296,10 @@ LocalMovementSimulationResult GoldSrcLocalMovementKernel::simulate(
                 std::move(contents_error->collision_error));
         }
     }
+    // A saved post-think effect changes only the endpoint velocity. In
+    // particular it must not integrate or friction-reduce that delta here.
+    const auto& post_impulse=command.post_velocity_impulse();
+    state.velocity.x+=post_impulse[0];state.velocity.y+=post_impulse[1];state.velocity.z+=post_impulse[2];
     ++statistics.command_count;
     statistics.total_horizontal_distance =
         horizontal_distance(previous_state.origin(), state.origin);

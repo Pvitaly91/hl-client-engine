@@ -129,12 +129,28 @@ endfunction()
 hlclient_add_library(
     hlclient_core
     include/hlclient/core/command_line.hpp
+    include/hlclient/core/presentation_settings.hpp
+    include/hlclient/core/external_launch_config.hpp
     include/hlclient/core/log.hpp
     include/hlclient/core/version.hpp
     src/core/command_line.cpp
+    src/core/external_launch_config.cpp
     src/core/log.cpp
 )
 add_library(hlclient::core ALIAS hlclient_core)
+
+hlclient_add_library(hlclient_session_receipts
+    include/hlclient/app/session_receipt.hpp
+    src/app/session_receipt.cpp
+    include/hlclient/app/movement_diagnostics.hpp
+    src/app/movement_diagnostics.cpp
+    include/hlclient/app/remote_movement_diagnostics.hpp
+    src/app/remote_movement_diagnostics.cpp
+    include/hlclient/app/movement_session_diagnostics.hpp
+    src/app/movement_session_diagnostics.cpp)
+add_library(hlclient::session_receipts ALIAS hlclient_session_receipts)
+target_link_libraries(hlclient_session_receipts PUBLIC hlclient::core)
+set_property(TARGET hlclient_session_receipts PROPERTY FOLDER "Engine/Session Evidence")
 
 hlclient_add_library(
     hlclient_hash_md5
@@ -257,6 +273,7 @@ hlclient_add_library(
     include/hlclient/assets/asset_types.hpp
     include/hlclient/assets/world_lightmap_types.hpp
     include/hlclient/assets/world_texture_types.hpp
+    include/hlclient/assets/skybox_asset.hpp
     src/assets/asset_source.cpp
     src/assets/world_lightmap_types.cpp
     src/assets/world_texture_types.cpp
@@ -264,6 +281,12 @@ hlclient_add_library(
 add_library(hlclient::asset_api ALIAS hlclient_asset_api)
 target_link_libraries(hlclient_asset_api PRIVATE hlclient::core)
 set_property(TARGET hlclient_asset_api PROPERTY FOLDER "Engine/Assets")
+
+hlclient_add_library(hlclient_tga_image
+    include/hlclient/assets/tga_image.hpp src/assets/tga_image.cpp)
+add_library(hlclient::tga_image ALIAS hlclient_tga_image)
+target_link_libraries(hlclient_tga_image PUBLIC hlclient::asset_api PRIVATE hlclient::core)
+set_property(TARGET hlclient_tga_image PROPERTY FOLDER "Engine/Assets/Formats")
 
 hlclient_add_library(hlclient_audio
     include/hlclient/assets/wav_importer.hpp src/assets/wav_importer.cpp
@@ -1160,6 +1183,8 @@ if(WIN32)
         hlclient_windows_secure_output
         include/hlclient/platform/windows/secure_output.hpp
         src/platform/windows/secure_output.cpp
+        include/hlclient/platform/windows/session_receipt_file.hpp
+        src/platform/windows/session_receipt_file.cpp
     )
     add_library(
         hlclient::windows_secure_output ALIAS
@@ -1167,7 +1192,8 @@ if(WIN32)
     target_compile_definitions(
         hlclient_windows_secure_output PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(
-        hlclient_windows_secure_output PRIVATE bcrypt hlclient::core)
+        hlclient_windows_secure_output PRIVATE bcrypt hlclient::core
+        PUBLIC hlclient::session_receipts)
 
     hlclient_add_library(
         hlclient_windows_binary_identity
@@ -1203,6 +1229,8 @@ if(WIN32)
         hlclient_windows_network_isolation
         include/hlclient/platform/windows/network_isolation.hpp
         src/platform/windows/network_isolation.cpp
+        include/hlclient/platform/windows/external_launch_preflight.hpp
+        src/platform/windows/external_launch_preflight.cpp
     )
     add_library(
         hlclient::windows_network_isolation ALIAS
@@ -1215,7 +1243,16 @@ if(WIN32)
         PUBLIC
             hlclient::windows_binary_identity
             hlclient::windows_process_orchestrator
-        PRIVATE fwpuclnt rpcrt4 iphlpapi ws2_32 hlclient::core)
+        PRIVATE fwpuclnt rpcrt4 iphlpapi ws2_32 wintrust crypt32 hlclient::core)
+
+    hlclient_add_library(hlclient_external_launcher
+        include/hlclient/platform/windows/external_launcher.hpp
+        src/platform/windows/external_launcher.cpp)
+    add_library(hlclient::external_launcher ALIAS hlclient_external_launcher)
+    target_compile_definitions(hlclient_external_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(hlclient_external_launcher PUBLIC
+        hlclient::windows_process_orchestrator hlclient::windows_secure_output hlclient::core
+        PRIVATE bcrypt)
 
     hlclient_add_library(
         hlclient_windows_reparse_provenance
@@ -1497,6 +1534,8 @@ hlclient_add_library(
     include/hlclient/entity_render/sprite_frame_selector.hpp
     include/hlclient/entity_render/sprite_billboard_basis.hpp
     src/entity_render/entity_render_types.cpp
+    include/hlclient/entity_render/studio_socket.hpp
+    src/entity_render/studio_socket.cpp
     src/entity_render/studio_model_render_asset.cpp
     src/entity_render/sprite_render_asset.cpp
     src/entity_render/sprite_frame_selector.cpp
@@ -1505,7 +1544,7 @@ hlclient_add_library(
 add_library(hlclient::entity_render_api ALIAS hlclient_entity_render_api)
 target_link_libraries(
     hlclient_entity_render_api
-    PUBLIC hlclient::model_asset_api hlclient::asset_api
+    PUBLIC hlclient::model_asset_api hlclient::asset_api hlclient::studio_pose
     PRIVATE hlclient::core)
 set_property(
     TARGET hlclient_entity_render_api
@@ -1653,6 +1692,7 @@ hlclient_add_library(
     hlclient_client
     include/hlclient/client/client_world_state.hpp
     include/hlclient/client/runtime_observation.hpp
+    include/hlclient/client/temporary_effect.hpp
     src/client/client_world_state.cpp
     src/client/runtime_observation.cpp
 )
@@ -1672,6 +1712,10 @@ target_sources(hlclient_game_api INTERFACE
     include/hlclient/game_api/scenario.hpp)
 target_sources(hlclient_game_api INTERFACE include/hlclient/game_api/remote_player.hpp)
 target_sources(hlclient_game_api INTERFACE include/hlclient/game_api/remote_effects.hpp)
+target_sources(hlclient_game_api INTERFACE include/hlclient/game_api/temporary_effects.hpp)
+target_sources(hlclient_game_api INTERFACE include/hlclient/game_api/effect_palette.hpp)
+  target_sources(hlclient_game_api INTERFACE include/hlclient/game_api/multiplayer.hpp)
+target_sources(hlclient_game_api INTERFACE include/hlclient/game_api/hud_input.hpp include/hlclient/game_api/hud_resources.hpp)
 set_property(TARGET hlclient_game_api PROPERTY FOLDER "Engine/Game API")
 
 hlclient_add_library(hlclient_game_policy
@@ -1690,10 +1734,12 @@ target_link_libraries(hlclient_game_client_host PUBLIC hlclient::game_api)
 hlclient_add_library(
     hlclient_renderer_api
     include/hlclient/renderer/render_camera_math.hpp
+    include/hlclient/renderer/render_line_geometry.hpp
     include/hlclient/renderer/render_scene.hpp
     include/hlclient/renderer/transient_visuals.hpp
     include/hlclient/renderer/renderer.hpp
     src/renderer/render_camera_math.cpp
+    src/renderer/render_line_geometry.cpp
     src/renderer/transient_visuals.cpp
     src/renderer/renderer.cpp
 )
@@ -1712,6 +1758,17 @@ hlclient_add_library(hlclient_goldsrc_sound_assets
     include/hlclient/goldsrc/sound_assets.hpp src/goldsrc/sound_assets.cpp)
 add_library(hlclient::goldsrc_sound_assets ALIAS hlclient_goldsrc_sound_assets)
 target_link_libraries(hlclient_goldsrc_sound_assets PUBLIC hlclient::goldsrc_audio hlclient::goldsrc_asset_dispatch)
+hlclient_add_library(hlclient_goldsrc_sky_assets
+    include/hlclient/goldsrc/sky_assets.hpp src/goldsrc/sky_assets.cpp)
+add_library(hlclient::goldsrc_sky_assets ALIAS hlclient_goldsrc_sky_assets)
+target_link_libraries(hlclient_goldsrc_sky_assets PUBLIC
+    hlclient::tga_image hlclient::goldsrc_sound_assets hlclient::goldsrc_bsp)
+set_property(TARGET hlclient_goldsrc_sky_assets PROPERTY FOLDER "Engine/Assets/World Textures")
+hlclient_add_library(hlclient_goldsrc_decal_assets
+    include/hlclient/goldsrc/decal_assets.hpp src/goldsrc/decal_assets.cpp)
+add_library(hlclient::goldsrc_decal_assets ALIAS hlclient_goldsrc_decal_assets)
+target_link_libraries(hlclient_goldsrc_decal_assets PUBLIC
+    hlclient::goldsrc_sound_assets hlclient::goldsrc_wad3 hlclient::hash_sha256)
 
 hlclient_add_library(
     hlclient_goldsrc_runtime_replay
@@ -2122,6 +2179,7 @@ set_property(
 
 hlclient_add_library(
     hlclient_entity_scene_render
+    include/hlclient/entity_render/beam_ribbon.hpp
     include/hlclient/entity_render/entity_scene_render.hpp
     src/entity_render/entity_scene_render.cpp
 )
@@ -2225,6 +2283,12 @@ hlclient_add_library(
     src/app/world_impact_presentation.cpp
     include/hlclient/app/remote_effect_presentation.hpp
     src/app/remote_effect_presentation.cpp
+    include/hlclient/app/temporary_effect_presentation.hpp
+    src/app/temporary_effect_presentation.cpp
+    include/hlclient/app/entity_follow_presentation.hpp
+    src/app/entity_follow_presentation.cpp
+    include/hlclient/goldsrc/player_model_assets.hpp
+    src/goldsrc/player_model_assets.cpp
 )
 add_library(
     hlclient::application_runtime_replay ALIAS
@@ -2251,13 +2315,41 @@ set_property(
     PROPERTY FOLDER "Apps")
 target_link_libraries(hlclient_application_runtime_replay
     PUBLIC hlclient::game_client_host hlclient::entity_interpolation)
+target_link_libraries(hlclient_application_runtime_replay PRIVATE hlclient::goldsrc_usercmd_session)
+
+hlclient_add_library(hlclient_goldsrc_hud_assets
+    include/hlclient/goldsrc/hud_manifest.hpp src/goldsrc/hud_manifest.cpp
+    include/hlclient/goldsrc/hud_assets.hpp src/goldsrc/hud_assets.cpp)
+add_library(hlclient::goldsrc_hud_assets ALIAS hlclient_goldsrc_hud_assets)
+target_link_libraries(hlclient_goldsrc_hud_assets
+    PUBLIC hlclient::game_api hlclient::goldsrc_sound_assets hlclient::goldsrc_decal_assets hlclient::entity_scene_render
+    PRIVATE hlclient::asset_manager hlclient::goldsrc_sprite hlclient::hash_sha256)
+set_property(TARGET hlclient_goldsrc_hud_assets PROPERTY FOLDER "Engine/Client/HUD Assets")
+target_sources(hlclient_application_runtime_replay PRIVATE
+    include/hlclient/app/hud_presentation.hpp src/app/hud_presentation.cpp)
+target_link_libraries(hlclient_application_runtime_replay PUBLIC hlclient::goldsrc_hud_assets)
+target_link_libraries(hlclient_application_runtime_replay PUBLIC hlclient::goldsrc_sky_assets)
 
 if(HLCLIENT_BUILD_GAME_HALFLIFE)
     hlclient_add_library(hlclient_game_halflife
+        src/games/halflife/sprite_hud.cpp
+        src/games/halflife/screen_effects.cpp
+        include/hlclient/games/halflife/screen_effects.hpp
+        include/hlclient/games/halflife/sprite_hud.hpp
+        src/games/halflife/hud_resource_profile.cpp
+        include/hlclient/games/halflife/hud_resource_profile.hpp
+        src/games/halflife/egon.cpp
+        include/hlclient/games/halflife/egon.hpp
+        src/games/halflife/gauss.cpp
+        include/hlclient/games/halflife/gauss.hpp
         src/games/halflife/remote_effects.cpp
         include/hlclient/games/halflife/remote_effects.hpp
+        include/hlclient/games/halflife/temporary_effects.hpp
+        src/games/halflife/temporary_effects.cpp
         src/games/halflife/remote_player.cpp
         include/hlclient/games/halflife/remote_player.hpp
+        src/games/halflife/player_appearance.cpp
+        include/hlclient/games/halflife/player_appearance.hpp
         src/games/halflife/materials.cpp
         include/hlclient/games/halflife/materials.hpp
         src/games/halflife/movement_audio.cpp
@@ -2266,6 +2358,7 @@ if(HLCLIENT_BUILD_GAME_HALFLIFE)
         include/hlclient/games/halflife/weapon_audio.hpp
         src/games/halflife/weapon_visuals.cpp
         include/hlclient/games/halflife/weapon_visuals.hpp
+        include/hlclient/games/halflife/firearm_profile.hpp
         include/hlclient/games/halflife/client_module.hpp
         include/hlclient/games/halflife/inventory.hpp
         include/hlclient/games/halflife/server_messages.hpp
@@ -2280,8 +2373,15 @@ if(HLCLIENT_BUILD_GAME_HALFLIFE)
         src/games/halflife/client_module.cpp
         src/games/halflife/inventory.cpp
         src/games/halflife/server_messages.cpp
+        src/games/halflife/multiplayer.cpp
         src/games/halflife/local_player_lifecycle.cpp
         src/games/halflife/local_weapon_presentation.cpp
+        src/games/halflife/satchel_presentation.cpp
+        src/games/halflife/tripmine_presentation.cpp
+        src/games/halflife/snark_presentation.cpp
+        include/hlclient/games/halflife/snark_profile.hpp
+        include/hlclient/games/halflife/tripmine_profile.hpp
+        include/hlclient/games/halflife/satchel_profile.hpp
         src/games/halflife/presentation.cpp
         src/games/halflife/movement_policy.cpp
         src/games/halflife/scenario_policy.cpp)
@@ -2292,7 +2392,7 @@ if(HLCLIENT_BUILD_GAME_HALFLIFE)
         PUBLIC hlclient::game_api
         PRIVATE hlclient::game_policy hlclient::client
             hlclient::gameplay_input hlclient::goldsrc_usercmd_api
-            hlclient::goldsrc_client_message)
+            hlclient::goldsrc_client_message hlclient::studio_pose)
     set_property(TARGET hlclient_game_halflife PROPERTY FOLDER "Games/HalfLife")
     set_property(TARGET hlclient_game_halflife PROPERTY HLCLIENT_GAME_MODULE TRUE)
     hlclient_enable_address_sanitizer(hlclient_game_halflife)
@@ -2406,10 +2506,11 @@ hlclient_enable_warnings(hlclient)
 target_link_libraries(
     hlclient
     PRIVATE
+        hlclient::session_receipts
         hlclient::core
         hlclient::app_support
         hlclient::application_runtime_replay
-        hlclient::audio_sdl hlclient::goldsrc_sound_assets
+        hlclient::audio_sdl hlclient::goldsrc_sound_assets hlclient::goldsrc_hud_assets
         hlclient::platform
         hlclient::filesystem
         hlclient::asset_api
@@ -2438,6 +2539,31 @@ target_link_libraries(
         hlclient::interactive_preview
         hlclient::live_visual_control
 )
+if(WIN32)
+    target_link_libraries(hlclient PRIVATE hlclient::windows_secure_output hlclient::external_launcher)
+
+    add_executable(hlclient_launcher WIN32 apps/hlclient_launcher/main.cpp)
+    set_target_properties(hlclient_launcher PROPERTIES OUTPUT_NAME HLClientLauncher FOLDER Apps)
+    hlclient_enable_warnings(hlclient_launcher)
+    target_compile_options(hlclient_launcher PRIVATE /utf-8)
+    target_compile_definitions(hlclient_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_link_libraries(hlclient_launcher PRIVATE hlclient::external_launcher
+        hlclient::platform SDL3::SDL3-shared hlclient::windows_network_isolation hlclient::hash_sha256
+        hlclient::session_receipts user32 gdi32 comctl32 shell32 ole32 uuid)
+    add_custom_command(TARGET hlclient_launcher POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:SDL3::SDL3-shared>"
+            "$<TARGET_FILE_DIR:hlclient_launcher>" VERBATIM)
+    if(BUILD_TESTING)
+        add_test(NAME hlclient_external_launcher_ui_offline
+            COMMAND hlclient_launcher --offline-ui-check)
+        set_tests_properties(hlclient_external_launcher_ui_offline PROPERTIES
+            LABELS "offline;e31;launcher" TIMEOUT 30)
+        add_executable(hlclient_external_process_fixture apps/hlclient_external_process_fixture/main.cpp)
+        hlclient_enable_warnings(hlclient_external_process_fixture)
+        target_compile_definitions(hlclient_external_process_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        set_property(TARGET hlclient_external_process_fixture PROPERTY FOLDER "Tests/Fixtures")
+    endif()
+endif()
 
 add_executable(
     hlclient_local_resource_check
@@ -2675,9 +2801,14 @@ if(WIN32)
         hlclient_stock_runtime_orchestrator
         apps/hlclient_stock_runtime_orchestrator/main.cpp)
     hlclient_enable_warnings(hlclient_stock_runtime_orchestrator)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/apps/hlclient_stock_runtime_orchestrator/main.cpp")
+    file(SHA256 "${PROJECT_SOURCE_DIR}/apps/hlclient_stock_runtime_orchestrator/main.cpp"
+        HLCLIENT_RUNNER_SOURCE_SHA256)
     target_compile_definitions(
         hlclient_stock_runtime_orchestrator
-        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+        HLCLIENT_RUNNER_SOURCE_ID="${HLCLIENT_RUNNER_SOURCE_SHA256}")
     target_link_libraries(
         hlclient_stock_runtime_orchestrator
         PRIVATE
@@ -3510,7 +3641,8 @@ set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT
 foreach(
     _hlclient_sanitized_target
     IN ITEMS
-        hlclient_audio hlclient_audio_sdl hlclient_goldsrc_audio hlclient_goldsrc_sound_assets
+        hlclient_audio hlclient_audio_sdl hlclient_goldsrc_audio hlclient_goldsrc_sound_assets hlclient_goldsrc_hud_assets
+        hlclient_tga_image hlclient_goldsrc_sky_assets
         hlclient_collision_api
         hlclient_goldsrc_bsp_collision
         hlclient_goldsrc_collision_scene
@@ -3572,6 +3704,22 @@ endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests/core_api)
+    if(WIN32)
+        # Owned byte/filesystem fixtures only; no installed map/game/device.
+        # Register in game-OFF builds as well as the ordinary client build.
+        add_test(NAME hlclient_gentest_multiplayer_map_no_stock
+            COMMAND "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+                -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File "${PROJECT_SOURCE_DIR}/scripts/test_gentest_multiplayer_map.ps1")
+        set_tests_properties(hlclient_gentest_multiplayer_map_no_stock PROPERTIES
+            LABELS "offline;no-stock;external-map" TIMEOUT 60)
+        add_test(NAME hlclient_movement_session_analysis_no_stock
+            COMMAND "${HLCLIENT_TEST_POWERSHELL_EXECUTABLE}"
+                -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File "${PROJECT_SOURCE_DIR}/scripts/test_movement_session_analysis.ps1")
+        set_tests_properties(hlclient_movement_session_analysis_no_stock PROPERTIES
+            LABELS "offline;no-stock;movement-diagnostics" TIMEOUT 60)
+    endif()
     if(HLCLIENT_BUILD_GAME_HALFLIFE)
         add_subdirectory(tests)
     endif()

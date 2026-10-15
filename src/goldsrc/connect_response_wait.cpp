@@ -444,7 +444,8 @@ bool ConnectResponseWaitStage::process_received(
             now,
             ConnectResponseTraceClassification::protocol_failure,
             source,
-            payload.size());
+            payload.size(),
+            parsed.error ? std::optional{parsed.error->byte_offset} : std::nullopt);
         return false;
     }
 
@@ -488,13 +489,15 @@ void ConnectResponseWaitStage::fail(
     const ConnectResponseWaitTimePoint now,
     const ConnectResponseTraceClassification classification,
     const network::NetworkAddress endpoint,
-    const std::size_t datagram_size)
+    const std::size_t datagram_size,
+    const std::optional<std::size_t> protocol_byte_offset)
 {
     state_ = state;
     error_ = ConnectResponseWaitError{
         code,
         protocol_code,
         bounded_text(std::move(context)),
+        protocol_byte_offset,
     };
     emit_trace(classification, now, endpoint, datagram_size);
 }

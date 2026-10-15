@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <deque>
+#include <limits>
 #include <hlclient/app/live_visual_control.hpp>
 #include <hlclient/games/halflife/movement_policy.hpp>
 #include <hlclient/games/halflife/client_module.hpp>
@@ -204,6 +205,287 @@ TEST_CASE("Reference prediction carrier ledger binds only actual move sends to f
     anchor = ledger.bind_clientdata(source);
     REQUIRE(anchor.bound());
     CHECK(anchor.last_new_command->value() == 4U); // backup IDs do not advance
+    source.record_identity = 105U;
+    source.source_sequence = 44U;
+    source.acknowledgement = first_receipt->outgoing_netchan_sequence;
+    const auto older_command = ledger.bind_clientdata(source);
+    CHECK_FALSE(older_command.bound());
+    CHECK(older_command.status != g::ReferencePredictionAnchorStatus::bound);
+    CHECK(older_command.status == g::ReferencePredictionAnchorStatus::stale_command_boundary);
+    source.record_identity = 106U;
+    source.source_sequence = 45U;
+    source.acknowledgement = second_receipt->outgoing_netchan_sequence;
+    const auto same_command = ledger.bind_clientdata(source);
+    REQUIRE(same_command.bound());
+    CHECK(same_command.last_new_command->value() == 4U);
+    source.record_identity = 107U; source.source_sequence = 46U;
+    source.source_reliable = true; source.reassembled = true;
+    CHECK(ledger.bind_clientdata(source).status == g::ReferencePredictionAnchorStatus::old_body_or_reassembly);
+    source.record_identity = 108U; source.reassembled = false;
+    source.contemporaneous_fragment_suffix = true;
+    REQUIRE(ledger.bind_clientdata(source).bound()); // rejected completion did not reserve this same carrier
+    source.record_identity = 109U; source.source_sequence = 47U;
+    source.contemporaneous_fragment_suffix = false;
+    CHECK(ledger.bind_clientdata(source).status == g::ReferencePredictionAnchorStatus::old_body_or_reassembly);
+    source.record_identity = 110U; source.source_sequence = 48U;
+    source.contemporaneous_fragment_suffix = true; source.reassembled = true;
+    CHECK(ledger.bind_clientdata(source).status == g::ReferencePredictionAnchorStatus::old_body_or_reassembly);
+}
+
+namespace {
+std::array<std::uint32_t, 3> coherent_frame_sent_carriers(
+    g::ReferencePredictionCarrierLedger& ledger, const std::uint64_t generation = 17U) {
+    Transport transport;
+    g::NetchanDriver driver{transport, transport.remote};
+    activate(driver, transport);
+    g::GoldSrcUserCmdTransmissionStage stage{driver, binding(), ready, config(generation)};
+    std::array<std::uint32_t, 3> carriers{};
+    for (std::uint32_t id = 1U; id <= carriers.size(); ++id) {
+        g::GoldSrcWireUserCmd command;
+        command.msec = 20U;
+        command.forward = static_cast<std::int16_t>(id * 100U);
+        REQUIRE(stage.queue_reference_command(f::sequence(id), command, generation));
+        REQUIRE(stage.update_reference(g::NetchanDriverTimePoint{} +
+            std::chrono::milliseconds{id + 1U}));
+        std::optional<g::GoldSrcUserCmdTransmissionEvent> receipt;
+        while (const auto event = stage.poll_event())
+            if (event->type == g::GoldSrcUserCmdTransmissionEventType::move_packet_submitted)
+                receipt = *event;
+        REQUIRE(receipt);
+        REQUIRE(receipt->outgoing_netchan_sequence);
+        REQUIRE(ledger.record_sent(*receipt, stage.history()) ==
+            g::ReferencePredictionAnchorStatus::bound);
+        carriers[id - 1U] = *receipt->outgoing_netchan_sequence;
+        REQUIRE(transport.sent.size() == id);
+        CHECK(decode(transport.sent.back(), generation).commands.back().value == command);
+    }
+    return carriers;
+}
+
+hlclient::client::RuntimeClientObservationState coherent_movement_frame(
+    const std::uint32_t acknowledgement, const std::uint64_t record = 100U,
+    const std::uint32_t sequence = 40U, const double time = 10.0,
+    const bool reliable = true, const bool suffix = false,
+    const bool reassembled = false, const std::uint64_t generation = 17U) {
+    namespace c = hlclient::client;
+    c::RuntimeClientObservationState observation;
+    observation.generation = generation;
+    observation.publication_revision = record;
+    observation.server_time_seconds = time;
+    const auto metadata = [&](const std::size_t begin, const std::size_t end) {
+        return c::RuntimeSubstateMetadata{generation,
+            c::RuntimeObservationFreshness::observed_in_record,
+            c::RuntimeObservationCompleteness::complete_reconstruction,
+            c::RuntimeObservationSource{record, 1U, sequence, begin, end,
+                acknowledgement, reliable, reassembled, suffix}};
+    };
+    observation.server_time_metadata = metadata(0U, 40U);
+    observation.client_metadata = metadata(40U, 144U);
+    observation.entity_metadata = metadata(144U, 336U);
+    observation.receiving_client.emplace();
+    c::RuntimePacketEntityObservation player;
+    player.entity_number = 13U;
+    player.player_movement_schema = true;
+    observation.packet_entities.push_back(player);
+    return observation;
+}
+} // namespace
+
+TEST_CASE("Coherent reliable movement frames bind real carriers without weakening the plain anchor API",
+          "[e322][prediction-anchor][reference-transmission][coherent-reliable]") {
+    g::ReferencePredictionCarrierLedger ledger;
+    const auto sent = coherent_frame_sent_carriers(ledger);
+    auto initial = coherent_movement_frame(sent[0], 100U, 40U, 0.0);
+    const auto strict = ledger.bind_clientdata({17U, 100U, 40U, sent[0], true, true, false});
+    CHECK(strict.status == g::ReferencePredictionAnchorStatus::old_body_or_reassembly);
+    CHECK_FALSE(strict.coherent_reliable_frame);
+    CHECK(ledger.bind_observation(initial, 12U, false).status ==
+        g::ReferencePredictionAnchorStatus::old_body_or_reassembly);
+    const auto first = ledger.bind_observation(initial, 12U, true);
+    REQUIRE(first.bound()); // An initial coherent frame need not wait for an unreliable one.
+    CHECK(first.coherent_reliable_frame);
+    CHECK(first.last_new_command->value() == 1U);
+    CHECK(first.last_new_value->forward == 100);
+    CHECK(first.outgoing_sequence == sent[0]);
+    CHECK_FALSE(ledger.bind_observation(initial, 12U, true).bound());
+    auto duplicate_sequence_ledger = ledger;
+    CHECK(duplicate_sequence_ledger.bind_observation(
+        coherent_movement_frame(sent[1], 101U, 40U, 0.01), 12U, true).status ==
+        g::ReferencePredictionAnchorStatus::stale_or_duplicate_record);
+    auto duplicate_record_ledger = ledger;
+    CHECK(duplicate_record_ledger.bind_observation(
+        coherent_movement_frame(sent[1], 100U, 41U, 0.01), 12U, true).status ==
+        g::ReferencePredictionAnchorStatus::stale_or_duplicate_record);
+
+    auto repeated_ack = coherent_movement_frame(sent[0], 101U, 41U, 0.02);
+    const auto same_boundary = ledger.bind_observation(repeated_ack, 12U, true);
+    REQUIRE(same_boundary.bound());
+    CHECK(same_boundary.coherent_reliable_frame);
+    CHECK(same_boundary.last_new_command->value() == 1U);
+    auto second = coherent_movement_frame(sent[1], 102U, 42U, 0.04);
+    REQUIRE(ledger.bind_observation(second, 12U, true).bound());
+    auto lower_ack = coherent_movement_frame(sent[0], 103U, 43U, 0.06);
+    const auto rejected = ledger.bind_observation(lower_ack, 12U, true);
+    CHECK(rejected.status == g::ReferencePredictionAnchorStatus::stale_command_boundary);
+    CHECK_FALSE(rejected.coherent_reliable_frame);
+    // A rejected later-time frame must not poison the accepted time watermark.
+    auto third = coherent_movement_frame(sent[2], 104U, 44U, 0.05);
+    const auto advanced = ledger.bind_observation(third, 12U, true);
+    REQUIRE(advanced.bound());
+    CHECK(advanced.coherent_reliable_frame);
+    CHECK(advanced.last_new_command->value() == 3U);
+    CHECK(advanced.last_new_value->forward == 300);
+    CHECK(initial.client_metadata.source->source_reliable);
+    CHECK_FALSE(initial.client_metadata.source->contemporaneous_fragment_suffix);
+    CHECK_FALSE(initial.client_metadata.source->reassembled);
+}
+
+TEST_CASE("Reliable movement admission requires every coherent ordered observation witness",
+          "[e322][prediction-anchor][reference-transmission][coherent-reliable]") {
+    namespace c = hlclient::client;
+    g::ReferencePredictionCarrierLedger recorded;
+    const auto sent = coherent_frame_sent_carriers(recorded);
+    for (unsigned defect = 0U; defect != 35U; ++defect) {
+        CAPTURE(defect);
+        auto ledger = recorded;
+        const auto valid = coherent_movement_frame(sent[0]);
+        auto invalid = valid;
+        auto& time = invalid.server_time_metadata;
+        auto& client = invalid.client_metadata;
+        auto& entities = invalid.entity_metadata;
+        switch (defect) {
+        case 0U: invalid.server_time_seconds.reset(); break;
+        case 1U: invalid.server_time_seconds = std::numeric_limits<double>::quiet_NaN(); break;
+        case 2U: invalid.server_time_seconds = std::numeric_limits<double>::infinity(); break;
+        case 3U: invalid.server_time_seconds = -0.001; break;
+        case 4U: invalid.receiving_client.reset(); break;
+        case 5U: invalid.packet_entities.clear(); break;
+        case 6U: invalid.packet_entities.front().entity_number = 12U; break;
+        case 7U: invalid.packet_entities.front().player_movement_schema = false; break;
+        case 8U: invalid.publication_revision = 0U; break;
+        case 9U: ++entities.source->record_identity; break;
+        case 10U: ++time.source->source_transport_sequence; break;
+        case 11U: entities.source->carrier_acknowledgement = sent[1]; break;
+        case 12U: time.source->source_reliable = false; break;
+        case 13U: entities.source->reassembled = true; break;
+        case 14U: time.source->contemporaneous_fragment_suffix = true; break;
+        case 15U: ++entities.generation; break;
+        case 16U: client.freshness = c::RuntimeObservationFreshness::retained; break;
+        case 17U: time.freshness = c::RuntimeObservationFreshness::retained; break;
+        case 18U: entities.completeness = c::RuntimeObservationCompleteness::unavailable; break;
+        case 19U: time.source.reset(); break;
+        case 20U: entities.source.reset(); break;
+        case 21U: time.source->end_bit_offset = time.source->start_bit_offset; break;
+        case 22U: client.source->end_bit_offset = client.source->start_bit_offset; break;
+        case 23U: entities.source->end_bit_offset = entities.source->start_bit_offset; break;
+        case 24U: time.source->end_bit_offset = client.source->start_bit_offset + 1U; break;
+        case 25U: client.source->end_bit_offset = entities.source->start_bit_offset + 1U; break;
+        case 26U: time.source->carrier_acknowledgement.reset(); break;
+        case 27U: ++entities.source->record_ordinal; break;
+        case 28U: client.source.reset(); break;
+        case 29U: client.completeness = c::RuntimeObservationCompleteness::unavailable; break;
+        case 30U: time.completeness = c::RuntimeObservationCompleteness::unavailable; break;
+        case 31U: entities.freshness = c::RuntimeObservationFreshness::retained; break;
+        case 32U: ++time.generation; break;
+        case 33U: ++client.generation; break;
+        case 34U: time.source->start_bit_offset = time.source->end_bit_offset + 1U; break;
+        }
+        const auto rejected = ledger.bind_observation(invalid, 12U, true);
+        CHECK_FALSE(rejected.bound());
+        CHECK_FALSE(rejected.coherent_reliable_frame);
+        // A malformed witness cannot consume the same record/sequence or time.
+        const auto recovered = ledger.bind_observation(valid, 12U, true);
+        REQUIRE(recovered.bound());
+        CHECK(recovered.coherent_reliable_frame);
+    }
+}
+
+TEST_CASE("Accepted direct and fragment suffix frames advance the reliable movement time frontier",
+          "[e322][prediction-anchor][reference-transmission][coherent-reliable]") {
+    g::ReferencePredictionCarrierLedger ledger;
+    const auto sent = coherent_frame_sent_carriers(ledger);
+    const auto direct = ledger.bind_observation(
+        coherent_movement_frame(sent[0], 100U, 40U, 10.0, false), 12U, true);
+    REQUIRE(direct.bound());
+    CHECK_FALSE(direct.coherent_reliable_frame);
+    for (const auto stale_time : {9.0, 10.0}) {
+        const auto stale = ledger.bind_observation(
+            coherent_movement_frame(sent[1], 101U, 41U, stale_time), 12U, true);
+        CHECK(stale.status == g::ReferencePredictionAnchorStatus::stale_movement_frame);
+        CHECK_FALSE(stale.coherent_reliable_frame);
+    }
+    REQUIRE(ledger.bind_observation(
+        coherent_movement_frame(sent[1], 101U, 41U, 10.02), 12U, true).bound());
+    const auto suffix = ledger.bind_observation(
+        coherent_movement_frame(sent[1], 102U, 42U, 10.5, true, true), 12U, true);
+    REQUIRE(suffix.bound());
+    CHECK_FALSE(suffix.coherent_reliable_frame);
+    CHECK(ledger.bind_observation(
+        coherent_movement_frame(sent[2], 103U, 43U, 10.49), 12U, true).status ==
+        g::ReferencePredictionAnchorStatus::stale_movement_frame);
+    REQUIRE(ledger.bind_observation(
+        coherent_movement_frame(sent[2], 103U, 43U, 10.6), 12U, true).bound());
+}
+
+TEST_CASE("Coherent movement compatibility preserves legacy direct binding and rejects completed fragments",
+          "[e322][prediction-anchor][reference-transmission][coherent-reliable]") {
+    g::ReferencePredictionCarrierLedger recorded;
+    const auto sent = coherent_frame_sent_carriers(recorded);
+    SECTION("Missing movement witnesses do not tighten the original direct path or advance time") {
+        auto ledger = recorded;
+        REQUIRE(ledger.bind_observation(
+            coherent_movement_frame(sent[0], 100U, 40U, 20.0, false), 12U, true).bound());
+        auto legacy = coherent_movement_frame(sent[1], 101U, 41U, 100.0, false);
+        legacy.entity_metadata.source.reset();
+        const auto ordinary = ledger.bind_observation(legacy, 12U, true);
+        REQUIRE(ordinary.bound());
+        CHECK_FALSE(ordinary.coherent_reliable_frame);
+        REQUIRE(ledger.bind_observation(
+            coherent_movement_frame(sent[2], 102U, 42U, 21.0), 12U, true).bound());
+    }
+    SECTION("Rejected completion cannot reserve a following ordinary suffix in the same packet") {
+        auto ledger = recorded;
+        for (const bool suffix_flag : {false, true}) {
+            const auto completed = ledger.bind_observation(
+                coherent_movement_frame(sent[0], 100U, 40U, 100.0, true, suffix_flag, true),
+                12U, true);
+            CHECK(completed.status == g::ReferencePredictionAnchorStatus::old_body_or_reassembly);
+            CHECK_FALSE(completed.coherent_reliable_frame);
+        }
+        const auto suffix = ledger.bind_observation(
+            coherent_movement_frame(sent[0], 101U, 40U, 1.0, true, true), 12U, true);
+        REQUIRE(suffix.bound());
+        CHECK_FALSE(suffix.coherent_reliable_frame);
+        REQUIRE(ledger.bind_observation(
+            coherent_movement_frame(sent[1], 102U, 41U, 1.02), 12U, true).bound());
+    }
+    SECTION("A missing actual sent carrier cannot advance the time watermark") {
+        auto ledger = recorded;
+        CHECK(ledger.bind_observation(coherent_movement_frame(999U, 100U, 40U, 100.0),
+            12U, true).status == g::ReferencePredictionAnchorStatus::sent_carrier_missing);
+        REQUIRE(ledger.bind_observation(
+            coherent_movement_frame(sent[0], 101U, 41U, 1.0), 12U, true).bound());
+    }
+}
+
+TEST_CASE("Reliable movement chronology is local to the actual transmitted session generation",
+          "[e322][prediction-anchor][reference-transmission][coherent-reliable]") {
+    g::ReferencePredictionCarrierLedger old_ledger;
+    const auto old_sent = coherent_frame_sent_carriers(old_ledger);
+    REQUIRE(old_ledger.bind_observation(
+        coherent_movement_frame(old_sent[0], 100U, 40U, 100.0), 12U, true).bound());
+    g::ReferencePredictionCarrierLedger fresh_ledger;
+    const auto fresh_sent = coherent_frame_sent_carriers(fresh_ledger, 18U);
+    const auto fresh = coherent_movement_frame(fresh_sent[0], 1U, 1U, 0.0,
+        true, false, false, 18U);
+    CHECK(old_ledger.bind_observation(fresh, 12U, true).status ==
+        g::ReferencePredictionAnchorStatus::generation_mismatch);
+    const auto accepted = fresh_ledger.bind_observation(fresh, 12U, true);
+    REQUIRE(accepted.bound());
+    CHECK(accepted.coherent_reliable_frame);
+    CHECK(accepted.generation == 18U);
+    CHECK(accepted.source_record_identity == 1U);
+    CHECK(accepted.last_new_command->value() == 1U);
 }
 
 TEST_CASE("D2 physical E through G1 policy immutable history and Netchan preserves tap hold release and backups",
@@ -408,6 +690,79 @@ TEST_CASE("D2 capture and life scoped input gate never resumes stale Use",
     CHECK(held == use);
 }
 
+TEST_CASE("E16 secondary passes normal policy Netchan wire and immutable backups",
+          "[e16][secondary][reference-transmission][game-module]") {
+    namespace gi = hlclient::gameplay_input;
+    namespace input = hlclient::input;
+    const auto policy = hlclient::games::halflife::make_movement_policy();
+    REQUIRE(policy.button_policy == g::GoldSrcReferenceButtonPolicy::jump_duck_primary_secondary_reload_use);
+    const auto secondary = gi::gameplay_button_mask(gi::GameplayButton::attack_secondary);
+    CHECK((policy.live_buttons & secondary) != 0U);
+    CHECK((policy.capture_life_scoped_buttons & secondary) != 0U);
+    Transport transport; g::NetchanDriver driver{transport, transport.remote}; activate(driver, transport);
+    g::GoldSrcUserCmdTransmissionStage stage{driver, binding(), ready, config()};
+    input::InputStateTracker tracker;
+    for (unsigned id = 1; id <= 3; ++id) {
+        tracker.begin_frame();
+        if (id == 1) {
+            tracker.apply_event(input::InputEvent::focus_gained());
+            tracker.apply_event(input::InputEvent::capture_acquired());
+            tracker.apply_event(input::InputEvent::mouse_button_pressed(input::PhysicalMouseButton::right));
+        } else if (id == 3)
+            tracker.apply_event(input::InputEvent::mouse_button_released(input::PhysicalMouseButton::right));
+        const auto intent = gi::GameplayInputIntentBuilder{}.build(
+            tracker.publish_snapshot(), *policy.bindings, policy.mouse_look, .02);
+        REQUIRE(intent);
+        const auto camera = hlclient::gameplay_camera::GameplayCameraState::create({}); REQUIRE(camera);
+        g::GoldSrcUserCmdBuildContext context; context.command_sequence = f::sequence(id);
+        context.command_msec = 20; context.command_sample_duration_nanoseconds = 20'000'000U;
+        context.reference_button_policy = policy.button_policy;
+        const auto wire = g::GoldSrcUserCmdInputAdapter{}.build_reference_wire(*intent.intent, *camera.state, context);
+        REQUIRE(wire); CHECK(wire.command->buttons == (id <= 2 ? 2048U : 0U));
+        REQUIRE(stage.queue_reference_command(f::sequence(id), *wire.command, 17U));
+        REQUIRE(stage.update_reference(g::NetchanDriverTimePoint{} + std::chrono::milliseconds{2 * id}));
+        const auto sent = decode(transport.sent.back());
+        CHECK(sent.commands.back().value == *wire.command);
+        CHECK(*stage.history().find(f::sequence(id))->reference_command == *wire.command);
+        if (id > 1) {
+            REQUIRE(sent.backup_count > 0);
+            CHECK(sent.commands.front().value.buttons == 2048U);
+        }
+        tracker.end_frame();
+    }
+    hlclient::game_api::ScopedGameplayButtonGate gate;
+    auto held = secondary, pressed = secondary;
+    gate.filter(secondary, false, held, pressed, 0U); CHECK(held == 0U); CHECK(pressed == 0U);
+    held = secondary; gate.filter(secondary, true, held, pressed, 0U); CHECK(held == 0U);
+    gate.filter(secondary, true, held, pressed, secondary); // release required before another life/capture.
+    held = secondary; pressed = secondary;
+    gate.filter(secondary, true, held, pressed, 0U); CHECK(held == secondary);
+    gate.invalidate(secondary); held = secondary; pressed = 0U;
+    gate.filter(secondary, true, held, pressed, 0U); CHECK(held == 0U);
+}
+
+TEST_CASE("Half Life selects the server-owned longjump policy explicitly",
+    "[longjump][game-module][movement]")
+{
+    const auto policy = hlclient::games::halflife::make_movement_policy();
+    REQUIRE(hlclient::game_api::valid_game_movement_policy(policy));
+    CHECK(policy.crouch_jump_physics_key == "slj");
+    REQUIRE(policy.movement_config.crouch_jump);
+    CHECK(policy.movement_config.crouch_jump->forward_speed == 560.0F);
+    CHECK(policy.movement_config.crouch_jump->vertical_impulse == std::sqrt(89600.0F));
+    CHECK(policy.movement_config.crouch_jump->minimum_speed == 50.0F);
+    auto malformed = policy;
+    malformed.crouch_jump_physics_key = "\\slj";
+    CHECK_FALSE(hlclient::game_api::valid_game_movement_policy(malformed));
+    malformed = policy; malformed.crouch_jump_physics_key.clear();
+    CHECK_FALSE(hlclient::game_api::valid_game_movement_policy(malformed));
+    malformed.movement_config.crouch_jump.reset();
+    CHECK(hlclient::game_api::valid_game_movement_policy(malformed));
+    malformed = policy; malformed.movement_config.crouch_jump->forward_speed =
+        std::numeric_limits<float>::quiet_NaN();
+    CHECK_FALSE(hlclient::game_api::valid_game_movement_policy(malformed));
+}
+
 TEST_CASE("Reference seed requires coherent player data and exact button provenance",
           "[prediction-seed]") {
     namespace c = hlclient::client;
@@ -455,6 +810,22 @@ TEST_CASE("Reference seed requires coherent player data and exact button provena
           g::ReferencePredictionFieldOrigin::reference_anchored_neutral_command);
     CHECK(seed.seed->origin.x == 10.0);
     CHECK(seed.seed->maximum_speed == 270.0);
+    // The game-selected exact capability is server-owned; reset/missing/key
+    // lookalikes and malformed tails cannot retain a prior enabled state.
+    for (const auto& [text, expected] : std::array{
+            std::pair{"\\slj\\1", true}, std::pair{"other\\v\\slj\\1", true},
+            std::pair{"\\slj\\0", false}, std::pair{"\\notslj\\1", false},
+            std::pair{"\\slj\\1\\broken", false}, std::pair{"\\slj\\11", false},
+            std::pair{"\\slj\\0\\slj\\1", false}, std::pair{"", false}}) {
+        observed.receiving_client->physics_info = text;
+        const auto ability = g::inspect_reference_prediction_seed(observed, 1U, anchor, {}, "slj");
+        REQUIRE(ability.seed); CHECK(ability.seed->crouch_jump_enabled == expected);
+        const auto unselected = g::inspect_reference_prediction_seed(observed, 1U, anchor);
+        REQUIRE(unselected.seed); CHECK_FALSE(unselected.seed->crouch_jump_enabled);
+    }
+    observed.receiving_client->physics_info.reset();
+    const auto absent_ability = g::inspect_reference_prediction_seed(observed, 1U, anchor, {}, "slj");
+    REQUIRE(absent_ability.seed); CHECK_FALSE(absent_ability.seed->crouch_jump_enabled);
     observed.receiving_client->view_offset =
         {std::nullopt, std::nullopt, 28.0};
     const auto vertical_only =
@@ -1151,6 +1522,109 @@ TEST_CASE("Production handoff is generation scoped and commits only after the sh
         driver, binding(), stale_ready, c};
     CHECK_FALSE(stale.valid_configuration());
     CHECK_FALSE(stale.queue_reference_command(f::sequence(1), {}, 17));
+}
+
+TEST_CASE("Post-driver reference preparation exposes only its owned submission and clears on receipt or teardown",
+          "[e311][fullscreen-usercmd][reference-transmission][usercmd][production][shared-driver][ownership]") {
+    Transport transport;
+    g::NetchanDriver driver{transport, transport.remote};
+    activate(driver, transport);
+    auto transmission_config = config();
+    transmission_config.externally_owned_driver_update = true;
+    transmission_config.timeout = 5ms;
+    const g::GoldSrcUserCmdSessionPrerequisite production_ready{
+        g::GoldSrcUserCmdSessionPrerequisiteProfile::production_live_runtime_ready_v1,
+        true, 17U};
+    g::GoldSrcUserCmdTransmissionStage stage{
+        driver, binding(), production_ready, transmission_config};
+    REQUIRE(stage.valid_configuration());
+    CHECK_FALSE(stage.has_pending_reference_submission());
+    // A legitimate already-owned clc_nop suffix makes the BEFORE phase wait.
+    // The one shared pump drains it; the AFTER phase then binds a move which
+    // has not yet had its own pump. This is distinct from unplanned history.
+    REQUIRE(driver.submit_unreliable(std::array{std::byte{1}}));
+    g::GoldSrcWireUserCmd command;
+    command.msec = 20U;
+    for (unsigned sequence = 1U; sequence <= 3U; ++sequence)
+        REQUIRE(stage.queue_reference_command(f::sequence(sequence), command, 17U));
+    CHECK_FALSE(stage.has_pending_reference_submission());
+    const auto first = g::NetchanDriverTimePoint{} + 2ms;
+    REQUIRE(stage.update_reference(first));
+    CHECK(stage.state() == g::GoldSrcUserCmdTransmissionState::unreliable_backpressure);
+    CHECK_FALSE(stage.has_pending_reference_submission());
+    driver.update(first);
+    REQUIRE(transport.sent.size() == 1U);
+    REQUIRE(stage.update_reference(first));
+    CHECK(stage.has_pending_reference_submission());
+    CHECK(stage.transmitted_packet_count() == 0U);
+    CHECK(stage.new_command_submission_count() == 0U);
+    const auto rejected = stage.queue_reference_command(f::sequence(4U), command, 17U);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error->code == g::GoldSrcUserCmdHistoryErrorCode::pending_submission);
+    CHECK(stage.history().size() == 3U);
+
+    SECTION("A would-block pump preserves ownership and later commits each new command once") {
+        transport.block = true;
+        REQUIRE(stage.update_reference(first + 1ms));
+        driver.update(first + 1ms);
+        REQUIRE(stage.update_reference(first + 1ms));
+        CHECK(stage.has_pending_reference_submission());
+        CHECK(stage.new_command_submission_count() == 0U);
+        CHECK(transport.sent.size() == 1U);
+        transport.block = false;
+        REQUIRE(stage.update_reference(first + 2ms));
+        driver.update(first + 2ms);
+        CHECK(stage.has_pending_reference_submission()); // Receipt not accounted yet.
+        REQUIRE(stage.update_reference(first + 2ms));
+        CHECK_FALSE(stage.has_pending_reference_submission());
+        REQUIRE(transport.sent.size() == 2U);
+        CHECK(stage.transmitted_packet_count() == 1U);
+        CHECK(stage.new_command_submission_count() == 3U);
+        const auto sent = decode(transport.sent.back());
+        CHECK(sent.new_count == 3U);
+        CHECK(sent.checksum_matched);
+        for (unsigned sequence = 1U; sequence <= 3U; ++sequence)
+            CHECK(stage.history().find(f::sequence(sequence))->new_transmission_count == 1U);
+        REQUIRE(stage.queue_reference_command(f::sequence(4U), command, 17U));
+        CHECK_FALSE(stage.has_pending_reference_submission());
+        REQUIRE(stage.update_reference(first + 3ms));
+        driver.update(first + 3ms);
+        REQUIRE(stage.update_reference(first + 3ms));
+        CHECK_FALSE(stage.has_pending_reference_submission());
+        CHECK(stage.new_command_submission_count() == 4U);
+        CHECK(decode(transport.sent.back()).new_count == 1U);
+        const auto transmitted = transport.sent.size();
+        REQUIRE(stage.update_reference(first + 3ms));
+        CHECK(transport.sent.size() == transmitted);
+        CHECK(stage.new_command_submission_count() == 4U);
+    }
+    SECTION("Cancellation abandons the pending capability without sending movement") {
+        stage.cancel(first + 1ms);
+        CHECK(stage.terminal());
+        CHECK_FALSE(stage.has_pending_reference_submission());
+        CHECK_FALSE(stage.queue_reference_command(f::sequence(4U), command, 17U));
+        CHECK_FALSE(stage.update_reference(first + 2ms));
+        CHECK(transport.sent.size() == 1U);
+        CHECK(stage.new_command_submission_count() == 0U);
+    }
+    SECTION("Close abandons the pending capability without sending movement") {
+        stage.close(first + 1ms);
+        CHECK(stage.terminal());
+        CHECK_FALSE(stage.has_pending_reference_submission());
+        CHECK_FALSE(stage.queue_reference_command(f::sequence(4U), command, 17U));
+        CHECK_FALSE(stage.update_reference(first + 2ms));
+        CHECK(transport.sent.size() == 1U);
+        CHECK(stage.new_command_submission_count() == 0U);
+    }
+    SECTION("A real stalled-progress timeout remains terminal") {
+        CHECK_FALSE(stage.update_reference(first + 6ms));
+        REQUIRE(stage.last_error());
+        CHECK(stage.last_error()->code == g::GoldSrcUserCmdTransmissionErrorCode::timed_out);
+        CHECK(stage.terminal());
+        CHECK_FALSE(stage.has_pending_reference_submission());
+        CHECK(transport.sent.size() == 1U);
+        CHECK(stage.new_command_submission_count() == 0U);
+    }
 }
 
 TEST_CASE("Reference production stage sends real loopback UDP to "

@@ -62,6 +62,9 @@ struct MouseLookConfig {
     double degrees_per_pixel_y{0.10};
     bool invert_y{false};
     double maximum_delta_per_frame{180.0};
+    // Neutral per-sample modifier; base sensitivity keeps its own safety
+    // envelope. Applied to displacement before the existing frame-delta cap.
+    double sensitivity_scale{1.0};
 };
 
 struct GameplayInputIntentLimits {

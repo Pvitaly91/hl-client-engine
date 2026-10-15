@@ -141,6 +141,9 @@ public:
     [[nodiscard]] const DeltaObjectState& object() const noexcept;
     [[nodiscard]] bool shares_object_with(
         const ClientWeaponSlotState& other) const noexcept;
+    // Exact field presence in this frame's weapon delta; inherited slots have
+    // no updated fields. The owning mask is bounded by the negotiated schema.
+    [[nodiscard]] bool wire_field_updated(std::string_view name) const noexcept;
 
 private:
     friend class GoldSrcClientDataDecoder;
@@ -151,6 +154,7 @@ private:
 
     std::uint8_t wire_index_{0U};
     std::shared_ptr<const DeltaObjectState> object_;
+    std::vector<bool> wire_updated_fields_;
 };
 
 class ClientDataFrameState final {
@@ -280,6 +284,7 @@ private:
     struct FrameFingerprint final {
         std::uint32_t sequence{0U};
         std::uint64_t payload_hash{0U};
+        bool unanchored_completion{false};
     };
 
     std::uint64_t source_generation_{0U};

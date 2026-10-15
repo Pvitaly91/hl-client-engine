@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <optional>
 
 namespace hlclient::game_api {
@@ -15,6 +16,14 @@ namespace hlclient::game_api {
 struct LocalVisualContext final {
     assets::AssetVector3 eye{}, forward{}, right{}, up{0, 0, 1}, velocity{};
     double now_seconds{};
+};
+
+// Compiled game-selected additive sprite dependency; no network slot or path.
+// Scale multiplies original sprite frame extents, not a guessed quad radius.
+struct MuzzleSpriteProfile final {
+    std::array<char, 48> virtual_name{};
+    float scale{1.0F};
+    std::uint32_t frame_seed{};
 };
 
 struct LocalMuzzleFlash final {
@@ -27,6 +36,7 @@ struct LocalMuzzleFlash final {
     float radius_units{6.0F};
     std::array<float, 4> color{1.0F, 0.72F, 0.28F, 0.85F};
     double starts_at_seconds{}, ends_at_seconds{};
+    std::optional<MuzzleSpriteProfile> sprite;
 };
 
 struct LocalMuzzleLight final {
@@ -48,6 +58,35 @@ struct LocalShellEjection final {
 
 // One-shot, owning presentation request. Origin and direction are captured
 // from a newly submitted command, never reconstructed from a later frame.
+// Numeric, presentation-only glow. Zero disables it; no asset/game identity.
+struct TransientGlowProfile final {
+    float radius_units{}, light_radius_units{}, light_intensity{};
+};
+[[nodiscard]] inline bool valid_transient_glow(const TransientGlowProfile& p) noexcept {
+    return std::isfinite(p.radius_units) && p.radius_units>=0 && p.radius_units<=16 &&
+        std::isfinite(p.light_radius_units) && p.light_radius_units>=0 && p.light_radius_units<=256 &&
+        std::isfinite(p.light_intensity) && p.light_intensity>=0 && p.light_intensity<=2 &&
+        ((p.light_radius_units==0 && p.light_intensity==0) ||
+         (p.light_radius_units>0 && p.light_intensity>0));
+}
+struct ImpactParticleProfile final {
+    std::uint32_t count{};
+    float lifetime_seconds{}, minimum_speed_units{}, maximum_speed_units{};
+    float gravity_units{}, radius_units{};
+    std::array<float,4> color{};
+    float spread_scale{1.0F}; // scales the existing outward hemisphere's tangent components
+    bool emissive{}; // additive soft sparks; false preserves alpha-blended dust
+    TransientGlowProfile contact_glow{};
+    float contact_glow_seconds{}; // one short flash/light per accepted burst, not per particle
+    bool radial_distribution{}; // neutral spherical burst; false preserves surface hemisphere
+    bool flicker{}; // deterministic absolute-age brightness, no new random/frame state
+};
+// Geometry only: motion, eligibility, identity and glow remain independent.
+// The original billboard is retained as the neutral/default API behavior.
+enum class WorldLineGeometry : std::uint8_t { flat_billboard, solid_3d };
+[[nodiscard]] inline bool valid_world_line_geometry(WorldLineGeometry geometry) noexcept {
+    return geometry==WorldLineGeometry::flat_billboard || geometry==WorldLineGeometry::solid_3d;
+}
 struct LocalWorldImpactRequest final {
     LocalWeaponActionIdentity action;
     assets::AssetVector3 origin{}, direction{};
@@ -56,6 +95,36 @@ struct LocalWorldImpactRequest final {
     double expires_at_seconds{};
     // Presentation-only delay after the immutable trace; zero for Glock.
     double decal_delay_seconds{};
+    std::optional<ImpactParticleProfile> particles;
+    struct Tracer final {
+        assets::AssetVector3 origin{};
+        float width_units{0.65F};
+        std::array<float,4> color{1.0F,0.82F,0.45F,0.85F};
+        double lifetime_seconds{0.06};
+        // Stationary lines follow the pose; moving streaks capture it once at launch.
+        // The trace/hit endpoint is immutable in both modes.
+        bool follow_local_muzzle{};
+        // Optional neutral moving streak, in world units/second and world units.
+        // Both zero means a stationary line; otherwise both must be positive.
+        // A moving local streak captures its first valid muzzle once, then flies freely.
+        float travel_speed_units_per_second{}, segment_length_units{};
+        // Fraction occupied by the taper; bounded to [0,1]. Zero preserves
+        // rectangular flat lines. Flat tapers lead; solid tapers trail.
+        float head_taper_fraction{};
+        TransientGlowProfile head_glow{}; // follows the moving front, expires with the streak
+        WorldLineGeometry geometry{WorldLineGeometry::flat_billboard};
+        // Game-selected forward distance from the actual launch muzzle toward
+        // the immutable hit. Chosen once per action, finite in [0,1024]. Zero
+        // preserves the existing start; a hit at/before it has no visible line.
+        float start_offset_units{};
+        // Solid positive taper: terminal diameter / body diameter, in [0,1].
+        // Zero retains the sharp cone. Positive adds an owning rounded rear
+        // cap inside the original interval; flat/zero-taper shapes ignore it.
+        float taper_end_diameter_fraction{};
+    };
+    std::optional<Tracer> tracer;
+    bool suppress_surface_effects{}; // trace still supplies tracer endpoint
+    bool suppress_decal{}; // valid solid-world trace/feedback, without a decal
 };
 
 enum class LocalWorldImpactOutcome : std::uint8_t {
@@ -89,7 +158,7 @@ struct LocalShellContact final {
 };
 
 enum class LocalDecalMaterialMode : std::uint8_t {
-    straight_alpha, white_neutral_modulate
+    straight_alpha, white_neutral_modulate, lit_straight_alpha
 };
 
 // Project-owned profile chosen by the game module, not server text.
@@ -126,6 +195,11 @@ struct LocalVisualFrame final {
     std::optional<LocalShellEjection> shell;
     std::optional<LocalWorldImpactRequest> world_impact;
     LocalVisualStatistics statistics;
+    // Per-action total bounds: two casings and eight independent traces.
+    std::array<LocalShellEjection,1> extra_shells{};
+    std::size_t extra_shell_count{};
+    std::array<LocalWorldImpactRequest,7> extra_impacts{};
+    std::size_t extra_impact_count{};
 };
 
 } // namespace hlclient::game_api

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <hlclient/core/presentation_settings.hpp>
 #include <optional>
 #include <span>
 #include <string>
@@ -93,12 +95,24 @@ enum class RuntimeReplayVisualOption {
 };
 
 struct CommandLineOptions {
+    // Direct external client configuration is distinct from research CLI.
+    bool external_server_client{};
+    std::optional<std::string> external_config;
+    std::optional<std::uintptr_t> external_cancel_event;
+    VideoSettings video;
+    ImageAdjustments image;
+    HudScaleSettings hud_scale;
     bool show_help{false};
     bool show_version{false};
     bool net_trace{false};
     unsigned audio_volume{35}; // application percent; zero is mute
     bool audio_on_focus_loss{false}; // explicit manual listener, default unchanged
     bool mute_glock_fire_sound{false}; // manual audio-isolation diagnostic, not gameplay
+    bool hud_draw{true}, crosshair{true}, hud_fastswitch{}, hud_diagnostics{};
+    bool movement_diagnostics{}; // bounded, opt-in movement incident recording
+    // Optional session presentation evidence from the owned server query;
+    // absence remains unknown and never supplies a server cvar assignment.
+    std::optional<bool> server_blood_presentation;
     bool view_world{false};
     bool view_entity_snapshot{false};
     std::optional<RuntimeReplayFixtureOption> runtime_replay_fixture;
@@ -116,6 +130,11 @@ struct CommandLineOptions {
     bool test_start_health{false}; // owned-server manual harness; never a health override
     std::optional<std::size_t> live_session_seconds;
     bool live_session_unlimited{false}; // explicit user-ended keyboard session
+    // Owned runner output identity; all three are required together. These
+    // configure structured publication only, never network/game commands.
+    std::optional<std::string> session_receipt_root;
+    std::optional<std::string> session_run_id;
+    std::optional<std::string> session_role;
     std::optional<AuthenticationProviderKind> authentication_provider;
     std::optional<std::string> authentication_material_file;
     std::optional<std::string> steam_api_runtime;
@@ -127,6 +146,7 @@ struct CommandLineOptions {
     WorldVisibilityOption world_visibility{WorldVisibilityOption::all};
     BrushSubmodelsOption brush_submodels{BrushSubmodelsOption::off};
     WorldCameraOption world_camera{WorldCameraOption::static_camera};
+    bool debug_freeze_tracer{false}; // opt-in manual geometry inspection, not gameplay
 };
 
 struct CommandLineParseResult {

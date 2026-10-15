@@ -19,6 +19,8 @@ struct GoldSrcWad3TextureRequest {
     std::optional<std::uint32_t> expected_height;
     std::optional<std::uint32_t> source_bsp_texture_index;
     std::optional<std::uint32_t> source_archive_ordinal;
+    indexed_texture::GoldSrcIndexedTextureInterpretation interpretation{
+        indexed_texture::GoldSrcIndexedTextureInterpretation::palette_color};
 };
 
 enum class GoldSrcWad3TextureErrorCode {

@@ -200,6 +200,36 @@ Connectionless `0xffffffff` is classified before this decoder. The
 conservative project classifier. That split-marker policy is **project
 fail-closed**; split packet decoding is pending.
 
+E32 tunnel follow-up (2026-10-12): that statement still describes strict
+bootstrap/research callers. The ordinary live runtime now explicitly enables
+`accept_udp_split_packets`, a separately bounded public GoldSrc UDP envelope
+profile: marker `-2` (u32 LE), opaque transfer identity (u32 LE), then one byte
+whose high/low nibbles are zero-based part index / declared count (2..15).
+This is outer UDP splitting, not the reliable slot-0 fragment grammar below.
+The independently authored receiver retains at most two transfers, 16,384 bytes
+each, with a fixed one-second deadline; duplicate-identical parts do not extend
+it, conflicting parts invalidate only that transfer, and excess transfers
+evict the oldest. Non-final part sizes must agree and the final part may be
+shorter. Missing/invalid/expired envelopes do not advance netchan state.
+
+Only a fully reconstructed datagram that passes the existing inner netchan
+codec enters the ordinary sequence/reliability/ACK/payload path. Endpoint
+filtering remains before buffering. No part is unmunge-decoded independently,
+and no partial reliable body or fake usercmd acknowledgement is published.
+Cleanup clears all buffered parts. Diagnostics distinguish parts, completions,
+duplicates, rejections, expiry and eviction; payload counts remain logical
+payloads, while owning datagrams count the physical UDP deliveries.
+
+Evidence classification: project deterministic/public-profile compatibility,
+not a new signed-stock confirmation. User run `b911557a...` establishes the
+`-2` marker through the classifier and a 1400-byte owning datagram, but did not
+retain its envelope fields. Valve Developer Community `Server_queries` was
+unavailable behind HTTP 403/anti-bot during this repair; a bounded read-only
+rules query to the user's server timed out without receiving a header. Neither
+attempt establishes the actual server's complete layout or stock parity.
+Literal packet fixtures therefore establish the implemented profile's bounds,
+ordering and composition; fresh manual LAN compatibility remains necessary.
+
 ## Payload transform
 
 **Stock-confirmed:** bytes 0 through 7 are never transformed. Every

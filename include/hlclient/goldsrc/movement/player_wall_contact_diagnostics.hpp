@@ -62,6 +62,7 @@ enum class PlayerMovementDiagnosticHitKind : std::uint8_t {
     none,
     world,
     explicit_synthetic_brush,
+    server_entity_box,
 };
 
 struct PlayerMovementDiagnosticRuntimeContext final {

@@ -43,13 +43,18 @@ inline constexpr NativeSocket kInvalidSocket = -1;
 #endif
 }
 
-void close_socket(const NativeSocket socket) noexcept
+[[nodiscard]] SocketNativeError close_socket(const NativeSocket socket) noexcept
 {
 #ifdef _WIN32
-    closesocket(socket);
+    if (::closesocket(socket) == SOCKET_ERROR)
+        return {SocketNativeErrorDomain::winsock,
+                static_cast<std::uint32_t>(::WSAGetLastError())};
 #else
-    close(socket);
+    if (::close(socket) != 0)
+        return {SocketNativeErrorDomain::posix,
+                static_cast<std::uint32_t>(errno)};
 #endif
+    return {};
 }
 
 [[nodiscard]] sockaddr_in to_native(const NetworkAddress& address) noexcept
@@ -86,7 +91,7 @@ struct UdpSocket::Impl final {
     ~Impl()
     {
         if (handle != kInvalidSocket) {
-            close_socket(handle);
+            static_cast<void>(close_socket(handle));
         }
     }
 
@@ -102,6 +107,25 @@ UdpSocket::UdpSocket(std::unique_ptr<Impl> implementation) noexcept
 UdpSocket::~UdpSocket() = default;
 UdpSocket::UdpSocket(UdpSocket&&) noexcept = default;
 UdpSocket& UdpSocket::operator=(UdpSocket&&) noexcept = default;
+
+SocketNativeError UdpSocket::close() noexcept
+{
+    if (close_requested_) return close_error_;
+    close_requested_ = true;
+    if (!implementation_ || implementation_->handle == kInvalidSocket) return {};
+#ifdef _WIN32
+    close_error_ = close_socket(implementation_->handle);
+    if (close_error_) return close_error_;
+    implementation_->handle = kInvalidSocket;
+#else
+    // POSIX close errors (notably EINTR) must not trigger a destructor retry
+    // against a descriptor which another owner could already have reused.
+    const auto handle = std::exchange(implementation_->handle, kInvalidSocket);
+    close_error_ = close_socket(handle);
+#endif
+    implementation_.reset();
+    return close_error_;
+}
 
 std::optional<UdpSocket> UdpSocket::open_ipv4(
     const NetworkRuntime& runtime,
@@ -148,7 +172,7 @@ std::optional<UdpSocket> UdpSocket::open_ipv4(
 bool UdpSocket::bind(const NetworkAddress& local_address, std::string& error)
 {
     error.clear();
-    if (!implementation_) {
+    if (!implementation_ || close_requested_) {
         error = "Cannot bind a moved-from UDP socket";
         return false;
     }
@@ -171,7 +195,7 @@ bool UdpSocket::bind(const NetworkAddress& local_address, std::string& error)
 std::optional<NetworkAddress> UdpSocket::local_address(std::string& error) const
 {
     error.clear();
-    if (!implementation_) {
+    if (!implementation_ || close_requested_) {
         error = "Cannot query a moved-from UDP socket";
         return std::nullopt;
     }
@@ -206,7 +230,7 @@ bool UdpSocket::send_to(
     if (native_error != nullptr) {
         *native_error = {};
     }
-    if (!implementation_) {
+    if (!implementation_ || close_requested_) {
         error = "Cannot send with a moved-from UDP socket";
         return false;
     }
@@ -263,7 +287,7 @@ bool UdpSocket::send_to(
 
 ReceiveResult UdpSocket::receive(const std::size_t maximum_size)
 {
-    if (!implementation_) {
+    if (!implementation_ || close_requested_) {
         return ReceiveResult{
             ReceiveStatus::error,
             std::nullopt,

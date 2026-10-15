@@ -14,6 +14,76 @@ namespace {
 using hlclient::core::parse_command_line;
 using hlclient::core::RendererBackend;
 
+TEST_CASE("E32 movement diagnostics remain explicit and external snapshots own forwarding", "[e32][core][command-line]") {
+    const auto defaults=parse_command_line({});REQUIRE(defaults);
+    CHECK_FALSE(defaults.options->movement_diagnostics);
+    const std::array<std::string_view,1> enabled{"--movement-diagnostics"};
+    const auto parsed=parse_command_line(enabled);REQUIRE(parsed);CHECK(parsed.options->movement_diagnostics);
+    CHECK(parsed.options->video==defaults.options->video);
+    CHECK(parsed.options->hud_scale==defaults.options->hud_scale);
+    CHECK(parsed.options->image==defaults.options->image);
+    const std::array<std::string_view,2> duplicate{"--movement-diagnostics","--movement-diagnostics"};
+    CHECK_FALSE(parse_command_line(duplicate));
+    const std::array<std::string_view,9> mixed{"--external-config","D:/fixture/launch-config.json",
+        "--session-receipt-root","D:/fixture","--session-run-id","0123456789abcdef0123456789abcdef",
+        "--session-role","A","--movement-diagnostics"};
+    CHECK_FALSE(parse_command_line(mixed));
+    CHECK(hlclient::core::command_line_help().find("F8")!=std::string_view::npos);
+}
+
+TEST_CASE("E31.1 normal CLI carries independent HUD and scene MSAA requests", "[e311][e31][core][command-line]") {
+    const auto defaults=parse_command_line({});REQUIRE(defaults);
+    CHECK(defaults.options->hud_scale==hlclient::core::HudScaleSettings{});
+    CHECK(defaults.options->video.msaa_samples==4);
+    for(const auto aa:{"off","0","2","4","8"})for(const auto scale:{"auto","0.5","0.75","1","1.25","2.0"}) {
+        const std::array<std::string_view,4> args{"--msaa",aa,"--hud-scale",scale};
+        const auto parsed=parse_command_line(args);REQUIRE(parsed);
+        CHECK(parsed.options->hud_scale.automatic==(std::string_view{scale}=="auto"));
+        CHECK(hlclient::core::valid_hud_scale_settings(parsed.options->hud_scale));
+        CHECK(hlclient::core::valid_msaa_samples(parsed.options->video.msaa_samples));
+        CHECK(parsed.options->video.width==defaults.options->video.width);
+        CHECK(parsed.options->image==defaults.options->image);
+    }
+    for(const auto bad:{"0.49","2.01","0.499999999","2.000000001","nan","inf","-1","1x","","1 1"}) {
+        const std::array<std::string_view,2> args{"--hud-scale",bad};CHECK_FALSE(parse_command_line(args));
+    }
+    for(const auto bad:{"1","3","16","4.0","-1","auto","","8x"}) {
+        const std::array<std::string_view,2> args{"--msaa",bad};CHECK_FALSE(parse_command_line(args));
+    }
+    for(const auto option:{"--msaa","--hud-scale"}) {
+        const std::array<std::string_view,4> args{option,"2",option,"2"};CHECK_FALSE(parse_command_line(args));
+    }
+    CHECK(hlclient::core::command_line_help().find("--hud-scale")!=std::string_view::npos);
+    CHECK(hlclient::core::command_line_help().find("--msaa")!=std::string_view::npos);
+}
+
+TEST_CASE("E28.1 receipt CLI accepts only a complete fixed identity trio", "[e281][core][command-line]") {
+    const std::vector<std::string_view> valid{"--connect","127.0.0.1:27243",
+        "--session-receipt-root","D:/fixture/0123456789abcdef0123456789abcdef",
+        "--session-run-id","0123456789abcdef0123456789abcdef","--session-role","B"};
+    const auto parsed=parse_command_line(valid); REQUIRE(parsed);
+    CHECK(parsed.options->session_role=="B");
+    CHECK(parsed.options->session_run_id=="0123456789abcdef0123456789abcdef");
+    for(const auto invalid:{"A;dropclient","C","a","","B\n"}) {
+        auto args=valid;args.back()=invalid;CHECK_FALSE(parse_command_line(args));
+    }
+    for(const auto invalid:{"0123456789ABCDEF0123456789ABCDEF","1","../../other","0123456789abcdef0123456789abcdef0"}) {
+        auto args=valid;args[5]=invalid;CHECK_FALSE(parse_command_line(args));
+    }
+    for(std::size_t pair=2;pair<8;pair+=2) {
+        auto args=valid;args.erase(args.begin()+pair,args.begin()+pair+2);
+        CHECK_FALSE(parse_command_line(args));
+    }
+    auto no_connect=valid;no_connect.erase(no_connect.begin(),no_connect.begin()+2);
+    CHECK_FALSE(parse_command_line(no_connect));
+    auto duplicate=valid;duplicate.insert(duplicate.end(),{"--session-role","A"});
+    CHECK_FALSE(parse_command_line(duplicate));
+    const std::vector<std::string_view> replay{"--renderer","null","--runtime-replay-fixture","basic-mixed",
+        "--session-receipt-root","D:/fixture/0123456789abcdef0123456789abcdef",
+        "--session-run-id","0123456789abcdef0123456789abcdef","--session-role","A"};
+    CHECK_FALSE(parse_command_line(replay));
+}
+
 TEST_CASE("Same-host peer plan keeps both clients audible when focused", "[e9][core][command-line]") {
     const std::vector<std::wstring> args{L"--renderer",L"opengl",L"--connect",L"127.0.0.1:27243",
         L"--stop-after",L"live-visual-control",L"--live-input",L"keyboard-mouse",L"--game",L"valve",
@@ -88,6 +158,58 @@ TEST_CASE("Manual timers accept long or explicitly user-ended sessions without r
     CHECK_FALSE(hlclient::core::remote_audio_peer_plan(peer));
 }
 
+TEST_CASE("Observed server blood presentation remains optional and typed", "[e27][core][command-line]") {
+    const std::vector<std::string_view> base{"--connect", "127.0.0.1:27243", "--stop-after", "live-visual-control",
+        "--live-input", "keyboard-mouse", "--basedir", "D:/fixture", "--game", "valve",
+        "--auth-provider", "steam", "--steam-api-runtime", "D:/fixture/api.dll"};
+    const auto ordinary = parse_command_line(base); REQUIRE(ordinary);
+    CHECK_FALSE(ordinary.options->server_blood_presentation.has_value());
+    for (const auto value : {"enabled", "disabled"}) {
+        auto args = base; args.insert(args.end(), {"--server-blood-presentation", value});
+        const auto parsed = parse_command_line(args); REQUIRE(parsed);
+        REQUIRE(parsed.options->server_blood_presentation.has_value());
+        CHECK(*parsed.options->server_blood_presentation == (std::string_view{value} == "enabled"));
+        CHECK(parsed.options->stop_after == ordinary.options->stop_after);
+        CHECK(parsed.options->connect_endpoint == ordinary.options->connect_endpoint);
+        CHECK(parsed.options->renderer == ordinary.options->renderer);
+        CHECK(parsed.options->live_input == ordinary.options->live_input);
+        CHECK_FALSE(parsed.options->test_start_health);
+        args.insert(args.end(), {"--server-blood-presentation", value});
+        CHECK_FALSE(parse_command_line(args));
+    }
+    for (const auto value : {"0", "1", "unknown", "Enabled", "enabled ", "enabled\n", "disabled;exec", ""}) {
+        auto args = base; args.insert(args.end(), {"--server-blood-presentation", value});
+        CHECK_FALSE(parse_command_line(args));
+    }
+    auto missing = base; missing.push_back("--server-blood-presentation");
+    CHECK_FALSE(parse_command_line(missing));
+    CHECK(hlclient::core::command_line_help().find("--server-blood-presentation") != std::string_view::npos);
+
+    const std::vector<std::wstring> peer_base{L"--renderer", L"opengl", L"--connect", L"127.0.0.1:27243",
+        L"--stop-after", L"live-visual-control", L"--live-input", L"keyboard-mouse", L"--game", L"valve",
+        L"--name", L"fixture", L"--auth-provider", L"steam", L"--steam-api-runtime", L"D:/fixture/api.dll",
+        L"--basedir", L"D:/fixture", L"--live-session-seconds", L"180"};
+    for (const auto value : {L"enabled", L"disabled"}) {
+        auto arguments = peer_base; arguments.insert(arguments.end(), {L"--server-blood-presentation", value});
+        const auto plan = hlclient::core::remote_audio_peer_plan(arguments); REQUIRE(plan);
+        for (const auto& client : {plan->listener, plan->mover}) {
+            std::vector<std::string> narrow;
+            for (const auto& arg : client) {
+                std::string converted;
+                for(const auto character:arg) {REQUIRE(character<=0x7f);converted.push_back(static_cast<char>(character));}
+                narrow.push_back(std::move(converted));
+            }
+            std::vector<std::string_view> views;
+            for (const auto& arg : narrow) views.push_back(arg);
+            const auto parsed = parse_command_line(views); REQUIRE(parsed);
+            CHECK(parsed.options->server_blood_presentation == (std::wstring_view{value} == L"enabled"));
+            CHECK(parsed.options->live_session_seconds == 180U);
+            CHECK(parsed.options->game_directory == "valve");
+            CHECK(parsed.options->connect_endpoint == "127.0.0.1:27243");
+        }
+    }
+}
+
 TEST_CASE("Test start health accepts only the explicit owned reference manual profile", "[core][command-line][test-start-health]") {
     std::array<std::string_view, 18> args{"--connect", "127.0.0.1:27243", "--stop-after", "live-visual-control",
         "--live-input", "keyboard-mouse", "--prediction", "reference", "--auth-provider", "steam",
@@ -126,6 +248,42 @@ TEST_CASE("Glock fire mute diagnostic is opt-in and restricted to manual Half-Li
     CHECK_FALSE(parse_command_line(replay));
 }
 
+TEST_CASE("Frozen tracer diagnostic is opt-in manual visuals and survives the shared peer plan",
+          "[core][command-line][tracer-freeze]") {
+    std::vector<std::string_view> args{"--renderer","opengl","--connect","127.0.0.1:27243",
+        "--stop-after","live-visual-control","--live-input","keyboard-mouse",
+        "--basedir","D:/fixture","--game","valve","--auth-provider","steam",
+        "--steam-api-runtime","D:/fixture/api.dll","--debug-freeze-tracer"};
+    const auto accepted=parse_command_line(args); REQUIRE(accepted);
+    CHECK(accepted.options->debug_freeze_tracer);
+    for(const auto prediction:{"reference","off"}) {
+        auto predicted=args;predicted.insert(predicted.end(),{"--prediction",prediction});
+        const auto result=parse_command_line(predicted);REQUIRE(result);CHECK(result.options->debug_freeze_tracer);
+    }
+    auto duplicate=args;duplicate.push_back("--debug-freeze-tracer");CHECK_FALSE(parse_command_line(duplicate));
+    args[7]="scripted-fire-reload-check";CHECK_FALSE(parse_command_line(args));args[7]="keyboard-mouse";
+    args[5]="delta-schemas";CHECK_FALSE(parse_command_line(args));args[5]="live-visual-control";
+    args[1]="null";CHECK_FALSE(parse_command_line(args));
+    const std::array<std::string_view,5> replay{"--renderer","null","--runtime-replay-fixture","basic-mixed","--debug-freeze-tracer"};
+    CHECK_FALSE(parse_command_line(replay));
+    const std::vector<std::wstring> peer{L"--renderer",L"opengl",L"--connect",L"127.0.0.1:27243",
+        L"--stop-after",L"live-visual-control",L"--live-input",L"keyboard-mouse",L"--game",L"valve",
+        L"--name",L"fixture",L"--auth-provider",L"steam",L"--steam-api-runtime",L"D:/fixture/api.dll",
+        L"--basedir",L"D:/fixture",L"--live-session-unlimited",L"--debug-freeze-tracer"};
+    const auto plan=hlclient::core::remote_audio_peer_plan(peer);REQUIRE(plan);
+    for(const auto& client:{plan->listener,plan->mover}) {
+        CHECK(std::find(client.begin(),client.end(),L"--debug-freeze-tracer")!=client.end());
+        std::vector<std::string> narrow;
+        for(const auto& part:client) {
+            std::string converted;for(const auto c:part) converted.push_back(static_cast<char>(c));
+            narrow.push_back(std::move(converted));
+        }
+        std::vector<std::string_view> views;for(const auto& part:narrow) views.push_back(part);
+        const auto result=parse_command_line(views);REQUIRE(result);CHECK(result.options->debug_freeze_tracer);
+        CHECK(result.options->live_session_unlimited);
+    }
+}
+
 TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
 {
     const std::array<std::string_view, 0> arguments{};
@@ -139,6 +297,7 @@ TEST_CASE("Command line parser supplies safe defaults", "[core][command-line]")
     CHECK_FALSE(result.options->view_world);
     CHECK_FALSE(result.options->view_entity_snapshot);
     CHECK_FALSE(result.options->mute_glock_fire_sound);
+    CHECK_FALSE(result.options->debug_freeze_tracer);
     CHECK_FALSE(result.options->base_directory.has_value());
     CHECK(result.options->game_directory == "valve");
     CHECK_FALSE(result.options->connect_endpoint.has_value());

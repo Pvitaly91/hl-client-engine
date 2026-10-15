@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -281,6 +282,9 @@ struct MockSteamApiState {
     std::uint64_t server_steam_id{0U};
     network::NetworkAddress endpoint;
     bool secure{false};
+    std::function<void()> on_initialize;
+    std::function<void()> on_callbacks;
+    std::function<void()> on_initiate;
 };
 
 class MockSteamApi final : public app::ISteamLegacyClientApi {
@@ -293,10 +297,15 @@ public:
     [[nodiscard]] bool initialize() noexcept override
     {
         ++state_->initialize_calls;
+        if (state_->on_initialize) state_->on_initialize();
         return state_->initialize_result;
     }
     void shutdown() noexcept override { ++state_->shutdown_calls; }
-    void run_callbacks() noexcept override { ++state_->callback_calls; }
+    void run_callbacks() noexcept override
+    {
+        ++state_->callback_calls;
+        if (state_->on_callbacks) state_->on_callbacks();
+    }
     [[nodiscard]] std::uint32_t app_id() const noexcept override
     {
         return state_->app_id;
@@ -313,6 +322,7 @@ public:
         const bool secure) noexcept override
     {
         ++state_->initiate_calls;
+        if (state_->on_initiate) state_->on_initiate();
         state_->server_steam_id = server_steam_id;
         state_->endpoint = network::NetworkAddress{ipv4, port};
         state_->secure = secure;
@@ -623,12 +633,12 @@ TEST_CASE("Steam provider reports context, runtime, callback, size, cancel, and 
         CHECK(state->terminate_calls == 0U);
     }
 
-    SECTION("bounded timeout happens before API work")
+    SECTION("bounded initialization timeout happens before API work")
     {
         auto state = std::make_shared<MockSteamApiState>();
         auto now = app::SteamAuthenticationClock::time_point{};
         auto config = mock_steam_config(state);
-        config.timeout = std::chrono::milliseconds{25};
+        config.initialization_timeout = std::chrono::milliseconds{25};
         config.now = [&now] { return now; };
         app::SteamAuthenticationProvider provider{std::move(config)};
         auto begun = provider.begin(steam_request_context());
@@ -637,6 +647,197 @@ TEST_CASE("Steam provider reports context, runtime, callback, size, cancel, and 
         const auto result = begun.operation->update();
         REQUIRE(result.error);
         CHECK(result.error->code == auth::AuthenticationErrorCode::timed_out);
+        CHECK(state->initialize_calls == 0U);
+    }
+}
+
+TEST_CASE("Steam initialization and fresh material have independent bounded deadlines",
+          "[auth][provider][steam][startup-deadline]")
+{
+    using Milliseconds = std::chrono::milliseconds;
+    auto state = std::make_shared<MockSteamApiState>();
+    auto now = app::SteamAuthenticationClock::time_point{};
+    auto config = mock_steam_config(state);
+    std::vector<app::SteamAuthenticationTraceEvent> events;
+    config.now = [&now] { return now; };
+    config.trace = [&events](const app::SteamAuthenticationTraceEvent& event) {
+        events.push_back(event);
+    };
+
+    SECTION("cold initialization longer than five seconds preserves a full material budget")
+    {
+        state->on_initialize = [&now] { now += Milliseconds{6'000}; };
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        CHECK(begun.operation->update().state == auth::AuthenticationUpdateState::pending);
+        CHECK(state->initialize_calls == 1U);
+        CHECK(state->initiate_calls == 0U);
+        REQUIRE(events.size() == 4U);
+        CHECK(events[2].status == app::SteamAuthenticationTraceStatus::api_initialized);
+        CHECK(events[2].phase == app::SteamAuthenticationPhase::initialization);
+        CHECK(events[2].elapsed == Milliseconds{6'000});
+        now += Milliseconds{4'999};
+        auto result = begun.operation->update();
+        REQUIRE(result.state == auth::AuthenticationUpdateState::succeeded);
+        REQUIRE(result.session);
+        CHECK(state->initiate_calls == 1U);
+        CHECK(events.back().phase == app::SteamAuthenticationPhase::material_acquisition);
+        CHECK(events.back().elapsed == Milliseconds{4'999});
+        result.session.reset();
+        CHECK(state->terminate_calls == 1U);
+    }
+
+    SECTION("an initialization result at its deadline cannot begin a connection")
+    {
+        state->on_initialize = [&now] { now += Milliseconds{30'000}; };
+        {
+            app::SteamAuthenticationProvider provider{std::move(config)};
+            auto begun = provider.begin(steam_request_context());
+            REQUIRE(begun.operation);
+            const auto result = begun.operation->update();
+            REQUIRE(result.error);
+            CHECK(result.error->code == auth::AuthenticationErrorCode::timed_out);
+            CHECK(state->initialize_calls == 1U);
+            CHECK(state->initiate_calls == 0U);
+            CHECK(state->terminate_calls == 0U);
+            CHECK(events.back().phase == app::SteamAuthenticationPhase::initialization);
+            CHECK(events.back().elapsed == Milliseconds{30'000});
+        }
+        CHECK(state->shutdown_calls == 1U);
+    }
+
+    SECTION("the initialization budget includes time before the first poll")
+    {
+        state->on_initialize = [&now] { now += Milliseconds{6'000}; };
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        now += Milliseconds{24'000};
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::timed_out);
+        CHECK(state->initialize_calls == 1U);
+        CHECK(state->initiate_calls == 0U);
+        CHECK(events.back().elapsed == Milliseconds{30'000});
+    }
+
+    SECTION("expired initialization before the first poll performs no API work")
+    {
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        now += Milliseconds{30'000};
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::timed_out);
+        CHECK(state->initialize_calls == 0U);
+        CHECK(state->initiate_calls == 0U);
+        CHECK(events.back().phase == app::SteamAuthenticationPhase::initialization);
+    }
+
+    SECTION("the material deadline remains five seconds after cold readiness")
+    {
+        state->on_initialize = [&now] { now += Milliseconds{6'000}; };
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        REQUIRE(begun.operation->update().state == auth::AuthenticationUpdateState::pending);
+        now += Milliseconds{5'000};
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::timed_out);
+        CHECK(state->callback_calls == 0U);
+        CHECK(state->initiate_calls == 0U);
+        CHECK(events.back().phase == app::SteamAuthenticationPhase::material_acquisition);
+        CHECK(events.back().elapsed == Milliseconds{5'000});
+    }
+
+    SECTION("callback work exhausting the material budget cannot initiate a new session")
+    {
+        state->on_callbacks = [&now] { now += Milliseconds{5'000}; };
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        REQUIRE(begun.operation->update().state == auth::AuthenticationUpdateState::pending);
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::timed_out);
+        CHECK(state->callback_calls == 1U);
+        CHECK(state->initiate_calls == 0U);
+        CHECK(state->terminate_calls == 0U);
+        CHECK(events.back().phase == app::SteamAuthenticationPhase::material_acquisition);
+    }
+
+    SECTION("a material call completing at the deadline terminates its returned session once")
+    {
+        state->on_initiate = [&now] { now += Milliseconds{5'000}; };
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto begun = provider.begin(steam_request_context());
+        REQUIRE(begun.operation);
+        REQUIRE(begun.operation->update().state == auth::AuthenticationUpdateState::pending);
+        const auto result = begun.operation->update();
+        REQUIRE(result.error);
+        CHECK(result.error->code == auth::AuthenticationErrorCode::timed_out);
+        CHECK_FALSE(result.session);
+        CHECK(state->initiate_calls == 1U);
+        CHECK(state->terminate_calls == 1U);
+        CHECK(events.back().phase == app::SteamAuthenticationPhase::material_acquisition);
+        begun.operation.reset();
+        CHECK(state->terminate_calls == 1U);
+    }
+
+    SECTION("a reused API initializes once but each operation owns fresh phase clocks")
+    {
+        state->on_initialize = [&now] { now += Milliseconds{6'000}; };
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        auto first = provider.begin(steam_request_context());
+        REQUIRE(first.operation);
+        REQUIRE(first.operation->update().state == auth::AuthenticationUpdateState::pending);
+        auto completed = first.operation->update();
+        REQUIRE(completed.session);
+        completed.session.reset();
+        now += Milliseconds{40'000};
+        auto second = provider.begin(steam_request_context());
+        REQUIRE(second.operation);
+        REQUIRE(second.operation->update().state == auth::AuthenticationUpdateState::pending);
+        CHECK(events.back().elapsed == Milliseconds{0});
+        now += Milliseconds{4'999};
+        completed = second.operation->update();
+        REQUIRE(completed.session);
+        completed.session.reset();
+        CHECK(state->initialize_calls == 1U);
+        CHECK(state->initiate_calls == 2U);
+        CHECK(state->terminate_calls == 2U);
+    }
+
+    SECTION("cancellation after readiness precedes an expired material deadline")
+    {
+        state->on_initialize = [&now] { now += Milliseconds{6'000}; };
+        {
+            app::SteamAuthenticationProvider provider{std::move(config)};
+            auto begun = provider.begin(steam_request_context());
+            REQUIRE(begun.operation);
+            REQUIRE(begun.operation->update().state == auth::AuthenticationUpdateState::pending);
+            begun.operation->cancel();
+            now += Milliseconds{35'000};
+            const auto result = begun.operation->update();
+            REQUIRE(result.error);
+            CHECK(result.error->code == auth::AuthenticationErrorCode::cancelled);
+            CHECK(state->initiate_calls == 0U);
+            CHECK(state->terminate_calls == 0U);
+        }
+        CHECK(state->shutdown_calls == 1U);
+    }
+
+    SECTION("zero initialization budget fails configuration without initialization")
+    {
+        config.initialization_timeout = Milliseconds::zero();
+        app::SteamAuthenticationProvider provider{std::move(config)};
+        const auto begun = provider.begin(steam_request_context());
+        REQUIRE_FALSE(begun);
+        REQUIRE(begun.error);
+        CHECK(begun.error->code == auth::AuthenticationErrorCode::configuration_error);
         CHECK(state->initialize_calls == 0U);
     }
 }

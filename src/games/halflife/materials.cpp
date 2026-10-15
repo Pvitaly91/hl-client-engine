@@ -155,13 +155,14 @@ std::array<game_api::LocalSoundReference,24> material_impact_preload() noexcept 
     }
     return out;
 }
-std::optional<game_api::LocalSoundReference> glock_ricochet_sound(
+std::optional<game_api::LocalSoundReference> bullet_ricochet_sound(
     const game_api::LocalWeaponActionIdentity& action) noexcept {
     // The SDK draws a 15-bit random value and emits ric1..5 below its
     // half-range threshold. We preserve that frequency/family but use an
     // independent action-stable hash, not its mutable client RNG stream.
     std::uint32_t value=action.command_sequence+
         static_cast<std::uint32_t>(action.generation)*5U;
+    value^=action.sub_identity*0x9e3779b9U;
     value^=value>>16U;
     value*=0x7feb352dU;
     value^=value>>15U;
@@ -169,11 +170,15 @@ std::optional<game_api::LocalSoundReference> glock_ricochet_sound(
     value^=value>>16U;
     const auto roll=(value>>17U)&0x7fffU;
     if(roll>=0x7fffU/2U) return {};
-    return glock_ricochet_preload()[roll%5U];
+    return bullet_ricochet_preload()[roll%5U];
 }
-std::array<game_api::LocalSoundReference,5> glock_ricochet_preload() noexcept {
+std::array<game_api::LocalSoundReference,5> bullet_ricochet_preload() noexcept {
     return {reference("weapons/ric1.wav"),reference("weapons/ric2.wav"),
         reference("weapons/ric3.wav"),reference("weapons/ric4.wav"),
         reference("weapons/ric5.wav")};
 }
+// Preserve the E7 public helper for existing controls; one shared implementation.
+std::optional<game_api::LocalSoundReference> glock_ricochet_sound(
+    const game_api::LocalWeaponActionIdentity& action) noexcept {return bullet_ricochet_sound(action);}
+std::array<game_api::LocalSoundReference,5> glock_ricochet_preload() noexcept {return bullet_ricochet_preload();}
 } // namespace hlclient::games::halflife

@@ -145,4 +145,84 @@ TEST_CASE("Matrix multiplication follows column-vector composition order",
     CHECK(transformed.w == 1.0F);
 }
 
+TEST_CASE("First-person camera clips camera-origin geometry without changing the world camera",
+          "[renderer][camera][math][first-person][viewmodel-clipping]")
+{
+    for (const float world_near : {0.05F, 0.1F, 4.0F}) {
+        CAPTURE(world_near);
+        renderer::RenderCamera world;
+        world.position = {23.0F, -77.0F, 90.0F};
+        world.target = {24.0F, -76.0F, 89.0F};
+        world.near_plane = world_near;
+        world.far_plane = 128.0F;
+        world.vertical_field_of_view_radians = 1.2F;
+        const auto saved = world;
+        const auto local = renderer::camera_local_first_person_camera(world);
+        CHECK(world == saved);
+        CHECK(local.near_plane == 1.0F);
+        CHECK(local.far_plane == world.far_plane);
+        CHECK(local.vertical_field_of_view_radians == world.vertical_field_of_view_radians);
+        CHECK(local.position.x == 0.0F);
+        CHECK(local.position.y == 0.0F);
+        CHECK(local.position.z == 0.0F);
+        CHECK(local.target.x == 1.0F);
+        CHECK(local.target.y == 0.0F);
+        CHECK(local.target.z == 0.0F);
+        const auto matrix = renderer::camera_view_projection(local, {640, 480});
+        REQUIRE(matrix);
+        const auto near_geometry = renderer::transform(*matrix.matrix, {0.403F, 0, 0, 1});
+        CHECK(near_geometry.z < -near_geometry.w);
+        const auto ordinary_geometry = renderer::transform(*matrix.matrix, {12, 0, 0, 1});
+        CHECK(ordinary_geometry.z >= -ordinary_geometry.w);
+        CHECK(ordinary_geometry.z <= ordinary_geometry.w);
+    }
+    renderer::RenderCamera invalid_local_range;
+    invalid_local_range.far_plane = 0.5F;
+    CHECK(renderer::is_valid(invalid_local_range));
+    CHECK_FALSE(renderer::is_valid(renderer::camera_local_first_person_camera(invalid_local_range)));
+}
+
+TEST_CASE("Screen effects transform only a private bounded camera value",
+          "[renderer][camera][math][screen-effects][no-stock]")
+{
+    renderer::RenderCamera camera;
+    camera.position={1,2,3};camera.target={2,2,3};camera.up={0,0,1};
+    const auto original=camera;
+    hlclient::game_api::ScreenEffectsFrame effects;
+    CHECK(renderer::valid_render_screen_effects(effects));
+    REQUIRE(renderer::apply_screen_effects(camera,effects));
+    CHECK(*renderer::apply_screen_effects(camera,effects)==original);
+    effects.translation={2,-1,.5F};effects.roll_degrees=10;
+    const auto moved=renderer::apply_screen_effects(camera,effects);REQUIRE(moved);
+    CHECK(camera==original);
+    CHECK(moved->position.x==3);CHECK(moved->position.y==1);CHECK(moved->position.z==3.5F);
+    CHECK(moved->target.x-moved->position.x==1);
+    CHECK(moved->target.y-moved->position.y==0);
+    CHECK(moved->target.z-moved->position.z==0);
+    CHECK(moved->up.y==Catch::Approx(-std::sin(10.0*0.017453292519943295)));
+    CHECK(moved->up.z==Catch::Approx(std::cos(10.0*0.017453292519943295)));
+    CHECK(moved->near_plane==original.near_plane);CHECK(moved->far_plane==original.far_plane);
+    CHECK(moved->vertical_field_of_view_radians==original.vertical_field_of_view_radians);
+    CHECK(*renderer::apply_screen_effects(camera,effects)==*moved);
+    effects={};CHECK(*renderer::apply_screen_effects(camera,effects)==original);
+    for(const float bad:{std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::infinity(),17.0F,-17.0F}) {
+        effects={};effects.translation[0]=bad;
+        CHECK_FALSE(renderer::valid_render_screen_effects(effects));
+        CHECK_FALSE(renderer::apply_screen_effects(camera,effects));
+        effects={};effects.roll_degrees=bad;
+        CHECK_FALSE(renderer::valid_render_screen_effects(effects));
+        CHECK_FALSE(renderer::apply_screen_effects(camera,effects));
+    }
+    for(const float bad:{std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::infinity(),1.01F,-.01F}) {
+        for(std::size_t channel=0;channel<4U;++channel) {
+            effects={};effects.overlay_rgba[channel]=bad;
+            CHECK_FALSE(renderer::valid_render_screen_effects(effects));
+        }
+    }
+    effects={};camera.target=camera.position;
+    CHECK_FALSE(renderer::apply_screen_effects(camera,effects));
+}
+
 } // namespace

@@ -45,7 +45,8 @@ GoldSrcUserCmdState::CreationResult reference_dry_walk_movement_command(
 static GoldSrcUserCmdState::CreationResult reference_actions_movement_command(
     const GoldSrcUserCmdSequence identity,
     const GoldSrcWireUserCmd& wire,
-    const bool weapon_buttons, const bool use_button = false) noexcept
+    const bool weapon_buttons, const bool use_button = false,
+    const bool secondary_button = false) noexcept
 {
     constexpr std::uint16_t movement_allowed =
         kReferenceGoldSrcButtonDirections |
@@ -54,7 +55,8 @@ static GoldSrcUserCmdState::CreationResult reference_actions_movement_command(
         kReferenceGoldSrcButtonAttack | kReferenceGoldSrcButtonReload;
     const std::uint16_t allowed = movement_allowed |
         (weapon_buttons ? weapon_allowed : 0U) |
-        (use_button ? kReferenceGoldSrcButtonUse : 0U);
+        (use_button ? kReferenceGoldSrcButtonUse : 0U) |
+        (secondary_button ? kReferenceGoldSrcButtonAttack2 : 0U);
     if (!identity.valid() || !valid_wire_usercmd(wire) || wire.msec == 0U ||
         wire.msec > 50U || (wire.buttons & ~allowed) != 0U ||
         wire.up != 0 || wire.impulse != 0U || wire.impact_index != 0U ||
@@ -110,6 +112,12 @@ GoldSrcUserCmdState::CreationResult reference_jump_duck_weapon_use_movement_comm
     const GoldSrcUserCmdSequence identity, const GoldSrcWireUserCmd& wire) noexcept
 {
     return reference_actions_movement_command(identity, wire, true, true);
+}
+
+GoldSrcUserCmdState::CreationResult reference_jump_duck_secondary_weapon_use_movement_command(
+    const GoldSrcUserCmdSequence identity, const GoldSrcWireUserCmd& wire) noexcept
+{
+    return reference_actions_movement_command(identity, wire, true, true, true);
 }
 
 } // namespace hlclient::goldsrc

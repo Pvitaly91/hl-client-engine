@@ -332,11 +332,13 @@ TEST_CASE("E3 sample warm-up restarts when approved assets arrive after early dr
   api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
   host.reset({1,1,{1}});
   const auto early=host.drain_audio();
-  REQUIRE(early.prepare_count==6);
+  REQUIRE(early.prepare_count==9); // original six + E22's startup/run/off warm-up
   CHECK(early.prepare[0].name()=="player/pl_step1.wav");
+  for(const auto name:{"weapons/egon_windup2.wav","weapons/egon_run3.wav","weapons/egon_off1.wav"})
+    CHECK(std::count_if(early.prepare.begin(),early.prepare.begin()+early.prepare_count,[&](const auto& r){return r.name()==name;})==1);
   host.configure_movement_materials("C CONCRETE\n");
   const auto ready=host.drain_audio();
-  REQUIRE(ready.prepare_count==6);
+  REQUIRE(ready.prepare_count==9);
   CHECK(ready.prepare[0].name()=="player/pl_step1.wav");
 }
 

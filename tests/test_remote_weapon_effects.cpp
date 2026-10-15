@@ -1,5 +1,6 @@
 #include <hlclient/game_api/game_client_host.hpp>
 #include <hlclient/games/halflife/client_module.hpp>
+#include <hlclient/games/halflife/remote_effects.hpp>
 #include <hlclient/goldsrc/runtime_replay_session.hpp>
 #include <hlclient/goldsrc/local_audio.hpp>
 #include "player_origin_test_fixture.hpp"
@@ -123,6 +124,143 @@ struct Replay {
 };
 }
 
+TEST_CASE("E13 committed visual life retires queued old fire without cancelling existing world actions",
+    "[e13][game][remote-effects][lifecycle]") {
+    Module m;
+    hlclient::client::RuntimePacketEntityObservation player;
+    player.entity_number=3;player.player_movement_schema=player.ordinary_visual_schema=true;
+    player.model_index=7;player.weapon_model_index=21;player.gait_sequence=1;
+    std::array entities{player};m.host.remote_entities(entities,8,1);
+    auto fire=m.event(1);fire.record_ordinal=1;m.host.committed_scripted_event(fire);
+    const auto first=m.host.drain_remote_effects(1.01);REQUIRE(first.count==1);
+    REQUIRE(first.effects[0].shell);
+    (void)m.host.drain_remote_audio();
+    fire.record=2;fire.record_ordinal=2;m.host.committed_scripted_event(fire);
+    entities[0].weapon_model_index=0;entities[0].gait_sequence=0;
+    m.host.remote_entities(entities,8,3);
+    CHECK(m.host.drain_remote_effects(1.02).count==0);CHECK(m.host.drain_remote_audio().count==0);
+    // The already published world's action remains eligible for actual shell contact audio.
+    api::LocalShellContact contact;contact.action=first.effects[0].action;
+    contact.point={100,10,0};contact.at_seconds=1.1;contact.ordinal=1;
+    contact.inward_normal_speed=100;
+    m.host.remote_shell_contact(contact);
+    CHECK(m.host.drain_remote_audio().count==1);
+    entities[0]=player;m.host.remote_entities(entities,8,4);
+    // Late old-life event cannot acquire the new armed life.
+    fire.record=5;fire.entry_ordinal=1;fire.record_ordinal=2;
+    m.host.committed_scripted_event(fire);CHECK(m.host.drain_remote_effects(1.1).count==0);
+    fire.record=6;fire.record_ordinal=4;m.host.committed_scripted_event(fire);
+    CHECK(m.host.drain_remote_effects(1.1).count==1);
+    m.host.remote_entities({},8,5);
+    fire.record=7;fire.record_ordinal=5;m.host.committed_scripted_event(fire);
+    CHECK(m.host.drain_remote_effects(1.1).count==0);
+    m.host.reset({2,2,1});CHECK(m.host.drain_remote_effects(1.1).count==0);
+}
+
+TEST_CASE("E12 normal module freezes weapon sockets and preserves independent trace and server pose",
+    "[e12][remote-effects][game-module]") {
+    Module f,legacy;
+    api::RemoteWeaponPoseSample pose;
+    pose.generation=pose.map_generation=1;pose.entity_lifetime=9;pose.entity=3;pose.model_slot=42;
+    pose.current_model_slot=42;pose.source_record=pose.source_ordinal=1;pose.frame_identity=100;
+    pose.resource_id=7;pose.revision={3,4};pose.observed_at_seconds=pose.presented_at_seconds=1;
+    pose.source=api::RemoteSocketSource::validated_pmodel_socket;pose.semantic_known=pose.semantic_match=true;
+    pose.server_sequence=17;pose.effects=2;
+    pose.muzzle={{102,4,20},{0,1,0},{1,0,0},{0,0,1}};
+    pose.shell={{100,4,18},{0,1,0},{1,0,0},{0,0,1}};
+    f.host.remote_weapon_poses(std::span{&pose,1});
+    auto event=f.event();event.record_ordinal=1;event.weapon_model_index=42;
+    f.host.committed_scripted_event(event);legacy.host.committed_scripted_event(event);
+    const auto resolved=f.host.drain_remote_effects(1.01),previous=legacy.host.drain_remote_effects(1.01);
+    REQUIRE(resolved.count==1);REQUIRE(previous.count==1);
+    const auto& shot=resolved.effects[0];const auto& old=previous.effects[0];
+    CHECK(shot.pose.status==api::RemotePoseResolution::resolved);CHECK(shot.pose.server_sequence==17);
+    CHECK(shot.pose.frame_identity==100);CHECK(shot.pose.source==api::RemoteSocketSource::validated_pmodel_socket);
+    REQUIRE(shot.flash);REQUIRE(shot.shell);REQUIRE(shot.light);REQUIRE(shot.impact);REQUIRE(old.impact);
+    CHECK(shot.muzzle_origin.x==102);CHECK(shot.flash->origin.x==102);CHECK(shot.flash->origin.z==20);
+    REQUIRE(shot.flash->sprite);
+    CHECK(std::string_view{shot.flash->sprite->virtual_name.data()}=="sprites/muzzleflash2.spr");
+    CHECK(shot.shell->origin.x==100);CHECK(shot.shell->origin.z==18);
+    CHECK(shot.shell->velocity.x==Approx(50+float((1U^3U^1U)%21U)));
+    CHECK(shot.shell->velocity.y==25);CHECK(shot.shell->velocity.z==100);
+    CHECK(shot.shell->expires_at_seconds==old.shell->expires_at_seconds);
+    CHECK(shot.action==old.action);
+    CHECK(shot.impact->origin.x==old.impact->origin.x);CHECK(shot.impact->origin.z==old.impact->origin.z);
+    CHECK(shot.impact->direction.x==old.impact->direction.x);CHECK(shot.impact->direction.z==old.impact->direction.z);
+    CHECK(shot.impact->particles->count==old.impact->particles->count);
+    CHECK(shot.impact->maximum_distance_units==old.impact->maximum_distance_units);
+    pose.muzzle.origin.x+=40;pose.shell.origin.x+=40;pose.frame_identity=101;
+    f.host.remote_weapon_poses(std::span{&pose,1});
+    CHECK(shot.flash->origin.x==102);CHECK(shot.shell->origin.x==100); // owning frozen outputs
+    f.host.committed_scripted_event(event);CHECK(f.host.drain_remote_effects(1.02).count==0);
+    event=f.event(2);event.record_ordinal=2;event.weapon_model_index=42;
+    f.host.committed_scripted_event(event);
+    const auto next=f.host.drain_remote_effects(1.02);REQUIRE(next.count==1);CHECK(next.effects[0].muzzle_origin.x==142);
+    event=f.event(3,1);f.host.committed_scripted_event(event);CHECK(f.host.drain_remote_effects(1.02).count==0);
+    CHECK(f.host.drain_remote_effects(1.02).statistics.local_echo==1);
+    f.host.teardown();CHECK(f.host.drain_remote_effects(1.03).count==0);
+}
+TEST_CASE("E12 correlation rejects stale lifetime generation future pose and switched weapon",
+    "[e12][remote-effects][game-module][lifecycle]") {
+    for(unsigned failure=0;failure<11;++failure) {
+        Module f;api::RemoteWeaponPoseSample pose;
+        pose.generation=pose.map_generation=1;pose.entity_lifetime=9;pose.entity=3;pose.model_slot=42;
+        pose.current_model_slot=42;pose.source_record=pose.source_ordinal=1;pose.frame_identity=100;
+        pose.resource_id=7;pose.observed_at_seconds=pose.presented_at_seconds=1;
+        pose.source=api::RemoteSocketSource::validated_pmodel_socket;pose.semantic_known=pose.semantic_match=true;
+        pose.muzzle={{102,4,20},{1,0,0},{0,-1,0},{0,0,1}};pose.shell=pose.muzzle;
+        f.host.remote_weapon_poses(std::span{&pose,1});
+        auto event=f.event();event.record_ordinal=1;event.weapon_model_index=42;f.host.committed_scripted_event(event);
+        const std::array expected{api::RemotePoseResolution::missing,api::RemotePoseResolution::stale,
+            api::RemotePoseResolution::generation_mismatch,api::RemotePoseResolution::lifetime_mismatch,
+            api::RemotePoseResolution::weapon_mismatch,api::RemotePoseResolution::stale,api::RemotePoseResolution::weapon_mismatch,
+            api::RemotePoseResolution::invalid_socket,api::RemotePoseResolution::invalid_socket,
+            api::RemotePoseResolution::invalid_socket,api::RemotePoseResolution::generation_mismatch};
+        if(failure==0) pose.entity=4;
+        if(failure==1) pose.observed_at_seconds=0;
+        if(failure==2) pose.map_generation=2;
+        if(failure==3) pose.entity_lifetime=10;
+        if(failure==4) pose.current_model_slot=43;
+        if(failure==5) pose.source_ordinal=2;
+        if(failure==6) pose.semantic_match=false;
+        if(failure==7) pose.shell.origin.x=std::numeric_limits<float>::quiet_NaN();
+        if(failure==8) pose.shell.right=pose.shell.forward;
+        if(failure==9) pose.resource_id=0;
+        if(failure==10) pose.generation=2;
+        f.host.remote_weapon_poses(std::span{&pose,1});
+        const auto batch=f.host.drain_remote_effects(1.01);REQUIRE(batch.count==1);
+        CHECK(batch.effects[0].pose.status==expected[failure]);REQUIRE(batch.effects[0].impact);
+        CHECK(batch.effects[0].impact->origin.z==28);CHECK(f.host.drain_remote_audio().count==1);
+        if(failure==2 || failure==3 || failure==4 || failure==6 || failure==10) {
+            CHECK_FALSE(batch.effects[0].flash);CHECK_FALSE(batch.effects[0].light);CHECK_FALSE(batch.effects[0].shell);
+        } else {
+            REQUIRE(batch.effects[0].flash);CHECK(batch.effects[0].pose.source==api::RemoteSocketSource::legacy_player_space_fallback);
+        }
+    }
+}
+TEST_CASE("E12 Half-Life socket profile validates actual geometry skeleton revision and semantic identity",
+    "[e12][remote-effects][game-module][socket-profile]") {
+    hl::RemoteWeaponEffects profiles;
+    hlclient::assets::SkeletalModelAssetData model;
+    constexpr std::array<std::string_view,12> names{"Bip01","Bip01 Pelvis","Bip01 Spine","Bip01 Spine1","Bip01 Spine2",
+        "Bip01 Spine3","Bip01 Neck","Bip01 R Arm","Bip01 R Arm1","Bip01 R Arm2","Bip01 R Hand","sides01"};
+    for(std::size_t i=0;i<names.size();++i) {hlclient::assets::ModelBone bone;bone.name=names[i];bone.parent_index=int(i)-1;model.bones.push_back(bone);}
+    model.bones[11].default_translation={5.7819F,0.735678F,1.5869F};
+    model.bones[11].default_rotation_radians={0.027741F,-0.080641F,0.094173F};
+    model.submodels.resize(1);hlclient::assets::ModelSkinnedVertex vertex;vertex.position_bone_index=11;
+    vertex.source_position={-4.12F,-0.79F,-2.65F};model.submodels[0].vertices.push_back(vertex);
+    vertex.source_position={4.12F,0.79F,2.65F};model.submodels[0].vertices.push_back(vertex);
+    auto plan=profiles.socket_plan({17,{3,4},"models/p_9mmhandgun.mdl",model});
+    CHECK(plan.source==api::RemoteSocketSource::validated_pmodel_socket);CHECK(plan.muzzle.bone_index==11);
+    CHECK(plan.muzzle.local_origin.x==Approx(4.2));CHECK(plan.shell.local_origin.y==Approx(-0.85));
+    CHECK(profiles.socket_plan({17,{3,4},"models/p_crowbar.mdl",model}).source==api::RemoteSocketSource::unavailable);
+    auto invalid=model;invalid.bones[11].name="unrelated";
+    CHECK(profiles.socket_plan({17,{3,5},"models/p_9mmhandgun.mdl",invalid}).source==api::RemoteSocketSource::unavailable);
+    model.attachments={{"muzzle",0,11,{4.2F,0,1.865F},{}},{"shell",0,11,{1,-0.85F,1.8F},{}}};
+    plan=profiles.socket_plan({17,{3,6},"models/p_9mmhandgun.mdl",model});
+    CHECK(plan.source==api::RemoteSocketSource::explicit_model_attachment);REQUIRE(plan.muzzle_attachment);CHECK(*plan.muzzle_attachment==0);
+    profiles.reset(2,1,3);CHECK(profiles.socket_plan({17,{3,4},"models/p_9mmhandgun.mdl",invalid}).source==api::RemoteSocketSource::unavailable);
+}
 TEST_CASE("Remote committed Glock effect uses exact binding and emitter without local viewmodel",
     "[remote-effects][game-module]") {
     Module f;
@@ -151,6 +289,53 @@ TEST_CASE("Remote committed Glock effect uses exact binding and emitter without 
     CHECK(f.host.drain_remote_effects(1.03).count==0);
     auto swing=f.host.drain_remote_audio();REQUIRE(swing.count==1);
     CHECK(swing.cues[0].reference.name()=="weapons/cbar_miss1.wav");
+}
+
+TEST_CASE("Glock2 remote normal host preserves server pose and produces one spatial bullet effects and fire PCM",
+    "[glock-secondary][remote-effects][game-module][audio]") {
+    Module f;Loader loader;Sink sink;
+    sink.set_listener({{100,0,0},{0,1,0},1,false});g::LocalAudio playback(sink,true);
+    playback.update(f.host.drain_remote_audio(),&loader,0,true);
+    api::RemoteWeaponPoseSample pose;
+    pose.generation=pose.map_generation=1;pose.entity_lifetime=9;pose.entity=3;pose.model_slot=42;
+    pose.current_model_slot=42;pose.source_record=pose.source_ordinal=1;pose.frame_identity=100;
+    pose.resource_id=7;pose.revision={3,4};pose.observed_at_seconds=pose.presented_at_seconds=1;
+    pose.source=api::RemoteSocketSource::validated_pmodel_socket;
+    pose.semantic_known=pose.semantic_match=true;pose.semantic_key=2;
+    pose.server_sequence=17;pose.effects=2;
+    pose.muzzle={{102,4,20},{0,1,0},{1,0,0},{0,0,1}};
+    pose.shell={{100,4,18},{0,1,0},{1,0,0},{0,0,1}};
+    f.host.remote_weapon_poses(std::span{&pose,1});
+    auto event=f.event();event.event_index=900;event.record_ordinal=1;event.weapon_model_index=42;
+    f.host.committed_scripted_event(event);
+    const auto batch=f.host.drain_remote_effects(1.01);REQUIRE(batch.count==1U);
+    const auto& effect=batch.effects[0];
+    CHECK(effect.action.weapon_id==2U);CHECK(effect.action.kind==api::LocalWeaponAction::primary_fire);
+    CHECK(effect.pose.status==api::RemotePoseResolution::resolved);
+    CHECK(effect.pose.server_sequence==17U);CHECK(effect.pose.frame_identity==100U);
+    REQUIRE(effect.flash);REQUIRE(effect.light);REQUIRE(effect.shell);REQUIRE(effect.impact);
+    CHECK(effect.flash->origin.x==102);CHECK(effect.shell->origin.x==100);
+    CHECK(effect.impact->origin.x==100);CHECK(effect.impact->origin.z==28);
+    CHECK_FALSE(effect.impact->tracer);CHECK(batch.statistics.secondary_launch==0U);
+    const auto audio=f.host.drain_remote_audio();REQUIRE(audio.count==1U);
+    CHECK(audio.cues[0].reference.name()=="weapons/pl_gun3.wav");
+    CHECK(audio.cues[0].kind==api::LocalSoundKind::fire);REQUIRE(audio.cues[0].world_origin);
+    CHECK(audio.cues[0].channel==api::LocalSoundChannel::automatic);
+    playback.update(audio,&loader,1.01,true);REQUIRE(sink.starts.size()==1U);
+    std::array<float,256> pcm{};sink.output.mixer.render(pcm);
+    CHECK(std::all_of(pcm.begin(),pcm.end(),[](float sample){return std::isfinite(sample);}));
+    CHECK(std::any_of(pcm.begin(),pcm.end(),[](float sample){return sample!=0.0F;}));
+    f.host.committed_scripted_event(event);
+    CHECK(f.host.drain_remote_effects(1.02).count==0U);CHECK(f.host.drain_remote_audio().count==0U);
+    f.host.remote_world_impact(effect.action,{100,10,0},1.02);
+    const auto impact=f.host.drain_remote_audio();REQUIRE(impact.count>=1U);
+    CHECK(impact.cues[0].kind==api::LocalSoundKind::impact);
+    api::LocalShellContact contact{effect.action,1,{100,-10,0},80,1.2};
+    f.host.remote_shell_contact(contact);const auto shell=f.host.drain_remote_audio();REQUIRE(shell.count==1U);
+    CHECK(shell.cues[0].reference.name()=="player/pl_shell1.wav");
+    CHECK(f.host.drain_audio().count==0U); // Observer never plays a local receiving-player fire.
+    f.host.reset({2,2,1});f.host.committed_scripted_event(event);
+    CHECK(f.host.drain_remote_effects(1.2).count==0U);CHECK(f.host.drain_remote_audio().count==0U);
 }
 
 TEST_CASE("Remote effect queue distinguishes generations delay expiry capacity and aim provenance",

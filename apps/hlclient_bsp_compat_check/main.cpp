@@ -13,6 +13,7 @@
 #include <hlclient/world_render/world_render_package_builder.hpp>
 
 #include <chrono>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -453,13 +454,40 @@ void print_summary(const CompatibilitySummary& summary)
             }
         }
         for (const auto key : {"target", "targetname", "master", "angle", "angles",
-                               "speed", "wait", "lip", "height", "spawnflags"}) {
+                               "speed", "wait", "lip", "height", "spawnflags",
+                               "duration", "holdtime", "rendercolor", "renderamt",
+                               "amplitude", "frequency", "radius"}) {
             std::size_t count = 0U;
             std::string_view value;
             for (const auto& pair : entity.pairs()) if (pair.key == key) { ++count; value = pair.value; }
             const bool safe = count == 1U && value.size() <= 128U &&
                 value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-. ") == std::string_view::npos;
             std::cout << ' ' << key << '=' << (safe ? value : "unavailable");
+        }
+        if (safe_name && name->value == "multi_manager") {
+            // Read-only trigger-chain evidence. Never interpret/execute targets;
+            // reject paths, control bytes, nonnumeric delays and unbounded lists.
+            std::size_t printed = 0U, omitted = 0U;
+            for (const auto& pair : entity.pairs()) {
+                if (pair.key == "classname" || pair.key == "origin" || pair.key == "angles" ||
+                    pair.key == "angle" || pair.key == "spawnflags" || pair.key == "targetname" ||
+                    pair.key == "target" || pair.key == "master" || pair.key == "wait" ||
+                    pair.key == "delay" || pair.key == "killtarget") continue;
+                double seconds{};
+                const auto parsed_delay = std::from_chars(pair.value.data(),
+                    pair.value.data() + pair.value.size(), seconds);
+                const bool safe_target = !pair.key.empty() && pair.key.size() <= 128U &&
+                    pair.key.find_first_not_of(
+                        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-#") == std::string::npos;
+                if (!safe_target || pair.value.size() > 32U || parsed_delay.ec != std::errc{} ||
+                    parsed_delay.ptr != pair.value.data() + pair.value.size() ||
+                    !std::isfinite(seconds) || seconds < 0.0 || seconds > 86400.0) continue;
+                if (printed == 16U) { ++omitted; continue; }
+                std::cout << " manager_target[" << printed << "]=" << pair.key
+                          << " manager_delay[" << printed << "]=" << seconds;
+                ++printed;
+            }
+            std::cout << " manager_targets_printed=" << printed << " manager_targets_omitted=" << omitted;
         }
         std::cout << '\n';
     }

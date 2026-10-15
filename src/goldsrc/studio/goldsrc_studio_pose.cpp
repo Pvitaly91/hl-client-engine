@@ -148,7 +148,14 @@ normalize_frame(const assets::ModelSequence& sequence,
     const bool looping = (sequence.source_flags & kStudioSequenceLooping) != 0U;
     const auto final_frame = sequence.frame_count - 1U;
     double normalized = source_frame;
-    if (looping) {
+    if (final_frame == 0U) {
+        // A one-key sequence has no interpolation interval or loop period.
+        // Every finite source time samples that sole pose; fmod(time, 1)
+        // would incorrectly produce fractional coordinates outside [0,0].
+        normalized = 0.0;
+        result.looped = looping && source_frame != 0.0;
+        result.clamped = !looping && source_frame != 0.0;
+    } else if (looping) {
         const auto period = static_cast<double>(std::max(final_frame, 1U));
         normalized = std::fmod(source_frame, period);
         if (normalized < 0.0) {
@@ -1325,6 +1332,112 @@ StudioPoseEvaluationResult StudioPoseEvaluator::compose(
     } catch (const std::length_error&) {
         return fail_pose(StudioPoseErrorCode::composition_limit_exceeded, "Composition container limit exceeded");
     }
+}
+
+StudioBoneMergeMappingResult StudioBoneMergeCache::prepare(
+    const StudioPoseModelIdentity& parent_id, const assets::SkeletalModelAssetData& parent,
+    const StudioPoseModelIdentity& child_id, const assets::SkeletalModelAssetData& child)
+{
+    const auto reject=[](StudioPoseErrorCode code, const char* context) {
+        return StudioBoneMergeMappingResult{{},make_error(code,context)};
+    };
+    if(!valid_model_identity(parent_id) || !valid_model_identity(child_id))
+        return reject(StudioPoseErrorCode::invalid_model_identity,"Invalid bone-merge pair identity");
+    if(parent.bones.empty() || child.bones.empty() || parent.bones.size()>128U || child.bones.size()>128U)
+        return reject(StudioPoseErrorCode::bone_limit_exceeded,"Bone-merge pair exceeds bounds");
+    for(const auto& entry:entries_) if(entry && entry->parent_identity==parent_id &&
+        entry->child_identity==child_id && entry->parent_bone_count==parent.bones.size() &&
+        entry->parent_bones.size()==child.bones.size()) {++hits_;return {entry,{}};}
+    try {
+        auto mapping=std::make_shared<StudioBoneMergeMapping>();
+        mapping->parent_identity=parent_id; mapping->child_identity=child_id;
+        mapping->parent_bone_count=parent.bones.size();
+        const auto key=[](std::string name) {
+            for(auto& c:name) if(c>='A' && c<='Z') c=static_cast<char>(c-'A'+'a');
+            return name;
+        };
+        std::vector<std::string> names;
+        for(const auto* model:{&parent,&child}) {
+            names.clear();
+            for(std::size_t i=0U;i<model->bones.size();++i) {
+                const auto& bone=model->bones[i];
+                if(bone.name.empty() || bone.name.size()>64U)
+                    return reject(StudioPoseErrorCode::invalid_composition,"Missing or oversized bone name");
+                auto name=key(bone.name);
+                if(std::find(names.begin(),names.end(),name)!=names.end())
+                    return reject(StudioPoseErrorCode::invalid_composition,"Ambiguous case-folded bone name");
+                names.push_back(std::move(name));
+                auto cursor=static_cast<std::int32_t>(i);
+                for(std::size_t depth=0U;cursor!=-1;++depth) {
+                    if(cursor<0 || static_cast<std::size_t>(cursor)>=model->bones.size() || depth>=model->bones.size())
+                        return reject(StudioPoseErrorCode::invalid_hierarchy,"Invalid bone-merge hierarchy");
+                    cursor=model->bones[static_cast<std::size_t>(cursor)].parent_index;
+                }
+            }
+        }
+        std::vector<std::string> parent_names;
+        for(const auto& bone:parent.bones) parent_names.push_back(key(bone.name));
+        for(const auto& bone:child.bones) {
+            const auto found=std::find(parent_names.begin(),parent_names.end(),key(bone.name));
+            mapping->parent_bones.push_back(found==parent_names.end() ? -1 :
+                static_cast<std::int32_t>(found-parent_names.begin()));
+            mapping->child_parents.push_back(bone.parent_index);
+            if(found!=parent_names.end()) ++mapping->matched_bones;
+        }
+        if(!mapping->matched_bones)
+            return reject(StudioPoseErrorCode::invalid_composition,"No shared attachment bones");
+        std::vector<bool> done(child.bones.size(),false);
+        while(mapping->evaluation_order.size()<child.bones.size()) {
+            for(std::size_t i=0U;i<child.bones.size();++i) {
+                const auto p=child.bones[i].parent_index;
+                if(!done[i] && (p==-1 || done[static_cast<std::size_t>(p)])) {
+                    mapping->evaluation_order.push_back(static_cast<std::uint32_t>(i));done[i]=true;
+                }
+            }
+        }
+        entries_[next_++%entries_.size()]=mapping;
+        return {std::move(mapping),{}};
+    } catch(const std::bad_alloc&) {
+        return reject(StudioPoseErrorCode::unable_to_retain_pose,"Unable to retain bone-merge mapping");
+    }
+}
+
+StudioPoseEvaluationResult StudioPoseEvaluator::merge(
+    const StudioPoseState& parent, const assets::SkeletalModelAssetData& child,
+    const StudioBoneMergeMapping& mapping, const StudioPoseInput& input,
+    const StudioPoseEvaluationLimits& limits) const
+{
+    if(child.bones.size()>128U || parent.model_identity()!=mapping.parent_identity ||
+        parent.world_bones().size()!=mapping.parent_bone_count ||
+        mapping.parent_bones.size()!=child.bones.size() ||
+        mapping.child_parents.size()!=child.bones.size() ||
+        mapping.evaluation_order.size()!=child.bones.size())
+        return fail_pose(StudioPoseErrorCode::invalid_composition,"Bone-merge mapping/pose identity mismatch");
+    auto result=evaluate(mapping.child_identity,child,input,limits);
+    if(!result) return result;
+    auto& pose=*result.pose;
+    std::array<bool,128U> done{};
+    for(const auto index:mapping.evaluation_order) {
+        if(index>=child.bones.size() || done[index] || mapping.child_parents[index]!=child.bones[index].parent_index)
+            return fail_pose(StudioPoseErrorCode::invalid_hierarchy,"Invalid retained merge order");
+        const auto matched=mapping.parent_bones[index], ancestor=mapping.child_parents[index];
+        if(ancestor!=-1 && (ancestor<0 || static_cast<std::size_t>(ancestor)>=child.bones.size() || !done[static_cast<std::size_t>(ancestor)]))
+            return fail_pose(StudioPoseErrorCode::invalid_hierarchy,"Merge parent is unavailable");
+        if(matched>=0) {
+            if(static_cast<std::size_t>(matched)>=parent.world_bones().size())
+                return fail_pose(StudioPoseErrorCode::invalid_composition,"Merge parent bone out of range");
+            pose.world_bones_[index]=parent.world_bones()[static_cast<std::size_t>(matched)];
+        } else if(matched==-1) {
+            const auto local=local_matrix(pose.local_bones_[index]);
+            auto& world=pose.world_bones_[index];
+            world.transform=ancestor==-1 ? local : concatenate(pose.world_bones_[static_cast<std::size_t>(ancestor)].transform,local);
+            world.normal_rotation=matrix_rotation(world.transform);
+        } else return fail_pose(StudioPoseErrorCode::invalid_composition,"Invalid merge correspondence");
+        if(!finite_matrix(pose.world_bones_[index].transform))
+            return fail_pose(StudioPoseErrorCode::non_finite_pose,"Non-finite merged bone");
+        done[index]=true;
+    }
+    return result;
 }
 
 StudioPosedBoundsResult StudioPoseEvaluator::posed_bounds(

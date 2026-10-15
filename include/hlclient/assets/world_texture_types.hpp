@@ -29,6 +29,7 @@ enum class WorldTextureSourceKind {
 enum class WorldTextureAlphaMode {
     opaque,
     masked_index_255,
+    straight_alpha,
 };
 
 enum class WorldTextureCompatibilityProfile {

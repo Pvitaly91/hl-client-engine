@@ -49,6 +49,7 @@ struct ReferencePredictionSeed final {
     std::uint32_t use_hull{0U};
     std::uint32_t water_level{0U};
     bool in_duck{false};
+    bool crouch_jump_enabled{false};
     ReferencePredictionFieldOrigin in_duck_origin{
         ReferencePredictionFieldOrigin::clientdata_observed};
     std::uint32_t duck_time_milliseconds{0U};
@@ -168,10 +169,22 @@ struct ReferencePredictionGroundResult final {
     std::optional<movement::LocalMovementCollisionSessionIdentity>
         collision_identity;
     std::optional<hlclient::movement::PlayerGroundStateCreateInfo> ground_evidence;
+    std::optional<movement::LocalMovementPositionTest> position_evidence;
+    std::optional<movement::LocalMovementTrace> trace_evidence;
+    std::optional<hlclient::movement::PlayerMovementHull> queried_hull;
+    std::optional<assets::AssetVector3> queried_origin;
 };
 
 // Read-only collision categorization of a coherent server seed. The observed
-// origin and velocity are never snapped to the probe endpoint or rewritten.
+// origin and velocity remain canonical. The derived prediction state may use
+// a verified one-binary32-step BSP-boundary clearance, or a grounded exact
+// brush/box boundary correction within the local-compatible 1/8-unit envelope.
+// Brush recovery witnesses its walkable plane and full-scene free occupancy;
+// queried_origin records the physical query, not an altered wire observation.
+// An exact borrowed reference command may witness a positive post-movement
+// velocity effect at this same boundary. It permits only the ordinary support
+// probe for the still-grounded post-think endpoint, never another impulse or
+// altered canonical velocity. Without that witness the strict policy remains.
 [[nodiscard]] ReferencePredictionGroundResult derive_reference_prediction_ground(
     const ReferencePredictionSeed& seed,
     const GoldSrcWireUserCmd& boundary_command,
@@ -181,7 +194,8 @@ struct ReferencePredictionGroundResult final {
     hlclient::movement::GoldSrcMovementCommandProfile command_profile =
         hlclient::movement::GoldSrcMovementCommandProfile::
             reference_wire_dry_walk_v1,
-    const ReferenceBrushCollisionContext* ladder_context = nullptr);
+    const ReferenceBrushCollisionContext* ladder_context = nullptr,
+    const GoldSrcUserCmdState* exact_post_boundary_command = nullptr);
 
 // ServerInfo's client slot is zero based; ReHLDS serializes its player entity
 // as slot + 1. Both substates must be freshly observed in the same record.
@@ -189,6 +203,7 @@ struct ReferencePredictionGroundResult final {
     const client::RuntimeClientObservationState& observation,
     std::uint8_t receiving_client_slot,
     const ReferencePredictionAnchorResult& anchor,
-    std::optional<ReferenceRetainedPredictionButtons> retained = {}) noexcept;
+    std::optional<ReferenceRetainedPredictionButtons> retained = {},
+    std::string_view crouch_jump_physics_key = {}) noexcept;
 
 } // namespace hlclient::goldsrc

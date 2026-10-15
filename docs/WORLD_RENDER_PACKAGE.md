@@ -42,8 +42,10 @@ flip. All derived coordinates must be finite.
 M4.4.1 guarantees that every incoming world or brush face was produced by the
 same `GoldSrcFaceGeometryBuilder`. The builder validates Valve's clockwise qbsp
 wire against the side-adjusted plane normal using a centroid-rebased
-double-precision area vector, applies only the bounded strictly-interior
-T-junction collinear rule, and publishes counter-clockwise triangles. The
+double-precision area vector, uses bounded strictly-interior collinear cleanup
+only on a temporary triangulation skeleton, restores all original boundary
+subdivisions, and publishes counter-clockwise triangles. Source T-junction
+corners and their affine UVs must survive in the actual emitted triangles. The
 render package never guesses winding from the first three corners and never
 repairs geometry. Its input invariant is:
 
@@ -188,3 +190,70 @@ gameplay input, server snapshots, and M3.3 downloads/cache. See
 acceptance uses the same package path through a network-free, read-only checker
 or viewer wrapper; those tools accept safe virtual names, report bounded
 metadata, detect external-file drift, and never commit user-owned assets.
+
+## Original six-panel skies (2026-10-15 corrective)
+
+The normal client's existing asynchronous local-resource preparation now takes
+the exact committed movevars sky name. Only when that value is absent may the
+already validated BSP's first worldspawn supply its unique `skyname` key.
+`message` is not a sky key: the locally inspected original Crossfire BSP has
+`message=desert` but no `skyname`, so its ordinary live `desert` selection comes
+from movevars. There is no guessed global sky name or directory scan.
+
+The GoldSrc adapter accepts only an ASCII alphanumeric/underscore/hyphen name
+of 1..64 bytes and derives exactly six `gfx/env/<name>{rt,lf,up,dn,bk,ft}.tga`
+dependencies. Each is resolved solely in the selected approved world's root,
+captured as a locator and read through `LocalAssetSourceOpener` with identity,
+size, final-handle and EOF checks. Six complete square equal-size panels publish
+atomically; missing, invalid-name and rejected statuses leave the previous
+verified flat-sky/clear-color fallback. No mod-to-valve fallback, downloads,
+native paths, renderer file access, manual copying or extra live session.
+
+The independent CPU TGA decoder supports bounded truecolor type2/type10,
+24/32-bit samples, descriptor alpha0/8 and all four row/column origin choices.
+It rejects palettes, interleaving, other depths and truncated/overlong RLE runs.
+Source size is at most17MiB, decoder dimensions at most2048; sky publication
+further limits each face to1024 square, aggregate six-face RGBA24MiB. The
+standard optional footer remains inert. Sky alpha is explicitly opaque,
+independently of masked/sprite/decal semantics. Original `desertrt.tga` inspected
+here is type2,256x256,24-bit,descriptor0 (bottom rows),196652 bytes.
+
+`SkyboxAsset` owns six neutral RGBA images in cube order; the adapter rotates
+the upper/lower panels in opposite quarter turns. Cube lookup uses the neutral
+Z-up mapping `(world.x,world.z,world.y)`. A read-only original `desert` edge
+audit measured the following mean absolute8-bit RGB differences across the
+expected adjacent source boundaries (not a claim that source edges are exact):
+
+| Source edges | Reverse second edge | Mean absolute difference |
+| --- | --- | ---: |
+| rt-left / bk-right | no | 5.24 |
+| rt-right / ft-left | no | 4.04 |
+| lf-left / ft-right | no | 5.57 |
+| lf-right / bk-left | no | 4.98 |
+| up-bottom / rt-top | no | 2.59 |
+| up-top / lf-top | yes | 2.50 |
+| up-left / bk-top | no | 1.21 |
+| up-right / ft-top | yes | 2.86 |
+| dn-top / rt-bottom | no | 7.34 |
+| dn-bottom / lf-bottom | yes | 8.04 |
+| dn-left / bk-bottom | yes | 8.79 |
+| dn-right / ft-bottom | no | 8.74 |
+
+The world builder marks validated special sky materials with a neutral
+`sky_surface` flag and includes it in resource identity. OpenGL has no sky
+filenames or GoldSrc parsing. It uploads one immutable cube, linear level0,
+clamped edges and seamless cube filtering. The infinite backdrop depends on
+view direction/FOV, not camera translation, and never writes depth. Actual
+visible sky polygons sample that same environment while retaining their finite
+depth, so opaque brushes/actors behind a sky portal cannot bleed through it;
+closer geometry still occludes the sky. World lightmaps/muzzle lights do not
+illuminate the environment. Reset/missing sky releases retained cube ownership.
+
+Project-owned `[skybox]` fixtures cover TGA orientation/alpha/RLE bounds, exact
+root isolation, transactional six-panel readiness, source precedence, cap
+rotations, all six GPU viewing directions, translation invariance, source row
+orientation, uniform corner seams, portal depth and front/behind brush occlusion.
+The separate `HLCLIENT_SKY_ASSET_ROOT` opt-in checks original approved resources
+without a game/server session. Final pass counts are recorded by the owning
+task after the coordinated builds. New manual visual verification remains
+`not_run`; sky color/gamma parity with the closed stock renderer is not claimed.

@@ -1,6 +1,7 @@
 #include <hlclient/gameplay_camera/first_person_camera.hpp>
 #include <hlclient/gameplay_input/gameplay_input_bindings.hpp>
 #include <hlclient/goldsrc/usercmd_input_adapter.hpp>
+#include <hlclient/goldsrc/reference_prediction_command.hpp>
 #include <hlclient/input/input_state_tracker.hpp>
 
 #include <catch2/catch_approx.hpp>
@@ -586,6 +587,56 @@ TEST_CASE("Pressed gameplay buttons are explicit move-only one-shot capabilities
     REQUIRE(unknown.error);
     CHECK(unknown.error->code ==
         goldsrc::GoldSrcUserCmdInputAdapterErrorCode::invalid_context);
+}
+
+TEST_CASE("E16 secondary requires explicit wire policy and is inert to old prediction helper",
+          "[e16][goldsrc][input-adapter][secondary][reference-actions]") {
+    const auto intent = intent_from_events({input::InputEvent::focus_gained(),
+        input::InputEvent::capture_acquired(),
+        input::InputEvent::mouse_button_pressed(input::PhysicalMouseButton::right)});
+    auto context = build_context();
+    context.command_msec = 20U;
+    context.command_sample_duration_nanoseconds = 20'000'000U;
+    context.reference_button_policy = goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use;
+    CHECK_FALSE(goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(intent, make_camera(90, -30), context));
+    context.reference_button_policy = goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_secondary_reload_use;
+    auto wire = goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(intent, make_camera(90, -30), context);
+    REQUIRE(wire); REQUIRE(wire.command);
+    CHECK(wire.command->buttons == goldsrc::kReferenceGoldSrcButtonAttack2);
+    CHECK(wire.command->buttons == 2048U);
+    CHECK(wire.command->angle_turns[0] == *goldsrc::quantize_wire_angle(30));
+    CHECK(wire.command->angle_turns[1] == 16384U);
+    CHECK_FALSE(goldsrc::reference_jump_duck_weapon_use_movement_command(context.command_sequence, *wire.command));
+    const auto inert = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(context.command_sequence, *wire.command);
+    REQUIRE(inert); CHECK(inert.state->buttons() == 2048U);
+    CHECK(inert.state->compatibility_profile() == goldsrc::GoldSrcUserCmdCompatibilityProfile::public_goldsrc48_jump_duck_weapon_use_prediction_v4);
+    CHECK(inert.state->view_angles()[0] == Catch::Approx(30.0).margin(.01));
+    // MoveLeft (bit 9) is already a valid direction. Use a bit outside this
+    // explicitly bounded prediction profile instead.
+    auto bad = *wire.command; bad.buttons |= 1U << 15U;
+    CHECK_FALSE(goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(context.command_sequence, bad));
+    auto primary = *wire.command; primary.buttons = goldsrc::kReferenceGoldSrcButtonAttack | goldsrc::kReferenceGoldSrcButtonUse;
+    const auto before = goldsrc::reference_jump_duck_weapon_use_movement_command(context.command_sequence, primary);
+    const auto after = goldsrc::reference_jump_duck_secondary_weapon_use_movement_command(context.command_sequence, primary);
+    REQUIRE(before); REQUIRE(after);
+    CHECK(before.state->buttons() == after.state->buttons());
+    CHECK(before.state->view_angles() == after.state->view_angles());
+    CHECK(before.state->compatibility_profile() == after.state->compatibility_profile());
+    CHECK(before.state->forward_move() == after.state->forward_move());
+    CHECK(before.state->side_move() == after.state->side_move());
+    const auto first_click = intent_from_events({input::InputEvent::focus_gained(),
+        input::InputEvent::mouse_button_pressed(input::PhysicalMouseButton::left)});
+    const auto capture = goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(first_click, make_camera(), context);
+    REQUIRE(capture); CHECK(capture.command->buttons == 0U);
+    const auto lost = intent_from_events({input::InputEvent::focus_gained(), input::InputEvent::capture_acquired(),
+        input::InputEvent::mouse_button_pressed(input::PhysicalMouseButton::right), input::InputEvent::focus_lost()});
+    const auto neutral = goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(lost, make_camera(), context);
+    REQUIRE(neutral); CHECK(neutral.command->buttons == 0U);
+    context.one_shot_buttons = gameplay::gameplay_button_mask(gameplay::GameplayButton::attack_secondary);
+    auto pulse = goldsrc::GoldSrcUserCmdInputAdapter{}.build_reference_wire(
+        intent_from_events({input::InputEvent::focus_gained(), input::InputEvent::capture_acquired()}), make_camera(), context);
+    REQUIRE(pulse); CHECK(pulse.command->buttons == 2048U); REQUIRE(pulse.one_shot_plan);
+    CHECK(pulse.one_shot_plan->commit_after_history_insert(context.command_sequence));
 }
 
 } // namespace

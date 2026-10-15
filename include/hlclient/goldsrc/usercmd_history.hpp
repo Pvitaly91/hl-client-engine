@@ -93,6 +93,23 @@ enum class GoldSrcUserCmdHistoryErrorCode : std::uint8_t {
     pending_submission,
 };
 
+[[nodiscard]] constexpr std::string_view to_string(
+    GoldSrcUserCmdHistoryErrorCode code) noexcept {
+    switch(code) {
+    case GoldSrcUserCmdHistoryErrorCode::invalid_configuration: return "invalid_configuration";
+    case GoldSrcUserCmdHistoryErrorCode::invalid_command: return "invalid_command";
+    case GoldSrcUserCmdHistoryErrorCode::duplicate_sequence: return "duplicate_sequence";
+    case GoldSrcUserCmdHistoryErrorCode::out_of_order_sequence: return "out_of_order_sequence";
+    case GoldSrcUserCmdHistoryErrorCode::history_full: return "history_full";
+    case GoldSrcUserCmdHistoryErrorCode::revision_overflow: return "revision_overflow";
+    case GoldSrcUserCmdHistoryErrorCode::transmission_count_overflow: return "transmission_count_overflow";
+    case GoldSrcUserCmdHistoryErrorCode::unknown_sequence: return "unknown_sequence";
+    case GoldSrcUserCmdHistoryErrorCode::stale_submission: return "stale_submission";
+    case GoldSrcUserCmdHistoryErrorCode::pending_submission: return "pending_submission";
+    }
+    return "unknown";
+}
+
 struct GoldSrcUserCmdHistoryError {
     GoldSrcUserCmdHistoryErrorCode code{
         GoldSrcUserCmdHistoryErrorCode::invalid_configuration};

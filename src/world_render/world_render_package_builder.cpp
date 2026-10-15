@@ -154,6 +154,46 @@ struct PendingBatch {
     std::size_t source_surface_count{0U};
 };
 
+[[nodiscard]] std::optional<WorldFlatSkyBackground> verified_flat_sky_background(
+    const assets::TexturedWorldAsset& world,
+    const std::span<const WorldRenderMaterial> materials) noexcept
+{
+    std::optional<WorldFlatSkyBackground> background;
+    const auto textures = world.textures.textures();
+    for (const auto& material : materials) {
+        const auto& texture = textures[material.base_texture_asset_index];
+        const auto& name = texture.name;
+        const bool sky_name = name.size() >= 3U &&
+            (name[0] == 's' || name[0] == 'S') &&
+            (name[1] == 'k' || name[1] == 'K') &&
+            (name[2] == 'y' || name[2] == 'Y');
+        if (!material.special_surface || !sky_name) continue;
+        if (material.lightmap_mode != WorldRenderLightmapMode::unlit_white ||
+            texture.alpha_mode != assets::WorldTextureAlphaMode::opaque ||
+            texture.source_kind == assets::WorldTextureSourceKind::generated_missing_texture)
+            return std::nullopt;
+        const auto& pixels = texture.mip_levels[0U].rgba_pixels;
+        if (pixels.size() < 4U) return std::nullopt;
+        const WorldFlatSkyBackground candidate{{
+            std::to_integer<std::uint8_t>(pixels[0U]),
+            std::to_integer<std::uint8_t>(pixels[1U]),
+            std::to_integer<std::uint8_t>(pixels[2U])}};
+        // Check every decoded mip, including filtering levels; never average a
+        // textured sky or turn an arbitrary placeholder into an environment.
+        for (const auto& mip : texture.mip_levels) {
+            for (std::size_t offset = 0U; offset < mip.rgba_pixels.size(); offset += 4U) {
+                for (std::size_t channel = 0U; channel < 3U; ++channel)
+                    if (std::to_integer<std::uint8_t>(mip.rgba_pixels[offset + channel]) !=
+                        candidate.rgb[channel]) return std::nullopt;
+                if (mip.rgba_pixels[offset + 3U] != std::byte{0xff}) return std::nullopt;
+            }
+        }
+        if (background && *background != candidate) return std::nullopt;
+        background = candidate;
+    }
+    return background;
+}
+
 class StableHasher final {
 public:
     void add_byte(const std::uint8_t value) noexcept
@@ -258,6 +298,7 @@ void hash_vector(StableHasher& hash, const assets::AssetVector3& value) noexcept
         revision_hash.add_integer(material.lightmap_atlas_page_index.has_value());
         revision_hash.add_integer(material.lightmap_atlas_page_index.value_or(0U));
         revision_hash.add_integer(material.special_surface);
+        revision_hash.add_integer(material.sky_surface);
     }
     for (const auto& batch : batches) {
         revision_hash.add_integer(batch.first_index);
@@ -721,6 +762,11 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 WorldRenderEvidenceProfile::
                     validated_geometry_texture_and_lightmap_bindings,
             });
+            const auto& texture_name=textured_world.textures.textures()[pending.key.base_texture_asset_index].name;
+            render_materials.back().sky_surface=pending.key.special_surface && texture_name.size()>=3 &&
+                (texture_name[0]=='s'||texture_name[0]=='S') &&
+                (texture_name[1]=='k'||texture_name[1]=='K') &&
+                (texture_name[2]=='y'||texture_name[2]=='Y');
             draw_batches.push_back(WorldDrawBatch{
                 static_cast<std::uint32_t>(render_indices.size()),
                 static_cast<std::uint32_t>(pending.indices.size()),
@@ -824,6 +870,8 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
         }
         statistics.total_cpu_render_byte_count = total_cpu_bytes;
         const auto retained_bounds = world.bounds;
+        const auto flat_sky_background = verified_flat_sky_background(
+            textured_world, render_materials);
         const auto resource_identity = make_resource_identity(textured_world,
             lightmaps,
             render_vertices,
@@ -843,6 +891,7 @@ WorldRenderPackageBuildResult WorldRenderPackageBuilder::build(
                 retained_bounds,
                 WorldRenderCoordinateMetadata{},
                 statistics,
+                flat_sky_background,
                 resource_identity,
             },
             std::nullopt,

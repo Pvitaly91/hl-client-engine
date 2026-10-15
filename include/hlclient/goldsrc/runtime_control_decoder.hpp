@@ -5,6 +5,7 @@
 #include <hlclient/goldsrc/service_message_stream.hpp>
 #include <hlclient/goldsrc/stock_runtime_message_catalog.hpp>
 #include <hlclient/goldsrc/user_info_update.hpp>
+#include <memory>
 
 #include <array>
 #include <cstddef>
@@ -156,6 +157,9 @@ struct RuntimeControlExactFixedBody final {
     std::size_t body_size{0U};
     // Owning E1 projection; fixed-control kind/hash contract remains unchanged.
     std::optional<RuntimeControlSound> sound;
+    // Inert svc_particle diagnostics: the already framed 11-byte body ends
+    // with count/color. No particle simulation or game semantics are inferred.
+    std::optional<std::array<std::uint8_t, 2U>> particle_count_color;
 
   [[nodiscard]] friend bool
   operator==(const RuntimeControlExactFixedBody &,
@@ -261,11 +265,69 @@ struct RuntimeControlDecal final {
                                        const RuntimeControlDecal &) = default;
 };
 
+// Owning wire observation only. This does not spawn blood, load sprites or
+// confer damage/death authority on the client. Protocol 48 TE_BLOODSPRITE.
+struct RuntimeControlBloodSprite final {
+  std::array<std::int16_t, 3U> coordinate_eighths{};
+  std::array<std::int16_t, 2U> sprite_references{};
+  std::uint8_t palette_color{}, scale{};
+  [[nodiscard]] friend bool operator==(const RuntimeControlBloodSprite&,
+                                      const RuntimeControlBloodSprite&) = default;
+};
+
+// Exact pinned public SDK temporary-entity bodies. Coordinates retain their
+// Protocol 48 signed eighth-unit wire representation; no effect is executed.
+struct RuntimeControlExplosion final {
+  std::array<std::int16_t, 3U> coordinate_eighths{};
+  std::int16_t sprite_reference{};
+  std::uint8_t scale_tenths{}, framerate{}, flags{};
+  [[nodiscard]] friend bool operator==(const RuntimeControlExplosion&,
+                                      const RuntimeControlExplosion&) = default;
+};
+
+struct RuntimeControlSmoke final {
+  std::array<std::int16_t, 3U> coordinate_eighths{};
+  std::int16_t sprite_reference{};
+  std::uint8_t scale_tenths{}, framerate{};
+  [[nodiscard]] friend bool operator==(const RuntimeControlSmoke&,
+                                      const RuntimeControlSmoke&) = default;
+};
+
+struct RuntimeControlSparks final {
+  std::array<std::int16_t, 3U> coordinate_eighths{};
+  [[nodiscard]] friend bool operator==(const RuntimeControlSparks&,
+                                      const RuntimeControlSparks&) = default;
+};
+
+// Exact inert TE_BEAMFOLLOW observation. The packed entity/attachment short is
+// retained as wire bits, not interpreted as projectile or gameplay authority.
+struct RuntimeControlBeamFollow final {
+  std::uint16_t entity_attachment{};
+  std::int16_t sprite_reference{};
+  std::uint8_t life_tenths{}, width_tenths{};
+  std::array<std::uint8_t, 3U> color{};
+  std::uint8_t brightness{};
+  [[nodiscard]] friend bool operator==(const RuntimeControlBeamFollow&,
+                                      const RuntimeControlBeamFollow&) = default;
+};
+
+struct RuntimeControlBubbles final {
+  std::array<std::int16_t, 3U> minimum_eighths{}, maximum_eighths{};
+  std::int16_t height_eighths{}, sprite_reference{}, speed_eighths{};
+  std::uint8_t count{};
+  bool trail{}; // subtype 114 has identical fixed fields but line, not box semantics
+  [[nodiscard]] friend bool operator==(const RuntimeControlBubbles&,
+                                      const RuntimeControlBubbles&) = default;
+};
+
 struct RuntimeControlUserInfoUpdate final {
   std::uint8_t client_index{0U};
   std::size_t info_string_length{0U};
   std::size_t info_entry_count{0U};
   std::size_t opaque_suffix_size{0U};
+  bool present{true};
+  // Already-private owning parser result, never forwarded through GameClientAPI.
+  std::shared_ptr<const UserInfoUpdateState> identity;
 
   [[nodiscard]] friend bool
   operator==(const RuntimeControlUserInfoUpdate &,
@@ -305,7 +367,10 @@ using RuntimeControlMessageBody =
                  RuntimeControlUserInfoUpdate, RuntimeControlBspDecal,
                  RuntimeControlSignonControl, RuntimeControlVoiceInitialization,
                  RuntimeControlUserMessage, RuntimeControlDecal,
-                 RuntimeControlScriptedEvents>;
+                 RuntimeControlScriptedEvents, RuntimeControlBloodSprite,
+                 RuntimeControlExplosion, RuntimeControlSmoke,
+                 RuntimeControlSparks, RuntimeControlBubbles,
+                 RuntimeControlBeamFollow>;
 
 struct RuntimeControlEvent final {
   RuntimeControlOpcode opcode{RuntimeControlOpcode::svc_nop};
@@ -442,6 +507,14 @@ struct RuntimeControlDecodeError final {
   std::string registration_name;
   std::optional<std::size_t> expected_body_size;
   std::optional<std::size_t> actual_body_size;
+  std::optional<std::uint8_t> temporary_entity_type;
+  // Bounded grammar/shape evidence only. Private user ID, raw info values and
+  // the opaque suffix never become diagnostic output.
+  std::optional<UserInfoUpdateErrorCode> user_info_error;
+  std::optional<UserInfoStringErrorCode> user_info_string_error;
+  std::optional<std::size_t> user_info_string_length;
+  std::optional<bool> user_info_empty;
+  std::optional<bool> user_info_private_id_present;
 };
 
 struct RuntimeControlDecodedBatch final {

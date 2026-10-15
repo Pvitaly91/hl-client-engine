@@ -456,6 +456,16 @@ private:
         }
         const auto packed = descriptor.packed_id();
         const auto fragment_count = packed ? packed->fragment_count() : 0U;
+        if (inserted.completion) {
+            ++reassembled_count_;
+            auto published = publish_payload(
+                datagram, packet.header, true, true,
+                StockRuntimeReplayedPayloadKind::completed_normal_fragment_transfer,
+                fragment_count, inserted.completion->payload);
+            if (!published) return published;
+        }
+        // Match the owning live-driver delivery order: the completed body
+        // cannot overwrite the contemporary suffix from its final packet.
         if (packet.payload.size() > packet.fragment_payload_size) {
             auto suffix = std::span<const std::byte>{packet.payload}.subspan(
                 packet.fragment_payload_size);
@@ -463,14 +473,6 @@ private:
                 datagram, packet.header, true, false,
                 StockRuntimeReplayedPayloadKind::contemporaneous_fragment_suffix,
                 fragment_count, suffix);
-            if (!published) return published;
-        }
-        if (inserted.completion) {
-            ++reassembled_count_;
-            auto published = publish_payload(
-                datagram, packet.header, true, true,
-                StockRuntimeReplayedPayloadKind::completed_normal_fragment_transfer,
-                fragment_count, inserted.completion->payload);
             if (!published) return published;
         }
         return success_marker();

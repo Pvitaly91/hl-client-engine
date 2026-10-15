@@ -18,6 +18,8 @@ enum class SpriteRenderTextureProfile {
     opaque,
     alpha_test_masked,
     unsupported,
+    additive,
+    index_alpha,
 };
 
 enum class SpriteRenderTextureSupportStatus {
@@ -25,6 +27,8 @@ enum class SpriteRenderTextureSupportStatus {
     supported_alpha_test_masked,
     unsupported_additive_evidence_pending,
     unsupported_index_alpha_evidence_pending,
+    supported_additive,
+    supported_index_alpha_local_compatible,
 };
 
 struct SpriteRenderFrameGeometry {

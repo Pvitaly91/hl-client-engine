@@ -1,0 +1,217 @@
+{
+  "schema": "hlclient.normal-close-final-verdict-evidence.v1",
+  "task": "HLC-E28-2-FINAL-VERDICT-AFTER-NORMAL-CLOSE",
+  "date": "2026-10-10",
+  "primary_result": "normal_close_final_verdict_consistent",
+  "final_verification_status": "passed",
+  "worktree": "D:/DEV/CPP/HLC-steamcfg-5e48b7c1",
+  "git": {
+    "head": "00505f71ff2547a9a6b083e53edf69ec45d48213",
+    "branch": "codex/stock-runtime-campaign-5e48b7c1",
+    "remote": "https://github.com/Pvitaly91/hl-client-engine.git",
+    "staged_changes": 0,
+    "staging_commit_push": "none",
+    "existing_dirty_changes": "preserved",
+    "diff_check": "passed"
+  },
+  "source_evidence": {
+    "classification_kind": "retrospective_offline_reclassification",
+    "source_run_id": "01993393570741b3b1b3dc638d7fe2dd",
+    "original_artifacts": 31,
+    "original_artifact_hash_failures": 0,
+    "original_verdict": "local_server_ready_client_blocked",
+    "original_managed_exit": 1,
+    "original_native_exit": 0,
+    "historical_artifacts_rewritten": false,
+    "wrapper_embedded_native_equals_retained_staged": true,
+    "original_wrapper_sha256": "56E124AFDAE7EF5BC3B716FDB73F67A9AFABDB014ED7D4FF692327D9702EB4BE",
+    "original_staged_sha256": "03DBA62A33C7AF8FF6480A8FF5ED86E30EEE11C01B8E8AF437774B28C9DD5CE5",
+    "original_runner_sha256": "98151F3E9904DC2766E1F0E560909E0BD4FB498BE6285BA6F9243D7DA437B753",
+    "original_runner_source_identity": "024ba9a6af334acf04bce5e0a5c6a76f2129b4a9d0bf4ebf7cebde50695d0397",
+    "A": {
+      "process_id": 5712,
+      "creation_filetime": 134360570596579820,
+      "map_entry": "observed",
+      "receipt_status": "ready",
+      "exit_code": 0,
+      "exit_reason": "window_close",
+      "disconnect_send_count": 1,
+      "transport_ack": true,
+      "explicit_server_confirmation": "not_observed"
+    },
+    "B": {
+      "process_id": 38280,
+      "creation_filetime": 134360570596811361,
+      "map_entry": "observed",
+      "receipt_status": "ready",
+      "exit_code": 0,
+      "exit_reason": "window_close",
+      "disconnect_send_count": 1,
+      "transport_ack": true,
+      "explicit_server_confirmation": "not_observed"
+    },
+    "B_close_intent_to_A_committed_absence_ms": 38.6624,
+    "removal_interval_kind": "postcommit_observation_delay_not_delivery_or_explicit_server_confirmation",
+    "cleanup": "exact",
+    "restoration": "scoped_exact",
+    "managed_scope_entries": 0,
+    "full_tree_verification": "not_performed",
+    "server_exit": 0,
+    "guard_exit": 0,
+    "authentication_status": "pending_or_unknown",
+    "scripted_coverage": "not_evaluated",
+    "evidence_eligible": false
+  },
+  "causes": [
+    {
+      "path": "apps/hlclient_stock_runtime_orchestrator/main.cpp",
+      "functions": ["observe_functional_client_log", "functional_connection_status"],
+      "defect": "Terminal disconnected/dropped observation assigned functional_connection_rejected and overwrote accepted establishment in projection, without failing native completion.",
+      "correction": "apply_functional_client_observation retains functional_connection_lost separately; connection_establishment and session_terminal_state are distinct. Real rejection and runtime/nonzero-child failure remain failures."
+    },
+    {
+      "path": "scripts/capture_stock_runtime_state.ps1",
+      "functions": ["Assert-OrchestratorValue", "Get-ProjectWorldPublicationExpectation", "Assert-ManualNormalCompletionAttestation", "Get-FunctionalSmokeFinalVerdict"],
+      "defect": "Manual keyboard attestation expected post-teardown transient world=false despite durable committed receipt world=true; exception set primaryError, selecting blocked and managed exit1.",
+      "correction": "Actual bound typed receipt/launch proof gates historical committed-world expectation and final completion predicate. No global false-to-true replacement, ignored exception or forced exit0.",
+      "original_exception": "Project orchestrator did not attest client-world-state-published=false.",
+      "stable_duration_zero_is_cause": false
+    }
+  ],
+  "additional_integrity_review_fix": {
+    "defect": "Runner hash collection previously followed final classification; a hash-read error could leave a success verdict with a cleanup error.",
+    "correction": "Hash collection and its retained integrity error now precede classifier, summary and wrapper publication.",
+    "historical_run_cause": false,
+    "regression": "Exact narrow production AST block with throwing offline hash reader; actual child exit1 and local_smoke_integrity_failed; source-order guard.",
+    "single_child_control": "passed"
+  },
+  "post_fix_offline_result": {
+    "native_result": "success",
+    "native_exit": 0,
+    "connection_establishment": "accepted",
+    "session_terminal_state": "normal_close_completed",
+    "world_publication_phase": "committed_during_session",
+    "manual_attestation": "passed",
+    "wrapper_result": "fresh_project_client_live_visual_control_integrated",
+    "managed_exit": 0,
+    "manual_acceptance_reporting_fix": "not_run"
+  },
+  "regression": {
+    "fixture": "scripts/tests/normal_close_verdict_e282_fixture.json",
+    "fixture_provenance": "selected_actual_public_numeric_evidence_no_userinfo_or_auth_material",
+    "pre_fix_native_probe_exit": 1,
+    "pre_fix_wrapper_probe_exit": 1,
+    "pre_fix_expected_world": false,
+    "pre_fix_actual_committed_world": true,
+    "pre_fix_exact_exception_and_blocked_result": "reproduced",
+    "post_fix_native_to_PS_child_cases": 32,
+    "final_all_child_cases": "passed_actual_native_to_PS_and_child_exits",
+    "negative_controls": [
+      "server_not_ready", "real_connection_rejection", "missing_map_entry", "normal_close_before_map",
+      "A_crash_after_signon", "runtime_failure_after_gameplay", "parser_failure_after_gameplay",
+      "B_crash", "cleanup_failure", "restoration_failure", "foreign_run", "foreign_client",
+      "foreign_generation", "missing_receipt", "corrupt_receipt", "truncated_receipt",
+      "legacy_without_evidence", "receipt_without_gameplay", "missing_world_publication",
+      "null_PID", "null_creation_identity", "Boolean_exit", "Boolean_counter", "fractional_counter",
+      "string_counter", "string_epoch", "unknown_fact_bit", "string_close_timestamp", "hash_publication_failure"
+    ],
+    "positive_special_controls": ["bounded_log_markers_evicted_valid_durable_receipts", "owned_A_close_first_B_stop_not_forged_normal_close"],
+    "eligibility_truth_table_cases": 32,
+    "test_assertions_weakened": false,
+    "initial_new_fixture_crash": {
+      "exit_hex": "0xC0000005",
+      "boundary": "New test identity construction from by-reference captured constexpr string_view; captureless literal construction resolved it.",
+      "compiler_or_ABI_root_cause_established": false,
+      "counted_as_classifier_pre_fix_proof": false,
+      "logs_preserved": true
+    }
+  },
+  "verification": {
+    "target": "VS2022_Win32",
+    "Debug_reporting_build": {"status": "passed", "targets": ["hlclient_stock_runtime_orchestrator", "hlclient_tests"], "exit": 0},
+    "Release_reporting_build": {"status": "passed", "targets": ["hlclient_stock_runtime_orchestrator", "hlclient_tests"], "exit": 0},
+    "Debug_focused_E282_E281": {"status": "passed", "cases": 39, "assertions": 1958, "exit": 0},
+    "Release_focused_E282_E281": {"status": "passed", "cases": 39, "assertions": 1958, "exit": 0},
+    "Release_full_after_last_production_edit": {
+      "status": "passed",
+      "exit": 0,
+      "CTest_entries": 3309,
+      "CTest_passed": 3253,
+      "CTest_skipped": 56,
+      "CTest_failures": 0,
+      "Catch_discovered_cases": 3187,
+      "Catch_passed_cases": 3131,
+      "Catch_skipped_cases": 56,
+      "Catch_assertions_executed": 1777135,
+      "CTest_seconds": 587.42,
+      "E282_native_to_PS_child_cases": 32,
+      "post_CTest_no_stock_launcher_and_source_only_CheckOnly": "passed",
+      "log": "release-suite-final-after-integrity.log",
+      "CTest_log": "final-LastTest.log"
+    },
+    "Release_prior_complete_retry": {"status": "passed_before_final_hash_order_edit", "CTest_entries": 3309, "skipped": 56, "failures": 0, "log": "release-suite-verified.log"},
+    "core_only": {"status": "passed", "HLCLIENT_BUILD_GAME_HALFLIFE": false, "CTest_entries": 42, "failures": 0, "core_cases": 292, "core_assertions": 142940, "architecture_guard": "passed"},
+    "launcher_CheckOnly": {"status": "passed", "prediction": "reference", "RemoteAudioPeer": true, "NoTimeLimit": true, "process_launches": 0, "log": "launcher-CheckOnly-final.log"},
+    "no_stock_launcher_fixture": {"status": "passed", "reference_off_damage_respawn_contracts": "preserved", "log": "no-stock-launcher.log"},
+    "skip_reason_groups": [
+      "Explicit read-only installed-game asset and real audio-device opt-ins were not selected; mandatory project-owned fixtures still execute.",
+      "Dynamic WFP and active-guard capability opt-ins remain disabled; no live WFP canary was claimed.",
+      "File/directory symlink and reparse capability unavailable in this test environment; cross-volume control has no second writable local volume.",
+      "Hidden SDL backend lacks operational keyboard focus/capture for the capability-gated capture cases."
+    ],
+    "ASan": {"status": "not_run", "prior_loader_blocker": "0xC0000135", "scope": "outside_this_fix_no_ASan_repair_or_build"},
+    "initial_full_suite_failures": {
+      "count": 2,
+      "policy_test": "Old duplicated text marker replaced by production helper import and all32 unchanged-policy truth-table checks; passed.",
+      "suspended_launch_test": "Unchanged immediate Job count assertion saw1 instead of0; same-case bounded cleanup passed, isolated retry, prior complete retry and final complete run passed.",
+      "exact_transient_Job_root_cause": "not_established",
+      "production_cleanup_code_changed": false,
+      "initial_logs_preserved": true
+    }
+  },
+  "preservation": {
+    "record_root": "manual-artifacts/task-records/e282-final-verdict-20261010",
+    "source_snapshot_files": 1303,
+    "source_snapshot_hash_failures": 0,
+    "Release_rollback_files": 34,
+    "Release_rollback_hash_failures": 0,
+    "existing_source_changes_this_task": [
+      "apps/hlclient_stock_runtime_orchestrator/main.cpp",
+      "scripts/capture_stock_runtime_state.ps1",
+      "scripts/test_research_copy_smoke.ps1",
+      "tests/CMakeLists.txt",
+      "tests/test_windows_process_orchestrator.cpp"
+    ],
+    "new_files": [
+      "scripts/test_normal_close_verdict_e282.ps1",
+      "scripts/tests/normal_close_verdict_e282_fixture.json",
+      "docs/NORMAL_CLOSE_FINAL_VERDICT_E28_2.md",
+      "docs/evidence/NORMAL_CLOSE_FINAL_VERDICT_E28_2.json"
+    ],
+    "normal_client_source_and_binary": "unchanged",
+    "graceful_disconnect": "unchanged_fixed13bytes_1500ms",
+    "netchan_UDP_prediction_arsenal_audio_beam_server_maps": "unchanged",
+    "launcher": "unchanged_selects_build/bin/Release/hlclient.exe"
+  },
+  "identities": {
+    "hlclient.exe_sha256": "F8A0050D1DC027B10AE3157EA8BE20CDF284A650D3573F2469C9CD89C846A75C",
+    "hlclient.exe_rebuilt_this_task": false,
+    "Release_runner_sha256": "3C1751AC686C6685C38D26A63100FC0BBC1EAD564FF9931677B38E8B90A4863B",
+    "Debug_runner_sha256": "D809401C48C48BA97064783004D8230EC2930068F4F8EFCD37D5252E6AE8CD51",
+    "runner_source_sha256_and_compiled_identity": "974402F052213C52E16E37290CE903E58A90DB81300EA3B21D2C1EFDDA31E662",
+    "capture_stock_runtime_state.ps1_sha256": "14749DE3EB1D291B1ADF44DDF447B15AD22BA0D157B6DC0DEF5442FC2B0689D5",
+    "test_normal_close_verdict_e282.ps1_sha256": "F87D002993F374FB9357F519D8EFD76713A997970C93D9B47F8B57454718FF3C",
+    "fixture_sha256": "64A3F2CDE4F638D0E0384400CC18A1FC0E1A30DED46193421F29E397199B6944",
+    "policy_test_sha256": "9FB2057C1E8F5CBC36D38148FE2CB550318402CF1764154CAEDAC59C4E0A94F3",
+    "tests_CMakeLists.txt_sha256": "C2CA97FE2F3EF65F9701CB6E1D09F9C05B89246424CAC99EFAEDB416ABE66117",
+    "windows_process_tests_sha256": "49BB4AD519CA292021132E6DFFFDC11256F0AAB42AACD7BE8214C6C3FD226C38",
+    "unchanged_launcher_sha256": "5E868C6BE8C5B5606C8C5774E02ED0F3ACB0F4611ECAB72BCE9E09ED192B86CB"
+  },
+  "handoff": {
+    "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"D:\\DEV\\CPP\\HLC-steamcfg-5e48b7c1\\Start-HLClient-H2-Manual.ps1\" -Prediction reference -RemoteAudioPeer -NoTimeLimit",
+    "scenario": "Connect A/B; normally close B and confirm A continues; normally close A; inspect final normal verdict and phase distinctions. No full arsenal retest.",
+    "manual_acceptance_reporting_fix": "not_run",
+    "new_live_Steam_HLDS_capture_sessions": 0,
+    "E29": "not_started"
+  }
+}

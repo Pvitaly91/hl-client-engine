@@ -118,6 +118,13 @@ TEST_CASE("Zero usercmd delta has one exact byte and preserves its base",
     CHECK(decoded.state->lerp_msec() == base.lerp_msec());
     CHECK(decoded.state->view_angles() == base.view_angles());
 }
+TEST_CASE("E21 simulation impulse does not enter usercmd bytes", "[e21][goldsrc][usercmd][delta]") {
+    const auto binding=fixture::exact_binding();const auto base=fixture::default_state(1);
+    const auto original=fixture::default_state(2);const auto changed=original.with_velocity_impulse({0,0,500});REQUIRE(changed);
+    const auto plain=synthetic_codec().encode_delta(base,original,binding);
+    const auto impulse=synthetic_codec().encode_delta(base,*changed.state,binding);REQUIRE(plain);REQUIRE(impulse);
+    CHECK(plain.delta->bytes==impulse.delta->bytes);CHECK(plain.delta->bit_length==impulse.delta->bit_length);
+}
 
 TEST_CASE("First and highest usercmd mask bits match independent literals",
           "[goldsrc][usercmd][delta][literal][mask]")

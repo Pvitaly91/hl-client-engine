@@ -6,7 +6,10 @@ struct PreparedSoundResources {
     std::shared_ptr<const PrecacheManifestState> manifest;
     std::shared_ptr<const local_resources::LocalResourceEnvironment> environment;
 };
+inline constexpr std::size_t kMaximumApprovedLocalSoundEntries=128;
 // One cancellable loader, max 512 exact sparse bindings, 32 MiB PCM cache.
+// Local/profile samples share at most 128 of those entries; the remaining
+// sparse server bindings and the PCM byte limit remain independent bounds.
 // No cache eviction: active/pending shared PCM cannot become dangling.
 class ApprovedSoundAssets final : public SoundAssets {
 public:

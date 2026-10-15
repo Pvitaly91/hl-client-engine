@@ -21,6 +21,13 @@ void Mixer::listener(Listener l) noexcept {
 }
 void Mixer::command(const Command& c) noexcept {
     if(c.operation==Operation::reset) { for(auto& v:voices_) v={}; return; }
+    if(c.operation==Operation::stop_group) {
+        if(!c.voice_group_mask || (c.voice & ~c.voice_group_mask)) {++stats_.rejected; return;}
+        for(auto& v:voices_) if(v.state.asset && (v.state.voice & c.voice_group_mask)==c.voice) {
+            v={}; ++stats_.stopped;
+        }
+        return;
+    }
     for(auto& v:voices_) if(v.state.asset && v.state.voice==c.voice) {
         if(c.operation==Operation::stop) { v={}; ++stats_.stopped; return; }
         if(c.operation==Operation::source) { if(finite(c.origin)) {v.state.origin=c.origin; v.state.local=c.local;} return; }
@@ -47,8 +54,9 @@ void Mixer::render(std::span<float> out) noexcept {
         if(!v.state.asset) continue;
         const auto& a=*v.state.asset;
         const auto count=a.interleaved_samples.size()/a.channel_count;
-        const bool looping=a.loop.has_value() && v.state.loop_enabled;
-        const auto end=looping ? a.loop->end : count;
+        const bool looping=v.state.loop_enabled && (a.loop.has_value() || v.state.repeat_sample);
+        const auto begin=a.loop ? a.loop->begin : 0U;
+        const auto end=looping && a.loop ? a.loop->end : count;
         const auto dx=v.state.origin.x-listener_.origin.x, dy=v.state.origin.y-listener_.origin.y, dz=v.state.origin.z-listener_.origin.z;
         const auto distance=std::sqrt(dx*dx+dy*dy+dz*dz);
         const auto pan=v.state.local || v.state.attenuation==0 || distance==0 ? 0.0F : std::clamp((dx*listener_.right.x+dy*listener_.right.y+dz*listener_.right.z)/distance,-1.0F,1.0F);
@@ -58,10 +66,10 @@ void Mixer::render(std::span<float> out) noexcept {
         for(std::size_t f=0;f<frames;++f) {
             if(v.cursor>=static_cast<double>(end)) {
                 if(!looping) {v={}; break;}
-                v.cursor=a.loop->begin+std::fmod(v.cursor-a.loop->begin,static_cast<double>(end-a.loop->begin));
+                v.cursor=begin+std::fmod(v.cursor-begin,static_cast<double>(end-begin));
             }
             const auto i=static_cast<std::size_t>(v.cursor);
-            const auto j=i+1<end ? i+1 : looping ? a.loop->begin : i;
+            const auto j=i+1<end ? i+1 : looping ? begin : i;
             const auto fraction=static_cast<float>(v.cursor-static_cast<double>(i));
             for(std::size_t ch=0;ch<2;++ch) {
                 const auto ac=a.channel_count==1 ? 0 : ch;

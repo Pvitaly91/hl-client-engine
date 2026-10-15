@@ -26,6 +26,7 @@ struct GoldSrcUserCmdBuildContext {
     // command is published to history. They are mapped explicitly and are
     // never treated as native GoldSrc button bits.
     gameplay_input::GameplayButtonMask one_shot_buttons{0U};
+    gameplay_input::GameplayButtonMask edge_triggered_buttons{0U};
     GoldSrcReferenceButtonPolicy reference_button_policy{
         GoldSrcReferenceButtonPolicy::none};
     std::optional<std::uint8_t> impulse;
@@ -48,6 +49,19 @@ enum class GoldSrcUserCmdInputAdapterErrorCode : std::uint8_t {
     unsupported_weapon_selection,
     state_validation_failed,
 };
+
+[[nodiscard]] constexpr std::string_view to_string(
+    GoldSrcUserCmdInputAdapterErrorCode code) noexcept {
+    switch(code) {
+    case GoldSrcUserCmdInputAdapterErrorCode::invalid_context: return "invalid_context";
+    case GoldSrcUserCmdInputAdapterErrorCode::unsupported_profile: return "unsupported_profile";
+    case GoldSrcUserCmdInputAdapterErrorCode::stock_evidence_pending: return "stock_evidence_pending";
+    case GoldSrcUserCmdInputAdapterErrorCode::unsupported_action: return "unsupported_action";
+    case GoldSrcUserCmdInputAdapterErrorCode::unsupported_weapon_selection: return "unsupported_weapon_selection";
+    case GoldSrcUserCmdInputAdapterErrorCode::state_validation_failed: return "state_validation_failed";
+    }
+    return "unknown";
+}
 
 struct GoldSrcUserCmdInputAdapterError {
     GoldSrcUserCmdInputAdapterErrorCode code{

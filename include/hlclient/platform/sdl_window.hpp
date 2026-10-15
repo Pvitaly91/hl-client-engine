@@ -2,6 +2,7 @@
 
 #include <hlclient/input/input_event.hpp>
 #include <hlclient/platform/platform_event.hpp>
+#include <hlclient/core/presentation_settings.hpp>
 
 #include <cstdint>
 #include <exception>
@@ -9,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hlclient::platform {
 
@@ -60,6 +62,37 @@ struct SdlWindowConfig {
     int width{1280};
     int height{720};
     bool hidden{false};
+    std::size_t display_index{};
+    core::VideoWindowMode mode{core::VideoWindowMode::windowed};
+    bool vsync{true};
+    unsigned msaa_samples{4}; // scene request only; native framebuffer stays single-sample
+};
+
+struct VideoDisplay {
+    std::size_t index{};
+    std::uint32_t id{};
+    std::string name;
+    int desktop_width{}, desktop_height{};
+    float content_scale{1.0F};
+};
+
+// SDL video must already be initialized; this is enumeration, not discovery
+// of network hosts. At most32 displays are retained.
+[[nodiscard]] std::vector<VideoDisplay> enumerate_video_displays();
+
+struct VideoWindowState {
+    core::VideoSettings requested;
+    std::size_t display_index{};
+    core::VideoWindowMode actual_mode{core::VideoWindowMode::windowed};
+    PixelExtent window_extent{}, framebuffer_extent{}, desktop_extent{};
+    float display_scale{1.0F};
+    float display_content_scale{1.0F}, pixel_density{1.0F};
+    int window_x{}, window_y{};
+    int default_framebuffer_samples{}, default_framebuffer_sample_buffers{};
+    bool default_framebuffer_samples_observed{};
+    bool vsync{};
+    bool safe_window_recovery{};
+    std::string recovery_reason;
 };
 
 enum class RelativeMouseCaptureStatus : std::uint8_t {
@@ -99,11 +132,17 @@ public:
     // same sole pump and skips input events; it never polls SDL independently.
     [[nodiscard]] bool poll_event(WindowEvent& event) noexcept;
 
+    // An application overlay can own Escape before the sole native event pump.
+    // Default false preserves ordinary release-capture/close behavior. Focus
+    // loss and hard event-limit recovery always keep their fail-safe release.
+    void set_escape_input_owned(bool owned) noexcept;
+
     [[nodiscard]] RelativeMouseCaptureResult request_relative_mouse_capture(bool enabled);
     [[nodiscard]] input::InputFocusState focus_state() const noexcept;
     [[nodiscard]] input::InputCaptureState capture_state() const noexcept;
     [[nodiscard]] PixelExtent pixel_extent() const;
     [[nodiscard]] bool vsync_enabled() const noexcept;
+    [[nodiscard]] VideoWindowState video_state() const;
     void swap_buffers();
 
 private:

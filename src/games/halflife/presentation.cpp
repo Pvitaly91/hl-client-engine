@@ -1,4 +1,9 @@
 #include <hlclient/games/halflife/presentation.hpp>
+#include <hlclient/games/halflife/firearm_profile.hpp>
+#include <hlclient/games/halflife/gauss.hpp>
+#include <hlclient/games/halflife/egon.hpp>
+#include <hlclient/games/halflife/hornet_profile.hpp>
+#include <hlclient/games/halflife/hand_grenade_profile.hpp>
 #include <algorithm>
 #include <cmath>
 #include <utility>
@@ -9,16 +14,68 @@ void HalfLifePresentation::bind_model(std::optional<game_api::LocalWeaponModelMe
 }
 void HalfLifePresentation::observe(const client::RuntimeClientObservationState& state, double now) {
   advance_pickup_clock(now);
+  observe_projection(state);
+  controller_.configure_projection(horizontal_fov_);
   controller_.observe(state, now);
 }
 void HalfLifePresentation::submit(const game_api::LocalWeaponSubmittedCommand& command, double now) {
+  const auto before=controller_.current_action_identity();
   controller_.submit(command, now);
+  const auto after=controller_.current_action_identity();
+  if(after && after!=before && (after->weapon_id==3U || after->weapon_id==6U) && after->kind==game_api::LocalWeaponAction::reload)
+    reset_projection();
 }
 void HalfLifePresentation::cancel_uncommitted() noexcept { controller_.cancel_uncommitted(); }
 game_api::LocalWeaponPresentationSnapshot HalfLifePresentation::sample(double now) noexcept {
   return controller_.sample(now);
 }
 void HalfLifePresentation::reset() noexcept { *this = HalfLifePresentation{}; }
+
+void HalfLifePresentation::reset_projection() noexcept {
+  horizontal_fov_=90.0;projection_status_=game_api::CameraIntent::ProjectionStatus::reset;
+  projection_floor_=projection_source_;
+}
+void HalfLifePresentation::observe_projection(const client::RuntimeClientObservationState& s) noexcept {
+  if(!s.generation || s.generation<projection_generation_) return;
+  if(s.generation==projection_generation_ && s.publication_revision<projection_revision_) return;
+  const auto newer=[](const auto& a,const auto& b) {
+    return a.record_ordinal>b.record_ordinal || (a.record_ordinal==b.record_ordinal &&
+        a.start_bit_offset>b.start_bit_offset);
+  };
+  if(s.generation!=projection_generation_) {
+    projection_generation_=s.generation;projection_source_.reset();projection_floor_.reset();
+    horizontal_fov_=90;projection_status_=game_api::CameraIntent::ProjectionStatus::reset;
+    projection_weapon_=s.weapon_hud.active_weapon_id;
+    projection_life_=s.lifecycle.life_epoch;projection_deaths_=s.lifecycle.deaths;
+  }
+  projection_revision_=s.publication_revision;
+  const bool reset=s.lifecycle.dead() ||
+      (s.receiving_client && s.receiving_client->health && *s.receiving_client->health<=0) ||
+      projection_life_!=s.lifecycle.life_epoch || projection_deaths_!=s.lifecycle.deaths ||
+      ((projection_weapon_==3U || projection_weapon_==6U) && s.weapon_hud.active_weapon_id!=projection_weapon_);
+  projection_life_=s.lifecycle.life_epoch;projection_deaths_=s.lifecycle.deaths;
+  projection_weapon_=s.weapon_hud.active_weapon_id;
+  const auto candidate=[&](double value,const client::RuntimeObservationSource& source) {
+    if(!source.record_identity || !source.record_ordinal ||
+        (projection_source_ && !newer(source,*projection_source_)) ||
+        (projection_floor_ && !newer(source,*projection_floor_))) return;
+    projection_source_=source;
+    if(!std::isfinite(value) || value<0 || value>179 || (value>0 && value<1)) {
+      horizontal_fov_=90;projection_status_=game_api::CameraIntent::ProjectionStatus::invalid;return;
+    }
+    horizontal_fov_=value==0 ? 90 : value;
+    projection_status_=game_api::CameraIntent::ProjectionStatus::server_confirmed;
+  };
+  if(s.client_metadata.generation==s.generation &&
+      s.client_metadata.freshness==client::RuntimeObservationFreshness::observed_in_record &&
+      s.client_metadata.source && s.receiving_client && s.receiving_client->field_of_view)
+    candidate(*s.receiving_client->field_of_view,*s.client_metadata.source);
+  if(s.weapon_hud.field_of_view_source)
+    candidate(s.weapon_hud.field_of_view.value_or(0),*s.weapon_hud.field_of_view_source);
+  const auto slot=std::find_if(s.weapon_slots.begin(),s.weapon_slots.end(),[&](const auto& w){return w.weapon_id==projection_weapon_;});
+  if(reset || ((projection_weapon_==3U || projection_weapon_==6U) && slot!=s.weapon_slots.end() && slot->in_reload.value_or(false)))
+    reset_projection();
+}
 
 void HalfLifePresentation::commit_pickups(game_api::GameRecordState& state) noexcept {
   if (pickup_life_ != state.lifecycle.life_epoch || pickup_deaths_ != state.lifecycle.deaths ||
@@ -56,7 +113,14 @@ void HalfLifePresentation::advance_pickup_clock(double now) noexcept {
 game_api::CameraIntent HalfLifePresentation::camera(
     const client::RuntimeClientObservationState& observation, double local_punch) const noexcept {
   game_api::CameraIntent result;
+  result.horizontal_field_of_view_degrees=horizontal_fov_;
+  result.projection_status=projection_status_;
+  // Pinned Valve HUD policy: default FOV restores base sensitivity; other
+  // confirmed FOV values use the default zoom_sensitivity_ratio of 1.2.
+  // Derive both outputs from the same reconciled value, including reset floors.
+  result.mouse_sensitivity_scale=horizontal_fov_==90.0 ? 1.0 : horizontal_fov_/90.0*1.2;
   result.allow_predicted_translation = !observation.lifecycle.dead();
+  result.authoritative_translation_blend_seconds = observation.lifecycle.dead() ? 0.1 : 0.0;
   if (!observation.receiving_client || !observation.receiving_client->health) {
     result.status = game_api::CameraIntentStatus::health_unavailable; return result;
   }
@@ -74,7 +138,7 @@ game_api::CameraIntent HalfLifePresentation::camera(
       result.roll_degrees = (*result.server_punch_angle)[2];
     }
   }
-  if (!std::isfinite(local_punch) || std::abs(local_punch) > 4.0) {
+  if (!std::isfinite(local_punch) || std::abs(local_punch) > 10.0) {
     result.status = game_api::CameraIntentStatus::invalid_local_punch; return result;
   }
   // Half-Life punch pitch is downward-positive; the geometric camera uses up.
@@ -84,7 +148,7 @@ game_api::CameraIntent HalfLifePresentation::camera(
 
 game_api::ViewmodelIntent HalfLifePresentation::viewmodel(
     const client::RuntimeClientObservationState& observation,
-    const std::optional<game_api::LocalWeaponModelMetadata>& metadata,
+    const std::optional<game_api::LocalWeaponModelMetadata>& input_metadata,
     double now, std::optional<game_api::LocalWeaponVisual> local_visual) {
   game_api::ViewmodelIntent result;
   result.generation = observation.generation;
@@ -111,14 +175,26 @@ game_api::ViewmodelIntent HalfLifePresentation::viewmodel(
     animation_source_.reset(); local_animation_restart_.reset();
     return result;
   }
-  const auto index = *observation.receiving_client->viewmodel_index;
+  const auto satchel_metadata=controller_.satchel_presentation_model();
+  const auto& metadata=satchel_metadata ? satchel_metadata : input_metadata;
+  const auto index = satchel_metadata ? satchel_metadata->model_index : *observation.receiving_client->viewmodel_index;
   const auto active = observation.weapon_hud.active_weapon_id;
+  // The exhaustible last throw cannot fall back to a retained server idle pose
+  // while its authoritative inventory retirement is in flight.
+  if (active==12U && controller_.hand_grenade_waiting_retirement()) return result;
+  if (active==14U && controller_.satchel_waiting_retirement()) return result;
+  if (active==13U && controller_.tripmine_waiting_retirement()) return result;
+  if (active==15U && controller_.snark_waiting_retirement()) return result;
   result.model_index = index;
   if (!bound_viewmodel_index_) {
     bound_viewmodel_index_ = index; bound_weapon_id_ = active;
     model_bound_record_ordinal_ = observation.client_metadata.source
         ? observation.client_metadata.source->record_ordinal : 0U;
   } else if (*bound_viewmodel_index_ != index || bound_weapon_id_ != active) {
+    if(active==14U && bound_weapon_id_==14U && metadata && satchel_sequences(*metadata)) {
+      bound_viewmodel_index_=index;
+      model_bound_record_ordinal_=observation.client_metadata.source ? observation.client_metadata.source->record_ordinal : 0U;
+    } else {
     // Independent CurWeapon/clientdata channels cannot expose a half-transition.
     if (*bound_viewmodel_index_ != index && (!bound_weapon_id_ || (active && active != bound_weapon_id_))) {
       bound_viewmodel_index_ = index; bound_weapon_id_ = active;
@@ -127,6 +203,7 @@ game_api::ViewmodelIntent HalfLifePresentation::viewmodel(
     } else if (!bound_weapon_id_ && *bound_viewmodel_index_ == index && active) {
       bound_weapon_id_ = active;
     } else return result;
+    }
   }
   if (!metadata || metadata->generation != observation.generation || metadata->model_index != index ||
       !metadata->resource_name.starts_with("models/v_") || !metadata->resource_name.ends_with(".mdl")) {
@@ -140,13 +217,27 @@ game_api::ViewmodelIntent HalfLifePresentation::viewmodel(
   auto sequence = valid_event && observation.weapon_hud.animation_sequence
       ? *observation.weapon_hud.animation_sequence : observation.receiving_client->weapon_animation.value_or(0U);
   auto body = valid_event ? observation.weapon_hud.animation_body.value_or(0U) : std::uint8_t{0U};
+  if(!valid_event && active==3U && python_sequences(*metadata))
+    body=static_cast<std::uint8_t>(maximum_clients_>1U);
   std::optional<std::uint64_t> local_restart;
   double requested_start_time = now;
   const bool standard_model = (active == 2U && metadata->resource_name == "models/v_9mmhandgun.mdl") ||
-      (active == 1U && metadata->resource_name == "models/v_crowbar.mdl");
+      (active == 1U && metadata->resource_name == "models/v_crowbar.mdl") ||
+      (active == 4U && mp5_sequences(*metadata)) ||
+      (active == 7U && shotgun_sequences(*metadata)) ||
+      (active == 3U && python_sequences(*metadata)) ||
+      (active == 6U && crossbow_sequences(*metadata)) ||
+      (active == 8U && rpg_sequences(*metadata)) ||
+      (active == 9U && gauss_sequences(*metadata)) ||
+      (active == 10U && egon_sequences(*metadata)) ||
+      (active == 11U && hornet_sequences(*metadata)) ||
+      (active == 12U && hand_grenade_sequences(*metadata)) ||
+      (active == 14U && satchel_sequences(*metadata)) ||
+      (active == 13U && tripmine_sequences(*metadata)) ||
+      (active == 15U && snark_sequences(*metadata));
   if (standard_model && local_visual && local_visual->sequence < metadata->sequences.size()) {
     const auto& candidate = metadata->sequences[local_visual->sequence];
-    if (candidate.frame_count > 1U && std::isfinite(candidate.fps) && candidate.fps > 0.0 &&
+    if ((candidate.frame_count > 1U || (active==10U && candidate.frame_count==1U)) && std::isfinite(candidate.fps) && candidate.fps > 0.0 &&
         now - local_visual->started_at_seconds >= 0.0 && metadata->selectable_bodies[local_visual->body]) {
       sequence = local_visual->sequence; body = local_visual->body; event_source.reset();
       local_restart = local_visual->restart_identity; requested_start_time = local_visual->started_at_seconds;
@@ -206,10 +297,13 @@ game_api::HudState HalfLifePresentation::hud(const client::RuntimeClientObservat
         [id](const auto& type) { return type.id == id; });
     if (found != observation.weapon_hud.catalogue.end()) {
       hud.weapon_name = found->command_name;
-      if (id < observation.weapon_hud.clips.size() && observation.weapon_hud.clips[id])
+      // The signed no-clip sentinel remains canonical server data. An absent
+      // display field represents a weapon without a magazine, not negative ammo.
+      if (id < observation.weapon_hud.clips.size() && observation.weapon_hud.clips[id] &&
+          *observation.weapon_hud.clips[id] >= 0)
         hud.clip = *observation.weapon_hud.clips[id];
-      if (found->primary_ammo_type < 0) hud.primary_reserve = -1;
-      else if (static_cast<std::size_t>(found->primary_ammo_type) < observation.weapon_hud.reserve_ammo.size() &&
+      if (found->primary_ammo_type >= 0 &&
+               static_cast<std::size_t>(found->primary_ammo_type) < observation.weapon_hud.reserve_ammo.size() &&
                observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(found->primary_ammo_type)])
         hud.primary_reserve = *observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(found->primary_ammo_type)];
     }
@@ -219,7 +313,43 @@ game_api::HudState HalfLifePresentation::hud(const client::RuntimeClientObservat
   };
   auto text = "HP " + label(hud.health) + "  ARM " + label(hud.armor) + "\n";
   text += hud.weapon_name.empty() ? "WEAPON ?" : hud.weapon_name;
-  text += "  CLIP " + label(hud.clip) + "  AMMO " + label(hud.primary_reserve);
+  if(observation.weapon_hud.active_weapon_id==1U && hud.weapon_name=="weapon_crowbar") {
+    // Crowbar owns neither a clip nor an ammunition pool.
+  } else if((observation.weapon_hud.active_weapon_id==9U && hud.weapon_name=="weapon_gauss") ||
+      (observation.weapon_hud.active_weapon_id==10U && hud.weapon_name=="weapon_egon")) {
+    hud.clip.reset();text += "  URANIUM " + label(hud.primary_reserve);
+  } else if(observation.weapon_hud.active_weapon_id==11U && hornet_command(hud.weapon_name)) {
+    hud.clip.reset();
+    // No predicted reserve or recharge clock. This is the current assigned
+    // AmmoX slot, including catch-up increases while another weapon was held.
+    if(hud.primary_reserve && (*hud.primary_reserve<0 || *hud.primary_reserve>hornet_maximum_ammo))
+      hud.primary_reserve.reset();
+    hud.weapon_name="Hornet Gun";
+    text="HP " + label(hud.health) + "  ARM " + label(hud.armor) + "\n" +
+        hud.weapon_name + "  HORNETS " + label(hud.primary_reserve);
+  } else if(observation.weapon_hud.active_weapon_id==12U && hand_grenade_command(hud.weapon_name)) {
+    hud.clip.reset();
+    if(hud.primary_reserve && (*hud.primary_reserve<0 || *hud.primary_reserve>hand_grenade_maximum_ammo))
+      hud.primary_reserve.reset();
+    hud.weapon_name="Hand Grenade";
+    text="HP " + label(hud.health) + "  ARM " + label(hud.armor) + "\n" +
+        hud.weapon_name + "  GRENADES " + label(hud.primary_reserve);
+  } else if(observation.weapon_hud.active_weapon_id==13U && tripmine_command(hud.weapon_name)) {
+    hud.clip.reset();
+    if(hud.primary_reserve && (*hud.primary_reserve<0 || *hud.primary_reserve>tripmine_maximum_ammo)) hud.primary_reserve.reset();
+    hud.weapon_name="Trip Mine";
+    text="HP " + label(hud.health) + "  ARM " + label(hud.armor) + "\n" + hud.weapon_name + "  MINES " + label(hud.primary_reserve);
+  } else if(observation.weapon_hud.active_weapon_id==14U && satchel_command(hud.weapon_name)) {
+    hud.clip.reset();
+    if(hud.primary_reserve && (*hud.primary_reserve<0 || *hud.primary_reserve>satchel_maximum_ammo)) hud.primary_reserve.reset();
+    hud.weapon_name="Satchel Charge";
+    text="HP " + label(hud.health) + "  ARM " + label(hud.armor) + "\n" + hud.weapon_name + "  SATCHELS " + label(hud.primary_reserve);
+  } else if(observation.weapon_hud.active_weapon_id==15U && snark_command(hud.weapon_name)) {
+    hud.clip.reset();
+    if(hud.primary_reserve && (*hud.primary_reserve<0 || *hud.primary_reserve>snark_maximum_ammo))hud.primary_reserve.reset();
+    hud.weapon_name="Snark";
+    text="HP " + label(hud.health) + "  ARM " + label(hud.armor) + "\n" + hud.weapon_name + "  SNARKS " + label(hud.primary_reserve);
+  } else text += "  CLIP " + label(hud.clip) + "  AMMO " + label(hud.primary_reserve);
   if (!hud.lifecycle_indicator.empty()) text += "\n" + hud.lifecycle_indicator;
   if (text.size() > 160U) text.resize(160U);
   hud.draw.rectangles.push_back({8.0F, 8.0F, 590.0F, 64.0F, {0.01F,0.02F,0.03F,0.78F}});
@@ -248,6 +378,8 @@ game_api::HudState HalfLifePresentation::hud(const client::RuntimeClientObservat
             type->command_name == "weapon_9mmhandgun") pickup_label = "GLOCK";
         else if (type != observation.weapon_hud.catalogue.end() && event.identifier == 1U &&
                  type->command_name == "weapon_crowbar") pickup_label = "CROWBAR";
+        else if (type != observation.weapon_hud.catalogue.end() && event.identifier == 15U &&
+                 snark_command(type->command_name)) pickup_label = "SNARK";
         else pickup_label = "WEAPON " + std::to_string(event.identifier) + " (UNSUPPORTED)";
       } else {
         pickup_label = event.item_token == "item_healthkit" ? "HEALTH KIT" :

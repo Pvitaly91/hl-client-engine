@@ -89,6 +89,10 @@ struct OwnedServicePayload {
     bool acknowledgement_reliable{false};
     NetchanDirection direction{NetchanDirection::server_to_client};
     NetchanDriverTimePoint received_at{};
+    bool contemporaneous_fragment_suffix{false};
+    // A driver-owned normal completion may contain old frame bodies. Its
+    // completion header is not the body’s original transport frame identity.
+    bool normal_fragment_completion{false};
 };
 
 [[nodiscard]] constexpr bool service_payload_decode_ready(

@@ -1,4 +1,8 @@
 #include <hlclient/games/halflife/inventory.hpp>
+#include <hlclient/games/halflife/hand_grenade_profile.hpp>
+#include <hlclient/games/halflife/satchel_profile.hpp>
+#include <hlclient/games/halflife/tripmine_profile.hpp>
+#include <hlclient/games/halflife/snark_profile.hpp>
 #include <hlclient/game_api/command.hpp>
 #include <algorithm>
 #include <ranges>
@@ -41,6 +45,44 @@ ClientMessageBuildResult build_weapon_selection_request(
               (character >= 'A' && character <= 'Z') ||
               (character >= '0' && character <= '9') || character == '_'))
             return rejected("weapon name is not one inert ASCII token");
+    }
+    if (weapon_id==12U && hand_grenade_command(found->command_name)) {
+        const auto ammo=found->primary_ammo_type;
+        if(ammo<0 || static_cast<std::size_t>(ammo)>=observation.weapon_hud.reserve_ammo.size() ||
+            !observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)] ||
+            *observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)]==0U ||
+            *observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)]>hand_grenade_maximum_ammo)
+            return rejected("exhaustible hand grenade lacks a positive authoritative reserve");
+    }
+    if(weapon_id==13U && tripmine_command(found->command_name)) {
+        const auto ammo=found->primary_ammo_type;
+        if((found->flags&24U)!=24U || ammo<0 || static_cast<std::size_t>(ammo)>=observation.weapon_hud.reserve_ammo.size() ||
+            !observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)] ||
+            *observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)]==0 ||
+            *observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)]>tripmine_maximum_ammo)
+            return rejected("exhaustible tripmine lacks a positive authoritative reserve");
+    }
+    if(weapon_id==15U && snark_command(found->command_name)) {
+        const auto ammo=found->primary_ammo_type;
+        if((found->flags&24U)!=24U || ammo<0 ||
+            static_cast<std::size_t>(ammo)>=observation.weapon_hud.reserve_ammo.size() ||
+            !observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)] ||
+            *observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)]==0 ||
+            *observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)]>snark_maximum_ammo)
+            return rejected("exhaustible Snark lacks a positive authoritative reserve");
+    }
+    if(weapon_id==14U && satchel_command(found->command_name)) {
+        const auto ammo=found->primary_ammo_type;
+        const auto slot=std::find_if(observation.weapon_slots.begin(),observation.weapon_slots.end(),
+            [](const auto& item){return item.weapon_id==14U;});
+        if(ammo<0 || static_cast<std::size_t>(ammo)>=observation.weapon_hud.reserve_ammo.size() ||
+            !observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)] ||
+            *observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)]>satchel_maximum_ammo)
+            return rejected("satchel pocket reserve is unavailable or invalid");
+        const auto pocket=*observation.weapon_hud.reserve_ammo[static_cast<std::size_t>(ammo)];
+        if(!pocket && (slot==observation.weapon_slots.end() || !slot->auxiliary_integer1 ||
+            *slot->auxiliary_integer1<1 || *slot->auxiliary_integer1>2))
+            return rejected("empty satchel lacks authoritative deployed/transition state");
     }
     return goldsrc::encode_game_command({game_api::GameCommandKind::inventory_selection, found->command_name});
 }

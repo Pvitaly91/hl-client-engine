@@ -4,6 +4,8 @@
 #include <hlclient/prediction/local_prediction.hpp>
 
 #include <cmath>
+#include <algorithm>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -114,6 +116,80 @@ ReferenceRebaseResult rebase_reference_prediction(
     } catch (const std::bad_alloc&) {
         return {ReferenceRebaseStatus::publication_failed};
     }
+}
+
+std::optional<ReferenceExteriorCornerPresentation>
+sample_reference_exterior_corner_presentation(
+    const assets::AssetVector3 from,const assets::AssetVector3 to,const double alpha,
+    const hlclient::movement::PlayerMovementHull hull,
+    const movement::ILocalMovementCollision& collision,
+    hlclient::collision::CollisionQueryScratch& scratch,
+    const movement::GoldSrcLocalMovementConfig& config,const double maximum_route_length,
+    std::size_t* const observed_trace_queries)
+{
+    const auto finite=[](const assets::AssetVector3& p){return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z);};
+    const auto length=[](const assets::AssetVector3& a,const assets::AssetVector3& b){
+        return std::hypot(static_cast<double>(a.x)-b.x,static_cast<double>(a.y)-b.y,static_cast<double>(a.z)-b.z);};
+    if(!finite(from)||!finite(to)||!std::isfinite(alpha)||alpha<0||alpha>1||
+        !std::isfinite(maximum_route_length)||maximum_route_length<=0||maximum_route_length>4||
+        std::abs(static_cast<double>(from.z)-to.z)>.001||length(from,to)>maximum_route_length||
+        !movement::valid_goldsrc_local_movement_config(config))return {};
+    const auto free=[&](const auto& p){const auto result=collision.test_position(p,hull,scratch,config.collision_query);
+        return result&&result.result->status==movement::LocalMovementPositionStatus::free;};
+    const auto trace=[&](const auto& a,const auto& b){
+        if(observed_trace_queries&&*observed_trace_queries!=(std::numeric_limits<std::size_t>::max)())++*observed_trace_queries;
+        return collision.trace_hull(a,b,hull,scratch,config.collision_query);};
+    const auto clear=[&](const auto& a,const auto& b){const auto result=trace(a,b);
+        return result&&!result.result->start_solid&&!result.result->all_solid&&!result.result->in_liquid&&result.result->fraction>=1;};
+    if(!free(from)||!free(to))return {};
+    const auto forward=trace(from,to);
+    const auto reverse=trace(to,from);
+    const auto eligible=[](const auto& trace){return trace&&trace.result&&!trace.result->start_solid&&!trace.result->all_solid&&
+        !trace.result->in_liquid&&trace.result->fraction<1&&trace.result->hit&&trace.result->collision_plane&&
+        trace.result->hit->kind==hlclient::movement::PlayerMovementHitKind::world;};
+    if(!eligible(forward)||!eligible(reverse)||forward.result->hit!=reverse.result->hit)return {};
+    const auto& a=*forward.result->collision_plane;const auto& b=*reverse.result->collision_plane;
+    const auto& na=a.normal;const auto& nb=b.normal;
+    const double dot=static_cast<double>(na.x)*nb.x+static_cast<double>(na.y)*nb.y;
+    const double determinant=static_cast<double>(na.x)*nb.y-static_cast<double>(na.y)*nb.x;
+    if(!finite(na)||!finite(nb)||!std::isfinite(a.distance)||!std::isfinite(b.distance)||
+        std::abs(na.z)>.0001||std::abs(nb.z)>.0001||std::abs(dot)>.0001||std::abs(determinant)<.999||
+        std::abs(std::hypot(na.x,na.y)-1)>.0001||std::abs(std::hypot(nb.x,nb.y)-1)>.0001)return {};
+    const auto side=[](const auto& plane,const auto& p){return static_cast<double>(plane.normal.x)*p.x+
+        static_cast<double>(plane.normal.y)*p.y+static_cast<double>(plane.normal.z)*p.z-plane.distance;};
+    // Opposite free faces of the same exterior corner. A concave trap or a
+    // parallel/opposing-wall passage must not acquire an invented escape.
+    if(side(a,from)<0||side(a,to)>=0||side(b,to)<0||side(b,from)>=0)return {};
+    assets::AssetVector3 bend{
+        static_cast<float>((a.distance*nb.y-b.distance*na.y)/determinant),
+        static_cast<float>((na.x*b.distance-nb.x*a.distance)/determinant),std::max(from.z,to.z)};
+    if(!finite(bend))return {};
+    // Resolve only our computed intersection, using <=4 representable free-
+    // side values. No BSP, hull, server origin or global epsilon is changed.
+    for(unsigned attempt=0;attempt<4 && !free(bend);++attempt) {
+        const auto outward=[](float p,float direction){return direction==0?p:std::nextafter(p,
+            std::copysign(std::numeric_limits<float>::infinity(),direction));};
+        bend.x=outward(bend.x,na.x+nb.x);bend.y=outward(bend.y,na.y+nb.y);
+    }
+    if(!free(bend)||!clear(from,bend)||!clear(bend,to))return {};
+    const auto supported=[&](const assets::AssetVector3& p){
+        auto end=p;end.z-=static_cast<float>(config.ground_probe_distance);
+        const auto ground=trace(p,end);
+        return ground&&ground.result&&!ground.result->start_solid&&!ground.result->all_solid&&!ground.result->in_liquid&&
+            ground.result->fraction<1&&ground.result->hit&&ground.result->hit->kind==hlclient::movement::PlayerMovementHitKind::world&&
+            ground.result->collision_plane&&ground.result->collision_plane->normal.z>=config.minimum_walkable_normal_z;
+    };
+    if(!supported(from)||!supported(bend)||!supported(to))return {};
+    const auto first_length=length(from,bend),second_length=length(bend,to),total=first_length+second_length;
+    if(!std::isfinite(total)||total<=0||total>maximum_route_length)return {};
+    const double along=total*alpha;assets::AssetVector3 sampled;
+    const auto interpolate=[](const auto& start,const auto& end,double fraction){return assets::AssetVector3{
+        static_cast<float>(start.x+(end.x-start.x)*fraction),static_cast<float>(start.y+(end.y-start.y)*fraction),
+        static_cast<float>(start.z+(end.z-start.z)*fraction)};};
+    if(along<=first_length && first_length>0)sampled=interpolate(from,bend,along/first_length);
+    else sampled=interpolate(bend,to,second_length>0?(along-first_length)/second_length:1.0);
+    if(!free(sampled)||!supported(sampled))return {};
+    return ReferenceExteriorCornerPresentation{from,bend,to,sampled,total};
 }
 
 } // namespace hlclient::goldsrc

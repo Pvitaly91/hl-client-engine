@@ -19,7 +19,9 @@ namespace {
     return {std::nullopt, std::move(error)};
 }
 
-[[nodiscard]] OwnedServicePayload owning_runtime_payload(
+} // namespace
+
+OwnedServicePayload make_owned_service_payload(
     const StockRuntimeReplayedPayload& payload)
 {
     OwnedServicePayload result;
@@ -27,7 +29,11 @@ namespace {
     result.source_sequence = payload.source_sequence();
     result.source_acknowledgement = payload.source_acknowledgement();
     result.source_reliable = payload.reliable();
-    result.reassembled = payload.reassembled();
+    result.contemporaneous_fragment_suffix = payload.kind() ==
+        StockRuntimeReplayedPayloadKind::contemporaneous_fragment_suffix;
+    result.normal_fragment_completion = payload.kind() ==
+        StockRuntimeReplayedPayloadKind::completed_normal_fragment_transfer;
+    result.reassembled = !result.contemporaneous_fragment_suffix && payload.reassembled();
     // StockRuntimeTransportReplay has already performed the optional bounded
     // envelope transform. The runtime decoder's flag means that this owning
     // buffer is ready for semantic decoding, including the identity transform
@@ -38,6 +44,8 @@ namespace {
     result.direction = payload.direction();
     return result;
 }
+
+namespace {
 
 [[nodiscard]] bool transport_padding_only(
     const StockRuntimeReplayedPayload& payload) noexcept
@@ -182,7 +190,7 @@ RuntimeReplayCaptureLoadResult RuntimeReplayCaptureLoader::load(
                 transport_padding_only(replayed)) {
                 continue;
             }
-            auto payload = owning_runtime_payload(replayed);
+            auto payload = make_owned_service_payload(replayed);
             auto cursor = StockRuntimeSourceCursor::create(
                 payload_ordinal == first_payload
                     ? signon.state->cursor().byte_offset

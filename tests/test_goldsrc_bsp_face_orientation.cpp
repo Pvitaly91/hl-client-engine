@@ -3,7 +3,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -149,6 +151,95 @@ void require_canonical_quad(
     }
 }
 
+void require_preserved_source_boundary(
+    const FaceFixture& fixture,
+    const bsp::GoldSrcFaceGeometryBuildResult& result)
+{
+    INFO((result.error ? bsp::to_string(result.error->code)
+                       : std::string_view{"none"}));
+    REQUIRE(result);
+    REQUIRE(result.candidate);
+    const auto& candidate = *result.candidate;
+    const auto corner_count = fixture.vertices.size();
+    REQUIRE(candidate.corners.size() == corner_count);
+    REQUIRE(candidate.local_triangle_indices.size() == (corner_count - 2U) * 3U);
+    CHECK(candidate.diagnostic.reconstructed_corner_count == corner_count);
+    CHECK(candidate.diagnostic.canonical_corner_count == corner_count);
+    CHECK(candidate.diagnostic.removed_collinear_corner_count == 0U);
+
+    auto bounds = assets::WorldBounds{fixture.vertices.front(), fixture.vertices.front()};
+    for (std::size_t index = 0U; index < corner_count; ++index) {
+        const auto source_index = index == 0U ? 0U : corner_count - index;
+        const auto& source = fixture.vertices[source_index];
+        const auto& corner = candidate.corners[index];
+        CHECK(corner.source_vertex_index == source_index);
+        CHECK(corner.position.x == source.x);
+        CHECK(corner.position.y == source.y);
+        CHECK(corner.position.z == source.z);
+        const auto coordinate = [&source](const std::array<float, 4U>& axis) {
+            return static_cast<float>(
+                static_cast<double>(source.x) * static_cast<double>(axis[0U]) +
+                static_cast<double>(source.y) * static_cast<double>(axis[1U]) +
+                static_cast<double>(source.z) * static_cast<double>(axis[2U]) +
+                static_cast<double>(axis[3U]));
+        };
+        CHECK(corner.texture_coordinate.x == coordinate(fixture.texinfo.s));
+        CHECK(corner.texture_coordinate.y == coordinate(fixture.texinfo.t));
+        bounds.minimum.x = std::min(bounds.minimum.x, source.x);
+        bounds.minimum.y = std::min(bounds.minimum.y, source.y);
+        bounds.minimum.z = std::min(bounds.minimum.z, source.z);
+        bounds.maximum.x = std::max(bounds.maximum.x, source.x);
+        bounds.maximum.y = std::max(bounds.maximum.y, source.y);
+        bounds.maximum.z = std::max(bounds.maximum.z, source.z);
+    }
+    CHECK(candidate.bounds.minimum.x == bounds.minimum.x);
+    CHECK(candidate.bounds.minimum.y == bounds.minimum.y);
+    CHECK(candidate.bounds.minimum.z == bounds.minimum.z);
+    CHECK(candidate.bounds.maximum.x == bounds.maximum.x);
+    CHECK(candidate.bounds.maximum.y == bounds.maximum.y);
+    CHECK(candidate.bounds.maximum.z == bounds.maximum.z);
+
+    auto triangle_area_sum = 0.0;
+    std::vector<bool> referenced(corner_count, false);
+    for (std::size_t triangle = 0U;
+         triangle < candidate.local_triangle_indices.size();
+         triangle += 3U) {
+        for (std::size_t edge = 0U; edge < 3U; ++edge) {
+            const auto index = candidate.local_triangle_indices[triangle + edge];
+            REQUIRE(index < corner_count);
+            referenced[index] = true;
+        }
+        const auto winding = triangle_normal_dot(candidate, triangle);
+        CHECK(std::isfinite(winding));
+        CHECK(winding > 0.0);
+        triangle_area_sum += winding;
+    }
+    CHECK(triangle_area_sum == Approx(-candidate.diagnostic.signed_area_normal_dot));
+    CHECK(candidate.diagnostic.minimum_triangle_winding_dot > 0.0);
+
+    // Keeping unused corners is insufficient: each original boundary segment
+    // must occur exactly once, in canonical direction, in the emitted mesh.
+    for (std::size_t first = 0U; first < corner_count; ++first) {
+        CHECK(referenced[first]);
+        const auto next = (first + 1U) % corner_count;
+        std::size_t forward_count = 0U;
+        std::size_t reverse_count = 0U;
+        for (std::size_t triangle = 0U;
+             triangle < candidate.local_triangle_indices.size();
+             triangle += 3U) {
+            for (std::size_t edge = 0U; edge < 3U; ++edge) {
+                const auto a = candidate.local_triangle_indices[triangle + edge];
+                const auto b = candidate.local_triangle_indices[
+                    triangle + (edge + 1U) % 3U];
+                forward_count += a == first && b == next ? 1U : 0U;
+                reverse_count += a == next && b == first ? 1U : 0U;
+            }
+        }
+        CHECK(forward_count == 1U);
+        CHECK(reverse_count == 0U);
+    }
+}
+
 TEST_CASE("Valve qbsp wire loops canonicalize for both face sides and surfedge signs",
     "[goldsrc-bsp][face-orientation][profile]")
 {
@@ -215,8 +306,8 @@ TEST_CASE("Valve qbsp wire loops canonicalize for both face sides and surfedge s
     }
 }
 
-TEST_CASE("Centroid area and evidence-gated cleanup retain deterministic geometry",
-    "[goldsrc-bsp][face-orientation][collinear]")
+TEST_CASE("Centroid area and boundary splits retain deterministic source geometry",
+    "[goldsrc-bsp][face-orientation][collinear][bsp-seam]")
 {
     SECTION("the first three wire corners may contain an interior split point")
     {
@@ -229,11 +320,8 @@ TEST_CASE("Centroid area and evidence-gated cleanup retain deterministic geometr
         });
         const auto first = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
         const auto second = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
-        require_canonical_quad(first, {0U, 4U, 3U, 2U});
-        require_canonical_quad(second, {0U, 4U, 3U, 2U});
-        CHECK(first.candidate->diagnostic.removed_collinear_corner_count == 1U);
-        CHECK(first.candidate->diagnostic.reconstructed_corner_count == 5U);
-        CHECK(first.candidate->diagnostic.canonical_corner_count == 4U);
+        require_preserved_source_boundary(fixture, first);
+        require_preserved_source_boundary(fixture, second);
         CHECK(first.candidate->local_triangle_indices ==
             second.candidate->local_triangle_indices);
         for (std::size_t index = 0U; index < first.candidate->corners.size(); ++index) {
@@ -245,7 +333,7 @@ TEST_CASE("Centroid area and evidence-gated cleanup retain deterministic geometr
         }
     }
 
-    SECTION("multiple interior split points are removed in bounded source order")
+    SECTION("multiple interior split points survive in bounded source order")
     {
         auto fixture = make_fixture({
             {0.0F, 0.0F, 0.0F},
@@ -259,14 +347,10 @@ TEST_CASE("Centroid area and evidence-gated cleanup retain deterministic geometr
         fixture.limits.maximum_face_edges = 7U;
         const auto first = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
         const auto second = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
-        require_canonical_quad(first, {0U, 6U, 4U, 3U});
-        require_canonical_quad(second, {0U, 6U, 4U, 3U});
-        CHECK(first.candidate->diagnostic.reconstructed_corner_count == 7U);
-        CHECK(first.candidate->diagnostic.removed_collinear_corner_count == 3U);
-        CHECK(first.candidate->diagnostic.canonical_corner_count == 4U);
-        CHECK(first.candidate->diagnostic.removed_collinear_corner_count ==
-            first.candidate->diagnostic.reconstructed_corner_count -
-                first.candidate->diagnostic.canonical_corner_count);
+        require_preserved_source_boundary(fixture, first);
+        require_preserved_source_boundary(fixture, second);
+        CHECK(first.candidate->local_triangle_indices ==
+            second.candidate->local_triangle_indices);
         CHECK(first.candidate->corners.front().source_vertex_index == 0U);
         for (std::size_t index = 0U; index < first.candidate->corners.size(); ++index) {
             const auto& first_corner = first.candidate->corners[index];
@@ -354,9 +438,8 @@ TEST_CASE("Centroid area and evidence-gated cleanup retain deterministic geometr
             {100'064.0F, 100'000.0F, 0.0F},
         });
         const auto result = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
-        require_canonical_quad(result, {0U, 4U, 3U, 2U});
+        require_preserved_source_boundary(fixture, result);
         CHECK(result.candidate->diagnostic.distance_tolerance == Approx(0.01));
-        CHECK(result.candidate->diagnostic.removed_collinear_corner_count == 1U);
     }
 
     SECTION("float-scale line drift remains an interior collinear split")
@@ -369,9 +452,8 @@ TEST_CASE("Centroid area and evidence-gated cleanup retain deterministic geometr
             {64.0F, 0.0F, 0.0F},
         });
         const auto result = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
-        require_canonical_quad(result, {0U, 4U, 3U, 2U});
+        require_preserved_source_boundary(fixture, result);
         CHECK(result.candidate->diagnostic.distance_tolerance > 0.0001);
-        CHECK(result.candidate->diagnostic.removed_collinear_corner_count == 1U);
     }
 
     SECTION("small valid geometry remains above its independent area tolerance")
@@ -402,6 +484,132 @@ TEST_CASE("Centroid area and evidence-gated cleanup retain deterministic geometr
         require_canonical_quad(result, {0U, 3U, 2U, 1U});
         CHECK(result.candidate->corners.front().position.x == Approx(-128.0F));
         CHECK(result.candidate->corners.front().position.y == Approx(-128.0F));
+    }
+}
+
+TEST_CASE("Boundary split chains survive every source anchor and surfedge encoding",
+    "[goldsrc-bsp][face-orientation][collinear][bsp-seam]")
+{
+    const std::vector<assets::AssetVector3> clockwise{
+        {0.0F, 16.0F, 0.0F},
+        {0.0F, 32.0F, 0.0F},
+        {0.0F, 64.0F, 0.0F},
+        {16.0F, 64.0F, 0.0F},
+        {48.0F, 64.0F, 0.0F},
+        {64.0F, 64.0F, 0.0F},
+        {64.0F, 48.0F, 0.0F},
+        {64.0F, 16.0F, 0.0F},
+        {64.0F, 0.0F, 0.0F},
+        {48.0F, 0.0F, 0.0F},
+        {16.0F, 0.0F, 0.0F},
+        {0.0F, 0.0F, 0.0F},
+    };
+    for (const auto side : std::array<std::int16_t, 2U>{0, 1}) {
+        for (const auto signs : std::array{
+                 SurfedgeSigns::positive, SurfedgeSigns::negative,
+                 SurfedgeSigns::mixed}) {
+            for (std::size_t anchor = 0U; anchor < clockwise.size(); ++anchor) {
+                INFO("side=" << side << " signs=" << static_cast<int>(signs)
+                             << " source anchor=" << anchor);
+                auto positions = clockwise;
+                std::rotate(positions.begin(),
+                    positions.begin() + static_cast<std::ptrdiff_t>(anchor),
+                    positions.end());
+                if (side == 1) {
+                    std::reverse(positions.begin() + 1, positions.end());
+                }
+                auto fixture = make_fixture(std::move(positions), side, signs);
+                fixture.texinfo.s = {0.5F, -2.0F, 0.0F, 7.0F};
+                fixture.texinfo.t = {-1.25F, 0.75F, 0.0F, -13.0F};
+                fixture.limits.maximum_face_edges = clockwise.size();
+                const auto first = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
+                const auto second = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
+                require_preserved_source_boundary(fixture, first);
+                require_preserved_source_boundary(fixture, second);
+                CHECK(first.candidate->local_triangle_indices ==
+                    second.candidate->local_triangle_indices);
+                CHECK(first.polygon_edge_pair_test_count ==
+                    clockwise.size() * (clockwise.size() - 3U) / 2U);
+                CHECK(first.polygon_edge_pair_test_count ==
+                    second.polygon_edge_pair_test_count);
+                CHECK(first.candidate->emitted_face_normal.z ==
+                    (side == 0 ? 1.0F : -1.0F));
+            }
+        }
+    }
+}
+
+TEST_CASE("Near-collinear boundary bends retain exact source positions and UVs",
+    "[goldsrc-bsp][face-orientation][collinear][bsp-seam]")
+{
+    for (const auto drift : std::array{-0.0001F, 0.0001F}) {
+        for (const auto side : std::array<std::int16_t, 2U>{0, 1}) {
+            INFO("drift=" << drift << " side=" << side);
+            std::vector<assets::AssetVector3> positions{
+                {0.0F, 0.0F, 0.0F},
+                {drift, 16.0F, 0.0F},
+                {-drift, 32.0F, 0.0F},
+                {drift, 48.0F, 0.0F},
+                {0.0F, 64.0F, 0.0F},
+                {64.0F, 64.0F, 0.0F},
+                {64.0F, 0.0F, 0.0F},
+            };
+            if (side == 1) {
+                std::reverse(positions.begin() + 1, positions.end());
+            }
+            auto fixture = make_fixture(std::move(positions), side, SurfedgeSigns::mixed);
+            fixture.texinfo.s = {2.0F, 0.5F, 0.0F, 3.0F};
+            fixture.texinfo.t = {-0.75F, -1.0F, 0.0F, -5.0F};
+            const auto first = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
+            const auto second = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
+            require_preserved_source_boundary(fixture, first);
+            require_preserved_source_boundary(fixture, second);
+            CHECK(first.candidate->local_triangle_indices ==
+                second.candidate->local_triangle_indices);
+            CHECK(first.candidate->diagnostic.distance_tolerance > std::abs(drift));
+        }
+    }
+}
+
+TEST_CASE("Thin boundary bends may meet or cross a temporary fan diagonal",
+    "[goldsrc-bsp][face-orientation][collinear][bsp-seam][thin-face]")
+{
+    for (const auto bend : std::array{0.00005F, 0.000075F}) {
+        const std::vector<assets::AssetVector3> clockwise{
+            {0.0F, 0.0F, 0.0F},
+            {bend, 32.0F, 0.0F},
+            {0.0F, 64.0F, 0.0F},
+            {0.0001F, 64.0F, 0.0F},
+            {0.0001F, 0.0F, 0.0F},
+        };
+        for (const auto side : std::array<std::int16_t, 2U>{0, 1}) {
+            for (const auto signs : std::array{
+                     SurfedgeSigns::positive, SurfedgeSigns::negative,
+                     SurfedgeSigns::mixed}) {
+                for (std::size_t anchor = 0U; anchor < clockwise.size(); ++anchor) {
+                    INFO("bend=" << bend << " side=" << side
+                                 << " signs=" << static_cast<int>(signs)
+                                 << " source anchor=" << anchor);
+                    auto positions = clockwise;
+                    std::rotate(positions.begin(),
+                        positions.begin() + static_cast<std::ptrdiff_t>(anchor),
+                        positions.end());
+                    if (side == 1) {
+                        std::reverse(positions.begin() + 1, positions.end());
+                    }
+                    auto fixture = make_fixture(std::move(positions), side, signs);
+                    fixture.texinfo.s = {12.5F, 0.0F, 0.0F, 0.0F};
+                    fixture.texinfo.t = {-2.0F, 0.125F, 0.0F, 3.0F};
+                    const auto first = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
+                    const auto second = bsp::GoldSrcFaceGeometryBuilder::build(fixture.input());
+                    require_preserved_source_boundary(fixture, first);
+                    require_preserved_source_boundary(fixture, second);
+                    CHECK(first.candidate->local_triangle_indices ==
+                        second.candidate->local_triangle_indices);
+                    CHECK(first.polygon_edge_pair_test_count == 5U);
+                }
+            }
+        }
     }
 }
 

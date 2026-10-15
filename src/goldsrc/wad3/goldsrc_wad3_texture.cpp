@@ -258,7 +258,8 @@ GoldSrcWad3TextureDecodeResult GoldSrcWad3TextureDecoder::decode(
         assets::WorldTextureSourceKind::external_wad3,
         metadata.source_bsp_texture_index,
         metadata.source_archive_ordinal,
-        limits);
+        limits,
+        request.interpretation);
     if (!decoded) {
         auto nested_error = std::move(decoded.error);
         const auto nested_offset = nested_error

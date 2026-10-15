@@ -141,7 +141,7 @@ SoundAssetResult ApprovedSoundAssets::request_local(const game_api::LocalSoundRe
         // Same local sample shares PCM across model/profile references, not voices.
         if(e.local->name()==r.name()) return e.result;
     }
-    if(locals>=64) return {SoundAssetStatus::limit,{}};
+    if(locals>=kMaximumApprovedLocalSoundEntries) return {SoundAssetStatus::limit,{}};
     for(auto& e:impl_->entries) if(!e.used) {
         e.used=e.requested=true; e.local=r; impl_->wake.notify_one(); return {};
     }

@@ -464,6 +464,11 @@ std::size_t ResourceListStage::transition_request_queue_count() const noexcept
     return transition_stage_.transition_request_queue_count();
 }
 
+NetchanDriver* ResourceListStage::close_driver() noexcept
+{
+    return transition_stage_.close_driver();
+}
+
 NetchanDriver* ResourceListStage::retained_driver() noexcept
 {
     if (!retain_connection_at_boundary_ ||

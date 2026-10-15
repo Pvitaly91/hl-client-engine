@@ -1,4 +1,5 @@
 #include <hlclient/goldsrc/netchan_driver.hpp>
+#include <hlclient/goldsrc/service_message_stream.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -278,6 +279,19 @@ public:
     return config;
 }
 
+std::vector<std::byte> udp_split_part(const std::vector<std::byte>& inner,
+    const std::uint32_t identity, const std::uint8_t index,
+    const std::uint8_t count, const std::size_t stride) {
+    std::vector<std::byte> result{std::byte{0xfe}, std::byte{0xff}, std::byte{0xff}, std::byte{0xff}};
+    for (unsigned i = 0; i < 4U; ++i) result.push_back(std::byte{static_cast<std::uint8_t>(identity >> (8U * i))});
+    result.push_back(std::byte{static_cast<std::uint8_t>((index << 4U) | count)});
+    const auto begin = std::min(inner.size(), static_cast<std::size_t>(index) * stride);
+    const auto end = std::min(inner.size(), begin + stride);
+    result.insert(result.end(), inner.begin() + static_cast<std::ptrdiff_t>(begin),
+        inner.begin() + static_cast<std::ptrdiff_t>(end));
+    return result;
+}
+
 [[nodiscard]] const std::array<std::uint8_t, 16U>& exact_first_acknowledgement()
 {
     static constexpr std::array<std::uint8_t, 16U> fixture{
@@ -314,6 +328,121 @@ void require_started(
 }
 
 } // namespace
+
+TEST_CASE("UDP split envelopes publish one original packet only after complete assembly",
+    "[e32-tunnel][netchan][udp-split]") {
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(31'001U);
+    auto config = test_config(); config.accept_udp_split_packets = true;
+    config.channel_inactivity_timeout = 5s;
+    goldsrc::NetchanDriver driver{transport, remote, config};
+    REQUIRE(driver.start({}, *transport.local));
+    const auto payload = canonical_payload(3000U);
+    const auto inner = server_packet(1U, true, 0U, false, payload);
+    // 1,400-byte first datagram matches the user's failure metadata.
+    transport.queue(remote, udp_split_part(inner, 17U, 1U, 3U, 1391U));
+    driver.update(goldsrc::NetchanDriverTimePoint{} + 1ms);
+    CHECK(driver.session().state().incoming_sequence == sequence(0U));
+    CHECK(transport.sent.empty());
+    CHECK(driver.receive_statistics().payloads_created == 0U);
+    transport.queue(remote, udp_split_part(inner, 17U, 1U, 3U, 1391U));
+    transport.queue(remote, udp_split_part(inner, 17U, 0U, 3U, 1391U));
+    driver.update(goldsrc::NetchanDriverTimePoint{} + 2ms);
+    CHECK(driver.session().state().incoming_sequence == sequence(0U));
+    CHECK(driver.receive_statistics().split_duplicates == 1U);
+    transport.queue(remote, udp_split_part(inner, 17U, 2U, 3U, 1391U));
+    driver.update(goldsrc::NetchanDriverTimePoint{} + 3ms);
+    REQUIRE(driver.state() == goldsrc::NetchanDriverState::active);
+    CHECK(driver.session().state().incoming_sequence == sequence(1U));
+    CHECK(driver.receive_statistics().split_completed == 1U);
+    CHECK(driver.receive_statistics().payloads_created == 1U);
+    CHECK(transport.sent.size() == 1U);
+    std::size_t payload_events{};
+    while (const auto event = driver.poll_event()) {
+        if (event->payload) { ++payload_events; CHECK(event->payload->bytes == payload); }
+    }
+    CHECK(payload_events == 1U);
+    for (std::uint8_t i = 0U; i < 3U; ++i)
+        transport.queue(remote, udp_split_part(inner, 17U, i, 3U, 1391U));
+    driver.update(goldsrc::NetchanDriverTimePoint{} + 4ms);
+    CHECK(driver.receive_statistics().payloads_created == 1U);
+    auto larger = goldsrc::decode_server_to_client_netchan_packet(inner);
+    REQUIRE(larger.packet);
+    larger.packet->header.sequence.sequence = sequence(2U);
+    larger.packet->header.sequence.flags.reliable = false;
+    larger.packet->payload = canonical_payload(6000U);
+    const auto large_wire = goldsrc::encode_server_to_client_netchan_packet(*larger.packet,
+        goldsrc::NetchanPacketLimits{goldsrc::kMaximumNetchanDatagramSize});
+    REQUIRE(large_wire.datagram);
+    for (std::uint8_t i = 0U; i < 5U; ++i)
+        transport.queue(remote, udp_split_part(*large_wire.datagram, 18U, i, 5U, 1391U));
+    driver.update(goldsrc::NetchanDriverTimePoint{} + 5ms);
+    CHECK(driver.state() == goldsrc::NetchanDriverState::active);
+    CHECK(driver.receive_statistics().payloads_created == 2U);
+    CHECK(driver.session().state().incoming_sequence == sequence(2U));
+}
+
+TEST_CASE("Incomplete and malformed UDP splits do not terminate or advance the channel",
+    "[e32-tunnel][netchan][udp-split]") {
+    FakeTransport transport;
+    const auto remote = network::NetworkAddress::loopback(31'001U);
+    auto config = test_config(); config.accept_udp_split_packets = true;
+    config.channel_inactivity_timeout = 5s;
+    goldsrc::NetchanDriver driver{transport, remote, config};
+    REQUIRE(driver.start({}, *transport.local));
+    const auto inner = server_packet(1U, false, 0U, false, canonical_payload(200U));
+    SECTION("conflicting duplicate") {
+        auto part = udp_split_part(inner, 2U, 0U, 2U, 120U);
+        transport.queue(remote, part); part.back() ^= std::byte{1}; transport.queue(remote, part);
+        driver.update(goldsrc::NetchanDriverTimePoint{} + 1ms);
+        CHECK(driver.receive_statistics().split_rejected == 1U);
+    }
+    SECTION("invalid index and empty part") {
+        auto part = udp_split_part(inner, 2U, 0U, 2U, 120U);
+        part[8] = std::byte{0x22}; transport.queue(remote, part);
+        part.resize(9U); part[8] = std::byte{2}; transport.queue(remote, part);
+        driver.update(goldsrc::NetchanDriverTimePoint{} + 1ms);
+        CHECK(driver.receive_statistics().split_rejected == 2U);
+    }
+    SECTION("fixed deadline and bounded transfer slots") {
+        for (std::uint32_t id = 1U; id <= 3U; ++id)
+            transport.queue(remote, udp_split_part(inner, id, 0U, 2U, 120U));
+        driver.update(goldsrc::NetchanDriverTimePoint{} + 1ms);
+        CHECK(driver.receive_statistics().split_evicted == 1U);
+        driver.update(goldsrc::NetchanDriverTimePoint{} + 1001ms);
+        CHECK(driver.receive_statistics().split_expired == 2U);
+    }
+    SECTION("other endpoint cannot seed transfer") {
+        transport.queue(network::NetworkAddress::loopback(31'002U), udp_split_part(inner, 2U, 0U, 2U, 120U));
+        transport.queue(remote, udp_split_part(inner, 2U, 1U, 2U, 120U));
+        driver.update(goldsrc::NetchanDriverTimePoint{} + 1ms);
+        CHECK(driver.receive_statistics().wrong_endpoint == 1U);
+        CHECK(driver.receive_statistics().split_completed == 0U);
+    }
+    SECTION("nested special payload is rejected before normal decoding") {
+        const std::vector<std::byte> special(24U, std::byte{0xff});
+        transport.queue(remote, udp_split_part(special, 2U, 0U, 2U, 12U));
+        transport.queue(remote, udp_split_part(special, 2U, 1U, 2U, 12U));
+        driver.update(goldsrc::NetchanDriverTimePoint{} + 1ms);
+        CHECK(driver.receive_statistics().split_rejected == 1U);
+    }
+    SECTION("oversized logical datagram is dropped within fixed memory cap") {
+        const std::vector<std::byte> large(20000U, std::byte{1});
+        for (std::uint8_t i = 0U; i < 15U; ++i)
+            transport.queue(remote, udp_split_part(large, 2U, i, 15U, 1391U));
+        driver.update(goldsrc::NetchanDriverTimePoint{} + 1ms);
+        driver.update(goldsrc::NetchanDriverTimePoint{} + 2ms);
+        CHECK(driver.receive_statistics().split_rejected > 0U);
+        CHECK(driver.receive_statistics().split_completed == 0U);
+    }
+    CHECK(driver.state() == goldsrc::NetchanDriverState::active);
+    CHECK(driver.session().state().incoming_sequence == sequence(0U));
+    CHECK(driver.receive_statistics().payloads_created == 0U);
+    transport.queue(remote, inner);
+    driver.update(goldsrc::NetchanDriverTimePoint{} + 1002ms);
+    CHECK(driver.state() == goldsrc::NetchanDriverState::active);
+    CHECK(driver.receive_statistics().payloads_created == 1U);
+}
 
 TEST_CASE("Netchan driver configuration has explicit hard limits",
           "[goldsrc][netchan][driver][limits]")
@@ -1181,6 +1310,186 @@ TEST_CASE("Netchan driver maps receive and first-ACK send failures",
     }
 }
 
+TEST_CASE("Netchan terminal failure retains exact typed native and packet metadata",
+          "[goldsrc][netchan][driver][network][e311][failure-metadata]")
+{
+    const auto remote = network::NetworkAddress::loopback(27'015U);
+    const auto epoch = goldsrc::NetchanDriverTimePoint{} + 1s;
+    FakeTransport transport;
+    goldsrc::NetchanDriver driver{transport, remote, test_config()};
+    require_started(driver, transport, epoch);
+
+    SECTION("receive native failure cannot inherit an earlier admitted packet")
+    {
+        transport.queue(remote, server_packet(1U, true, 0U, false, bytes("PAYLOAD")));
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.state() == goldsrc::NetchanDriverState::active);
+        while (driver.poll_event()) {}
+        transport.incoming.push_back({network::DatagramTransportReceiveStatus::error,
+            std::nullopt, std::nullopt, 0U, "synthetic native receive failure",
+            {network::SocketNativeErrorDomain::winsock, 10054U}});
+        driver.update(epoch + 2ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::receive_failed);
+        REQUIRE(driver.last_error()->native_error);
+        CHECK(driver.last_error()->native_error->domain == network::SocketNativeErrorDomain::winsock);
+        CHECK(driver.last_error()->native_error->code == 10054U);
+        CHECK_FALSE(driver.last_error()->packet_metadata);
+        CHECK_FALSE(driver.last_error()->packet_code);
+        CHECK_FALSE(driver.last_error()->session_code);
+        CHECK(driver.cleanup_count() == 1U);
+    }
+
+    SECTION("first ACK native send failure cannot be misattributed to its received packet")
+    {
+        transport.send_results.push_back({network::DatagramSendStatus::error,
+            "synthetic native send failure", {network::SocketNativeErrorDomain::winsock, 10055U}});
+        transport.queue(remote, server_packet(1U, true, 0U, false, bytes("PAYLOAD")));
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::send_failed);
+        REQUIRE(driver.last_error()->native_error);
+        CHECK(driver.last_error()->native_error->domain == network::SocketNativeErrorDomain::winsock);
+        CHECK(driver.last_error()->native_error->code == 10055U);
+        CHECK_FALSE(driver.last_error()->packet_metadata);
+        CHECK(driver.transmitted_packet_count() == 0U);
+        auto event = driver.poll_event();
+        REQUIRE(event);
+        CHECK(event->type == goldsrc::NetchanDriverEventType::network_error);
+        CHECK_FALSE(event->payload);
+        CHECK_FALSE(driver.poll_event());
+    }
+
+    SECTION("truncation preserves native error and explicit size lower bound")
+    {
+        transport.incoming.push_back({network::DatagramTransportReceiveStatus::truncated,
+            std::nullopt, remote, 2049U, "synthetic native truncation",
+            {network::SocketNativeErrorDomain::winsock, 10040U}});
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::datagram_truncated);
+        REQUIRE(driver.last_error()->native_error);
+        CHECK(driver.last_error()->native_error->code == 10040U);
+        REQUIRE(driver.last_error()->packet_metadata);
+        const auto& metadata = *driver.last_error()->packet_metadata;
+        CHECK(metadata.datagram_size == 2049U);
+        CHECK(metadata.datagram_size_is_lower_bound);
+        CHECK_FALSE(metadata.classification);
+        CHECK_FALSE(metadata.connectionless_opcode);
+        CHECK_FALSE(metadata.sequence);
+        CHECK_FALSE(metadata.acknowledgement);
+        CHECK(transport.sent.empty());
+    }
+
+    SECTION("wrong endpoint truncation does not contaminate a later socket failure")
+    {
+        transport.incoming.push_back({network::DatagramTransportReceiveStatus::truncated,
+            std::nullopt, network::NetworkAddress::loopback(1234U), 2049U, "ignored",
+            {network::SocketNativeErrorDomain::winsock, 10040U}});
+        transport.incoming.push_back({network::DatagramTransportReceiveStatus::error,
+            std::nullopt, std::nullopt, 0U, "synthetic POSIX error",
+            {network::SocketNativeErrorDomain::posix, 111U}});
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::receive_failed);
+        REQUIRE(driver.last_error()->native_error);
+        CHECK(driver.last_error()->native_error->domain == network::SocketNativeErrorDomain::posix);
+        CHECK(driver.last_error()->native_error->code == 111U);
+        CHECK_FALSE(driver.last_error()->packet_metadata);
+        CHECK(driver.receive_statistics().wrong_endpoint == 1U);
+    }
+
+    SECTION("connectionless rejection records only classification and first opcode")
+    {
+        std::vector<std::byte> datagram(4U, std::byte{0xff});
+        const auto opaque = bytes("Lsynthetic private text never becomes metadata");
+        datagram.insert(datagram.end(), opaque.begin(), opaque.end());
+        const auto size = datagram.size();
+        transport.queue(remote, std::move(datagram));
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::unexpected_connectionless_packet);
+        CHECK(driver.last_error()->packet_code == goldsrc::NetchanPacketErrorCode::connectionless_packet);
+        REQUIRE(driver.last_error()->packet_metadata);
+        const auto& metadata = *driver.last_error()->packet_metadata;
+        CHECK(metadata.datagram_size == size);
+        CHECK_FALSE(metadata.datagram_size_is_lower_bound);
+        CHECK(metadata.classification == goldsrc::NetchanDatagramClassification::connectionless);
+        CHECK(metadata.connectionless_opcode == static_cast<std::uint8_t>('L'));
+        CHECK_FALSE(metadata.sequence);
+        CHECK_FALSE(metadata.acknowledgement);
+        CHECK_FALSE(driver.last_error()->native_error);
+        CHECK(driver.last_error()->context.find("private") == std::string::npos);
+        CHECK(transport.sent.empty());
+    }
+
+    SECTION("marker-only connectionless rejection has no invented opcode")
+    {
+        transport.queue(remote, std::vector<std::byte>(4U, std::byte{0xff}));
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::unexpected_connectionless_packet);
+        REQUIRE(driver.last_error()->packet_metadata);
+        CHECK(driver.last_error()->packet_metadata->classification ==
+              goldsrc::NetchanDatagramClassification::connectionless);
+        CHECK_FALSE(driver.last_error()->packet_metadata->connectionless_opcode);
+    }
+
+    SECTION("future acknowledgement retains the exact new header and session reason")
+    {
+        auto datagram = server_packet(1U, false, 99U, false, bytes("PAYLOAD"));
+        const auto size = datagram.size();
+        transport.queue(remote, std::move(datagram));
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::invalid_acknowledgement);
+        CHECK(driver.last_error()->session_code == goldsrc::NetchanSessionErrorCode::future_acknowledgement);
+        REQUIRE(driver.last_error()->packet_metadata);
+        const auto& metadata = *driver.last_error()->packet_metadata;
+        CHECK(metadata.datagram_size == size);
+        CHECK(metadata.classification == goldsrc::NetchanDatagramClassification::sequenced);
+        CHECK(metadata.sequence == 1U);
+        CHECK(metadata.acknowledgement == 99U);
+        CHECK_FALSE(metadata.connectionless_opcode);
+        CHECK_FALSE(driver.last_error()->native_error);
+        CHECK(driver.session().state().incoming_sequence == sequence(0U));
+        CHECK(transport.sent.empty());
+    }
+
+    SECTION("reserved acknowledgement bit keeps strict packet rejection and its header")
+    {
+        auto datagram = server_packet(1U, false, 0U, false, bytes("PAYLOAD"));
+        datagram[7U] |= std::byte{0x40};
+        transport.queue(remote, std::move(datagram));
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::malformed_packet);
+        CHECK(driver.last_error()->packet_code == goldsrc::NetchanPacketErrorCode::reserved_acknowledgement_flag);
+        REQUIRE(driver.last_error()->packet_metadata);
+        CHECK(driver.last_error()->packet_metadata->sequence == 1U);
+        CHECK(driver.last_error()->packet_metadata->acknowledgement == 0U);
+        CHECK(transport.sent.empty());
+    }
+
+    SECTION("neutral receive polling cannot fabricate a native failure")
+    {
+        driver.update(epoch + 1ms);
+        REQUIRE(driver.state() == goldsrc::NetchanDriverState::active);
+        CHECK_FALSE(driver.last_error());
+        transport.queue(remote, std::vector<std::byte>(7U));
+        driver.update(epoch + 2ms);
+        REQUIRE(driver.last_error());
+        CHECK(driver.last_error()->code == goldsrc::NetchanDriverErrorCode::malformed_packet);
+        CHECK_FALSE(driver.last_error()->native_error);
+        REQUIRE(driver.last_error()->packet_metadata);
+        CHECK(driver.last_error()->packet_metadata->datagram_size == 7U);
+        CHECK(driver.last_error()->packet_metadata->classification ==
+              goldsrc::NetchanDatagramClassification::malformed);
+        CHECK_FALSE(driver.last_error()->packet_metadata->sequence);
+        CHECK_FALSE(driver.last_error()->packet_metadata->acknowledgement);
+    }
+}
+
 TEST_CASE("Target-endpoint malformed packet is terminal without ACK or payload",
           "[goldsrc][netchan][driver][protocol][malformed]")
 {
@@ -1399,11 +1708,29 @@ TEST_CASE("Fragment suffix is preserved separately from owning completion",
     CHECK(event->type == goldsrc::NetchanDriverEventType::payload_ready);
     REQUIRE(event->payload);
     CHECK(event->payload->bytes == fragment);
+    CHECK(event->payload->sequence_flags.reliable);
+    CHECK(event->payload->sequence_flags.fragmented);
+    CHECK(event->payload->body_kind == goldsrc::NetchanPayloadBodyKind::normal_fragment_completion);
+    const auto completed_body = goldsrc::make_owned_service_payload(std::move(*event->payload));
+    CHECK(completed_body.source_reliable);
+    CHECK(completed_body.reassembled);
+    CHECK_FALSE(completed_body.contemporaneous_fragment_suffix);
+    CHECK(completed_body.normal_fragment_completion);
+    CHECK(completed_body.bytes == fragment);
     event = driver.poll_event();
     REQUIRE(event);
     CHECK(event->type == goldsrc::NetchanDriverEventType::payload_ready);
     REQUIRE(event->payload);
     CHECK(event->payload->bytes == suffix);
+    CHECK(event->payload->sequence_flags.reliable);
+    CHECK(event->payload->sequence_flags.fragmented);
+    CHECK(event->payload->body_kind == goldsrc::NetchanPayloadBodyKind::contemporaneous_fragment_suffix);
+    const auto contemporary_body = goldsrc::make_owned_service_payload(std::move(*event->payload));
+    CHECK(contemporary_body.source_reliable);
+    CHECK_FALSE(contemporary_body.reassembled);
+    CHECK(contemporary_body.contemporaneous_fragment_suffix);
+    CHECK_FALSE(contemporary_body.normal_fragment_completion);
+    CHECK(contemporary_body.bytes == suffix);
     CHECK_FALSE(driver.poll_event());
 }
 

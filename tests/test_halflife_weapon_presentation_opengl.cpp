@@ -31,7 +31,7 @@ namespace spatial = hlclient::world_spatial;
 namespace visibility = hlclient::world_visibility;
 
 TEST_CASE("Owned Studio weapon sequences change framebuffer and preserve A1 camera space",
-          "[weapon-presentation][opengl][first-person][actual-context]") {
+          "[e15][weapon-presentation][opengl][first-person][actual-context]") {
     namespace studio = hlclient::goldsrc::studio;
     namespace app = hlclient::games::halflife;
     namespace client = hlclient::client;
@@ -122,20 +122,27 @@ TEST_CASE("Owned Studio weapon sequences change framebuffer and preserve A1 came
         }
         return baseline.color_signature;
     };
-    for (const std::uint8_t weapon : {std::uint8_t{2U},std::uint8_t{1U}}) {
+    for (const std::uint8_t weapon : {std::uint8_t{2U},std::uint8_t{1U},std::uint8_t{4U}}) {
         app::LocalWeaponModelMetadata metadata;
         metadata.generation = 1U; metadata.model_index = 7U; metadata.resource_revision = 1U;
-        metadata.resource_name = weapon == 2U ? "models/v_9mmhandgun.mdl" : "models/v_crowbar.mdl";
+        metadata.resource_name = weapon == 2U ? "models/v_9mmhandgun.mdl" : weapon==4U ? "models/v_9mmAR.mdl" : "models/v_crowbar.mdl";
         metadata.supported_bodies.fill(true);
         for (const auto& seq : model.sequences)
             metadata.sequences.push_back({seq.frames_per_second,seq.frame_count,(seq.source_flags & 1U)!=0U});
+        if(weapon==4U) {
+            // Project-owned animation tracks, with independently inspected MP5 semantic roles.
+            metadata.sequences.resize(8);
+            const std::array<std::string_view,8> labels{"longidle","idle1","grenade","reload","deploy","shoot","shoot","shoot"};
+            for(std::size_t i=0;i<labels.size();++i) metadata.sequences[i].label=labels[i];
+            for(unsigned i=5;i<8;++i) {metadata.sequences[i].fps=10;metadata.sequences[i].frame_count=7;}
+        }
         client::RuntimeClientObservationState state;
         state.generation = 1U; state.publication_revision = 1U;
         state.client_metadata = {1U,client::RuntimeObservationFreshness::observed_in_record,
             client::RuntimeObservationCompleteness::complete_reconstruction,client::RuntimeObservationSource{1U,1U}};
         state.receiving_client.emplace(); state.receiving_client->viewmodel_index = 7U;
         state.weapon_hud.active_weapon_id = weapon;
-        state.weapon_hud.catalogue.push_back({weapon,"owned",1});
+        state.weapon_hud.catalogue.push_back({weapon,weapon==4U ? "weapon_9mmAR" : "owned",1});
         state.weapon_hud.reserve_ammo[1U] = std::uint8_t{68U};
         state.weapon_slots.push_back({.clip=17,.in_reload=false,.next_primary_attack=0.0,.weapon_id=weapon});
         app::LocalWeaponPresentationController controller;
@@ -146,13 +153,14 @@ TEST_CASE("Owned Studio weapon sequences change framebuffer and preserve A1 came
         const auto action_signature = render_visual(controller.sample(0.17),17,68);
         CHECK(action_signature != idle_signature);
         state.publication_revision = 2U; state.client_metadata.source = client::RuntimeObservationSource{2U,2U};
-        if (weapon == 2U) state.weapon_slots[0U].clip = 16;
+        if (weapon == 2U || weapon==4U) state.weapon_slots[0U].clip = 16;
         else state.weapon_slots[0U].next_primary_attack = 0.5;
         controller.observe(state,0.18);
         CHECK(controller.sample(0.18).actions_confirmed == 1U);
         CHECK_FALSE(controller.sample(0.18).hit_status_available);
-        CHECK(render_visual(controller.sample(0.55),16,68) == idle_signature);
-        (void)render_visual(controller.sample(0.56),16,68);
+        const auto completed_at=weapon==4U ? .65 : .55;
+        CHECK(render_visual(controller.sample(completed_at),16,68) == idle_signature);
+        (void)render_visual(controller.sample(completed_at+.01),16,68);
         if (weapon == 2U) {
             controller.submit({1U,2U,std::uint16_t{1U<<13U},0.6},0.6);
             const auto reload_signature = render_visual(controller.sample(0.75),16,68);

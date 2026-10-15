@@ -1,14 +1,17 @@
 #include <hlclient/games/halflife/server_messages.hpp>
 #include <hlclient/games/halflife/local_player_lifecycle.hpp>
+#include <hlclient/games/halflife/multiplayer.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace hlclient::games::halflife {
 namespace {
 [[nodiscard]] std::optional<game_api::GameMessageFailure> apply_messages(
     game_api::GameRecordState& staged,
-    std::span<const game_api::GameMessageView> messages)
+    std::span<const game_api::GameMessageView> messages,
+    std::uint32_t maximum_clients)
 {
     auto& hud = staged.weapon_hud;
     auto& life_events = staged.life_events;
@@ -31,6 +34,39 @@ namespace {
                 animation ? std::string{"svc_weaponanim"} : std::string{name},
                 message.registration_id, source, expected, length, std::move(context), body_offset};
         };
+        if (!animation && name == "SayText") {
+            // Pinned SDK ClientDisconnect and CHudSayText use entity byte then
+            // one NUL-terminated string. Validate the registered body exactly;
+            // text remains inert and is not retained or presented as chat.
+            if (length < 2U || length > 255U || body.back() != std::byte{0U} ||
+                std::find(body.begin() + 1U, body.end() - 1U, std::byte{0U}) != body.end() - 1U)
+                return reject(game_api::GameMessageErrorCode::invalid_body,
+                    "SayText requires one entity byte and one bounded exact terminated string");
+            if (byte(body[0U]) > maximum_clients)
+                return reject(game_api::GameMessageErrorCode::invalid_identifier,
+                    "SayText entity exceeds negotiated client bounds", {}, 0U);
+            continue;
+        }
+        if(!animation && name=="ScreenShake") {
+            if(length!=6)return reject(game_api::GameMessageErrorCode::invalid_body,"ScreenShake requires three fixed-point unsigned shorts",6);
+            if(staged.screen_shakes.size()>=32)return reject(game_api::GameMessageErrorCode::capacity_exceeded,"ScreenShake event bound exceeded");
+            const auto word=[&](std::size_t i){return static_cast<std::uint16_t>(byte(body[i])|(byte(body[i+1])<<8));};
+            staged.screen_shakes.push_back({word(0)/4096.,word(2)/4096.,word(4)/256.,source});continue;
+        }
+        if(!animation && name=="ScreenFade") {
+            if(length!=10)return reject(game_api::GameMessageErrorCode::invalid_body,
+                "ScreenFade requires three shorts and four color bytes",10);
+            if(staged.screen_fades.size()>=32)return reject(game_api::GameMessageErrorCode::capacity_exceeded,
+                "ScreenFade event bound exceeded");
+            const auto word=[&](std::size_t i){return static_cast<std::uint16_t>(byte(body[i])|(byte(body[i+1])<<8));};
+            const auto flags=word(4);
+            if(flags&~7U)return reject(game_api::GameMessageErrorCode::invalid_value,
+                "ScreenFade contains unsupported non-HL flags",{},4);
+            staged.screen_fades.push_back({word(0)/4096.,word(2)/4096.,
+                {byte(body[6])/255.F,byte(body[7])/255.F,byte(body[8])/255.F,byte(body[9])/255.F},
+                (flags&1U)!=0,(flags&2U)!=0,(flags&4U)!=0,source});
+            continue;
+        }
         if (!animation && (name == "AmmoPickup" || name == "WeapPickup" || name == "ItemPickup")) {
             game_api::GameRecordState::Pickup pickup;
             pickup.source = source;
@@ -104,6 +140,10 @@ namespace {
             if (length != 0U) return reject(game_api::GameMessageErrorCode::invalid_body, "InitHUD requires an empty body", 0U);
             life.kind = client::RuntimeLifeEventKind::init_hud;
             life_events.push_back(std::move(life));
+            hud.hud_reset_source = source;
+            hud.status_icons = {};
+            hud.flashlight_on.reset();
+            hud.flashlight_battery.reset();
         }
         if (animation) {
             hud.animation_sequence = byte(body[0]);
@@ -123,6 +163,10 @@ namespace {
                 type.command_name.push_back(static_cast<char>(byte(body[i])));
             type.primary_ammo_type = signed_byte(body[name_length + 1U]);
             type.secondary_ammo_type = signed_byte(body[name_length + 3U]);
+            type.primary_maximum_ammo = static_cast<std::int16_t>(byte(body[name_length + 2U]) == 255U
+                ? -1 : byte(body[name_length + 2U]));
+            type.secondary_maximum_ammo = static_cast<std::int16_t>(byte(body[name_length + 4U]) == 255U
+                ? -1 : byte(body[name_length + 4U]));
             type.slot = byte(body[name_length + 5U]);
             type.position = byte(body[name_length + 6U]);
             type.flags = byte(body[name_length + 8U]);
@@ -148,10 +192,12 @@ namespace {
             if (id <= 0) {
                 hud.active_weapon_id = std::uint8_t{0U};
                 hud.active_source = source;
+                hud.active_on_target.reset();
             } else if (state != 0U) {
                 if (id >= 64) return reject(game_api::GameMessageErrorCode::invalid_identifier, "CurWeapon active ID is outside supported bounds");
                 hud.active_weapon_id = static_cast<std::uint8_t>(id);
                 hud.active_source = source;
+                hud.active_on_target = state > 1U;
             }
         } else if (name == "AmmoX") {
             if (length != 2U || byte(body[0]) >= hud.reserve_ammo.size())
@@ -165,6 +211,7 @@ namespace {
         } else if (name == "SetFOV") {
             if (length != 1U) return reject(game_api::GameMessageErrorCode::invalid_body, "SetFOV requires one byte", 1U);
             hud.field_of_view = byte(body[0]);
+            hud.field_of_view_source = source;
         } else if (name == "Battery") {
             if (length != 2U) return reject(game_api::GameMessageErrorCode::invalid_body, "Battery requires a short", 2U);
             hud.armor = static_cast<std::int16_t>(
@@ -174,6 +221,43 @@ namespace {
         } else if (name == "HideWeapon") {
             if (length != 1U) return reject(game_api::GameMessageErrorCode::invalid_body, "HideWeapon requires one byte", 1U);
             hud.hide_flags = byte(body[0]);
+        } else if (name == "FlashBat") {
+            if (length != 1U) return reject(game_api::GameMessageErrorCode::invalid_body, "FlashBat requires one exact byte", 1U);
+            hud.flashlight_battery = byte(body[0]);
+        } else if (name == "Flashlight") {
+            if (length != 2U || byte(body[0]) > 1U)
+                return reject(length != 2U ? game_api::GameMessageErrorCode::invalid_body : game_api::GameMessageErrorCode::invalid_value,
+                    "Flashlight requires a boolean state and exact battery byte", 2U);
+            hud.flashlight_on = byte(body[0]) != 0U;
+            hud.flashlight_battery = byte(body[1]);
+        } else if (name == "StatusIcon") {
+            if (length < 3U || length > 69U || byte(body[0]) > 1U)
+                return reject(game_api::GameMessageErrorCode::invalid_body, "StatusIcon requires a bounded enable state and inert name");
+            const auto terminator = std::find(body.begin()+1U, body.end(), std::byte{0});
+            const auto token_length = static_cast<std::size_t>(terminator-(body.begin()+1U));
+            const bool enabled = byte(body[0]) != 0U;
+            if (terminator == body.end() || token_length == 0U || token_length > 63U ||
+                length != token_length + (enabled ? 5U : 2U))
+                return reject(game_api::GameMessageErrorCode::invalid_body, "StatusIcon body does not match its enabled color contract");
+            client::RuntimeWeaponHudObservation::StatusIcon icon;
+            icon.source = source;
+            for (std::size_t i=1U;i<=token_length;++i) {
+                const auto c=byte(body[i]);
+                if (!((c>='a' && c<='z') || (c>='A' && c<='Z') ||
+                    (c>='0' && c<='9') || c=='_'))
+                    return reject(game_api::GameMessageErrorCode::invalid_token, "StatusIcon name is not an inert HUD role", {}, i);
+                icon.token.push_back(static_cast<char>(c));
+            }
+            auto slot=std::find_if(hud.status_icons.begin(),hud.status_icons.end(),
+                [&](const auto& value){return value && value->token==icon.token;});
+            if (!enabled) {
+                if(slot!=hud.status_icons.end())slot->reset();
+            } else {
+                for(std::size_t i=0;i<3;++i)icon.color[i]=byte(body[token_length+2U+i]);
+                if(slot==hud.status_icons.end())slot=std::find(hud.status_icons.begin(),hud.status_icons.end(),std::nullopt);
+                if(slot==hud.status_icons.end())slot=hud.status_icons.begin();
+                *slot=std::move(icon);
+            }
         } else if (name == "ResetHUD") {
             if (length != 1U) return reject(game_api::GameMessageErrorCode::invalid_body, "ResetHUD requires one byte", 1U);
             life.kind = client::RuntimeLifeEventKind::reset_hud;
@@ -189,7 +273,13 @@ namespace {
             hud.health_source.reset();
             hud.armor_source.reset();
             hud.hide_flags.reset();
+            hud.active_on_target.reset();
+            hud.flashlight_on.reset();
+            hud.flashlight_battery.reset();
+            hud.status_icons = {};
+            hud.hud_reset_source = source;
             hud.field_of_view.reset();
+            hud.field_of_view_source = source;
             hud.animation_sequence.reset();
             hud.animation_body.reset();
             hud.animation_source.reset();
@@ -208,11 +298,19 @@ game_api::GameRecordResult stage_record(
     const game_api::GameRecordState* previous_game)
 {
     game_api::GameRecordState staged;
+    staged.screen_effect_seconds=input.presentation_seconds;
+    if ((input.presentation_seconds && (!std::isfinite(*input.presentation_seconds) || *input.presentation_seconds < 0.0)) ||
+        input.maximum_clients == 0U || input.maximum_clients > game_api::kMaximumHudPlayers ||
+        (input.receiving_entity && (*input.receiving_entity == 0U || *input.receiving_entity > input.maximum_clients)))
+        return {{}, std::string{"Multiplayer session has invalid client bounds"}};
     if (previous_game) {
+        staged.multiplayer = previous_game->multiplayer;
         staged.weapon_hud = previous_game->weapon_hud;
         staged.pickup_high_water = previous_game->pickup_high_water;
     }
-    if (auto error = apply_messages(staged, input.messages))
+    if (auto error = apply_messages(staged, input.messages, input.maximum_clients))
+        return {{}, error->context, std::move(error)};
+    if (auto error = stage_multiplayer(staged, input))
         return {{}, error->context, std::move(error)};
     staged.lifecycle = advance_local_player_lifecycle(input.previous,
         input.observation, input.receiving_entity, staged.weapon_hud, staged.life_events,

@@ -781,7 +781,10 @@ WorldVisibilityResolveResult WorldVisibilityResolver::resolve(
                 selected = *classification.classification !=
                     WorldBoundsClassification::outside;
             } else {
-                if ((state & kLeafFrustumCandidateBit) != 0U) {
+                // Marksurfaces may extend beyond the AABB of their referring
+                // BSP leaf. PVS membership authorizes the candidate; the face's
+                // own bounds, not its leaf's bounds, decide frustum rejection.
+                if ((state & kPvsCandidateBit) != 0U) {
                     const auto classification = frustum->classify(surface.bounds);
                     if (!classification || !classification.classification) {
                         return fail(WorldVisibilityErrorCode::invalid_world_surface,

@@ -85,6 +85,9 @@ struct NetchanDriverConfig {
     // an owning payload. Persistent drivers leave this false and consume the
     // remaining bounded RX/TX/event budget.
     bool yield_after_owning_payload{false};
+    // Public GoldSrc UDP split envelope; independent from reliable slot-0
+    // fragmentation. Strict bootstrap/research callers retain their boundary.
+    bool accept_udp_split_packets{false};
 };
 
 [[nodiscard]] bool valid_configuration(const NetchanDriverConfig& config) noexcept;
@@ -135,12 +138,25 @@ enum class NetchanDriverErrorCode {
     event_backpressure,
 };
 
+// Structural facts for the exact received packet that caused rejection. No
+// payload bytes, endpoint text, server text or authentication material is kept.
+struct NetchanFailurePacketMetadata {
+    std::size_t datagram_size{0U};
+    bool datagram_size_is_lower_bound{false};
+    std::optional<NetchanDatagramClassification> classification;
+    std::optional<std::uint8_t> connectionless_opcode;
+    std::optional<std::uint32_t> sequence;
+    std::optional<std::uint32_t> acknowledgement;
+};
+
 struct NetchanDriverError {
     NetchanDriverErrorCode code{NetchanDriverErrorCode::invalid_configuration};
     std::optional<NetchanPacketErrorCode> packet_code;
     std::optional<NetchanSessionErrorCode> session_code;
     std::string context;
     std::optional<NetchanReassemblyErrorCode> reassembly_code;
+    std::optional<network::SocketNativeError> native_error;
+    std::optional<NetchanFailurePacketMetadata> packet_metadata;
 };
 
 struct NetchanDriverOperationResult {
@@ -151,6 +167,56 @@ struct NetchanDriverOperationResult {
         return !error.has_value();
     }
 };
+
+inline constexpr std::chrono::milliseconds kGracefulCloseBudget{1500};
+inline constexpr std::chrono::milliseconds kGracefulCloseRetryInterval{100};
+inline constexpr std::size_t kGracefulCloseMaximumSendAttempts = 3U;
+inline constexpr std::size_t kGracefulCloseMaximumSupportSendAttempts = 3U;
+
+enum class GracefulCloseOutcome {
+    not_requested,
+    pending,
+    cancel_without_protocol_disconnect,
+    sent_but_unconfirmed,
+    transport_acknowledged,
+    server_disconnect_confirmed,
+    send_failed,
+    cancelled,
+    fatal_failure,
+};
+
+struct GracefulCloseSummary final {
+    bool requested{}, eligible{}, queued{}, ack_observed{};
+    bool server_disconnect_observed{}, deadline_reached{};
+    std::uint64_t operation_identity{}, session_generation{};
+    std::size_t send_attempt_count{}, successful_send_count{};
+    std::size_t support_send_attempt_count{}, successful_support_send_count{};
+    std::size_t would_block_count{};
+    std::optional<NetchanDriverTimePoint> requested_at, deadline_at;
+    std::optional<NetchanDriverTimePoint> first_send_at, last_send_at;
+    // Logical netchan/auth lifetime teardown, not the external UDP socket.
+    std::optional<NetchanDriverTimePoint> netchan_closed_at;
+    std::optional<NetchanDriverErrorCode> transport_error;
+    GracefulCloseOutcome outcome{GracefulCloseOutcome::not_requested};
+};
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const GracefulCloseOutcome outcome) noexcept
+{
+    switch (outcome) {
+    case GracefulCloseOutcome::not_requested: return "not_requested";
+    case GracefulCloseOutcome::pending: return "pending";
+    case GracefulCloseOutcome::cancel_without_protocol_disconnect:
+        return "cancel_without_protocol_disconnect";
+    case GracefulCloseOutcome::sent_but_unconfirmed: return "sent_but_unconfirmed";
+    case GracefulCloseOutcome::transport_acknowledged: return "transport_acknowledged";
+    case GracefulCloseOutcome::server_disconnect_confirmed: return "server_disconnect_confirmed";
+    case GracefulCloseOutcome::send_failed: return "send_failed";
+    case GracefulCloseOutcome::cancelled: return "cancelled";
+    case GracefulCloseOutcome::fatal_failure: return "fatal_failure";
+    }
+    return "unknown";
+}
 
 struct NetchanOutgoingReliableComposition {
     ReliableTransmitDecision decision{ReliableTransmitDecision::none};
@@ -202,6 +268,12 @@ struct NetchanOutgoingContextPrepareResult {
     }
 };
 
+enum class NetchanPayloadBodyKind : std::uint8_t {
+    direct_body,
+    normal_fragment_completion,
+    contemporaneous_fragment_suffix,
+};
+
 struct OwnedNetchanPayload {
     std::vector<std::byte> bytes;
     NetchanSequence source_sequence;
@@ -210,6 +282,14 @@ struct OwnedNetchanPayload {
     bool acknowledgement_reliable{false};
     NetchanDirection direction{NetchanDirection::server_to_client};
     NetchanDriverTimePoint received_at{};
+    // Optional actual monotonic receive() brackets. Caller protocol time and
+    // unknown kernel arrival time remain separate. Reassembly uses the final
+    // fragment's read brackets. Disabled diagnostics leave these unavailable.
+    std::optional<std::uint64_t> socket_read_begin_ns;
+    std::optional<std::uint64_t> socket_read_end_ns;
+    // Established by the driver at the validated fragment byte boundary.
+    // Original datagram header flags above are retained unchanged.
+    NetchanPayloadBodyKind body_kind{NetchanPayloadBodyKind::direct_body};
 };
 
 enum class NetchanDriverEventType {
@@ -299,6 +379,8 @@ struct NetchanDriverReceiveStatistics final {
     std::size_t accepted_sequences{0U};
     std::size_t rejected_sequences{0U};
     std::size_t payloads_created{0U};
+    std::size_t split_parts{0U}, split_completed{0U}, split_duplicates{0U};
+    std::size_t split_rejected{0U}, split_expired{0U}, split_evicted{0U};
     std::optional<std::uint32_t> first_accepted_sequence;
     std::optional<std::uint32_t> last_accepted_sequence;
     std::optional<std::uint32_t> first_payload_sequence;
@@ -344,6 +426,11 @@ public:
     void update(NetchanDriverTimePoint now);
     void cancel(NetchanDriverTimePoint now);
     void close(NetchanDriverTimePoint now);
+    // One typed, fixed goodbye on this confirmed same-socket channel. Repeated
+    // intent does not replace identity/deadline; cancel remains forced teardown.
+    [[nodiscard]] bool request_graceful_close(NetchanDriverTimePoint now);
+    void confirm_server_disconnect(NetchanDriverTimePoint now);
+    [[nodiscard]] GracefulCloseSummary graceful_close_snapshot() const noexcept;
 
     [[nodiscard]] NetchanDriverOperationResult queue_reliable(
         std::span<const std::byte> payload);
@@ -370,6 +457,7 @@ public:
     [[nodiscard]] std::size_t pending_event_count() const noexcept;
     [[nodiscard]] std::size_t transmitted_packet_count() const noexcept;
     [[nodiscard]] NetchanDriverReceiveStatistics receive_statistics() const noexcept;
+    void set_movement_diagnostics_enabled(bool enabled) noexcept;
     // Identity of the most recent sequence-bound unreliable context whose
     // datagram reached IDatagramTransport::send_to successfully. This narrow
     // receipt lets the owner commit semantic history without inferring success

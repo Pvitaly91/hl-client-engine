@@ -314,10 +314,12 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
   }
 
   std::optional<std::size_t> bit_failure_offset;
+  std::optional<std::uint8_t> temporary_entity_type;
   const auto body_failure = [&](const RuntimeControlDecodeErrorCode code,
       std::string context, std::optional<StockRuntimeSourceCursor> cursor = {},
       std::optional<std::uint8_t> opcode = {}) {
     auto rejected = single_failure(code, std::move(context), cursor, opcode);
+    rejected.error->temporary_entity_type = temporary_entity_type;
     if (bit_failure_offset)
       rejected.error->failure_cursor = StockRuntimeSourceCursor::create(
           *bit_failure_offset / 8U, *bit_failure_offset % 8U, input.payload.bytes.size());
@@ -626,7 +628,11 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     }
     kind = RuntimeControlMessageKind::exact_fixed_control;
     RuntimeControlExactFixedBody fixed{*body_size};
-    if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_stopsound)) {
+    if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_particle)) {
+      fixed.particle_count_color = std::array{
+          std::to_integer<std::uint8_t>((*bytes)[9]),
+          std::to_integer<std::uint8_t>((*bytes)[10])};
+    } else if (*wire_opcode == static_cast<std::uint8_t>(RuntimeControlOpcode::svc_stopsound)) {
       ByteReader fields{*bytes};
       const auto packed=*fields.read_uint16_le();
       RuntimeControlSound sound;
@@ -720,19 +726,63 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     break;
   }
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_updateuserinfo): {
+    const auto bytes = std::span{input.payload.bytes}.subspan(initial_byte_offset);
+    const auto user_info_failure = [&](UserInfoUpdateErrorCode code,
+        std::size_t failure_byte, std::string context,
+        std::optional<UserInfoStringErrorCode> string_code = {}) {
+      auto rejected = body_failure(RuntimeControlDecodeErrorCode::user_info_update_failed,
+          std::move(context), input.initial_cursor, wire_opcode);
+      // General cursor identifies the opcode, nested cursor identifies the
+      // precise grammar checkpoint. The outer reader has read only opcode 13.
+      rejected.error->failure_cursor = cursor_at(failure_byte, input.payload.bytes.size());
+      rejected.error->user_info_error = code;
+      rejected.error->user_info_string_error = string_code;
+      if (bytes.size() >= 6U)
+        rejected.error->user_info_private_id_present = std::any_of(
+            bytes.begin() + 2U, bytes.begin() + 6U,
+            [](std::byte value) { return value != std::byte{0U}; });
+      if (bytes.size() >= 7U) {
+        rejected.error->user_info_empty = bytes[6U] == std::byte{0U};
+        const auto length_bound = (std::min)(bytes.size() - 6U,
+            kDefaultMaximumUserInfoStringSize + 1U);
+        const auto info = bytes.subspan(6U, length_bound);
+        const auto terminator = std::find(info.begin(), info.end(), std::byte{0U});
+        if (terminator != info.end())
+          rejected.error->user_info_string_length = static_cast<std::size_t>(
+              std::distance(info.begin(), terminator));
+      }
+      return rejected;
+    };
+    // Runtime-only vacancy is the exact empty info string plus fixed suffix.
+    // A retained nonnegative private ID is not occupant-presence evidence.
+    // This independently verified compatibility extension is not a claim to
+    // have recovered the absent historical disconnect packet body. Sign-on
+    // retains its strict positive-ID/nonempty-profile parser.
+    if (bytes.size() >= 7U && bytes[6U] == std::byte{0U}) {
+      if (std::to_integer<unsigned>(bytes[1U]) > kMaximumUserInfoClientIndex)
+        return user_info_failure(UserInfoUpdateErrorCode::invalid_client_index,
+            initial_byte_offset + 1U, "runtime vacant user-info client index exceeds Protocol 48 bounds");
+      if ((std::to_integer<unsigned>(bytes[5U]) & 0x80U) != 0U)
+        return user_info_failure(UserInfoUpdateErrorCode::invalid_user_id,
+            initial_byte_offset + 2U, "runtime vacant user-info private ID must be nonnegative int32");
+      if (bytes.size() < 23U || !reader.read_bytes(22U))
+        return user_info_failure(UserInfoUpdateErrorCode::truncated_opaque_suffix,
+            input.payload.bytes.size(), "runtime vacant user-info fixed opaque suffix is truncated");
+      kind = RuntimeControlMessageKind::user_info_update;
+      body = RuntimeControlUserInfoUpdate{std::to_integer<std::uint8_t>(bytes[1]),
+          0U, 0U, kUserInfoOpaqueSuffixSize, false, {}};
+      break;
+    }
     const auto parsed = UserInfoUpdateParser{}.parse_prefix(
         input.payload.bytes, initial_byte_offset);
     if (!parsed || !parsed.state) {
-      const auto error_cursor = cursor_at(
+      return user_info_failure(
+          parsed.error ? parsed.error->code : UserInfoUpdateErrorCode::invalid_configuration,
           parsed.error ? parsed.error->byte_offset : initial_byte_offset,
-          input.payload.bytes.size());
-      return body_failure(
-          RuntimeControlDecodeErrorCode::user_info_update_failed,
           parsed.error ? "svc_updateuserinfo typed parser failed: " +
                              std::string{to_string(parsed.error->code)}
                        : "svc_updateuserinfo typed parser returned no state",
-          error_cursor ? error_cursor : std::optional{input.initial_cursor},
-          wire_opcode);
+          parsed.error ? parsed.error->info_string_code : std::nullopt);
     }
     const auto remaining_body_bytes = parsed.bytes_consumed - 1U;
     if (!reader.read_bytes(remaining_body_bytes)) {
@@ -744,7 +794,8 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
     kind = RuntimeControlMessageKind::user_info_update;
     body = RuntimeControlUserInfoUpdate{
         parsed.state->client_index(), parsed.state->info_string_length(),
-        parsed.state->info_entry_count(), parsed.state->opaque_suffix_size()};
+        parsed.state->info_entry_count(), parsed.state->opaque_suffix_size(), true,
+        std::make_shared<const UserInfoUpdateState>(*parsed.state)};
     break;
   }
   case static_cast<std::uint8_t>(RuntimeControlOpcode::svc_temp_entity): {
@@ -754,6 +805,117 @@ RuntimeControlDecoder::decode_one(const RuntimeControlDecodeInput &input,
       return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
                             "svc_temp_entity requires a subtype",
                             input.initial_cursor, wire_opcode);
+    }
+    temporary_entity_type = *type;
+    // Pinned Valve SDK b1b5cf... common/const.h. Each branch consumes only
+    // its documented body; unsupported subtypes still fail without resync.
+    if (*type == 22U) {
+      RuntimeControlBeamFollow observed;
+      const auto entity = reader.read_int16_le();
+      const auto sprite = reader.read_int16_le();
+      const auto life = reader.read_uint8();
+      const auto width = reader.read_uint8();
+      if (!entity || !sprite || !life || !width)
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_BEAMFOLLOW requires entity, sprite, life and width", input.initial_cursor, wire_opcode);
+      observed.entity_attachment = static_cast<std::uint16_t>(*entity);
+      observed.sprite_reference = *sprite;
+      observed.life_tenths = *life; observed.width_tenths = *width;
+      for (auto& component : observed.color) {
+        const auto value = reader.read_uint8();
+        if (!value) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_BEAMFOLLOW requires three color bytes", input.initial_cursor, wire_opcode);
+        component = *value;
+      }
+      const auto brightness = reader.read_uint8();
+      if (!brightness) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "TE_BEAMFOLLOW requires brightness", input.initial_cursor, wire_opcode);
+      observed.brightness = *brightness;
+      kind = RuntimeControlMessageKind::temporary_entity; body = observed;
+      break; // Observed but visually deferred; no arbitrary skip or local trail.
+    }
+    if (*type == 3U || *type == 5U) {
+      std::array<std::int16_t, 3U> coordinates{};
+      for (auto& coordinate : coordinates) {
+        const auto value = reader.read_int16_le();
+        if (!value) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "explosion/smoke requires three coordinate shorts", input.initial_cursor, wire_opcode);
+        coordinate = *value;
+      }
+      const auto sprite = reader.read_int16_le();
+      const auto scale = reader.read_uint8();
+      const auto framerate = reader.read_uint8();
+      if (!sprite || !scale || !framerate)
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "explosion/smoke requires sprite, scale and framerate", input.initial_cursor, wire_opcode);
+      if (*type == 3U) {
+        const auto flags = reader.read_uint8();
+        if (!flags) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_EXPLOSION requires flags", input.initial_cursor, wire_opcode);
+        body = RuntimeControlExplosion{coordinates, *sprite, *scale, *framerate, *flags};
+      } else {
+        body = RuntimeControlSmoke{coordinates, *sprite, *scale, *framerate};
+      }
+      kind = RuntimeControlMessageKind::temporary_entity;
+      break;
+    }
+    if (*type == 9U) {
+      RuntimeControlSparks observed;
+      for (auto& coordinate : observed.coordinate_eighths) {
+        const auto value = reader.read_int16_le();
+        if (!value) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_SPARKS requires three coordinate shorts", input.initial_cursor, wire_opcode);
+        coordinate = *value;
+      }
+      kind = RuntimeControlMessageKind::temporary_entity;
+      body = observed;
+      break;
+    }
+    if (*type == 113U || *type == 114U) {
+      RuntimeControlBubbles observed;
+      observed.trail = *type == 114U;
+      for (auto* bounds : {&observed.minimum_eighths, &observed.maximum_eighths}) {
+        for (auto& coordinate : *bounds) {
+          const auto value = reader.read_int16_le();
+          if (!value) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+              "TE_BUBBLES/TRAIL requires two coordinate triples", input.initial_cursor, wire_opcode);
+          coordinate = *value;
+        }
+      }
+      const auto height = reader.read_int16_le();
+      const auto sprite = reader.read_int16_le();
+      const auto count = reader.read_uint8();
+      const auto speed = reader.read_int16_le();
+      if (!height || !sprite || !count || !speed)
+        return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_BUBBLES/TRAIL requires height, sprite, count and speed", input.initial_cursor, wire_opcode);
+      observed.height_eighths = *height; observed.sprite_reference = *sprite;
+      observed.count = *count; observed.speed_eighths = *speed;
+      kind = RuntimeControlMessageKind::temporary_entity;
+      body = observed;
+      break;
+    }
+    if (*type == 115U) { // Pinned SDK const.h / UTIL_BloodDrips: exact body.
+      RuntimeControlBloodSprite observed;
+      for (auto& coordinate : observed.coordinate_eighths) {
+        const auto value = reader.read_int16_le();
+        if (!value) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_BLOODSPRITE requires three coordinate shorts", input.initial_cursor, wire_opcode);
+        coordinate = *value;
+      }
+      for (auto& reference : observed.sprite_references) {
+        const auto value = reader.read_int16_le();
+        if (!value) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+            "TE_BLOODSPRITE requires two sprite shorts", input.initial_cursor, wire_opcode);
+        reference = *value;
+      }
+      const auto color = reader.read_uint8();
+      const auto scale = reader.read_uint8();
+      if (!color || !scale) return body_failure(RuntimeControlDecodeErrorCode::truncated_body,
+          "TE_BLOODSPRITE requires palette-color and scale bytes", input.initial_cursor, wire_opcode);
+      observed.palette_color = *color; observed.scale = *scale;
+      kind = RuntimeControlMessageKind::temporary_entity; body = observed;
+      break;
     }
     if (const auto layout = decal_layout(*type)) {
       RuntimeControlDecal decal;
@@ -1125,7 +1287,8 @@ std::optional<RuntimeControlDecodeError> RuntimeControlDecoder::apply_events(
       if (body == nullptr ||
           event.opcode != RuntimeControlOpcode::svc_updateuserinfo ||
           body->client_index > kMaximumUserInfoClientIndex ||
-          body->info_string_length == 0U || body->info_entry_count == 0U ||
+          (body->present && (body->info_string_length == 0U || body->info_entry_count == 0U)) ||
+          (!body->present && (body->info_string_length != 0U || body->info_entry_count != 0U || body->identity)) ||
           body->opaque_suffix_size != kUserInfoOpaqueSuffixSize) {
         return RuntimeControlDecodeError{
             RuntimeControlDecodeErrorCode::invalid_configuration,
@@ -1136,6 +1299,26 @@ std::optional<RuntimeControlDecodeError> RuntimeControlDecoder::apply_events(
       break;
     }
     case RuntimeControlMessageKind::temporary_entity: {
+      if (std::holds_alternative<RuntimeControlExplosion>(event.body) ||
+          std::holds_alternative<RuntimeControlSmoke>(event.body) ||
+          std::holds_alternative<RuntimeControlSparks>(event.body) ||
+          std::holds_alternative<RuntimeControlBubbles>(event.body) ||
+          std::holds_alternative<RuntimeControlBeamFollow>(event.body)) {
+        if (event.opcode != RuntimeControlOpcode::svc_temp_entity)
+          return RuntimeControlDecodeError{RuntimeControlDecodeErrorCode::invalid_configuration,
+              event.provenance.start_cursor, static_cast<std::uint8_t>(event.opcode),
+              "decoded temporary sprite/contact effect has incompatible opcode"};
+        // All values are exact bounded wire scalars. Resource/flag policy is
+        // downstream; unknown sprite slots or flag bits do not alter framing.
+        break;
+      }
+      if (std::holds_alternative<RuntimeControlBloodSprite>(event.body)) {
+        if (event.opcode != RuntimeControlOpcode::svc_temp_entity)
+          return RuntimeControlDecodeError{RuntimeControlDecodeErrorCode::invalid_configuration,
+              event.provenance.start_cursor, static_cast<std::uint8_t>(event.opcode),
+              "decoded TE_BLOODSPRITE has incompatible opcode"};
+        break; // Valid inert observation, not a rendering/damage command.
+      }
       if (const auto *decal = std::get_if<RuntimeControlDecal>(&event.body)) {
         const auto layout = decal_layout(decal->temporary_entity_type);
         const auto base = decal_index_base(decal->temporary_entity_type);

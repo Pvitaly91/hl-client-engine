@@ -388,7 +388,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "Entity frame composer retains unsupported render profiles as typed metadata",
+    "Entity frame composer applies supported sprite formats and retains unsupported orientation",
     "[entity-render][composer][unsupported][sprite]")
 {
     SECTION("supported alpha-test render mode")
@@ -427,14 +427,35 @@ TEST_CASE(
         INFO((composed.error ? composed.error->context : std::string{}));
         REQUIRE(composed);
         REQUIRE(composed.frame);
-        CHECK(composed.frame->sprite_instances().empty());
-        REQUIRE(composed.frame->unsupported_instances().size() == 1U);
-        CHECK(composed.frame->unsupported_instances()[0U].reason ==
-            render::UnsupportedEntityVisualReason::unsupported_render_mode);
-        CHECK(composed.frame->draw_commands().empty());
+        REQUIRE(composed.frame->sprite_instances().size() == 1U);
+        CHECK(composed.frame->sprite_instances()[0U].blend_mode == render::SpriteBlendMode::additive);
+        CHECK(composed.frame->unsupported_instances().empty());
+        REQUIRE(composed.frame->draw_commands().size() == 1U);
     }
 
-    SECTION("unsupported index-alpha source format")
+    SECTION("supported additive source format")
+    {
+        const auto package_assets = make_package({},
+            fixture::sprite_asset(assets::SpriteTextureFormat::additive));
+        const auto frame = make_frame({sprite_input()});
+        studio::StudioPoseCache cache;
+        const auto composed = render::EntityRenderFrameComposer{}.compose(
+            *package_assets.package, frame,
+            composition_input(*package_assets.package), cache);
+        REQUIRE(composed);
+        REQUIRE(composed.frame);
+        REQUIRE(composed.frame->sprite_instances().size() == 1U);
+        CHECK(composed.frame->sprite_instances()[0U].texture_format_support ==
+            render::SpriteRenderTextureSupportStatus::supported_additive);
+        CHECK(composed.frame->sprite_instances()[0U].blend_mode ==
+            render::SpriteBlendMode::source_asset_default);
+        CHECK(composed.frame->unsupported_instances().empty());
+        REQUIRE(composed.frame->draw_commands().size() == 1U);
+        CHECK(composed.frame->draw_commands()[0U].draw_class ==
+            render::EntityDrawClass::sprite_normal);
+    }
+
+    SECTION("supported index-alpha source format")
     {
         const auto package_assets = make_package({},
             fixture::sprite_asset(assets::SpriteTextureFormat::index_alpha));
@@ -448,9 +469,11 @@ TEST_CASE(
         INFO((composed.error ? composed.error->context : std::string{}));
         REQUIRE(composed);
         REQUIRE(composed.frame);
-        REQUIRE(composed.frame->unsupported_instances().size() == 1U);
-        CHECK(composed.frame->unsupported_instances()[0U].reason ==
-            render::UnsupportedEntityVisualReason::unsupported_sprite_format);
+        REQUIRE(composed.frame->sprite_instances().size() == 1U);
+        CHECK(composed.frame->sprite_instances()[0U].texture_format_support ==
+            render::SpriteRenderTextureSupportStatus::supported_index_alpha_local_compatible);
+        CHECK(composed.frame->unsupported_instances().empty());
+        REQUIRE(composed.frame->draw_commands().size() == 1U);
     }
 
     SECTION("unsupported billboard orientation")
@@ -474,6 +497,25 @@ TEST_CASE(
         CHECK(composed.frame->unsupported_instances()[0U].reason ==
             render::UnsupportedEntityVisualReason::
                 unsupported_sprite_orientation);
+        CHECK(composed.frame->draw_commands().empty());
+    }
+
+    SECTION("masked sprite cannot request an opaque asset profile")
+    {
+        const auto package_assets = make_package({},
+            fixture::sprite_asset(assets::SpriteTextureFormat::alpha_test));
+        const auto frame = make_frame(
+            {sprite_input(visual::EntityVisualRenderMode::opaque)});
+        studio::StudioPoseCache cache;
+        const auto composed = render::EntityRenderFrameComposer{}.compose(
+            *package_assets.package, frame,
+            composition_input(*package_assets.package), cache);
+        REQUIRE(composed);
+        REQUIRE(composed.frame);
+        CHECK(composed.frame->sprite_instances().empty());
+        REQUIRE(composed.frame->unsupported_instances().size() == 1U);
+        CHECK(composed.frame->unsupported_instances()[0U].reason ==
+            render::UnsupportedEntityVisualReason::unsupported_render_mode);
         CHECK(composed.frame->draw_commands().empty());
     }
 }

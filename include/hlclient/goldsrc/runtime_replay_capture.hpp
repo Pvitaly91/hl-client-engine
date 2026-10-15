@@ -15,6 +15,12 @@
 
 namespace hlclient::goldsrc {
 
+class StockRuntimeReplayedPayload;
+// Existing capture-loader ownership boundary, also usable by project-owned
+// transport fixtures. No capture-file grammar or live socket work is involved.
+[[nodiscard]] OwnedServicePayload make_owned_service_payload(
+    const StockRuntimeReplayedPayload& payload);
+
 struct RuntimeReplayCaptureSummary final {
     std::string run_id;
     std::string corpus_structural_sha256;

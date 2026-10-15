@@ -3,12 +3,15 @@
 #include <hlclient/assets/asset_types.hpp>
 #include <hlclient/client/runtime_observation.hpp>
 #include <hlclient/entity_visual/entity_visual_projection.hpp>
+#include <hlclient/entity_visual/player_presentation_diagnostics.hpp>
 #include <hlclient/goldsrc/entity_snapshot.hpp>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <map>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -413,13 +416,30 @@ struct InterpolatedEntityFrameResult {
     }
 };
 
+struct RuntimePlayerAnimationEffectException final {
+    std::uint32_t entity{};
+    std::size_t record_ordinal{};
+    std::uint32_t ignored_effect_mask{};
+};
 struct RuntimeEntityInterpolationOptions {
     EntityInterpolationLimits limits{};
     bool no_interpolation{false};
     std::uint32_t no_interpolation_effect_mask{};
     std::span<const std::uint32_t> discontinuous_entities;
     std::optional<double> teleport_distance;
+    // Sorted unique non-player IDs selected by the asset owner. Empty retains
+    // the established player-only behavior; brush owners never enter this list.
+    std::span<const std::uint32_t> ordinary_entities;
+    // Explicit kinetic presentation continuity, independent of player policy.
+    // Absent retains the caller's existing teleport_distance behavior. This
+    // only selects observation brackets; it never integrates/extrapolates.
+    std::optional<double> ordinary_teleport_distance;
+    // Game-selected, exact committed-source qualifications. Sorted unique by
+    // (entity, ordinal), at most16 histories x32 players. Defaults stay strict.
+    std::span<const RuntimePlayerAnimationEffectException> animation_only_effect_exceptions;
 };
+[[nodiscard]] std::uint32_t runtime_animation_only_effect_mask(
+    const RuntimeEntityInterpolationOptions&,std::uint32_t entity,std::size_t record_ordinal) noexcept;
 struct RuntimeEntityInterpolationResult {
     std::shared_ptr<const client::RuntimeClientObservationState> state;
     double sample_seconds{}, alpha{};
@@ -442,6 +462,87 @@ class EntitySnapshotInterpolator final {
         const client::RuntimeClientObservationState& current,
         double target_server_seconds,
         const RuntimeEntityInterpolationOptions& options = {}) const;
+};
+
+// Render-only ordinary-entity jitter buffer. The caller retains current-list
+// authority and chooses ready kinetic Studio / server glow-sprite identities;
+// no velocity, gravity,
+// collision or game rule is executed here. Observations are immutable owning
+// references, limited to sixteen. Per-lifetime retained values are visual
+// samples only, bounded by maximum_entities; they never enter RX or replay.
+class RuntimeOrdinarySnapshotPresentation final {
+  public:
+    static constexpr std::size_t maximum_history = 16U;
+    static constexpr double maximum_delay_seconds = 0.1;
+    static constexpr double default_continuity_distance_units = 512.0;
+    void reset() noexcept;
+    void observe(std::shared_ptr<const client::RuntimeClientObservationState>);
+    [[nodiscard]] RuntimeEntityInterpolationResult sample(
+        const client::RuntimeClientObservationState& current_presentation,
+        double application_seconds, const RuntimeEntityInterpolationOptions&,
+        double maximum_selected_delay_seconds);
+    [[nodiscard]] std::size_t history_size() const noexcept { return history_.size(); }
+    [[nodiscard]] std::size_t lifetime_count() const noexcept { return lifetimes_.size(); }
+    [[nodiscard]] std::optional<double> cadence_delay_seconds() const noexcept { return cadence_delay_; }
+  private:
+    struct Lifetime {
+        std::size_t record_ordinal{};
+        double committed_seconds{}, target_seconds{};
+        double birth_server_seconds{}, birth_application_seconds{};
+        client::RuntimePacketEntityObservation committed, rendered;
+    };
+    std::vector<std::shared_ptr<const client::RuntimeClientObservationState>> history_;
+    std::map<std::uint32_t,Lifetime> lifetimes_;
+    std::optional<double> application_anchor_, server_anchor_, last_application_, cadence_delay_;
+};
+
+// An owning committed bracket for one rendered player. The game layer borrows
+// these exact anchors only during pose composition; no RX/gameplay publication.
+struct RuntimePlayerInterpolationAnchor final {
+    std::uint32_t entity{};
+    std::shared_ptr<const client::RuntimeClientObservationState> previous, current;
+    double sample_seconds{};
+    bool discontinuity{};
+    entity_visual::PlayerPresentationDiagnostics diagnostics{};
+};
+struct RuntimePlayerContinuityBoundary final {
+    std::uint32_t entity{};
+    std::size_t record_ordinal{};
+};
+struct RuntimePlayerSnapshotPresentationResult final {
+    RuntimeEntityInterpolationResult presentation;
+    std::shared_ptr<const client::RuntimeClientObservationState> previous, current;
+    std::vector<RuntimePlayerInterpolationAnchor> players;
+    [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(presentation); }
+};
+
+// The same runtime interpolator and immutable RX observations, with a stable
+// player presentation clock. Ordinary projectiles keep their distinct verified
+// birth/cadence profile above. Both owners share references, never asset data.
+class RuntimePlayerSnapshotPresentation final {
+  public:
+    static constexpr std::size_t maximum_history=16U, maximum_players=32U;
+    static constexpr double maximum_delay_seconds=.1;
+    void reset() noexcept;
+    void observe(std::shared_ptr<const client::RuntimeClientObservationState>);
+    [[nodiscard]] std::span<const std::shared_ptr<const client::RuntimeClientObservationState>>
+        observations() const noexcept { return history_; }
+    [[nodiscard]] RuntimePlayerSnapshotPresentationResult sample(
+        const client::RuntimeClientObservationState& latest, double application_seconds,
+        const RuntimeEntityInterpolationOptions&, double selected_delay_seconds,
+        std::span<const std::uint32_t> players,
+        std::span<const RuntimePlayerContinuityBoundary> boundaries={});
+    [[nodiscard]] std::size_t history_size() const noexcept { return history_.size(); }
+    [[nodiscard]] std::size_t player_count() const noexcept { return players_.size(); }
+  private:
+    struct PlayerContinuity {
+        std::size_t floor{}, seen{}, presented{};
+        std::uint32_t floor_reasons{};
+    };
+    std::vector<std::shared_ptr<const client::RuntimeClientObservationState>> history_;
+    std::map<std::uint32_t,PlayerContinuity> players_;
+    std::optional<double> application_anchor_, server_anchor_, last_application_, last_target_, delay_;
+    std::uint32_t pending_clock_reasons_{};
 };
 
 [[nodiscard]] constexpr std::string_view

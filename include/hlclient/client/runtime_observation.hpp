@@ -41,6 +41,9 @@ struct RuntimeObservationSource final {
     std::optional<std::uint32_t> carrier_acknowledgement;
     bool source_reliable{false};
     bool reassembled{false};
+    // Only the driver-proven ordinary suffix after an exact fragment prefix;
+    // neither the reliable completion nor a whole ordinary reliable body.
+    bool contemporaneous_fragment_suffix{false};
 
     [[nodiscard]] friend bool operator==(
         const RuntimeObservationSource&,
@@ -75,19 +78,43 @@ struct RuntimeVector3Observation final {
         const RuntimeVector3Observation&) noexcept = default;
 };
 
+// Descriptor-backed custom entity state. Angles here are endpoint coordinates,
+// not Euler angles. Packed references are split by the protocol projector.
+struct RuntimeBeamEndpoint final {
+    std::uint32_t entity{};
+    std::uint8_t attachment{};
+    friend bool operator==(const RuntimeBeamEndpoint&,const RuntimeBeamEndpoint&) = default;
+};
+struct RuntimeCustomBeamObservation final {
+    enum class Type : std::uint8_t { points, entity_point, entities, hose };
+    Type type{};
+    std::uint8_t flags{};
+    RuntimeBeamEndpoint start_reference{}, end_reference{};
+    std::uint32_t sprite_model_index{};
+    double width_units{}, noise_raw{}, scroll_rate{}, frame{};
+    std::array<std::uint8_t,3> color{};
+    std::uint8_t opacity{};
+    bool complete{}, supported{};
+    friend bool operator==(const RuntimeCustomBeamObservation&,const RuntimeCustomBeamObservation&) = default;
+};
 struct RuntimePacketEntityObservation final {
     std::uint32_t entity_number{0U};
     RuntimeVector3Observation origin;
     RuntimeVector3Observation angles;
+    std::optional<RuntimeCustomBeamObservation> custom_beam;
     // Public-reference visual semantics, separate from the historical H
     // observation hash profile. Missing descriptors remain unavailable.
     bool ordinary_visual_schema{false};
     // Neutral protocol fields; absence is not SOLID_NOT/MOVETYPE_NONE.
     std::optional<std::uint32_t> solid;
+    // Negotiated entity bounds, relative to origin. Not model vertices or
+    // guessed game dimensions; unavailable descriptors stay absent.
+    RuntimeVector3Observation collision_mins, collision_maxs;
     std::optional<std::uint32_t> brush_move_type;
     std::optional<std::uint32_t> model_index;
     std::optional<std::uint32_t> sequence;
     std::optional<double> frame;
+    std::optional<double> visual_scale;
     // Exact advertised delta semantics, never SDK ABI defaults.
     std::optional<double> animation_time_seconds, frame_rate;
     std::optional<std::uint32_t> gait_sequence, weapon_model_index;
@@ -95,7 +122,10 @@ struct RuntimePacketEntityObservation final {
     std::optional<std::uint32_t> body;
     std::optional<std::int32_t> skin;
     std::optional<std::uint32_t> render_mode;
+    std::optional<std::uint32_t> render_effect, render_amount;
     std::optional<std::uint32_t> effects;
+    // Optional negotiated owner reference; diagnostic only, never gameplay authority.
+    std::optional<std::uint32_t> owner_entity_reference;
     std::array<std::optional<std::uint32_t>, 4U> controllers;
     std::array<std::optional<std::uint32_t>, 2U> blending;
     // Player-state semantics are projected only for the exact public player
@@ -138,8 +168,16 @@ struct RuntimeReceivingClientObservation final {
     std::optional<double> maximum_speed;
     std::optional<std::uint32_t> duck_time;
     std::optional<bool> in_duck;
+    // Exact bounded clientdata text; interpretation belongs to the game policy.
+    std::optional<std::string> physics_info;
     std::optional<std::uint32_t> water_level;
     std::optional<std::uint32_t> dead_flag;
+    // Exact optional clientdata descriptor; no game projection/default here.
+    std::optional<double> field_of_view;
+    // Exact negotiated clientdata vector, owning optional components. The core
+    // does not interpret mod-specific meanings or invent missing zero values.
+    RuntimeVector3Observation auxiliary_vector2;
+    std::optional<double> auxiliary_float2, auxiliary_float3;
 
     [[nodiscard]] friend bool operator==(
         const RuntimeReceivingClientObservation&,
@@ -155,11 +193,20 @@ struct RuntimeWeaponTypeObservation final {
     std::uint8_t position{0U};
     std::uint8_t flags{0U};
     RuntimeObservationSource source{};
+    // Display-only catalogue limits from the same WeaponList record. These
+    // do not create ammo, ownership or alter the historical canonical hash.
+    std::optional<std::int16_t> primary_maximum_ammo, secondary_maximum_ammo;
     [[nodiscard]] friend bool operator==(const RuntimeWeaponTypeObservation&,
         const RuntimeWeaponTypeObservation&) = default;
 };
 
 struct RuntimeWeaponHudObservation final {
+    struct StatusIcon final {
+        std::string token;
+        std::array<std::uint8_t, 3U> color{};
+        RuntimeObservationSource source;
+        friend bool operator==(const StatusIcon&, const StatusIcon&) = default;
+    };
     std::vector<RuntimeWeaponTypeObservation> catalogue;
     std::array<std::optional<std::uint8_t>, 64U> reserve_ammo{};
     std::array<std::optional<std::int16_t>, 64U> clips{};
@@ -171,6 +218,7 @@ struct RuntimeWeaponHudObservation final {
     std::optional<std::int16_t> armor;
     std::optional<std::uint8_t> health;
     std::optional<std::uint8_t> field_of_view;
+    std::optional<RuntimeObservationSource> field_of_view_source;
     std::optional<std::uint8_t> hide_flags;
     std::optional<std::uint8_t> animation_sequence;
     std::optional<std::uint8_t> animation_body;
@@ -179,6 +227,13 @@ struct RuntimeWeaponHudObservation final {
     std::optional<RuntimeObservationSource> last_message_source;
     std::optional<RuntimeObservationSource> health_source, armor_source;
     std::uint64_t revision{0U};
+    // Presentation observations, retained only from the committed user
+    // messages. Inactive CurWeapon messages never overwrite on-target state.
+    std::optional<bool> active_on_target;
+    std::optional<bool> flashlight_on;
+    std::optional<std::uint8_t> flashlight_battery;
+    std::array<std::optional<StatusIcon>, 8U> status_icons;
+    std::optional<RuntimeObservationSource> hud_reset_source;
     [[nodiscard]] friend bool operator==(const RuntimeWeaponHudObservation&,
         const RuntimeWeaponHudObservation&) = default;
 };
@@ -221,9 +276,11 @@ struct LocalPlayerLifecycle final {
     friend bool operator==(const LocalPlayerLifecycle&, const LocalPlayerLifecycle&) = default;
 };
 
-// One-shot svc_setangle correction observed in the same committed server
-// record. It is not retained into later publications: consumers must apply a
-// source at most once, then continue from their local input orientation.
+// Latest committed svc_setangle correction, retained within its generation
+// with the original owning source identity so delayed camera consumers do not
+// lose a spawn/respawn correction. This is one bounded slot, not an event queue.
+// Consumers apply a (generation, source) at most once, then continue from local
+// input orientation. New corrections replace the slot; new sessions clear it.
 // Angles retain GoldSrc wire semantics: downward-positive pitch in degrees,
 // possibly represented as an unsigned turn. Camera consumers convert them;
 // protocol observations and their canonical hash remain unchanged.
@@ -247,6 +304,23 @@ struct RuntimeWeaponSlotObservation final {
     std::optional<std::uint32_t> weapon_id;
     std::optional<double> next_secondary_attack;
     std::optional<double> time_weapon_idle;
+    // Optional negotiated numeric fields, not game-specific reload stages.
+    // Pump time is unavailable unless the schema actually advertises it.
+    std::optional<double> pump_time;
+    std::optional<std::int32_t> special_reload_state;
+    std::optional<std::int32_t> auxiliary_integer2;
+    std::optional<std::int32_t> auxiliary_integer3;
+    std::optional<std::int32_t> auxiliary_integer1;
+    bool auxiliary_integer1_updated_in_record{false};
+    // Exact negotiated weapon_data fields, distinct from clientdata auxiliary
+    // fields. No game meaning, clock conversion or fabricated missing zero.
+    std::optional<double> auxiliary_float2, auxiliary_float3;
+    // Current committed record only: the exact field was encoded, or a
+    // no-base clientdata frame authoritatively reconstructed its zero/default.
+    // False for inherited fields even if another field/slot changed. Source and
+    // acknowledgement are client_metadata.source; these are not replay events.
+    bool auxiliary_float2_updated_in_record{false};
+    bool auxiliary_float3_updated_in_record{false};
 
     [[nodiscard]] friend bool operator==(
         const RuntimeWeaponSlotObservation&,
@@ -285,7 +359,8 @@ public:
 
 // The stable A-H canonical hash excludes publication revision,
 // record identity/ordinal, cursor geometry, freshness, and the later E
-// receiving-client origin and one-shot view-angle extensions. Those
+// receiving-client origin, one-shot view-angle, and auxiliary weapon field
+// extensions (including their wire-presence metadata). Those
 // exclusions preserve the
 // historical replay hash contract while origin remains available as an exact
 // typed observation for live movement evaluation.
@@ -297,6 +372,8 @@ public:
 [[nodiscard]] std::uint64_t runtime_observation_visual_hash(
     const RuntimeClientObservationState& state) noexcept;
 [[nodiscard]] std::uint64_t runtime_observation_visual_hash_v2(
+    const RuntimeClientObservationState& state) noexcept;
+[[nodiscard]] std::uint64_t runtime_observation_visual_hash_v3(
     const RuntimeClientObservationState& state) noexcept;
 [[nodiscard]] std::uint64_t runtime_observation_weapon_hud_hash(
     const RuntimeClientObservationState& state) noexcept;

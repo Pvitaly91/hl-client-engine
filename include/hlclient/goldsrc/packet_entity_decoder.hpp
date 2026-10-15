@@ -222,6 +222,7 @@ private:
     struct FrameFingerprint final {
         std::uint32_t sequence{0U};
         std::uint64_t payload_hash{0U};
+        bool unanchored_completion{false};
     };
 
     std::uint64_t source_generation_{0U};

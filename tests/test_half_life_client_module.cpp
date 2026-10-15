@@ -56,8 +56,20 @@ TEST_CASE("Half-Life factory routes unchanged input HUD and Glock presentation t
           "[game-module][halflife][weapon-presentation]") {
     api::GameClientHost host{hlclient::games::halflife::make_half_life_client_module()};
     host.reset({1U, 1U, 1U});
+    api::HudPresentationContext diagnostic_context;
+    diagnostic_context.diagnostic_overlay=true; // This contract deliberately checks the retained diagnostic projection.
+    host.set_hud_context(diagnostic_context);
     const auto& policy = host.movement_policy();
     REQUIRE(api::valid_game_movement_policy(policy));
+    CHECK(policy.inventory_last_key==hlclient::input::PhysicalKey::q);
+    auto invalid_last_key=policy;invalid_last_key.inventory_last_key=hlclient::input::PhysicalKey::count;
+    CHECK_FALSE(api::valid_game_movement_policy(invalid_last_key));
+    invalid_last_key.inventory_last_key.reset();CHECK(api::valid_game_movement_policy(invalid_last_key));
+    REQUIRE(policy.nonblocking_point_boxes.size()==6U);
+    CHECK(policy.nonblocking_point_boxes[0].model_name=="models/hgibs.mdl");
+    CHECK(policy.nonblocking_point_boxes[0].move_type==10U);
+    auto invalid_policy=policy;invalid_policy.server_box_solid_code.reset();
+    CHECK_FALSE(api::valid_game_movement_policy(invalid_policy));
     CHECK(policy.movement_speeds.forward_speed == 400.0F);
     CHECK(policy.movement_speeds.backward_speed == 400.0F);
     CHECK(policy.movement_speeds.side_speed == 400.0F);
@@ -65,7 +77,7 @@ TEST_CASE("Half-Life factory routes unchanged input HUD and Glock presentation t
     CHECK(policy.mouse_look.degrees_per_pixel_x == 0.10);
     CHECK(policy.mouse_look.degrees_per_pixel_y == 0.10);
     CHECK(policy.button_policy ==
-        hlclient::goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_reload_use);
+        hlclient::goldsrc::GoldSrcReferenceButtonPolicy::jump_duck_primary_secondary_reload_use);
     CHECK(policy.bindings->actions_for_key(hlclient::input::PhysicalKey::w) ==
         hlclient::gameplay_input::gameplay_input_action_mask(
             hlclient::gameplay_input::GameplayInputAction::move_forward));

@@ -338,6 +338,145 @@ generic-map:
 
 ## Failure boundaries and cleanup
 
+### Two normal clients on a verified external map — 2026-10-08
+
+`-RemoteAudioPeer` now combines with `-ExternalMapBsp` in Fast/manual mode,
+without TestStartHealth or a second Map selection. Both normal clients use
+the same owned HLDS, exact isolated research root, server-selected BSP and
+existing argv/authentication/prediction/audio/cleanup path. No second server,
+asset overlay, download/install step or new game-client option is introduced.
+The wrapper resolves/preflights the ordinary BSP first; the runner forwards
+its existing ExternalManualMap opt-in as internal `--external-manual-map`.
+The native helper accepts that marker only for Fast/manual/functional stock
+signon/live-visual-control/keyboard-mouse without health override. Non-crossfire
+peer maps without the opt-in, unsafe names, Strict external, scripted and health
+profiles remain rejected. Historical E9 crossfire behavior is unchanged.
+
+For the already installed all-weapons gentest, one user invocation starts one
+server and two clients; no gameplay timer:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File "D:\DEV\CPP\HLC-steamcfg-5e48b7c1\Start-HLClient-H2-Manual.ps1" -Prediction reference -ExternalMapBsp "D:\DEV\HLCLIENT-RESEARCH\Half-Life\valve\maps\gentest.bsp" -RemoteAudioPeer -NoTimeLimit
+```
+
+Use the focused window to control/hear that client. Closing A ends both owned
+clients; wait for managed cleanup before closing the console. Replace
+`-NoTimeLimit` with `-DurationSeconds 300` for a five-minute gameplay limit.
+Reference/off are supported. Add `-CheckOnly` for a read-only preflight; it
+does not start client/server, Steam API, WFP or sockets. Never invoke the command
+twice to obtain the second client: that would create a competing server/session.
+
+This prepares the launcher, not a new live/manual acceptance claim. The map's
+multiplayer spawn suitability, two-player authentication and mine/laser behavior
+still require a user-run session. The task starts zero new live sessions.
+Current normal client SHA remains
+`508AFEC01246300CD12FBD3D91F3E043B8A9473BFC49BBD2FC7CEC81A47DCE9A`;
+only the launcher/managed helper and their owned offline contracts change.
+Pre-edit1281-file verified source snapshot is under
+`manual-artifacts/task-records/external-map-peer-20261008/source/`.
+
+Offline verification for this launcher follow-up: existing VS2022/v143 Win32
+Debug/Release orchestrator targets built incrementally/serially; both native
+peer contract validators passed with process-launches0, and the existing E9
+owned-helper diagnostic test passed11 assertions in each configuration.
+The complete no-stock PowerShell launcher suite passed, including four actual
+synthetic child argv runs for external peer reference/off ×45s/unlimited,
+shared endpoint/root/normal executable assertions and incompatible-profile
+rejections. A fixture-only root-placement failure was corrected by keeping its
+owned research data outside its fake project/Steam roots; production safety
+checks were not relaxed. Actual gentest/reference/peer/unlimited and
+gentest/off/peer/300s CheckOnly passed with the production approved BSP resolver.
+Native diagnostic-log contract, `git diff --check` and source preservation passed:
+six changed ordinary files, zero missing snapshot files, index empty.
+The engine/client binary and sources are unchanged; no full engine suite is
+claimed rerun for this launcher-only change. The previous E26 full-suite
+timeout and ASan runtime limitation remain recorded in that task, not erased.
+New Release orchestrator SHA-256:
+`4C68D4AA0195AAF132682983DB9FE8C42CDEF636216C6431674267C38F269524`.
+`new_live_sessions=0; two-client-gentest-manual=not_run; staging/commit/push=none`.
+
+### gentest multiplayer spawn correction — 2026-10-08
+
+New `attribution=user_report`: selecting/controlling the other client appeared
+not to work on gentest, while the same Escape/mouse interaction worked on
+crossfire. Exact latest matching run `a69eddf413184a8a9b16330b4e6ee464`
+(server28784, A32508, B23360) and previous
+`25c4225ce3a54306b4ef606e36c8f7d2` contain different keyboard/jump/look input
+from both clients but no authoritative translation. Both remain at the first
+spawn `(5.0625,-2.164062,38)`; focus events/capture were observed in both.
+Both exited0, with exact owned cleanup and scoped_exact restoration. This is
+not new mine/gameplay acceptance and does not prove every OS-focus edge case.
+
+The original gentest has2 `info_player_start`,0 `info_player_deathmatch`.
+Pinned official SDK `dlls/player.cpp` prefers valid deathmatch points, excludes
+other players within128 units, and otherwise falls back to the first start.
+The two authored positions are `(5.06378,-2.16843,37)` yaw90 and
+`(5.06378,1024,36)` yaw270, about1026.169 units apart. Production collision
+queries confirmed both standing/crouching positions free and downward floor
+hits. Normal window/input, transport, renderer, prediction and game module
+code were not changed to compensate for a map spawn setup.
+
+User requested the ordinary crossfire two-player behavior on this test map.
+Prepared **a separate local `gentest_mp.bsp`**: all87 original entities remain
+unchanged/ordered identically, and2 exact authored spawn blocks are appended
+with only classname changed to `info_player_deathmatch`. Both original starts
+remain. No fabricated client teleport, delayed-peer workaround, plugin, SDK
+implementation copy, server/config/Steam change, or new gameplay milestone.
+Stock HLDS chooses the new points using its existing multiplayer rules.
+
+Reproducible project sources: `scripts/gentest_multiplayer_map.psm1`,
+`scripts/prepare_gentest_multiplayer.ps1`,
+`scripts/test_gentest_multiplayer_map.ps1`. Preparation checks the exact pinned
+original hash, bounded/nonoverlapping BSPv30 lump ranges, terminal NUL and quoted
+entity grammar, unique keys, exact two starts, supported spawn fields, finite
+coordinates and separation. The output keeps the entire original prefix except
+header bytes4..11 (entity-lump offset/length), appends the replacement lump at
+aligned EOF, and preserves all14 non-entity lump descriptors/bytes. Fixed sibling
+destination uses CreateNew; matching prepared output is idempotent, while
+conflicts, reparse/hardlink paths, repository/Steam roots are rejected without
+overwrite. The launcher remains read-only; preparation is a separate explicit
+step and never installs/downloading anything automatically during a game run.
+
+Actual outside-repository artifact:
+`D:\DEV\HLCLIENT-RESEARCH\Half-Life\valve\maps\gentest_mp.bsp`,209001 bytes.
+SHA-256 `E174A07BFC43AA6BD5A109A64706AE88779F804C1FBAE2376B7E393991FB6371`.
+Original remains199776 bytes/SHA
+`9338A39EAA14332625A8F4935DED3345A1CD9EC3ABB141750590091A4D21D7A2`.
+No game asset is added to Git; the generator/owned fixtures are ordinary source.
+
+Offline results:61 no-stock cases passed, including grammar/bounds/duplicate/
+nonfinite/spawn separation, source preservation, pinning, CheckOnly, no overwrite,
+idempotency, junctions and hardlinks. Registered as
+`hlclient_gentest_multiplayer_map_no_stock` in both normal and game-OFF builds;
+Debug/Release CTest passed, and core-only new test plus architecture guard2/2
+passed. Existing approved production inspector/spatial importer reports89
+entities,2 DM points, unchanged671 faces/3225 vertices/1939 triangles,9 textures,
+1 lightmap page,63 PVS rows and2 supported brush instances. Spawn probes find4
+open/free standing/free crouching/floor hits (the2 old starts plus2 DM clones),
+startsolid/allsolid0. Raw file/lump comparison confirms non-entity data identical.
+
+Collision structural hash legitimately changes with source fingerprint.
+`deterministic-probes` also includes spawn queries, so its aggregate query hash
+changes with2 added probe sets: points182→184, traces/hits86→88, while fixed
+corpus startsolid/allsolid84 stay unchanged. Both maps' full summaries are
+deterministic across repeated runs. Cross-map hash equality is not claimed.
+Actual reference/peer/unlimited and off/peer/300s CheckOnly passed, with no
+game/runner/Steam API/WFP/socket startup. Source snapshot1281 verified files is
+under `manual-artifacts/task-records/gentest-mp-20261008/source/`.
+
+Use the existing launcher exactly once for the prepared MP variant:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File "D:\DEV\CPP\HLC-steamcfg-5e48b7c1\Start-HLClient-H2-Manual.ps1" -Prediction reference -ExternalMapBsp "D:\DEV\HLCLIENT-RESEARCH\Half-Life\valve\maps\gentest_mp.bsp" -RemoteAudioPeer -NoTimeLimit
+```
+
+No runtime feature flags or new executable are needed. The normal Release client
+remains SHA `508AFEC01246300CD12FBD3D91F3E043B8A9473BFC49BBD2FC7CEC81A47DCE9A`;
+no engine/Debug/Release/ASan rebuild or full engine suite is claimed for this
+map/script-only change. Earlier ASan and full-suite timeout records are retained.
+New MP-map movement, focus switching, respawn and mine behavior require a fresh
+user test: `gentest_mp_manual=not_run; new_live_sessions=0; staging/commit/push=none`.
+
 `external_map_not_supplied` / `archive_not_extracted`: pass an explicit
 installed `.bsp`, not a URL/archive. `bsp_not_found`: inspect extracted
 package and install the **actual** filename. `unsupported_game_variant`:

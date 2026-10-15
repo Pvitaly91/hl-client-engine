@@ -225,6 +225,13 @@ TEST_CASE("First-person configuration is bounded and project-owned",
     invalid.mouse_look_config.degrees_per_pixel_x =
         std::numeric_limits<double>::quiet_NaN();
     CHECK_FALSE(camera::FirstPersonCameraConfig::create(invalid));
+    for(const double scale:{0.0,-1.0,4.01,std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity()}) {
+        invalid={};invalid.mouse_look_config.sensitivity_scale=scale;
+        CHECK_FALSE(camera::FirstPersonCameraConfig::create(invalid));
+    }
+    invalid={};invalid.mouse_look_config.sensitivity_scale=4.0;
+    CHECK(camera::FirstPersonCameraConfig::create(invalid));
 }
 
 TEST_CASE("First-person camera enforces the exact documented FOV bounds",

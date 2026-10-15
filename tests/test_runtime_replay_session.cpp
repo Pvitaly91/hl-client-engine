@@ -6,6 +6,8 @@
 
 #include "delta_test_fixture.hpp"
 #include "event_test_fixture.hpp"
+#include "crossbow_test_fixture.hpp"
+#include "snark_sound_pop_test_fixture.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -70,7 +72,13 @@ make_schemas(const bool mismatched_health = false,
     const std::optional<std::uint32_t> model_field_type = std::nullopt,
     const bool prediction_client_fields = false,
     const bool brush_fields = false,
-    const bool scripted_event_fields = false)
+    const bool scripted_event_fields = false,
+    const bool special_reload_fields = false,
+    const std::optional<std::uint32_t> special_reload_field_type = std::nullopt,
+    const bool pump_field = true,
+    const std::optional<std::uint32_t> fov_type = std::nullopt,
+    const std::optional<std::uint32_t> auxiliary_type = std::nullopt,
+    const std::optional<std::uint32_t> physics_type = std::nullopt)
 {
     const fixture::Field mismatched_client[]{
         {"health", 0x8000'0008U, 0U, 10U},
@@ -79,6 +87,23 @@ make_schemas(const bool mismatched_health = false,
     std::vector<fixture::Field> entity_fields{std::begin(kEntityFields),std::end(kEntityFields)};
     std::vector<fixture::Field> client_fields{std::begin(kClientFields),std::end(kClientFields)};
     std::vector<fixture::Field> player_fields{std::begin(kEntityFields),std::end(kEntityFields)};
+    std::vector<fixture::Field> weapon_fields{std::begin(kWeaponFields),std::end(kWeaponFields)};
+    if(fov_type) client_fields.push_back({"fov",*fov_type,56U,8U});
+    // DT_STRING carries a one-bit descriptor width; the value itself is the
+    // bounded NUL-terminated byte string. Integer negative control stays8.
+    if(physics_type) client_fields.push_back({"physinfo",*physics_type,900U,
+        static_cast<std::uint8_t>(*physics_type == 0x80U ? 1U : 8U)});
+    if(auxiliary_type) {
+        client_fields.push_back({"vuser2[1]",*auxiliary_type,800U,10U});
+        client_fields.push_back({"vuser2[2]",*auxiliary_type,804U,10U});
+    }
+    if (special_reload_fields) {
+        // Negotiated unsigned DT_INTEGER, not a bool or signed ABI member.
+        weapon_fields.push_back({"m_fInSpecialReload",
+            special_reload_field_type.value_or(0x0000'0008U),16U,2U});
+        if (pump_field) weapon_fields.push_back({"m_flPumpTime",
+            0x8000'0004U,20U,22U,4'000'000U,4'000U});
+    }
     if (model_field_type) { entity_fields.push_back({"modelindex",*model_field_type,600U,16U}); }
     if (brush_fields) {
         entity_fields.push_back({"solid",0x0000'0002U,604U,3U});
@@ -107,7 +132,7 @@ make_schemas(const bool mismatched_health = false,
                  mismatched_health
                      ? std::span<const fixture::Field>{mismatched_client}
                      : std::span<const fixture::Field>{client_fields}),
-             fixture::schema("weapon_data_t", kWeaponFields)}) {
+             fixture::schema("weapon_data_t", weapon_fields)}) {
         const auto parsed = goldsrc::DeltaDescriptionParser{}.parse(encoded, 0U);
         REQUIRE(parsed);
         REQUIRE(parsed.schema);
@@ -178,7 +203,8 @@ void delta(
 make_baselines(
     const goldsrc::DeltaSchemaRegistryState& schemas,
     const std::uint64_t generation,
-    const bool include_player = false)
+    const bool include_player = false,
+    const std::uint32_t max_clients = 1U)
 {
     auto source = payload(baseline_bytes(include_player), 17U);
     const auto cursor = goldsrc::StockRuntimeSourceCursor::create(
@@ -186,7 +212,7 @@ make_baselines(
     REQUIRE(cursor);
     const auto decoded = goldsrc::GoldSrcEntityBaselineDecoder{}.decode(
         goldsrc::EntityBaselineDecodeInput{
-            &source, *cursor, 1U, generation, 1U,
+            &source, *cursor, 1U, generation, max_clients,
             "entity_state_t",
             include_player ? "entity_state_player_t" : "entity_state_t",
             "entity_state_t",
@@ -249,6 +275,23 @@ void client_delta(
         delta(writer, 0x01U, clip_value);
     }
     writer.write(0U, 1U);
+    writer.align_zero();
+}
+
+void special_weapon_fields(
+    fixture::BitWriter& writer,
+    const std::uint8_t mask,
+    const std::span<const std::pair<std::uint32_t, std::size_t>> values,
+    const std::optional<std::uint8_t> base_tag = std::nullopt)
+{
+    writer.write(goldsrc::kGoldSrcSvcClientDataOpcode,8U);
+    writer.write(base_tag ? 1U : 0U,1U);
+    if (base_tag) writer.write(*base_tag,8U);
+    delta(writer,0U); // Unrelated client values are zero/inherited.
+    writer.write(1U,1U);
+    writer.write(2U,6U); // Arbitrary wire slot: neutral field projection.
+    delta(writer,mask,values);
+    writer.write(0U,1U);
     writer.align_zero();
 }
 
@@ -361,9 +404,9 @@ void finish_entities(fixture::BitWriter& writer)
 {
     fixture::BitWriter writer;
     time_prefix(writer, 101.0F);
-    client_delta(writer, 100U, 75U, 5U);
+    client_delta(writer, 100U, 75U, std::uint8_t{5});
     entity_header(
-        writer, goldsrc::kGoldSrcSvcDeltaPacketEntitiesOpcode, 3U, 100U);
+        writer, goldsrc::kGoldSrcSvcDeltaPacketEntitiesOpcode, 3U, std::uint8_t{100});
     delta_entity(writer, 2U, 96U);
     remove_entity(writer, 18U);
     delta_entity(writer, 10U, 320U);
@@ -498,6 +541,52 @@ void finish_entities(fixture::BitWriter& writer)
     return *found;
 }
 
+TEST_CASE("E14 replay exact registered bindings names receipt clock and rollback", "[e14][runtime-replay]") {
+    namespace api = hlclient::game_api;
+    auto init = initialization();init.max_clients=2U;init.receiving_player_entity=1U;
+    init.user_message_definitions={{201U,9,"ScoreInfo"},{202U,-1,"DeathMsg"}};
+    auto host=init.game_client;host->set_movement_audio_time_origin(1000.0);
+    client::ClientWorldState world;
+    auto session=goldsrc::RuntimeReplaySession::initialize(std::move(init),world);REQUIRE(session);
+    const auto append_info=[](std::vector<std::byte>& bytes,std::uint8_t index,std::uint32_t uid,std::string_view name) {
+        bytes.push_back(std::byte{13});bytes.push_back(static_cast<std::byte>(index));
+        for(unsigned i=0;i<4U;++i)bytes.push_back(static_cast<std::byte>((uid>>(8U*i))&255U));
+        const auto info=uid ? "\\name\\"+std::string{name}+"\\private\\secret" : std::string{};
+        for(const unsigned char c:info)bytes.push_back(static_cast<std::byte>(c));
+        bytes.push_back(std::byte{0});bytes.resize(bytes.size()+16U,std::byte{0});
+    };
+    const auto append_score=[](std::vector<std::byte>& bytes,std::uint8_t slot,std::uint16_t frags,std::uint16_t deaths) {
+        bytes.insert(bytes.end(),{std::byte{201},static_cast<std::byte>(slot),static_cast<std::byte>(frags&255U),static_cast<std::byte>(frags>>8U),
+            static_cast<std::byte>(deaths&255U),static_cast<std::byte>(deaths>>8U),std::byte{0},std::byte{0},std::byte{0},std::byte{0}});
+    };
+    const auto hud_text=[&](std::string_view expected,bool tab=true,double seconds=1.0) {
+        host->set_hud_context({640U,480U,tab});const auto hud=host->hud(*world.runtime_observation(),seconds);
+        return std::any_of(hud.draw.texts.begin(),hud.draw.texts.end(),[&](const auto& t){return t.text.find(expected)!=std::string::npos;});
+    };
+    std::vector<std::byte> wire;append_info(wire,0U,11U,"Alice");append_info(wire,1U,12U,"Bob");
+    append_score(wire,1U,0U,0U);append_score(wire,2U,0U,0U);
+    auto first=record(wire,100U,13001U,1U);REQUIRE(session.session->apply_record(first));
+    CHECK(hud_text("Alice"));CHECK(hud_text("Bob"));const auto canonical=world.runtime_observation()->canonical_state_hash;
+    wire={std::byte{202},std::byte{13},std::byte{1},std::byte{2}};
+    for(const char c:std::string{"9mmhandgun"})wire.push_back(static_cast<std::byte>(c));wire.push_back(std::byte{0});
+    auto shot=record(wire,101U,13002U,2U);
+    shot.received_at=goldsrc::SoundTime{std::chrono::duration_cast<goldsrc::SoundTime::duration>(std::chrono::duration<double>{1001.0})};
+    REQUIRE(session.session->apply_record(shot));CHECK(hud_text("Alice [9mmhandgun] Bob",false));
+    CHECK(world.runtime_observation()->canonical_state_hash==canonical);
+    CHECK_FALSE(session.session->apply_record(shot));
+    wire.clear();append_info(wire,1U,12U,"Rename");wire.push_back(std::byte{255});
+    CHECK_FALSE(session.session->apply_record(record(wire,102U,13003U,3U)));
+    CHECK(hud_text("Bob"));CHECK_FALSE(hud_text("Rename"));
+    wire.pop_back();REQUIRE(session.session->apply_record(record(wire,102U,13003U,3U)));
+    CHECK(hud_text("Rename"));CHECK(hud_text("Alice [9mmhandgun] Bob",false));
+    wire.clear();append_info(wire,1U,0U,"");REQUIRE(session.session->apply_record(record(wire,103U,13004U,4U)));
+    CHECK_FALSE(hud_text("Rename"));CHECK(hud_text("Alice [9mmhandgun] Bob",false));
+    wire.clear();append_info(wire,1U,13U,"Eve");REQUIRE(session.session->apply_record(record(wire,104U,13005U,5U)));
+    CHECK(hud_text("Eve"));CHECK_FALSE(hud_text("Alice [9mmhandgun] Bob",false,7.0));
+    auto next=initialization(2U);next.max_clients=2U;next.receiving_player_entity=1U;next.game_client=host;
+    REQUIRE_FALSE(session.session->reset_generation(std::move(next)));CHECK_FALSE(hud_text("Alice"));CHECK_FALSE(hud_text("Eve"));
+}
+
 TEST_CASE("Runtime replay reference profile and limits are explicit",
           "[goldsrc][runtime-replay][profile]")
 {
@@ -520,6 +609,7 @@ TEST_CASE("G1 selected module owns framed messages and rejects semantic suffix a
           "[goldsrc][runtime-replay][game-module][weapon-hud]")
 {
     auto init = initialization();
+    init.max_clients = 2U; // Fixture DeathMsg addresses player two.
     init.user_message_definitions = {
         {91U, -1, "WeaponList"}, {88U, -1, "DeathMsg"},
         {93U, -1, "Health"}, {94U, -1, "Battery"}, {95U, 1, "ProjectUnknown"}};
@@ -556,6 +646,121 @@ TEST_CASE("G1 selected module owns framed messages and rejects semantic suffix a
         {std::byte{95},std::byte{17}},44U,13003U,3U)));
     CHECK(world.runtime_observation()->weapon_hud.health == 77U);
     CHECK(world.runtime_observation()->life_events.empty());
+}
+
+TEST_CASE("E13 hit body and health death messages stay active on selected and protocol-only receivers",
+          "[e13-hit][goldsrc][runtime-replay][damage-respawn]") {
+    for(const bool selected:{false,true}) {
+        auto init=initialization();init.max_clients=2U;
+        init.baselines=make_baselines(*init.schemas,init.generation,false,2U);
+        if(!selected) init.game_client.reset();
+        init.receiving_player_entity=1;
+        init.user_message_definitions={{86,1,"Health"},{88,-1,"DeathMsg"}};
+        client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        const auto initial=session.session->apply_record(record(initial_mixed(),100,13001,1));
+        INFO((initial.error ? initial.error->context : ""));REQUIRE(initial);
+        const std::vector blood{std::byte{23},std::byte{115},std::byte{8},std::byte{0},
+            std::byte{240},std::byte{255},std::byte{24},std::byte{0},std::byte{129},std::byte{0},
+            std::byte{130},std::byte{0},std::byte{247},std::byte{3}};
+        auto wire=blood;wire.insert(wire.end(),{std::byte{86},std::byte{38}});
+        const auto hit=session.session->apply_record(record(wire,101,13002,2));REQUIRE(hit);
+        REQUIRE(hit.event->decoded_batch.events.size()==2U);
+        CHECK(session.session->status()==goldsrc::RuntimeReplaySessionStatus::active);
+        if(selected) CHECK(world.runtime_observation()->weapon_hud.health==38U);
+        const auto before=world.runtime_observation();
+        wire.push_back(std::byte{254});
+        REQUIRE_FALSE(session.session->apply_record(record(wire,102,13003,3)));
+        CHECK(world.runtime_observation()==before);
+        CHECK(session.session->status()==goldsrc::RuntimeReplaySessionStatus::active);
+        auto death=blood;death.insert(death.end(),{std::byte{86},std::byte{0},std::byte{88},
+            std::byte{4},std::byte{2},std::byte{1},std::byte{120},std::byte{0}});
+        REQUIRE(session.session->apply_record(record(death,103,13004,3)));
+        CHECK(session.session->status()==goldsrc::RuntimeReplaySessionStatus::active);
+        if(selected) {
+            CHECK(world.runtime_observation()->weapon_hud.health==0U);
+            REQUIRE(world.runtime_observation()->life_events.size()==1U);
+            CHECK(world.runtime_observation()->life_events[0].victim_entity==1U);
+        }
+        REQUIRE_FALSE(session.session->apply_record(record(death,103,13004,3)));
+    }
+}
+
+TEST_CASE("E17 repeated four and eight bloodsprite hits retain Health DeathMsg ScoreInfo and active replay",
+          "[e17][shotgun][e13-hit][e14][goldsrc][runtime-replay][transaction][stress]") {
+    for(const std::size_t pellets:{4U,8U}) {
+        CAPTURE(pellets);auto init=initialization();init.max_clients=2U;
+        init.baselines=make_baselines(*init.schemas,init.generation,false,2U);
+        init.receiving_player_entity=1U;
+        init.user_message_definitions={{86U,1,"Health"},{88U,-1,"DeathMsg"},{201U,9,"ScoreInfo"}};
+        const auto host=init.game_client;
+        client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        REQUIRE(session.session->apply_record(record(initial_mixed(),100U,68001U,1U)));
+        // Independent pinned public TE_BLOODSPRITE literal reused from the
+        // existing E13 fixture. This is bounded synthetic player-hit pressure,
+        // not a captured stock packet or local damage/hitgroup authority.
+        const std::vector blood{std::byte{23},std::byte{115},std::byte{8},std::byte{0},
+            std::byte{240},std::byte{255},std::byte{24},std::byte{0},std::byte{129},std::byte{0},
+            std::byte{130},std::byte{0},std::byte{247},std::byte{3}};
+        std::size_t kills=0U;
+        for(std::uint32_t shot=1U;shot<=12U;++shot) {
+            CAPTURE(shot);std::vector<std::byte> wire;
+            for(std::size_t pellet=0;pellet<pellets;++pellet) {
+                const auto at=wire.size();wire.insert(wire.end(),blood.begin(),blood.end());
+                wire[at+2U]=static_cast<std::byte>(8U+pellet); // Independent finite contact coordinates.
+            }
+            const auto health=static_cast<std::uint8_t>(90U-shot);
+            wire.insert(wire.end(),{std::byte{86},static_cast<std::byte>(health)});
+            const bool death=shot%3U==0U;
+            if(death) {
+                ++kills;
+                wire.insert(wire.end(),{std::byte{88},std::byte{10},std::byte{1},std::byte{2},
+                    std::byte{'s'},std::byte{'h'},std::byte{'o'},std::byte{'t'},std::byte{'g'},
+                    std::byte{'u'},std::byte{'n'},std::byte{0}});
+                // Two exact registered ScoreInfo bodies, not local increments.
+                wire.insert(wire.end(),{std::byte{201},std::byte{1},static_cast<std::byte>(kills),std::byte{0},
+                    std::byte{0},std::byte{0},std::byte{0},std::byte{0},std::byte{0},std::byte{0},
+                    std::byte{201},std::byte{2},std::byte{0},std::byte{0},static_cast<std::byte>(kills),
+                    std::byte{0},std::byte{0},std::byte{0},std::byte{0},std::byte{0}});
+            }
+            const auto before=world.runtime_observation();const auto revision=world.runtime_publication_revision();
+            if(shot==6U) {
+                auto malformed=wire;malformed.push_back(std::byte{255});
+                REQUIRE_FALSE(session.session->apply_record(record(malformed,100U+shot,68001U+shot,1U+shot)));
+                CHECK(world.runtime_observation()==before);CHECK(world.runtime_publication_revision()==revision);
+                CHECK(session.session->status()==goldsrc::RuntimeReplaySessionStatus::active);
+            }
+            auto incoming=record(wire,100U+shot,68001U+shot,1U+shot);
+            const auto accepted=session.session->apply_record(incoming);REQUIRE(accepted);REQUIRE(accepted.event);
+            REQUIRE(accepted.event->decoded_batch.events.size()==pellets+(death ? 4U : 1U));
+            for(std::size_t pellet=0;pellet<pellets;++pellet) {
+                const auto* control=std::get_if<goldsrc::RuntimeControlEvent>(&accepted.event->decoded_batch.events[pellet]);
+                REQUIRE(control);REQUIRE(std::holds_alternative<goldsrc::RuntimeControlBloodSprite>(control->body));
+                const auto& body=std::get<goldsrc::RuntimeControlBloodSprite>(control->body);
+                CHECK(body.coordinate_eighths[0]==8+static_cast<std::int16_t>(pellet));
+                CHECK(body.sprite_references==std::array<std::int16_t,2>{129,130});
+                CHECK(body.palette_color==247U);CHECK(body.scale==3U);
+            }
+            const auto committed=world.runtime_observation();REQUIRE(committed);
+            CHECK(committed->weapon_hud.health==health);
+            CHECK(committed->receiving_client==before->receiving_client); // No local pellet damage.
+            CHECK(world.runtime_publication_revision()==revision+1U);
+            CHECK(session.session->status()==goldsrc::RuntimeReplaySessionStatus::active);
+            CHECK(committed->life_events.size()==(death ? 1U : 0U));
+            if(death) {CHECK(committed->life_events[0].victim_entity==2U);CHECK(committed->life_events[0].weapon_text=="shotgun");}
+            auto display=host->stage_record({committed.get(),*committed,{},1U,2U});REQUIRE(display);
+            CHECK(display.state->multiplayer.players[0].frags==static_cast<std::int16_t>(kills));
+            CHECK(display.state->multiplayer.players[1].deaths==static_cast<std::int16_t>(kills));
+            REQUIRE_FALSE(session.session->apply_record(incoming));CHECK(world.runtime_observation()==committed);
+            CHECK(world.runtime_publication_revision()==revision+1U);
+            std::fill(incoming.payload.bytes.begin(),incoming.payload.bytes.end(),std::byte{0});
+            const auto& retained=std::get<goldsrc::RuntimeControlBloodSprite>(
+                std::get<goldsrc::RuntimeControlEvent>(accepted.event->decoded_batch.events[0]).body);
+            CHECK(retained.coordinate_eighths[0]==8);CHECK(retained.sprite_references[0]==129);
+        }
+        CHECK(kills==4U);CHECK(session.session->status()==goldsrc::RuntimeReplaySessionStatus::active);
+    }
 }
 
 TEST_CASE("G1 protocol-only replay never silently selects Half-Life",
@@ -640,12 +845,15 @@ TEST_CASE("C dynamic life messages are atomic owning one-shot events",
 TEST_CASE("C HLDM notice and fresh clientdata drive repeated lives without losing delta bases",
           "[goldsrc][runtime-replay][damage-respawn]") {
     auto init = initialization();
+    init.max_clients = 2U; // The other-victim notice is valid only in a two-client session.
+    init.baselines=make_baselines(*init.schemas,init.generation,false,2U);
     init.receiving_player_entity = 1U;
     init.user_message_definitions = {{88,-1,"DeathMsg"}, {90,1,"ResetHUD"}, {89,0,"InitHUD"}};
     client::ClientWorldState world;
     auto session = goldsrc::RuntimeReplaySession::initialize(init, world);
     REQUIRE(session);
-    REQUIRE(session.session->apply_record(record(initial_mixed(),100,3000,1)));
+    const auto initial=session.session->apply_record(record(initial_mixed(),100,3000,1));
+    INFO((initial.error ? initial.error->context : ""));REQUIRE(initial);
     std::uint32_t seq = 100;
     std::size_t ordinal = 1;
     const auto apply = [&](std::vector<std::byte> wire) {
@@ -777,7 +985,7 @@ TEST_CASE("Weapon selection requires current ownership and one safe catalogue to
     CHECK(built.bytes->front() == std::byte{3U});
     CHECK(built.bytes->back() == std::byte{0U});
     CHECK(hlclient::games::halflife::select_owned_weapon_group(state, 1U, {}) == 2U);
-    CHECK(hlclient::games::halflife::cycle_owned_weapon(state, 2U, 1) == 5U);
+    CHECK(hlclient::games::halflife::cycle_owned_weapon(state, std::uint8_t{2}, 1) == 5U);
     state.receiving_client->owned_weapon_bits = 1U << 2U;
     CHECK_FALSE(hlclient::games::halflife::build_weapon_selection_request(state, 5U));
     state.weapon_hud.catalogue[0].command_name = "weapon_crowbar;quit";
@@ -1134,6 +1342,168 @@ TEST_CASE("Runtime replay bridge failures duplicates and generation reset are ty
     }
 }
 
+TEST_CASE("Runtime replay long sessions retain identity rollback and bounded reset semantics",
+    "[goldsrc][runtime-replay][long-session][fingerprint-retention]") {
+    constexpr std::size_t count=8'192U;
+    auto init=initialization();
+    init.limits.maximum_record_fingerprints=count+2U;
+    client::ClientWorldState world;
+    auto session=goldsrc::RuntimeReplaySession::initialize(std::move(init),world);
+    REQUIRE(session);
+    const auto initial=record(initial_mixed(),100U,60'000U,1U);
+    REQUIRE(session.session->apply_record(initial));
+    const auto canonical=world.runtime_observation()->canonical_state_hash;
+    const auto snapshot=session.session->decoder_state().current_snapshot();
+    const auto client_frame=session.session->decoder_state().client_data_state().current_frame();
+    std::vector<goldsrc::RuntimeReplayRecord> records;
+    records.reserve(count);
+    for(std::size_t i=0;i<count;++i) records.push_back(record(
+        {std::byte{1}},static_cast<std::uint32_t>(101U+i),60'001U+i,2U+i));
+    // Timing is descriptive only. Prebuilt owning wire records exercise the
+    // production transaction; no wall-clock threshold makes the test flaky.
+    for(std::size_t block=0;block<8U;++block) {
+        const auto started=std::chrono::steady_clock::now();
+        for(std::size_t i=block*1'024U;i<(block+1U)*1'024U;++i) {
+            const auto applied=session.session->apply_record(records[i]);
+            REQUIRE(applied);
+        }
+        const auto milliseconds=std::chrono::duration<double,std::milli>{
+            std::chrono::steady_clock::now()-started}.count();
+        std::cout<<"[runtime-fingerprint-cost] first="<<block*1'024U+1U
+            <<" count=1024 milliseconds="<<milliseconds<<'\n';
+        CHECK(world.runtime_observation()->canonical_state_hash==canonical);
+        CHECK(session.session->decoder_state().current_snapshot()==snapshot);
+        CHECK(session.session->decoder_state().client_data_state().current_frame()==client_frame);
+    }
+    CHECK(world.runtime_publication_revision()==count+2U);
+    for(const auto* retained:std::array<const goldsrc::RuntimeReplayRecord*,3>{
+            &initial,&records[count/2U],&records.back()}) {
+        const auto before=world.runtime_observation();
+        const auto duplicate=session.session->apply_record(*retained);
+        REQUIRE_FALSE(duplicate);REQUIRE(duplicate.error);
+        CHECK(duplicate.error->code==goldsrc::RuntimeReplayErrorCode::duplicate_record);
+        auto changed=*retained;changed.payload.bytes.push_back(std::byte{1});
+        const auto conflict=session.session->apply_record(changed);
+        REQUIRE_FALSE(conflict);REQUIRE(conflict.error);
+        CHECK(conflict.error->code==goldsrc::RuntimeReplayErrorCode::conflicting_record);
+        CHECK(world.runtime_observation()==before);
+    }
+    const auto before=world.runtime_observation();
+    auto retry=record({std::byte{255}},9'000U,90'000U,count+2U);
+    const auto rejected=session.session->apply_record(retry);
+    REQUIRE_FALSE(rejected);REQUIRE(rejected.error);
+    CHECK(rejected.error->code==goldsrc::RuntimeReplayErrorCode::decoder_failed);
+    CHECK(world.runtime_observation()==before);
+    retry.payload.bytes[0]=std::byte{1};
+    REQUIRE(session.session->apply_record(retry));
+    const auto full=world.runtime_observation();
+    const auto exhausted=session.session->apply_record(record(
+        {std::byte{1}},9'001U,90'001U,count+3U));
+    REQUIRE_FALSE(exhausted);REQUIRE(exhausted.error);
+    CHECK(exhausted.error->code==goldsrc::RuntimeReplayErrorCode::record_identity_limit_exceeded);
+    CHECK(world.runtime_observation()==full);
+    std::uint64_t generation=2U;
+    for(const std::size_t limit:{1U,9U,2U}) {
+        auto next=initialization(generation);next.limits.maximum_record_fingerprints=limit;
+        REQUIRE_FALSE(session.session->reset_generation(std::move(next)));
+        for(std::size_t i=0;i<limit;++i) REQUIRE(session.session->apply_record(record(
+            {std::byte{1}},static_cast<std::uint32_t>(100U+i),60'000U+i,1U+i,generation)));
+        const auto committed=world.runtime_observation();
+        const auto limited=session.session->apply_record(record(
+            {std::byte{1}},200U,70'000U,limit+1U,generation));
+        REQUIRE_FALSE(limited);REQUIRE(limited.error);
+        CHECK(limited.error->code==goldsrc::RuntimeReplayErrorCode::record_identity_limit_exceeded);
+        CHECK(world.runtime_observation()==committed);
+        ++generation;
+    }
+}
+
+TEST_CASE("E13 advertised render effect and amount are neutral bounded atomic projections",
+    "[e13][goldsrc][runtime-replay]") {
+    for(const bool player_schema:{false,true}) for(const auto amount:{0U,2U,255U}) {
+        auto init=initialization(1U,4096U,false,true);
+        goldsrc::DeltaSchemaRegistryBuilder builder;
+        for(const auto name:{"entity_state_t","entity_state_player_t","clientdata_t","weapon_data_t"}) {
+            if(std::string_view{name}!=(player_schema ? "entity_state_player_t" : "entity_state_t")) {
+                REQUIRE(builder.insert(*init.schemas->find_exact(name)));continue;
+            }
+            std::vector<fixture::Field> fields{std::begin(kEntityFields),std::end(kEntityFields)};
+            // Deliberately unrelated SDK offsets: exact advertised names/types only.
+            fields.push_back({"renderfx",8U,700U,8U});fields.push_back({"renderamt",8U,724U,8U});
+            const auto parsed=goldsrc::DeltaDescriptionParser{}.parse(fixture::schema(name,fields),0);
+            REQUIRE(parsed);REQUIRE(builder.insert(*parsed.schema));
+        }
+        init.schemas=std::make_shared<const goldsrc::DeltaSchemaRegistryState>(std::move(builder).publish());
+        init.baselines=make_baselines(*init.schemas,1U,true);
+        client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        fixture::BitWriter writer;time_prefix(writer,100.0F);
+        entity_header(writer,goldsrc::kGoldSrcSvcPacketEntitiesOpcode,1);
+        writer.write(0,1);writer.write(0,1);writer.write(player_schema ? 1U : 2U,6);
+        writer.write(0,1);writer.write(0,1);
+        const std::pair<std::uint32_t,std::size_t> values[]{{17,8},{amount,8}};
+        delta(writer,0xc0U,values);finish_entities(writer);
+        const auto applied=session.session->apply_record(record(writer.bytes(),100,13001,1));
+        INFO((applied.error ? applied.error->context : "published"));REQUIRE(applied);
+        const auto published=world.runtime_observation();REQUIRE(published->packet_entities.size()==1);
+        CHECK(published->packet_entities[0].render_effect==17);CHECK(published->packet_entities[0].render_amount==amount);
+        auto changed=*published;changed.packet_entities[0].render_amount=42;
+        CHECK(client::runtime_observation_canonical_hash(changed)==published->canonical_state_hash);
+        CHECK(client::runtime_observation_visual_hash_v2(changed)==client::runtime_observation_visual_hash_v2(*published));
+        CHECK(client::runtime_observation_visual_hash_v3(changed)!=client::runtime_observation_visual_hash_v3(*published));
+        changed.packet_entities[0].render_amount=256;CHECK_FALSE(client::valid_runtime_observation(changed));
+        auto bad=writer.bytes();bad.push_back(std::byte{255});
+        REQUIRE_FALSE(session.session->apply_record(record(bad,101,13002,2)));
+        CHECK(world.runtime_observation()==published);
+        REQUIRE_FALSE(session.session->apply_record(record(writer.bytes(),100,13001,1)));
+        CHECK(world.runtime_observation()==published);
+        fixture::BitWriter retained;time_prefix(retained,100.1F);retained.write(1,8);
+        REQUIRE(session.session->apply_record(record(retained.bytes(),102,13003,2)));
+        CHECK(world.runtime_observation()->packet_entities[0].render_amount==amount);
+        fixture::BitWriter update;time_prefix(update,100.2F);
+        entity_header(update,goldsrc::kGoldSrcSvcDeltaPacketEntitiesOpcode,1,std::uint8_t{100});
+        update.write(0,1);update.write(0,1);update.write(player_schema ? 1U : 2U,6);update.write(0,1);
+        const std::pair<std::uint32_t,std::size_t> zero[]{{0,8}};
+        delta(update,0x80U,zero);finish_entities(update);
+        REQUIRE(session.session->apply_record(record(update.bytes(),103,13004,3)));
+        CHECK(world.runtime_observation()->packet_entities[0].render_effect==17);
+        CHECK(world.runtime_observation()->packet_entities[0].render_amount==0);
+        const auto after_delta=world.runtime_observation();
+        auto truncated=writer.bytes();truncated.pop_back();
+        REQUIRE_FALSE(session.session->apply_record(record(truncated,104,13005,4)));
+        CHECK(world.runtime_observation()==after_delta);
+        auto next=initialization(2U);REQUIRE_FALSE(session.session->reset_generation(next));
+        CHECK(world.runtime_observation()->packet_entities.empty());
+    }
+}
+
+TEST_CASE("E13 render effect and amount reject mismatched descriptor types without publication",
+    "[e13][goldsrc][runtime-replay]") {
+    for(const auto field:{"renderfx","renderamt"}) for(const auto type:{2U,1U,0x80000008U}) {
+        auto init=initialization(1U,4096U,false,true);goldsrc::DeltaSchemaRegistryBuilder builder;
+        for(const auto name:{"entity_state_player_t","clientdata_t","weapon_data_t"})
+            REQUIRE(builder.insert(*init.schemas->find_exact(name)));
+        std::vector<fixture::Field> fields{std::begin(kEntityFields),std::end(kEntityFields)};
+        fields.push_back({field,type,701,8});
+        const auto parsed=goldsrc::DeltaDescriptionParser{}.parse(fixture::schema("entity_state_t",fields),0);
+        REQUIRE(parsed);REQUIRE(builder.insert(*parsed.schema));
+        init.schemas=std::make_shared<const goldsrc::DeltaSchemaRegistryState>(std::move(builder).publish());
+        init.baselines=make_baselines(*init.schemas,1);
+        client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        const auto before=world.runtime_observation();
+        fixture::BitWriter writer;time_prefix(writer,100);
+        entity_header(writer,goldsrc::kGoldSrcSvcPacketEntitiesOpcode,1);
+        writer.write(0,1);writer.write(0,1);writer.write(2,6);writer.write(0,1);writer.write(0,1);
+        const std::pair<std::uint32_t,std::size_t> value[]{{17,8}};
+        delta(writer,0x40,value);finish_entities(writer);
+        const auto rejected=session.session->apply_record(record(writer.bytes(),100,13021,1));
+        REQUIRE_FALSE(rejected);REQUIRE(rejected.error);
+        CHECK(rejected.error->code==goldsrc::RuntimeReplayErrorCode::semantic_schema_mismatch);
+        CHECK(world.runtime_observation()==before);
+    }
+}
+
 TEST_CASE("E10 exact advertised player animation fields publish atomically",
           "[e10][goldsrc][runtime-replay]")
 {
@@ -1185,6 +1555,7 @@ TEST_CASE("E10 absent animation descriptors remain unavailable", "[e10][goldsrc]
     REQUIRE(session); REQUIRE(session.session->apply_record(record(initial_mixed(),100U,10011U,1U)));
     for(const auto& entity:world.runtime_observation()->packet_entities) {
         CHECK_FALSE(entity.animation_time_seconds); CHECK_FALSE(entity.frame_rate);
+        CHECK_FALSE(entity.render_effect);CHECK_FALSE(entity.render_amount);
         CHECK_FALSE(entity.gait_sequence); CHECK_FALSE(entity.weapon_model_index); CHECK_FALSE(entity.velocity.complete());
     }
 }
@@ -1345,6 +1716,113 @@ TEST_CASE("Runtime replay retains typed public clientdata prediction fields",
     CHECK(*observed.receiving_client->origin.x == 0.0);
 }
 
+TEST_CASE("Server physics info remains bounded exact text with atomic projection",
+    "[longjump][goldsrc][runtime-replay][prediction-seed]")
+{
+    for (const auto type : {0x80U, 0x08U}) {
+        auto init = initialization();
+        init.schemas = make_schemas(false, {}, false, false, false, false, {}, true, {}, {}, type);
+        init.baselines = make_baselines(*init.schemas, 1U);
+        client::ClientWorldState world;
+        auto session = goldsrc::RuntimeReplaySession::initialize(std::move(init), world);
+        REQUIRE(session);
+        const auto before = world.runtime_observation();
+        fixture::BitWriter writer;
+        time_prefix(writer, 1.0F);
+        writer.write(goldsrc::kGoldSrcSvcClientDataOpcode, 8U);
+        writer.write(0U, 1U); writer.write(2U, 3U); writer.write(0x0100U, 16U);
+        if (type == 0x80U) writer.string("\\other\\value\\slj\\1");
+        else writer.write(1U, 8U);
+        writer.write(0U, 1U); writer.align_zero();
+        const auto applied = session.session->apply_record(record(writer.bytes(), 111U, 5300U, 1U));
+        if (type == 0x80U) {
+            REQUIRE(applied); REQUIRE(world.runtime_observation()->receiving_client);
+            CHECK(world.runtime_observation()->receiving_client->physics_info == "\\other\\value\\slj\\1");
+            const auto committed = world.runtime_observation();
+            auto malformed = writer.bytes(); malformed.push_back(std::byte{255});
+            CHECK_FALSE(session.session->apply_record(record(malformed, 112U, 5301U, 2U)));
+            CHECK(world.runtime_observation() == committed);
+            fixture::BitWriter retained;
+            time_prefix(retained, 1.5F);
+            retained.write(goldsrc::kGoldSrcSvcClientDataOpcode, 8U);
+            retained.write(1U, 1U); retained.write(111U, 8U);
+            delta(retained, 0U); retained.write(0U, 1U); retained.align_zero();
+            REQUIRE(session.session->apply_record(record(retained.bytes(), 113U, 5302U, 2U)));
+            CHECK(world.runtime_observation()->receiving_client->physics_info == "\\other\\value\\slj\\1");
+            fixture::BitWriter removed;
+            time_prefix(removed, 2.0F);
+            removed.write(goldsrc::kGoldSrcSvcClientDataOpcode, 8U);
+            removed.write(1U, 1U); removed.write(113U, 8U);
+            removed.write(2U, 3U); removed.write(0x0100U, 16U);
+            removed.string("\\slj\\0"); removed.write(0U, 1U); removed.align_zero();
+            REQUIRE(session.session->apply_record(record(removed.bytes(), 114U, 5303U, 3U)));
+            CHECK(world.runtime_observation()->receiving_client->physics_info == "\\slj\\0");
+            REQUIRE_FALSE(session.session->reset_generation(initialization(2U)));
+            CHECK_FALSE(world.runtime_observation()->receiving_client);
+        } else {
+            REQUIRE_FALSE(applied); REQUIRE(applied.error);
+            CHECK(applied.error->code == goldsrc::RuntimeReplayErrorCode::semantic_schema_mismatch);
+            CHECK(world.runtime_observation() == before);
+        }
+    }
+}
+
+TEST_CASE("E18 clientdata FOV exact unsigned float is optional atomic and not a guessed ABI field",
+    "[e18][goldsrc][runtime-replay][camera]") {
+    for(const std::uint32_t type:{4U,0x80000004U,8U}) {
+        auto init=initialization();
+        init.schemas=make_schemas(false,std::nullopt,false,false,false,false,std::nullopt,true,type);
+        init.baselines=make_baselines(*init.schemas,1);client::ClientWorldState world;
+        auto session=goldsrc::RuntimeReplaySession::initialize(std::move(init),world);REQUIRE(session);
+        fixture::BitWriter writer;time_prefix(writer,1.0F);writer.write(goldsrc::kGoldSrcSvcClientDataOpcode,8);
+        writer.write(0,1);writer.write(2,3);writer.write(1,8);writer.write(1,8);
+        writer.write(goldsrc_signed(100),10);writer.write(40,8);writer.write(0,1);writer.align_zero();
+        const auto result=session.session->apply_record(record(writer.bytes(),101,6001,1));
+        if(type==4U) {
+            INFO((result.error ? result.error->context : "ready"));REQUIRE(result);
+            REQUIRE(world.runtime_observation()->receiving_client);
+            CHECK(world.runtime_observation()->receiving_client->field_of_view==40.0);
+            const auto before=world.runtime_observation();
+            auto malformed=writer.bytes();malformed.push_back(std::byte{255});
+            CHECK_FALSE(session.session->apply_record(record(malformed,102,6002,2)));
+            CHECK(world.runtime_observation()==before);
+        } else {
+            CHECK_FALSE(result);REQUIRE(result.error);
+            CHECK(result.error->code==goldsrc::RuntimeReplayErrorCode::semantic_schema_mismatch);
+        }
+    }
+    auto init=initialization();client::ClientWorldState world;
+    auto session=goldsrc::RuntimeReplaySession::initialize(std::move(init),world);REQUIRE(session);
+    REQUIRE(session.session->apply_record(record(receiving_client_origin_only(),103,6003,1)));
+    CHECK_FALSE(world.runtime_observation()->receiving_client->field_of_view);
+}
+
+TEST_CASE("E20 exact negotiated auxiliary vector is optional signed float and atomic", "[e20][goldsrc][runtime-replay]") {
+    for(const unsigned type:{0x80000004U,4U,8U}) {
+        auto init=initialization();
+        init.schemas=make_schemas(false,std::nullopt,false,false,false,false,std::nullopt,true,std::nullopt,type);
+        init.baselines=make_baselines(*init.schemas,1);client::ClientWorldState world;
+        auto session=goldsrc::RuntimeReplaySession::initialize(std::move(init),world);REQUIRE(session);
+        fixture::BitWriter writer;time_prefix(writer,1.0F);writer.write(goldsrc::kGoldSrcSvcClientDataOpcode,8);
+        writer.write(0,1);writer.write(2,3);writer.write(1,8);writer.write(3,8);
+        writer.write(goldsrc_signed(100),10);writer.write(goldsrc_signed(1),10);writer.write(goldsrc_signed(2),10);
+        writer.write(0,1);writer.align_zero();
+        auto result=session.session->apply_record(record(writer.bytes(),101,6201,1));
+        if(type==0x80000004U) {
+            INFO((result.error ? result.error->context : "ready"));REQUIRE(result);
+            const auto& v=world.runtime_observation()->receiving_client->auxiliary_vector2;
+            CHECK_FALSE(v.x);CHECK(v.y==1.0);CHECK(v.z==2.0);
+            auto before=world.runtime_observation();auto bad=writer.bytes();bad.push_back(std::byte{255});
+            CHECK_FALSE(session.session->apply_record(record(bad,102,6202,2)));CHECK(world.runtime_observation()==before);
+        } else {CHECK_FALSE(result);REQUIRE(result.error);CHECK(result.error->code==goldsrc::RuntimeReplayErrorCode::semantic_schema_mismatch);}
+    }
+    auto init=initialization();client::ClientWorldState world;
+    auto session=goldsrc::RuntimeReplaySession::initialize(std::move(init),world);REQUIRE(session);
+    REQUIRE(session.session->apply_record(record(receiving_client_origin_only(),103,6203,1)));
+    CHECK_FALSE(world.runtime_observation()->receiving_client->auxiliary_vector2.y);
+    CHECK_FALSE(world.runtime_observation()->receiving_client->auxiliary_vector2.z);
+}
+
 TEST_CASE("Runtime replay projects player movement fields in one committed record",
           "[goldsrc][runtime-replay][prediction-seed]")
 {
@@ -1417,7 +1895,7 @@ TEST_CASE("Replay record order identity and source sequence stay separate",
           goldsrc::RuntimeReplayErrorCode::session_finished);
 }
 
-TEST_CASE("Runtime replay publishes svc_setangle as a fresh one-shot correction",
+TEST_CASE("Runtime replay retains latest svc_setangle with unchanged identity and canonical hash",
           "[goldsrc][runtime-replay][view-angle][live-visual]") {
     client::ClientWorldState world;
     auto initialized = goldsrc::RuntimeReplaySession::initialize(
@@ -1444,10 +1922,82 @@ TEST_CASE("Runtime replay publishes svc_setangle as a fresh one-shot correction"
         record(std::vector<std::byte>{nop.begin(), nop.end()},
                61U, 7'002U, 2U)));
     REQUIRE(world.runtime_observation());
-    CHECK_FALSE(world.runtime_observation()->view_angle_correction);
+    REQUIRE(world.runtime_observation()->view_angle_correction);
+    CHECK(world.runtime_observation()->view_angle_correction->source
+              .source_transport_sequence == 60U);
+    CHECK(world.runtime_observation()->view_angle_correction->yaw_degrees == 90.0);
     CHECK(world.runtime_observation()->canonical_state_hash == legacy_hash);
 }
 
+
+TEST_CASE("Spawn orientation survives later records before the first camera consumer",
+          "[spawn-orientation][goldsrc][runtime-replay][view-angle]") {
+    client::ClientWorldState world;
+    auto initialized = goldsrc::RuntimeReplaySession::initialize(initialization(), world);
+    REQUIRE(initialized);
+    // Independent literal: pitch zero, yaw 180, roll zero. No local +180 fix.
+    const std::vector<std::byte> correction{
+        std::byte{10}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{0x80}, std::byte{0}, std::byte{0}};
+    REQUIRE(initialized.session->apply_record(record(correction, 60, 7001, 1)));
+    const auto first = world.runtime_observation()->view_angle_correction;
+    REQUIRE(first);
+    for (unsigned index = 0; index < 4; ++index) {
+        REQUIRE(initialized.session->apply_record(
+            record({std::byte{1}}, 61 + index, 7002 + index, 2 + index)));
+        REQUIRE(world.runtime_observation()->view_angle_correction);
+        CHECK(world.runtime_observation()->view_angle_correction == first);
+    }
+    auto replacement = correction;
+    replacement[4] = std::byte{0x40}; // yaw 90, new source even in same generation
+    REQUIRE(initialized.session->apply_record(record(replacement, 65, 7006, 6)));
+    REQUIRE(world.runtime_observation()->view_angle_correction);
+    CHECK(world.runtime_observation()->view_angle_correction->yaw_degrees == 90.0);
+    CHECK(world.runtime_observation()->view_angle_correction->source
+              .source_transport_sequence == 65);
+    REQUIRE(initialized.session->apply_record(record({std::byte{1}}, 66, 7007, 7)));
+    CHECK(world.runtime_observation()->view_angle_correction->yaw_degrees == 90.0);
+    const auto committed = world.runtime_observation();
+    auto malformed = correction;
+    malformed.push_back(std::byte{254});
+    CHECK_FALSE(initialized.session->apply_record(record(malformed, 67, 7008, 8)));
+    CHECK(world.runtime_observation() == committed);
+
+    // A new session must never inherit the old session's correction.
+    client::ClientWorldState next_world;
+    auto next = goldsrc::RuntimeReplaySession::initialize(initialization(2), next_world);
+    REQUIRE(next);
+    CHECK_FALSE(next_world.runtime_observation()->view_angle_correction);
+}
+
+TEST_CASE("E13 unsupported temporary subtype survives owning failure and native wrapper summary",
+          "[e13-hit-roundtrip][runtime-diagnostics][goldsrc][runtime-replay]") {
+    auto init=initialization();init.user_message_definitions={{79,2,"AmmoPickup"},{83,2,"AmmoX"},{86,1,"Health"}};
+    client::ClientWorldState world;
+    const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+    REQUIRE(session.session->apply_record(record({std::byte{83},std::byte{1},std::byte{50}},90,901,1)));
+    REQUIRE(session.session->apply_record(record({std::byte{86},std::byte{90},
+        std::byte{79},std::byte{1},std::byte{17}},91,902,2)));
+    const auto committed=world.runtime_observation();
+    goldsrc::RuntimeReplayError retained;
+    {
+        const auto rejected=session.session->apply_record(record({std::byte{86},std::byte{33},
+            std::byte{79},std::byte{1},std::byte{4},std::byte{23},std::byte{12},std::byte{1}},92,903,3));
+        REQUIRE_FALSE(rejected);REQUIRE(rejected.error);retained=*rejected.error;
+    }
+    REQUIRE(retained.control_error);CHECK(retained.control_error->temporary_entity_type==12U);
+    CHECK(world.runtime_observation()==committed);
+    const auto summary=goldsrc::runtime_failure_summary(retained);
+    CHECK(summary.find("temporary_entity_type=12")!=std::string::npos);
+    CHECK(summary.find("message_start_byte=5")!=std::string::npos);
+    CHECK(summary.find("failure_byte=7")!=std::string::npos);
+    const auto hud=init.game_client->hud(*committed,1.1);
+    CHECK(hud.inventory_notifications_received==1U);
+    std::cout << "live_application_outcome result=error primary_error=runtime_record_failed"
+        << " scripted_coverage=not_evaluated prediction_coverage=limited inventory_notifications="
+        << hud.inventory_notifications_received
+        << summary << '\n'; // Passed through existing fake-child/native/PowerShell harness.
+}
 
 TEST_CASE("Owning runtime failure survives rollback payload release and terminal formatting",
           "[runtime-diagnostics][goldsrc][runtime-replay][game-module]") {
@@ -1756,4 +2306,593 @@ TEST_CASE("Mixed replay enforces scripted argument schema payload budget and gen
     }
 }
 
+TEST_CASE("E16 temporary effects are owning record-atomic observations with exact identities",
+          "[e16][goldsrc][runtime-replay][temp-entity][transaction]") {
+    const std::vector<std::byte> explosion{std::byte{23}, std::byte{3},
+        std::byte{0xf7}, std::byte{0xff}, std::byte{0x12}, std::byte{0},
+        std::byte{0x1b}, std::byte{0}, std::byte{0x34}, std::byte{0x12},
+        std::byte{60}, std::byte{15}, std::byte{0}};
+    auto smoke = explosion; smoke[1] = std::byte{5}; smoke.pop_back();
+    client::ClientWorldState world;
+    auto init = initialization();
+    // Wire ownership/publication is independent of any concrete game module.
+    init.game_client.reset();
+    auto session = goldsrc::RuntimeReplaySession::initialize(init, world);
+    REQUIRE(session);
+    const auto initial = world.runtime_observation();
+    auto truncated = explosion; truncated.pop_back();
+    std::vector<std::byte> bad{std::byte{1}};
+    bad.insert(bad.end(), explosion.begin(), explosion.end());
+    bad.insert(bad.end(), truncated.begin(), truncated.end());
+    const auto failure = session.session->apply_record(record(std::move(bad), 100, 61001, 1));
+    REQUIRE_FALSE(failure); REQUIRE(failure.error->control_error);
+    CHECK(failure.error->control_error->temporary_entity_type == 3U);
+    CHECK(world.runtime_observation() == initial);
+    CHECK(session.session->publication_revision() == 1U);
+    auto stream = explosion;
+    stream.insert(stream.end(), explosion.begin(), explosion.end()); // Same place, distinct message identity.
+    auto incoming = record(std::move(stream), 100, 61001, 1);
+    incoming.received_at = goldsrc::SoundTime{} + std::chrono::seconds{20};
+    auto committed = session.session->apply_record(incoming);
+    REQUIRE(committed); REQUIRE(committed.event->temporary_effects.size() == 2U);
+    const auto retained = committed.event->temporary_effects;
+    CHECK(retained[0].kind == client::TemporaryEffectKind::explosion);
+    CHECK(retained[0].generation == 1U); CHECK(retained[0].record == 61001U);
+    CHECK(retained[0].record_ordinal == 1U); CHECK(retained[0].message_bit_offset == 0U);
+    CHECK(retained[1].message_bit_offset == 104U); CHECK(retained[0].entry_ordinal == 0U);
+    CHECK(retained[0].received_at_seconds == 20.0);
+    CHECK(retained[0].origin.x == -1.125F); CHECK(retained[0].origin.y == 2.25F);
+    CHECK(retained[0].origin.z == 3.375F); CHECK(retained[0].sprite_index == 0x1234U);
+    CHECK(retained[0].scale_tenths == 60U); CHECK(retained[0].framerate == 15U);
+    auto duplicate = session.session->apply_record(incoming);
+    REQUIRE_FALSE(duplicate); CHECK(duplicate.error->code == goldsrc::RuntimeReplayErrorCode::duplicate_record);
+    CHECK(session.session->publication_revision() == 2U);
+    auto independent = session.session->apply_record(record(explosion, 101, 61002, 2));
+    REQUIRE(independent); REQUIRE(independent.event->temporary_effects.size() == 1U);
+    CHECK(independent.event->temporary_effects[0].record == 61002U);
+    auto no_effect = session.session->apply_record(record({std::byte{1}}, 102, 61003, 3));
+    REQUIRE(no_effect); CHECK(no_effect.event->temporary_effects.empty()); // No retained replay at render/update.
+    auto server_smoke = session.session->apply_record(record(smoke, 103, 61004, 4));
+    REQUIRE(server_smoke); REQUIRE(server_smoke.event->temporary_effects.size() == 1U);
+    CHECK(server_smoke.event->temporary_effects[0].kind == client::TemporaryEffectKind::smoke);
+    CHECK(server_smoke.event->temporary_effects[0].flags == 0U);
+    auto next = initialization(2U); next.game_client.reset();
+    REQUIRE_FALSE(session.session->reset_generation(next));
+    auto stale = session.session->apply_record(incoming);
+    REQUIRE_FALSE(stale); CHECK(stale.error->code == goldsrc::RuntimeReplayErrorCode::generation_mismatch);
+    incoming.payload.bytes.clear(); session.session.reset();
+    CHECK(retained[0].origin.x == -1.125F); CHECK(retained[0].sprite_index == 0x1234U);
+}
+
+TEST_CASE("E16 commit delivers temp effects through normal game host without partial visuals or duplicate debris",
+          "[e16][goldsrc][runtime-replay][game-module][temp-entity][transaction]") {
+    const std::vector<std::byte> explosion{std::byte{23}, std::byte{3},
+        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{7}, std::byte{0}, std::byte{60}, std::byte{15}, std::byte{0}};
+    auto init = initialization();
+    auto host = init.game_client; host->set_movement_audio_time_origin(100.0);
+    const auto sounds = std::make_shared<goldsrc::CommittedSoundQueue>(); init.sound_events = sounds;
+    client::ClientWorldState world;
+    auto session = goldsrc::RuntimeReplaySession::initialize(init, world); REQUIRE(session);
+    auto bytes = explosion; bytes.insert(bytes.end(), explosion.begin(), explosion.end()); bytes.pop_back();
+    auto bad = record(bytes, 200, 62001, 1); bad.received_at = goldsrc::SoundTime{} + std::chrono::seconds{101};
+    CHECK_FALSE(session.session->apply_record(bad));
+    auto batch = host->drain_temporary_effects(1.0); CHECK(batch.count == 0U); CHECK(batch.statistics.received == 0U);
+    bytes = explosion; bytes.insert(bytes.end(), event_fixture::kSound.begin(), event_fixture::kSound.end());
+    auto incoming = record(bytes, 200, 62001, 1); incoming.received_at = *bad.received_at;
+    REQUIRE(session.session->apply_record(incoming));
+    batch = host->drain_temporary_effects(1.0); REQUIRE(batch.count == 1U);
+    REQUIRE(batch.effects[0].sprite); CHECK(batch.effects[0].sprite->model_slot == 7U);
+    CHECK(batch.effects[0].starts_at_seconds == 1.0); REQUIRE(batch.effects[0].light); REQUIRE(batch.effects[0].particles);
+    CHECK(sounds->starts == 1U); // Existing svc_sound only, not a synthetic second debris cue.
+    CHECK_FALSE(session.session->apply_record(incoming));
+    CHECK(host->drain_temporary_effects(1.0).count == 0U); CHECK(sounds->starts == 1U);
+    auto independent = record(explosion, 201, 62002, 2); independent.received_at = *bad.received_at;
+    REQUIRE(session.session->apply_record(independent));
+    CHECK(host->drain_temporary_effects(1.0).count == 1U); // Same coordinates, legitimate distinct commit.
+    REQUIRE(session.session->apply_record(record({std::byte{1}}, 202, 62003, 3)));
+    CHECK(host->drain_temporary_effects(1.3).count == 0U); // No local smoke timer.
+    auto smoke = explosion; smoke[1] = std::byte{5}; smoke.pop_back();
+    auto server_smoke = record(smoke, 203, 62004, 4);
+    server_smoke.received_at = goldsrc::SoundTime{} + std::chrono::milliseconds{101300};
+    REQUIRE(session.session->apply_record(server_smoke));
+    batch = host->drain_temporary_effects(1.3); REQUIRE(batch.count == 1U);
+    REQUIRE(batch.effects[0].sprite); CHECK(batch.effects[0].sprite->blend == hlclient::game_api::TemporarySpriteBlend::alpha_blended);
+    CHECK_FALSE(batch.effects[0].light); CHECK_FALSE(batch.effects[0].particles);
+}
+
+TEST_CASE("Snark sound visual crosses atomic runtime commit without requiring an audio queue or extra audio",
+    "[e27][sound-pop][runtime-replay][transaction][no-stock]") {
+    namespace pop=hlclient::tests::snark_sound_pop_fixture;
+    auto init=initialization();auto host=init.game_client;
+    host->set_movement_audio_time_origin(100);
+    client::ClientWorldState world;
+    auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+    pop::bind(*host,5); // Fixture's actual decoded slot, not production's observed 54.
+    pop::entities(*host,1,19);
+    auto bytes=event_fixture::bytes(event_fixture::kSound);
+    auto incoming=record(bytes,100,72001,2);
+    incoming.received_at=goldsrc::SoundTime{}+std::chrono::seconds{101};
+    auto invalid=incoming;invalid.payload.bytes.push_back(std::byte{255});
+    const auto before=world.runtime_observation();CHECK_FALSE(session.session->apply_record(invalid));
+    CHECK(world.runtime_observation()==before);CHECK(host->drain_temporary_effects(1).count==0);
+    REQUIRE(session.session->apply_record(incoming));
+    const auto batch=host->drain_temporary_effects(1);REQUIRE(batch.count==1);
+    CHECK(batch.statistics.pop_sound_accepted==1);CHECK(batch.statistics.blood_received==0);
+    CHECK(batch.effects[0].starts_at_seconds==1);CHECK(batch.effects[0].identity.record==72001);
+    CHECK(batch.effects[0].origin.x==0);CHECK(batch.effects[0].origin.y==0);CHECK(batch.effects[0].origin.z==0);
+    REQUIRE(batch.effects[0].sprite);REQUIRE(batch.effects[0].sprite_burst);
+    CHECK(batch.effects[0].sprite->model_slot==321);CHECK(batch.effects[0].sprite_burst->sprite.model_slot==322);
+    CHECK(batch.effects[0].sprite_burst->count==16);CHECK_FALSE(batch.effects[0].secondary_sprite);
+    CHECK_FALSE(batch.effects[0].sound);CHECK_FALSE(init.sound_events);
+    CHECK_FALSE(session.session->apply_record(incoming));CHECK(host->drain_temporary_effects(1).count==0);
+    CHECK(host->drain_audio().count==0);CHECK(host->drain_remote_audio().count==0);
+}
+
+TEST_CASE("E16 observed beam follow commits without synthetic effects and rejects malformed suffix",
+          "[e16][e20][manual-fix][goldsrc][runtime-replay][temp-entity][transaction]") {
+    const std::vector<std::byte> beam{std::byte{23},std::byte{22},
+        std::byte{7},std::byte{0},std::byte{9},std::byte{0},
+        std::byte{10},std::byte{3},std::byte{255},std::byte{255},std::byte{255},std::byte{255}};
+    auto init = initialization(); auto host = init.game_client;
+    host->set_movement_audio_time_origin(100.0);
+    const auto sounds = std::make_shared<goldsrc::CommittedSoundQueue>(); init.sound_events = sounds;
+    client::ClientWorldState world;
+    auto session = goldsrc::RuntimeReplaySession::initialize(init, world); REQUIRE(session);
+    const auto before = world.runtime_observation();
+    auto bytes = beam; bytes.insert(bytes.end(), beam.begin(), beam.end()); bytes.pop_back();
+    auto bad = record(bytes, 300, 63001, 1);
+    bad.received_at = goldsrc::SoundTime{} + std::chrono::seconds{101};
+    CHECK_FALSE(session.session->apply_record(bad));
+    CHECK(world.runtime_observation() == before);
+    CHECK(host->drain_temporary_effects(1.0).count == 0U); CHECK(sounds->starts == 0U);
+    CHECK(host->drain_follow_events().count==0U);
+    bytes = beam; bytes.insert(bytes.end(), event_fixture::kSound.begin(), event_fixture::kSound.end());
+    auto incoming = record(bytes, 300, 63001, 1); incoming.received_at = *bad.received_at;
+    const auto committed = session.session->apply_record(incoming); REQUIRE(committed);
+    // E20 implements this previously inert generic server effect, not a fake
+    // grenade/HL callback. Keep strict payload, atomicity and duplicate checks.
+    REQUIRE(committed.event->temporary_effects.size()==1U);
+    CHECK(committed.event->temporary_effects[0].kind==client::TemporaryEffectKind::beam_follow);
+    const auto follows=host->drain_follow_events();REQUIRE(follows.count==1U);
+    CHECK(follows.events[0].entity_attachment==7U);CHECK(follows.events[0].sprite_index==9U);
+    CHECK(follows.events[0].life_tenths==10U);CHECK(follows.events[0].width_tenths==3U);
+    CHECK(host->drain_temporary_effects(1.0).count == 0U); CHECK(sounds->starts == 1U);
+    CHECK_FALSE(session.session->apply_record(incoming)); CHECK(sounds->starts == 1U);
+    CHECK(host->drain_follow_events().count==0U);
+}
+
+TEST_CASE("E17 negotiated numeric special reload and pump fields retain owned observations",
+          "[e17][goldsrc][runtime-replay][weapon-data][special-reload]")
+{
+    auto init=initialization();
+    init.schemas=make_schemas(false,std::nullopt,false,false,false,true);
+    init.baselines=make_baselines(*init.schemas,init.generation);
+    client::ClientWorldState world;
+    const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);
+    REQUIRE(session);
+    fixture::BitWriter first;
+    time_prefix(first,100.0F);
+    const std::pair<std::uint32_t,std::size_t> start[]{{goldsrc_signed(2U),10U},
+        {1U,2U},{goldsrc_signed(500U),22U}};
+    special_weapon_fields(first,0x31U,start);
+    auto incoming=record(first.bytes(),100U,67001U,1U);
+    REQUIRE(session.session->apply_record(incoming));
+    const auto started=world.runtime_observation();
+    REQUIRE(started);REQUIRE(started->weapon_slots.size()>2U);
+    CHECK(started->weapon_slots[2U].clip==2);
+    CHECK(started->weapon_slots[2U].special_reload_state==1);
+    REQUIRE(started->weapon_slots[2U].pump_time);
+    CHECK(*started->weapon_slots[2U].pump_time==Catch::Approx(0.5));
+    CHECK(started->client_metadata.freshness==client::RuntimeObservationFreshness::observed_in_record);
+    std::fill(incoming.payload.bytes.begin(),incoming.payload.bytes.end(),std::byte{255});
+    CHECK(started->weapon_slots[2U].special_reload_state==1); // No RX-buffer retention.
+
+    fixture::BitWriter retained;time_prefix(retained,100.1F);retained.write(1U,8U);
+    REQUIRE(session.session->apply_record(record(retained.bytes(),101U,67002U,2U)));
+    CHECK(world.runtime_observation()->client_metadata.freshness==client::RuntimeObservationFreshness::retained);
+    CHECK(world.runtime_observation()->weapon_slots[2U].special_reload_state==1);
+    CHECK(world.runtime_observation()->weapon_slots[2U].pump_time==started->weapon_slots[2U].pump_time);
+
+    // Fresh delta inherits pump/clip but changes the numeric state to 2.
+    fixture::BitWriter inserting;time_prefix(inserting,100.2F);
+    const std::pair<std::uint32_t,std::size_t> insert[]{{2U,2U}};
+    special_weapon_fields(inserting,0x10U,insert,std::uint8_t{100});
+    REQUIRE(session.session->apply_record(record(inserting.bytes(),102U,67003U,3U)));
+    const auto inserted=world.runtime_observation();
+    CHECK(inserted->client_metadata.freshness==client::RuntimeObservationFreshness::observed_in_record);
+    CHECK(inserted->weapon_slots[2U].special_reload_state==2);
+    CHECK(inserted->weapon_slots[2U].clip==2);
+    CHECK(inserted->weapon_slots[2U].pump_time==started->weapon_slots[2U].pump_time);
+
+    fixture::BitWriter transfer;time_prefix(transfer,100.3F);
+    const std::pair<std::uint32_t,std::size_t> transferred[]{{goldsrc_signed(3U),10U},{1U,2U}};
+    special_weapon_fields(transfer,0x11U,transferred,std::uint8_t{102});
+    REQUIRE(session.session->apply_record(record(transfer.bytes(),103U,67004U,4U)));
+    CHECK(world.runtime_observation()->weapon_slots[2U].clip==3);
+    CHECK(world.runtime_observation()->weapon_slots[2U].special_reload_state==1);
+    CHECK(started->weapon_slots[2U].clip==2);CHECK(inserted->weapon_slots[2U].special_reload_state==2);
+
+    fixture::BitWriter finish;time_prefix(finish,100.4F);
+    const std::pair<std::uint32_t,std::size_t> finished[]{{0U,2U}};
+    special_weapon_fields(finish,0x10U,finished,std::uint8_t{103});
+    REQUIRE(session.session->apply_record(record(finish.bytes(),104U,67005U,5U)));
+    CHECK(world.runtime_observation()->weapon_slots[2U].special_reload_state==0);
+    CHECK(world.runtime_observation()->weapon_slots[2U].clip==3);
+
+    // Value 3 is a neutral advertised integer, not protocol-side Shotgun policy.
+    fixture::BitWriter numeric;time_prefix(numeric,100.5F);
+    const std::pair<std::uint32_t,std::size_t> value_three[]{{3U,2U}};
+    special_weapon_fields(numeric,0x10U,value_three,std::uint8_t{104});
+    REQUIRE(session.session->apply_record(record(numeric.bytes(),105U,67006U,6U)));
+    CHECK(world.runtime_observation()->weapon_slots[2U].special_reload_state==3);
+    auto changed=*world.runtime_observation();
+    changed.weapon_slots[2U].special_reload_state=0;
+    changed.weapon_slots[2U].pump_time=0.75;
+    CHECK(client::runtime_observation_canonical_hash(changed)==world.runtime_observation()->canonical_state_hash);
+    changed.weapon_slots[2U].pump_time=std::numeric_limits<double>::infinity();
+    CHECK_FALSE(client::valid_runtime_observation(changed));
+}
+
+TEST_CASE("E17 absent exact weapon descriptors stay unavailable without fallback timers",
+          "[e17][goldsrc][runtime-replay][weapon-data][special-reload]")
+{
+    SECTION("Legacy schema does not acquire new optional values") {
+        client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(initialization(),world);
+        REQUIRE(session);REQUIRE(session.session->apply_record(record(initial_mixed(),100U,67101U,1U)));
+        for (const auto& weapon:world.runtime_observation()->weapon_slots) {
+            CHECK_FALSE(weapon.special_reload_state);CHECK_FALSE(weapon.pump_time);
+        }
+    }
+    SECTION("Numeric special state does not fabricate an absent pump descriptor") {
+        auto init=initialization();
+        init.schemas=make_schemas(false,std::nullopt,false,false,false,true,std::nullopt,false);
+        init.baselines=make_baselines(*init.schemas,init.generation);
+        client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        fixture::BitWriter writer;
+        time_prefix(writer,100.0F);
+        const std::pair<std::uint32_t,std::size_t> values[]{{2U,2U}};
+        special_weapon_fields(writer,0x10U,values);
+        REQUIRE(session.session->apply_record(record(writer.bytes(),100U,67102U,1U)));
+        CHECK(world.runtime_observation()->weapon_slots[2U].special_reload_state==2);
+        CHECK_FALSE(world.runtime_observation()->weapon_slots[2U].pump_time);
+    }
+}
+
+TEST_CASE("E17 malformed weapon field type or suffix publishes neither game prefix nor weapon state",
+          "[e17][goldsrc][runtime-replay][weapon-data][special-reload][transaction]")
+{
+    for (const auto type:{0x0000'0001U,0x0000'0002U,0x8000'0008U,0x8000'0004U}) {
+        CAPTURE(type);
+        auto init=initialization();
+        init.schemas=make_schemas(false,std::nullopt,false,false,false,true,type);
+        init.baselines=make_baselines(*init.schemas,init.generation);
+        init.user_message_definitions={{93U,1,"Health"}};
+        const auto host=init.game_client;
+        client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        REQUIRE(session.session->apply_record(record({std::byte{93},std::byte{77}},100U,67201U,1U)));
+        const auto before=world.runtime_observation();
+        const auto hud=host->hud(*before,1.0);
+        const auto history=session.session->decoder_state().client_data_state().history().frame_count();
+        fixture::BitWriter writer;time_prefix(writer,100.1F);writer.write(93U,8U);writer.write(31U,8U);
+        const std::pair<std::uint32_t,std::size_t> values[]{{0U,2U}};
+        special_weapon_fields(writer,0x10U,values);
+        const auto rejected=session.session->apply_record(record(writer.bytes(),101U,67202U,2U));
+        REQUIRE_FALSE(rejected);REQUIRE(rejected.error);
+        CHECK(rejected.error->code==goldsrc::RuntimeReplayErrorCode::semantic_schema_mismatch);
+        CHECK(rejected.error->context.find("m_fInSpecialReload")!=std::string::npos);
+        CHECK(world.runtime_observation()==before);
+        CHECK(world.runtime_observation()->canonical_state_hash==before->canonical_state_hash);
+        CHECK(world.runtime_observation()->weapon_hud.health==77U);
+        CHECK(host->hud(*before,1.1).inventory_feedback_revision==hud.inventory_feedback_revision);
+        CHECK(session.session->decoder_state().client_data_state().history().frame_count()==history);
+        REQUIRE(session.session->apply_record(record({std::byte{1}},102U,67203U,3U)));
+        CHECK(world.runtime_observation()->weapon_hud.health==77U); // Staged module state rolled back too.
+    }
+    SECTION("Valid negotiated prefix plus malformed service suffix is atomic and retryable") {
+        auto init=initialization();
+        init.schemas=make_schemas(false,std::nullopt,false,false,false,true);
+        init.baselines=make_baselines(*init.schemas,init.generation);
+        init.user_message_definitions={{93U,1,"Health"}};
+        const auto host=init.game_client;
+        client::ClientWorldState world;
+        const auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        REQUIRE(session.session->apply_record(record({std::byte{93},std::byte{77}},100U,67301U,1U)));
+        const auto before=world.runtime_observation();
+        fixture::BitWriter writer;time_prefix(writer,100.1F);writer.write(93U,8U);writer.write(31U,8U);
+        const std::pair<std::uint32_t,std::size_t> values[]{{2U,2U}};
+        special_weapon_fields(writer,0x10U,values);
+        auto malformed=writer.bytes();malformed.push_back(std::byte{255});
+        REQUIRE_FALSE(session.session->apply_record(record(malformed,101U,67302U,2U)));
+        CHECK(world.runtime_observation()==before);
+        CHECK(world.runtime_observation()->canonical_state_hash==before->canonical_state_hash);
+        CHECK(host->hud(*before,1.0).inventory_notifications_received==0U);
+        auto good=record(writer.bytes(),101U,67302U,2U);
+        REQUIRE(session.session->apply_record(good));
+        const auto committed=world.runtime_observation();
+        CHECK(committed->weapon_slots[2U].special_reload_state==2);
+        CHECK(committed->weapon_hud.health==31U);
+        REQUIRE_FALSE(session.session->apply_record(good));
+        CHECK(world.runtime_observation()==committed);
+    }
+}
+
+TEST_CASE("E19 exact signed event parameters survive atomic replay and feed assigned remote Crossbow semantics",
+          "[e19][runtime-replay][scripted-events][transaction]") {
+    namespace cb=hlclient::tests::crossbow_fixture;
+    auto init=initialization();init.max_clients=8;init.receiving_player_entity=1;
+    goldsrc::DeltaSchemaRegistryBuilder builder;for(const auto& schema:init.schemas->schemas())REQUIRE(builder.insert(schema));
+    const fixture::Field fields[]{
+        {"entindex",0x0000'0008U,0,8},{"origin[0]",0x8000'0004U,4,16,32000,4000},
+        {"origin[1]",0x8000'0004U,8,16,32000,4000},{"origin[2]",0x8000'0004U,12,16,32000,4000},
+        {"angles[0]",0x0000'0010U,16,16},{"angles[1]",0x0000'0010U,20,16},{"angles[2]",0x0000'0010U,24,16},
+        {"iparam1",0x8000'0008U,28,16},{"iparam2",0x8000'0008U,32,16}};
+    const auto parsed=goldsrc::DeltaDescriptionParser{}.parse(fixture::schema("event_t",fields),0);REQUIRE(parsed);REQUIRE(builder.insert(*parsed.schema));
+    init.schemas=std::make_shared<const goldsrc::DeltaSchemaRegistryState>(std::move(builder).publish());
+    init.baselines=make_baselines(*init.schemas,1);auto host=init.game_client;
+    host->set_movement_audio_time_origin(100);client::ClientWorldState world;
+    auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+    const std::array bindings{cb::binding(),cb::binding(true,902)};host->configure_scripted_events(bindings);
+    (void)host->drain_remote_audio();
+    fixture::BitWriter writer;writer.write(21,8);writer.write(902,10);
+    writer.write(2,3);writer.write(0xff,8);writer.write(1,8);
+    writer.write(3,8);writer.write(goldsrc_signed(800),16);writer.write(goldsrc_signed(640),16);writer.write(goldsrc_signed(416),16);
+    writer.write(0,16);writer.write(32768,16);writer.write(0,16);writer.write(goldsrc_signed(4),16);writer.write(goldsrc_signed(10),16);
+    writer.write(0,1);writer.align_zero();
+    auto incoming=record(writer.bytes(),300,65001,1);incoming.received_at=goldsrc::SoundTime{}+std::chrono::milliseconds{100030};
+    auto malformed=incoming;malformed.payload.bytes.push_back(std::byte{255});const auto before=world.runtime_observation();
+    CHECK_FALSE(session.session->apply_record(malformed));CHECK(world.runtime_observation()==before);
+    CHECK(host->drain_remote_effects(.03).count==0);CHECK(host->drain_remote_audio().count==0);
+    const auto committed=session.session->apply_record(incoming);REQUIRE(committed);
+    incoming.payload.bytes.clear();
+    const auto batch=host->drain_remote_effects(.031);REQUIRE(batch.count==1);REQUIRE(batch.effects[0].impact);
+    CHECK(batch.effects[0].action.weapon_id==6);CHECK(batch.effects[0].impact->suppress_decal);
+    CHECK(batch.effects[0].impact->origin.x==100);CHECK(batch.effects[0].impact->origin.z==80);
+    const auto audio=host->drain_remote_audio();REQUIRE(audio.count==2);CHECK(audio.cues[0].reference.name()=="weapons/xbow_fire1.wav");
+    CHECK(host->drain_remote_effects(.031).count==0);
+}
+TEST_CASE("E21 exact magnitude primary flag and delayed stop remain atomic across reliable records", "[e21][runtime-replay][transaction][no-stock]") {
+    auto init=initialization();init.max_clients=8;init.receiving_player_entity=1;
+    goldsrc::DeltaSchemaRegistryBuilder builder;for(const auto& schema:init.schemas->schemas())REQUIRE(builder.insert(schema));
+    const fixture::Field fields[]{
+        {"entindex",0x00000008U,0,8},{"origin[0]",0x80000004U,4,16,32000,4000},{"origin[1]",0x80000004U,8,16,32000,4000},{"origin[2]",0x80000004U,12,16,32000,4000},
+        {"angles[0]",0x00000010U,16,16},{"angles[1]",0x00000010U,20,16},{"angles[2]",0x00000010U,24,16},
+        {"fparam1",0x80000004U,28,16,32000,4000},{"bparam1",0x00000008U,32,1},{"bparam2",0x00000008U,36,1}};
+    const auto parsed=goldsrc::DeltaDescriptionParser{}.parse(fixture::schema("event_t",fields),0);REQUIRE(parsed);REQUIRE(builder.insert(*parsed.schema));
+    init.schemas=std::make_shared<const goldsrc::DeltaSchemaRegistryState>(std::move(builder).publish());init.baselines=make_baselines(*init.schemas,1);
+    auto host=init.game_client;host->set_movement_audio_time_origin(100);client::ClientWorldState world;auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+    hlclient::game_api::ScriptedEventBinding binding;binding.index=900;constexpr std::string_view name="events/gauss.sc";std::copy(name.begin(),name.end(),binding.name.begin());host->configure_scripted_events(std::span{&binding,1U});
+    const auto encoded=[](bool stop) {
+        fixture::BitWriter w;w.write(21,8);w.write(900,10);w.write(2,3);w.write(0xff,8);w.write(3,8);
+        w.write(2,8);w.write(goldsrc_signed(800),16);w.write(goldsrc_signed(640),16);w.write(goldsrc_signed(416),16);
+        w.write(0,16);w.write(32768,16);w.write(0,16);w.write(goldsrc_signed(stop ? 0 : 1600),16);w.write(0,1);w.write(stop ? 1 : 0,1);
+        w.write(stop ? 1 : 0,1);if(stop)w.write(1,16);w.align_zero();return w.bytes();
+    };
+    auto incoming=record(encoded(false),300,67501,1);incoming.received_at=goldsrc::SoundTime{}+std::chrono::milliseconds{100030};
+    auto malformed=incoming;malformed.payload.bytes.push_back(std::byte{255});const auto before=world.runtime_observation();
+    CHECK_FALSE(session.session->apply_record(malformed));CHECK(world.runtime_observation()==before);CHECK(host->drain_audio().count==0);
+    REQUIRE(session.session->apply_record(incoming));incoming.payload.bytes.clear();auto sound=host->drain_audio();REQUIRE(sound.count==1);CHECK(sound.cues[0].reference.name()=="weapons/gauss2.wav");CHECK(sound.cues[0].volume==1);
+    auto stop=record(encoded(true),301,67502,2);stop.received_at=incoming.received_at;REQUIRE(session.session->apply_record(stop));CHECK(host->drain_audio().count==0);CHECK_FALSE(session.session->apply_record(stop));
+}
+TEST_CASE("E21 explicitly transmitted Gauss model pitch survives the real event publisher", "[e21][gauss-remote-aim][runtime-replay][scripted-events][transaction][no-stock]") {
+    namespace api=hlclient::game_api;using V=hlclient::assets::AssetVector3;
+    struct Query final:api::IStaticEffectTrace {
+        mutable V eye{},target{};mutable unsigned calls{};
+        api::StaticEffectTrace trace(V a,V b) const noexcept override {
+            ++calls;eye=a;target=b;return {true,false,false,false,false,b,{}};
+        }
+    };
+    for(const bool reliable:{false,true})for(const bool primary:{true,false})for(const bool ducking:{false,true}) {
+        CAPTURE(reliable,primary,ducking);auto init=initialization();init.max_clients=8;init.receiving_player_entity=1;
+        goldsrc::DeltaSchemaRegistryBuilder builder;
+        for(const auto name:{"clientdata_t","weapon_data_t"})REQUIRE(builder.insert(*init.schemas->find_exact(name)));
+        std::vector<fixture::Field> player_fields{std::begin(kEntityFields),std::end(kEntityFields)};
+        player_fields.push_back({"weaponmodel",0x00000008U,24,16});
+        const auto player=goldsrc::DeltaDescriptionParser{}.parse(fixture::schema("entity_state_t",player_fields),0);
+        REQUIRE(player);REQUIRE(builder.insert(*player.schema));
+        const fixture::Field fields[]{
+            {"entindex",0x00000008U,0,8},{"origin[0]",0x80000004U,4,16,32000,4000},{"origin[1]",0x80000004U,8,16,32000,4000},{"origin[2]",0x80000004U,12,16,32000,4000},
+            {"angles[0]",0x00000010U,16,16},{"angles[1]",0x00000010U,20,16},{"angles[2]",0x00000010U,24,16},
+            {"fparam1",0x80000004U,28,16,32000,4000},{"bparam1",0x00000008U,32,1},{"bparam2",0x00000008U,36,1},{"ducking",0x00000008U,40,1}};
+        const auto parsed=goldsrc::DeltaDescriptionParser{}.parse(fixture::schema("event_t",fields),0);
+        REQUIRE(parsed);REQUIRE(builder.insert(*parsed.schema));
+        init.schemas=std::make_shared<const goldsrc::DeltaSchemaRegistryState>(std::move(builder).publish());
+        init.baselines=make_baselines(*init.schemas,1,false,8);auto host=init.game_client;host->set_movement_audio_time_origin(100);
+        client::ClientWorldState world;auto session=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(session);
+        api::ScriptedEventBinding binding;binding.index=900;constexpr std::string_view name="events/gauss.sc";
+        std::copy(name.begin(),name.end(),binding.name.begin());host->configure_scripted_events(std::span{&binding,1U});
+        fixture::BitWriter w;time_prefix(w,100.03F);
+        entity_header(w,goldsrc::kGoldSrcSvcPacketEntitiesOpcode,1);
+        w.write(0,1);w.write(0,1);w.write(2,6);w.write(0,1);w.write(0,1);
+        const std::pair<std::uint32_t,std::size_t> values[]{{goldsrc_signed(256),16},{71,16}};
+        delta(w,0x41,values);finish_entities(w);
+        w.write(reliable ? 21 : 3,8);if(!reliable)w.write(1,5);w.write(900,10);
+        if(!reliable){w.write(1,1);w.write(0,11);w.write(1,1);} // packet0, explicit delta
+        w.write(2,3);w.write(0xff,8);w.write(7,8);
+        w.write(2,8);w.write(goldsrc_signed(256),16);w.write(goldsrc_signed(256),16);w.write(goldsrc_signed(128),16);
+        w.write(60075,16);w.write(0,16);w.write(0,16); // independently quantized SDK model pitch330 degrees
+        w.write(goldsrc_signed(primary ? 160 : 1600),16);w.write(primary ? 1 : 0,1);w.write(0,1);w.write(ducking ? 1 : 0,1);
+        w.write(0,1);w.align_zero();
+        auto incoming=record(w.bytes(),300,67801,1);incoming.received_at=goldsrc::SoundTime{}+std::chrono::milliseconds{100030};
+        auto malformed=incoming;malformed.payload.bytes.push_back(std::byte{255});const auto before=world.runtime_observation();Query query;
+        CHECK_FALSE(session.session->apply_record(malformed));CHECK(world.runtime_observation()==before);
+        CHECK(host->beam_effects(query,.031,{}).shots==0);CHECK(query.calls==0);CHECK(host->drain_audio().count==0);
+        const auto committed=session.session->apply_record(incoming);REQUIRE(committed);
+        const goldsrc::RuntimeControlScriptedEvents* body=nullptr;
+        for(const auto& item:committed.event->decoded_batch.events)
+            if(const auto* control=std::get_if<goldsrc::RuntimeControlEvent>(&item))
+                if(const auto* events=std::get_if<goldsrc::RuntimeControlScriptedEvents>(&control->body))body=events;
+        REQUIRE(body);CHECK(body->reliable==reliable);REQUIRE(body->entries.size()==1);
+        CHECK((body->entries[0].argument_field_mask&(std::uint64_t{1}<<4))!=0);
+        const auto duplicate=incoming;incoming.payload.bytes.clear();const auto beam=host->beam_effects(query,.031,{});
+        REQUIRE(beam.count==1);CHECK(query.calls==1);CHECK(beam.shots==1);
+        CHECK(query.eye.z==(ducking ? 28.F : 44.F));CHECK((query.target.z-query.eye.z)/8192==Catch::Approx(-1).margin(1e-5));
+        CHECK(beam.sprites[0].end.z<beam.sprites[0].start.z);CHECK(beam.sprites[0].width==Catch::Approx(primary ? 2.975 : 5.95));
+        REQUIRE(host->drain_audio().count==1);CHECK_FALSE(session.session->apply_record(duplicate));
+        CHECK(host->beam_effects(query,.032,{}).shots==1);CHECK(query.calls==1);CHECK(host->drain_audio().count==0);
+        host->teardown();CHECK(host->beam_effects(query,.033,{}).count==0);
+    }
+}
+TEST_CASE("E19 bubble trail mixed suffix is framed atomically and remains visual deferred",
+          "[e19][runtime-replay][temp-entity][transaction]") {
+    const std::vector<std::byte> trail{std::byte{23},std::byte{114},
+        std::byte{0},std::byte{0},std::byte{0},std::byte{0},std::byte{0},std::byte{0},
+        std::byte{8},std::byte{0},std::byte{16},std::byte{0},std::byte{24},std::byte{0},
+        std::byte{32},std::byte{0},std::byte{7},std::byte{0},std::byte{1},std::byte{64},std::byte{0}};
+    auto init=initialization();auto host=init.game_client;host->set_movement_audio_time_origin(100);
+    client::ClientWorldState world;auto replay=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(replay);
+    auto bytes=trail;bytes.push_back(std::byte{255});auto bad=record(bytes,300,66001,1);
+    bad.received_at=goldsrc::SoundTime{}+std::chrono::seconds{101};const auto before=world.runtime_observation();
+    CHECK_FALSE(replay.session->apply_record(bad));CHECK(world.runtime_observation()==before);
+    CHECK(host->drain_temporary_effects(1).statistics.received==0);
+    bytes=trail;bytes.push_back(std::byte{1});auto good=record(bytes,300,66001,1);good.received_at=bad.received_at;
+    const auto committed=replay.session->apply_record(good);REQUIRE(committed);REQUIRE(committed.event->temporary_effects.size()==1);
+    CHECK(committed.event->temporary_effects[0].kind==client::TemporaryEffectKind::bubble_trail);
+    const auto batch=host->drain_temporary_effects(1);CHECK(batch.count==0);CHECK(batch.statistics.deferred_kind==1);
+}
+
+TEST_CASE("E30 server decal observations cross atomic replay with exact wire identities",
+          "[e30][goldsrc][runtime-replay][temp-entity][transaction][no-stock]") {
+    struct Decal {
+        std::vector<std::byte> bytes;
+        std::uint8_t subtype;
+        std::int32_t index;
+        std::int16_t target;
+        std::optional<std::int16_t> model;
+    };
+    // Independently authored literal SDK bodies. HIGH is not signed byte,
+    // BSP uses shorts, and gunshot's target precedes its byte index.
+    const std::array<Decal,7> decals{{
+        {{std::byte{23},std::byte{116},std::byte{8},std::byte{0},
+          std::byte{240},std::byte{255},std::byte{24},std::byte{0},std::byte{255}},116,255,0,{}},
+        {{std::byte{23},std::byte{117},std::byte{8},std::byte{0},
+          std::byte{240},std::byte{255},std::byte{24},std::byte{0},std::byte{0}},117,256,0,{}},
+        {{std::byte{23},std::byte{104},std::byte{8},std::byte{0},
+          std::byte{240},std::byte{255},std::byte{24},std::byte{0},
+          std::byte{7},std::byte{5},std::byte{0}},104,7,5,{}},
+        {{std::byte{23},std::byte{118},std::byte{8},std::byte{0},
+          std::byte{240},std::byte{255},std::byte{24},std::byte{0},
+          std::byte{255},std::byte{255},std::byte{255}},118,511,-1,{}},
+        {{std::byte{23},std::byte{109},std::byte{8},std::byte{0},
+          std::byte{240},std::byte{255},std::byte{24},std::byte{0},
+          std::byte{5},std::byte{0},std::byte{11}},109,11,5,{}},
+        {{std::byte{23},std::byte{13},std::byte{8},std::byte{0},
+          std::byte{240},std::byte{255},std::byte{24},std::byte{0},
+          std::byte{255},std::byte{255},std::byte{0},std::byte{0}},13,-1,0,{}},
+        {{std::byte{23},std::byte{13},std::byte{8},std::byte{0},
+          std::byte{240},std::byte{255},std::byte{24},std::byte{0},
+          std::byte{44},std::byte{1},std::byte{5},std::byte{0},
+          std::byte{52},std::byte{18}},13,300,5,std::int16_t{4660}},
+    }};
+    auto init=initialization();
+    init.game_client.reset(); // Protocol observations need no HL implementation.
+    client::ClientWorldState world;
+    auto replay=goldsrc::RuntimeReplaySession::initialize(init,world);
+    REQUIRE(replay);
+    auto bytes=std::vector<std::byte>{std::byte{1}};
+    std::vector<std::uint32_t> offsets;
+    for(const auto& decal:decals) {
+        offsets.push_back(static_cast<std::uint32_t>(bytes.size()*8U));
+        bytes.insert(bytes.end(),decal.bytes.begin(),decal.bytes.end());
+    }
+    // A blood sprite at the same coordinates is a separate server message.
+    const std::vector<std::byte> blood{std::byte{23},std::byte{115},
+        std::byte{8},std::byte{0},std::byte{240},std::byte{255},std::byte{24},std::byte{0},
+        std::byte{7},std::byte{0},std::byte{8},std::byte{0},std::byte{247},std::byte{3}};
+    const auto blood_offset=static_cast<std::uint32_t>(bytes.size()*8U);
+    bytes.insert(bytes.end(),blood.begin(),blood.end());
+    bytes.push_back(std::byte{1});
+    auto incoming=record(bytes,300,88001,1);
+    incoming.received_at=goldsrc::SoundTime{}+std::chrono::milliseconds{101250};
+    auto malformed=incoming;
+    malformed.payload.bytes.back()=std::byte{255};
+    const auto before=world.runtime_observation();
+    CHECK_FALSE(replay.session->apply_record(malformed));
+    CHECK(world.runtime_observation()==before);
+    CHECK(replay.session->publication_revision()==1U);
+    auto committed=replay.session->apply_record(incoming);
+    REQUIRE(committed);
+    REQUIRE(committed.event->temporary_effects.size()==decals.size()+1U);
+    const auto retained=committed.event->temporary_effects;
+    for(std::size_t i=0;i<decals.size();++i) {
+        CAPTURE(i,decals[i].subtype);
+        const auto& observed=retained[i];
+        CHECK(observed.kind==client::TemporaryEffectKind::decal);
+        CHECK(observed.decal_subtype==decals[i].subtype);
+        CHECK(observed.decal_index==decals[i].index);
+        CHECK(observed.decal_entity==decals[i].target);
+        CHECK(observed.decal_model_reference==decals[i].model);
+        CHECK(observed.origin.x==1.F);CHECK(observed.origin.y==-2.F);CHECK(observed.origin.z==3.F);
+        CHECK(observed.generation==1U);CHECK(observed.record==88001U);
+        CHECK(observed.record_ordinal==1U);CHECK(observed.message_bit_offset==offsets[i]);
+        CHECK(observed.received_at_seconds==101.25);
+    }
+    CHECK(retained.back().kind==client::TemporaryEffectKind::blood_sprite);
+    CHECK(retained.back().message_bit_offset==blood_offset);
+    CHECK(retained.back().blood_scale==3U);
+    const auto duplicate=replay.session->apply_record(incoming);
+    REQUIRE_FALSE(duplicate);
+    CHECK(duplicate.error->code==goldsrc::RuntimeReplayErrorCode::duplicate_record);
+    auto fresh=record(decals.front().bytes,301,88002,2);
+    fresh.received_at=incoming.received_at;
+    const auto independent=replay.session->apply_record(fresh);
+    REQUIRE(independent);REQUIRE(independent.event->temporary_effects.size()==1U);
+    CHECK(independent.event->temporary_effects[0].record==88002U); // Same point, new legitimate decal.
+    REQUIRE(replay.session->apply_record(record({std::byte{1}},302,88003,3)));
+    REQUIRE_FALSE(replay.session->reset_generation(initialization(2U)));
+    const auto stale=replay.session->apply_record(incoming);
+    REQUIRE_FALSE(stale);CHECK(stale.error->code==goldsrc::RuntimeReplayErrorCode::generation_mismatch);
+    incoming.payload.bytes.clear();replay.session.reset();
+    CHECK(retained[6].decal_model_reference==std::int16_t{4660});
+    CHECK(retained[3].decal_index==511);CHECK(retained[3].decal_entity==-1);
+}
+
+TEST_CASE("E30 every decal truncation rolls back before normal host delivery",
+          "[e30][goldsrc][runtime-replay][temp-entity][transaction][no-stock]") {
+    const std::array<std::vector<std::byte>,4> decals{{
+        {std::byte{23},std::byte{116},std::byte{0},std::byte{0},std::byte{0},std::byte{0},
+         std::byte{0},std::byte{0},std::byte{127}},
+        {std::byte{23},std::byte{117},std::byte{0},std::byte{0},std::byte{0},std::byte{0},
+         std::byte{0},std::byte{0},std::byte{128}},
+        {std::byte{23},std::byte{104},std::byte{0},std::byte{0},std::byte{0},std::byte{0},
+         std::byte{0},std::byte{0},std::byte{128},std::byte{5},std::byte{0}},
+        {std::byte{23},std::byte{118},std::byte{0},std::byte{0},std::byte{0},std::byte{0},
+         std::byte{0},std::byte{0},std::byte{255},std::byte{5},std::byte{0}},
+    }};
+    auto init=initialization();auto host=init.game_client;
+    host->set_movement_audio_time_origin(100);
+    client::ClientWorldState world;
+    auto replay=goldsrc::RuntimeReplaySession::initialize(init,world);REQUIRE(replay);
+    const auto before=world.runtime_observation();
+    for(const auto& decal:decals) {
+        for(std::size_t size=1;size<decal.size();++size) {
+            CAPTURE(std::to_integer<unsigned>(decal[1]),size);
+            auto bytes=decals.front(); // A valid prefix cannot publish early.
+            bytes.insert(bytes.end(),decal.begin(),decal.begin()+static_cast<std::ptrdiff_t>(size));
+            auto bad=record(bytes,300,89001,1);
+            bad.received_at=goldsrc::SoundTime{}+std::chrono::seconds{101};
+            const auto rejected=replay.session->apply_record(bad);REQUIRE_FALSE(rejected);
+            REQUIRE(rejected.error->control_error);
+            CHECK(rejected.error->control_error->code==goldsrc::RuntimeControlDecodeErrorCode::truncated_body);
+            CHECK(world.runtime_observation()==before);
+            CHECK(host->temporary_delivery_statistics(client::TemporaryEffectKind::decal).received==0U);
+        }
+    }
+    std::vector<std::byte> bytes;
+    for(const auto& decal:decals)bytes.insert(bytes.end(),decal.begin(),decal.end());
+    auto incoming=record(bytes,300,89001,1);
+    incoming.received_at=goldsrc::SoundTime{}+std::chrono::seconds{101};
+    REQUIRE(replay.session->apply_record(incoming));
+    auto delivered=host->temporary_delivery_statistics(client::TemporaryEffectKind::decal);
+    CHECK(delivered.received==4U);CHECK(delivered.forwarded==4U);CHECK(delivered.clock_dropped==0U);
+    CHECK_FALSE(replay.session->apply_record(incoming));
+    delivered=host->temporary_delivery_statistics(client::TemporaryEffectKind::decal);
+    CHECK(delivered.received==4U);CHECK(delivered.forwarded==4U);
+    host->cancel_uncommitted(); // Focus hook cannot re-publish an already committed server event.
+    REQUIRE(replay.session->apply_record(record({std::byte{1}},301,89002,2)));
+    CHECK(host->temporary_delivery_statistics(client::TemporaryEffectKind::decal).received==4U);
+}
 } // namespace

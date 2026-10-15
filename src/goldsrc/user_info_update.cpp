@@ -502,6 +502,48 @@ std::size_t UserInfoUpdateState::info_string_length() const noexcept { return in
 std::size_t UserInfoUpdateState::info_entry_count() const noexcept { return private_keys_.size(); }
 std::span<const UserInfoSafeFieldMetadata> UserInfoUpdateState::safe_fields() const noexcept { return safe_fields_; }
 std::optional<std::size_t> UserInfoUpdateState::player_name_length() const noexcept { return player_name_length_; }
+std::string UserInfoUpdateState::player_display_name() const {
+    for (std::size_t i = 0U; i < private_keys_.size(); ++i) {
+        if (private_keys_[i] != "name") continue;
+        std::string display;
+        for (const unsigned char c : private_values_[i]) {
+            if (display.size() == 31U) break;
+            display.push_back(c >= 32U && c <= 126U ? static_cast<char>(c) : '?');
+        }
+        return display;
+    }
+    return {};
+}
+bool UserInfoUpdateState::same_occupant(const UserInfoUpdateState& other) const noexcept {
+    return client_index_ == other.client_index_ && private_user_id_ == other.private_user_id_;
+}
+game_api::PlayerAppearanceFields UserInfoUpdateState::player_appearance() const {
+    game_api::PlayerAppearanceFields result;
+    for (std::size_t i=0; i<private_keys_.size(); ++i) {
+        const auto& key=private_keys_[i]; const auto& value=private_values_[i];
+        if(key=="model") {
+            result.model_advertised=true;
+            result.model_token_rejected=value.empty() || value.size()>32U ||
+                !std::all_of(value.begin(),value.end(),[](unsigned char c){
+                    return (c>='a'&&c<='z') || (c>='A'&&c<='Z') || (c>='0'&&c<='9') || c=='_' || c=='-';
+                });
+            if(!result.model_token_rejected) {
+                result.model=value;
+                for(auto& c:result.model) if(c>='A'&&c<='Z') c=static_cast<char>(c-'A'+'a');
+            }
+        } else if(key=="topcolor" || key=="bottomcolor") {
+            // Strict bounded numeric presentation field. Bad colors do not
+            // invalidate otherwise valid protocol/user identity metadata.
+            std::uint32_t n=0; bool valid=!value.empty() && value.size()<=3U;
+            for(const unsigned char c:value) {
+                if(c<'0'||c>'9') {valid=false;break;}
+                n=n*10U+static_cast<unsigned>(c-'0');
+            }
+            if(valid && n<=360U) (key=="topcolor" ? result.top_color : result.bottom_color)=static_cast<std::uint16_t>(n);
+        }
+    }
+    return result;
+}
 std::optional<std::size_t> UserInfoUpdateState::player_model_length() const noexcept { return player_model_length_; }
 bool UserInfoUpdateState::has_private_user_id() const noexcept { return true; }
 std::size_t UserInfoUpdateState::opaque_suffix_size() const noexcept { return opaque_suffix_.size(); }

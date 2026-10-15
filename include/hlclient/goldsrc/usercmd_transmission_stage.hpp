@@ -134,6 +134,30 @@ enum class GoldSrcUserCmdTransmissionErrorCode : std::uint8_t {
     cancelled,
 };
 
+[[nodiscard]] constexpr std::string_view to_string(
+    GoldSrcUserCmdTransmissionErrorCode code) noexcept {
+    switch(code) {
+    case GoldSrcUserCmdTransmissionErrorCode::invalid_configuration: return "invalid_configuration";
+    case GoldSrcUserCmdTransmissionErrorCode::not_active: return "not_active";
+    case GoldSrcUserCmdTransmissionErrorCode::runtime_signon_evidence_pending: return "runtime_signon_evidence_pending";
+    case GoldSrcUserCmdTransmissionErrorCode::scheduler_failed: return "scheduler_failed";
+    case GoldSrcUserCmdTransmissionErrorCode::adapter_failed: return "adapter_failed";
+    case GoldSrcUserCmdTransmissionErrorCode::history_failed: return "history_failed";
+    case GoldSrcUserCmdTransmissionErrorCode::packet_plan_failed: return "packet_plan_failed";
+    case GoldSrcUserCmdTransmissionErrorCode::packet_context_failed: return "packet_context_failed";
+    case GoldSrcUserCmdTransmissionErrorCode::packet_context_stale: return "packet_context_stale";
+    case GoldSrcUserCmdTransmissionErrorCode::packet_too_large: return "packet_too_large";
+    case GoldSrcUserCmdTransmissionErrorCode::driver_submission_failed: return "driver_submission_failed";
+    case GoldSrcUserCmdTransmissionErrorCode::driver_send_failed: return "driver_send_failed";
+    case GoldSrcUserCmdTransmissionErrorCode::one_shot_pending: return "one_shot_pending";
+    case GoldSrcUserCmdTransmissionErrorCode::event_backpressure: return "event_backpressure";
+    case GoldSrcUserCmdTransmissionErrorCode::counter_exhausted: return "counter_exhausted";
+    case GoldSrcUserCmdTransmissionErrorCode::timed_out: return "timed_out";
+    case GoldSrcUserCmdTransmissionErrorCode::cancelled: return "cancelled";
+    }
+    return "unknown";
+}
+
 struct GoldSrcUserCmdTransmissionError {
     GoldSrcUserCmdTransmissionErrorCode code{
         GoldSrcUserCmdTransmissionErrorCode::invalid_configuration};
@@ -165,6 +189,10 @@ public:
     [[nodiscard]] bool valid_configuration() const noexcept;
     [[nodiscard]] GoldSrcUserCmdTransmissionState state() const noexcept;
     [[nodiscard]] bool terminal() const noexcept;
+    // A prepared reference packet owns its exact history revision until its
+    // send receipt is committed or the capability is abandoned. The live
+    // owner must yield sampling before advancing its external scheduler.
+    [[nodiscard]] bool has_pending_reference_submission() const noexcept;
     [[nodiscard]] std::size_t sampled_command_count() const noexcept;
     [[nodiscard]] std::size_t transmitted_packet_count() const noexcept;
     [[nodiscard]] std::size_t new_command_submission_count() const noexcept;

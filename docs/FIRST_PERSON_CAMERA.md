@@ -81,3 +81,34 @@ The correction object records only bounded classifications, ordinals,
 revisions, and flags. It exposes no arbitrary correction input and does not
 make the camera target an owner of prediction. See
 [prediction visual correction](PREDICTION_VISUAL_CORRECTION.md).
+
+## Live spawn/respawn orientation delivery (2026-10-02)
+
+The normal application follows the server's committed `svc_setangle`; it does
+not infer yaw from a BSP spawn, flip all players by 180 degrees, or change model
+axes. The pinned Valve SDK `b1b5cf5892918535619b2937bb927e46cb097ba1`,
+`dlls/gamerules.cpp::CGameRules::GetPlayerSpawnSpot`, assigns the selected spot's
+angles and sets `fixangle`. Camera conversion preserves yaw (zero faces +X),
+normalizes its turn, and converts downward-positive protocol pitch to the
+existing geometric pitch convention.
+
+Previously the replay bridge exposed `view_angle_correction` in only the record
+that contained it, and the pre-baseline live handoff discarded that control.
+Async asset readiness or several RX commits before one render could therefore
+lose the correction, leaving local yaw zero. The shared live owner now includes
+typed view-angle controls in its existing bounded pre-baseline handoff. Replay
+retains one owning latest correction within the same network generation,
+preserving the original source/cursor identity; a new correction replaces it.
+Fresh clientdata and retained correction remain distinguishable by their
+independent original source identities. No canonical hash or wire grammar is
+changed, and a malformed runtime suffix cannot publish a new correction.
+
+`LiveVisualCameraController` applies each (generation, source) once when the
+required view is ready, then continues from local mouse orientation. Repeat
+frames and retained observations do not force the player back toward spawn.
+Respawn's new source applies again without resetting Netchan or prediction;
+new sessions never inherit the old replay slot. The normal application performs
+this camera update before its existing input activation/first usercmd handoff.
+The angle-correction diagnostic counts actual applications even when the
+clientdata in that render update is retained. Half-Life eligibility/punch policy
+and remote Studio transform mechanisms are unchanged.

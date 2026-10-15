@@ -17,6 +17,8 @@ struct SpriteBillboardInput {
     assets::AssetVector3 oriented_forward{};
     assets::AssetVector3 oriented_right{};
     assets::AssetVector3 oriented_up{};
+    // Neutral roll in the camera-parallel plane; never a wire Euler value.
+    float roll_degrees{};
 };
 
 enum class SpriteBillboardBasisStatus {
@@ -29,6 +31,7 @@ enum class SpriteBillboardBasisStatus {
     degenerate_camera_basis,
     degenerate_upright_basis,
     degenerate_oriented_basis,
+    supported_view_parallel_oriented,
 };
 
 [[nodiscard]] std::string_view to_string(
@@ -46,7 +49,8 @@ struct SpriteBillboardBasisResult {
     {
         return status == SpriteBillboardBasisStatus::supported_view_parallel ||
             status == SpriteBillboardBasisStatus::supported_view_parallel_upright ||
-            status == SpriteBillboardBasisStatus::supported_oriented;
+            status == SpriteBillboardBasisStatus::supported_oriented ||
+            status == SpriteBillboardBasisStatus::supported_view_parallel_oriented;
     }
 };
 

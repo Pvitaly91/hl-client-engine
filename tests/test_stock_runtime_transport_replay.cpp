@@ -1,10 +1,15 @@
 #include <hlclient/goldsrc/netchan_payload_transform.hpp>
 #include <hlclient/goldsrc/stock_runtime_transport_replay.hpp>
+#include <hlclient/goldsrc/runtime_replay_capture.hpp>
+
+#include "delta_test_fixture.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <memory>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -12,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <variant>
 
 namespace {
 
@@ -449,6 +455,67 @@ TEST_CASE("Offline replay completes a two-fragment transfer with exact provenanc
         payload.bytes().last(3U),
         std::array{
             std::byte{0x7bU}, std::byte{0x7cU}, std::byte{0x7dU}}));
+}
+
+TEST_CASE("E32.1 offline completion suffix order and loader ownership preserve the next clientdata base",
+          "[e321][e321-a-cache][goldsrc][stock-runtime][transport-replay][fragment][suffix]")
+{
+    namespace delta = hlclient::test::delta_fixture;
+    const auto body = [](const float time,const std::uint32_t health,const bool base) {
+        delta::BitWriter wire;
+        wire.write(7U,8U);wire.write(std::bit_cast<std::uint32_t>(time),32U);
+        wire.write(goldsrc::kGoldSrcSvcClientDataOpcode,8U);
+        wire.write(base ? 1U : 0U,1U);
+        if(base) {wire.write(2U,8U);wire.write(0U,3U);}
+        else {wire.write(1U,3U);wire.write(1U,8U);wire.write(health<<1U,10U);}
+        wire.write(0U,1U);wire.align_zero();return wire.bytes();
+    };
+    const auto completion_bytes=body(101.F,250U,false),suffix_bytes=body(102.F,100U,false);
+    auto combined=completion_bytes;combined.insert(combined.end(),suffix_bytes.begin(),suffix_bytes.end());
+    goldsrc::NetchanFragmentSlots fragments{};
+    fragments[0U]=goldsrc::NetchanFragmentDescriptor{0U,(1U<<16U)|1U,0U,
+        static_cast<std::uint16_t>(completion_bytes.size()),0U};
+    const auto packet=goldsrc::encode_server_to_client_netchan_packet({
+        {{sequence(2U),{true,true}},{sequence(0U),false}},fragments,std::move(combined),completion_bytes.size()});
+    REQUIRE(packet);REQUIRE(packet.datagram);
+    auto delivered=handshake();
+    delivered.push_back(datagram(goldsrc::StockRuntimeCaptureDirection::server_to_client,4U,*packet.datagram));
+    delivered.push_back(datagram(goldsrc::StockRuntimeCaptureDirection::server_to_client,5U,
+        encoded_server_payload(3U,body(103.F,0U,true))));
+    const auto replayed=goldsrc::StockRuntimeTransportReplay{}.replay(delivered);
+    REQUIRE(replayed);REQUIRE(replayed.state);REQUIRE(replayed.state->payloads().size()==3U);
+    CHECK(replayed.state->payloads()[0U].kind()==goldsrc::StockRuntimeReplayedPayloadKind::completed_normal_fragment_transfer);
+    CHECK(replayed.state->payloads()[1U].kind()==goldsrc::StockRuntimeReplayedPayloadKind::contemporaneous_fragment_suffix);
+    CHECK(replayed.state->payloads()[0U].source_sequence()==2U);
+    CHECK(replayed.state->payloads()[1U].source_sequence()==2U);
+
+    constexpr delta::Field client_fields[]{{"health",0x8000'0008U,0U,10U}};
+    constexpr delta::Field weapon_fields[]{{"m_iClip",0x8000'0008U,0U,10U}};
+    goldsrc::DeltaSchemaRegistryBuilder builder;
+    for(const auto& wire:{delta::schema("clientdata_t",client_fields),delta::schema("weapon_data_t",weapon_fields)}) {
+        const auto parsed=goldsrc::DeltaDescriptionParser{}.parse(wire,0U);REQUIRE(parsed);REQUIRE(parsed.schema);
+        REQUIRE(builder.insert(*parsed.schema));
+    }
+    const auto schemas=std::make_shared<const goldsrc::DeltaSchemaRegistryState>(std::move(builder).publish());
+    const auto published=goldsrc::EntityBaselineRegistryBuilder{*schemas,{},
+        goldsrc::EntitySnapshotCompatibilityProfile::public_goldsrc48_entity_delta_v1}.publish();
+    REQUIRE(published);REQUIRE(published.state);
+    const auto baselines=std::make_shared<const goldsrc::EntityBaselineRegistryState>(std::move(*published.state));
+    goldsrc::PacketEntitySnapshotState state{1U,1U,schemas,baselines};
+    goldsrc::GoldSrcPacketEntityDecoder decoder;
+    for(std::size_t i=0U;i<replayed.state->payloads().size();++i) {
+        const auto payload=goldsrc::make_owned_service_payload(replayed.state->payloads()[i]);
+        CHECK(payload.normal_fragment_completion==(i==0U));
+        CHECK(payload.contemporaneous_fragment_suffix==(i==1U));
+        CHECK(payload.reassembled==(i==0U));
+        CHECK(payload.source_reliable==(i<2U));
+        REQUIRE(decoder.decode_and_apply({payload,*goldsrc::StockRuntimeSourceCursor::create(
+            0U,0U,payload.bytes.size()),1U,i+1U},state));
+        REQUIRE(state.client_data_state().current_frame());
+        const auto* health=state.client_data_state().current_frame()->client_data().find_exact("health");REQUIRE(health);
+        CHECK(std::get<std::int32_t>(health->value())==(i==0U ? 250 : 100));
+        CHECK(state.client_data_state().history().frame_count()==i);
+    }
 }
 
 TEST_CASE("Offline replay drops old sequence bodies but preserves reordered provenance",

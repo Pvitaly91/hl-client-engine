@@ -24,7 +24,8 @@ public:
         const RenderDynamicEntities& entities,
         const RenderCamera& camera,
         const RenderMatrix4& view_projection,
-        const std::optional<RenderPointLight>& light = std::nullopt);
+        const std::optional<RenderPointLight>& light = std::nullopt,
+        std::span<const RenderPointLight> effect_lights = {});
     void release_resources() noexcept;
     [[nodiscard]] const OpenGlEntityRendererStatistics& statistics()
         const noexcept;

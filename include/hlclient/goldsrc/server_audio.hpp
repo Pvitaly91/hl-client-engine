@@ -12,6 +12,9 @@ struct CommittedSound {
     RuntimeControlOpcode opcode{};
     RuntimeControlSound sound;
     SoundTime received{};
+    // Exact validated vacant-userinfo publication, not a cosmetic info update.
+    // Stops source-attached loops; independent finite sounds keep ownership.
+    bool retire_source{};
 };
 // Sole session thread only. Fixed owning outbox, published after world commit.
 class CommittedSoundQueue final {
@@ -43,7 +46,7 @@ public:
     virtual std::string_view virtual_name(std::uint16_t) const noexcept {return {};}
     virtual SoundAssetResult request_local(const game_api::LocalSoundReference&) noexcept { return {SoundAssetStatus::unsupported,{}}; }
 };
-struct SoundSource {std::uint32_t entity{}; audio::Vec3 position{};};
+struct SoundSource {std::uint32_t entity{}; audio::Vec3 position{};std::uint64_t lifetime{};};
 struct ServerAudioStatistics {std::uint64_t started{},stopped{},updated{},expired{},unsupported{},missing{},limits{},no_voice{},loads{},sentences{},formats{},pending{},not_authorized{},open_failed{},decode_failed{},voice_rejected{},invalid_origin{},attachment_invalidated{};};
 class ServerAudio final {
 public:
@@ -53,7 +56,8 @@ public:
     void consume(const CommittedSound&,SoundTime now) noexcept;
     void update(SoundAssets*,SoundTime now) noexcept;
     // One-shots retain the server event origin. Loops may follow valid entity
-    // sources (never render visibility); missing sources fall back after 2s.
+    // sources (never render visibility). Provenanced source lifetimes retire
+    // loops on removal/reuse; legacy unprovenanced sources retain 2s fallback.
     void present(std::span<const SoundSource>,audio::Listener,SoundTime now,std::uint32_t receiving_entity) noexcept;
     const ServerAudioStatistics& statistics() const noexcept {return stats_;}
     std::string_view first_error() const noexcept {return first_error_;}
@@ -63,10 +67,14 @@ private:
         CommittedSound event;
         audio::Command command;
         SoundTime expires{},seen{};
+        std::uint64_t source_lifetime{};
     };
     void stop(Slot&) noexcept;
     audio::Output& output_;
     std::array<Slot,audio::maximum_voices> slots_{};
+    // Client-index byte maps to entity1..256. Only exact committed userinfo
+    // presence changes this neutral source-retirement state.
+    std::array<bool,256> retired_sources_{};
     std::uint64_t generation_{},next_voice_{};
     std::size_t high_ordinal_{},high_cursor_{};
     std::uint32_t receiving_entity_{};
