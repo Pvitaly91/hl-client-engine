@@ -1,5 +1,25 @@
 # Building and debugging
 
+## Continue the published E11–E32 state (2026-10-16)
+
+The accumulated current implementation is published in source checkpoint
+`1d98b90ba4589e327ac73a94120ad212574ef7ba` on
+`codex/stock-runtime-campaign-5e48b7c1`. Read the current follow-ups in
+`ARCHITECTURE.md`, E22, E29 and the E31/E32 task records before extending it.
+The latest observer-Egon build has 199 focused Release cases passed, two
+explicit asset opt-in skips, and all 44 core-only CTests passed. Its new manual
+acceptance is pending; historical full-suite counts remain build-specific.
+
+Local artifact cleanup retained normal/core Release executables, the pinned
+SDK, dependency source caches, owned manual-test server prerequisites and
+required approval/canonical replay data. Compiler intermediates, old Debug/
+ASan binaries, duplicate source snapshots and stale logs were removed without
+archives. The existing Release launcher can run the retained client directly.
+For further development regenerate the removed build products with the source
+build command below (`-Configuration Release`, or Debug when needed). A first
+rebuild after cleanup will take longer. Neither old source snapshots nor
+private captures are required for the source-only build/test workflow.
+
 ## Recover the current H2 source checkpoint (not historical main)
 
 The accumulated A-I, live sign-on/usercmd, OpenGL/input, jump/duck, normal/Shift,

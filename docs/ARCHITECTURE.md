@@ -1,5 +1,42 @@
 # Architecture
 
+## Published continuation checkpoint and artifact cleanup (2026-10-16)
+
+Source checkpoint `1d98b90ba4589e327ac73a94120ad212574ef7ba` is published on
+`origin/codex/stock-runtime-campaign-5e48b7c1`. It preserves the accumulated
+E11–E32 implementations, regression fixtures and actual task records, including
+the LAN launcher, movement/lift corrections, original HUD/sky/muzzle resources,
+Q selection and local/observer Egon illumination. This publication does not
+promote pending manual acceptance or replace the per-task validation below.
+
+Cleanup was confined to `D:\DEV\CPP\HLC-steamcfg-5e48b7c1`. It removed
+173,213 obsolete files / 8,189,491,853 logical bytes (7.627 GiB), mainly compiler
+intermediates, repeated pre-edit source snapshots, rollback binaries, failed
+capture attempts and old logs. No archives were created. Historical statements
+about those deleted snapshots describe their original verification; they are
+not instructions to depend on the removed copies. Current code is recoverable
+from the published checkpoint; deleted historical logs/drafts are not archived.
+
+Retained data include all source/docs/test fixtures, pinned SDK and dependency
+source repositories, normal and core-only `bin/Release`, local manual-test
+server prerequisites, exact-source approval records, canonical replay corpus
+`research-runtime-capture/ededd068a0444ff497d98204eacec8a4`, small historical
+result metadata and recent Q/Egon validation/pixel evidence. Other worktrees,
+MDL-Viewer, external Half-Life resources and launcher settings were untouched.
+All 2,696 retained source/runtime/evidence/configuration hashes verified after
+pruning. Manual launcher `-CheckOnly` and normal null-renderer startup pass.
+The active worktree contains approximately 0.774 GiB afterward; shared Git data
+outside this worktree are not part of that physical-directory measurement.
+
+Current client SHA-256 remains
+`F2D7A32A0B1E40C73019EDEF9E8C80A1E9E27A7A07A38BD6EB7761BA2F4F9CF7`;
+launcher remains
+`636D89EE3816B7F2B330D1E68F1AB03B90D8FADD36219E252E037AF7482425FA`.
+The cleanup receipt is `manual-artifacts/maintenance-20261016/cleanup-result.json`.
+Regenerate removed compiler outputs using the supported source-build workflow
+in `BUILDING.md`; the retained Release is ready for normal launching. New
+observer-Egon manual verification remains `not_run`.
+
 ## Observer Egon emission (2026-10-16)
 
 The existing optional beam scene-light profile can now specify a bounded RGB
