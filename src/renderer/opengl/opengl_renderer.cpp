@@ -2357,9 +2357,10 @@ public:
         const RenderCamera& camera,
         const RenderMatrix4& view_projection,
         const std::optional<RenderPointLight>& light = std::nullopt,
-        std::span<const RenderPointLight> effect_lights = {})
+        std::span<const RenderPointLight> effect_lights = {},
+        const assets::AssetVector3& light_direction = {0.0F,0.0F,-1.0F})
     {
-        entity_renderer_.render(entities, camera, view_projection, light,effect_lights);
+        entity_renderer_.render(entities, camera, view_projection, light,effect_lights,light_direction);
     }
 
     [[nodiscard]] const OpenGlEntityRendererStatistics& entity_statistics()
@@ -2926,8 +2927,11 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
                 fail(OpenGlRendererErrorCode::camera_invalid,
                     "First-person camera is invalid");
             glClear(GL_DEPTH_BUFFER_BIT);
+            const auto light_direction=camera_local_direction(scene.camera,{0.0F,0.0F,-1.0F});
+            if (!light_direction)
+                fail(OpenGlRendererErrorCode::camera_invalid,"First-person lighting camera is invalid");
             implementation_->render_entities(*scene.first_person_entities,
-                first_person_camera, *matrix.matrix,scene.transient_first_person_light);
+                first_person_camera, *matrix.matrix,scene.transient_first_person_light,{},*light_direction);
             if(scene.first_person_muzzle_entities)
                 implementation_->render_entities(*scene.first_person_muzzle_entities,first_person_camera,*matrix.matrix);
             if (scene.first_person_flash)
@@ -3251,9 +3255,12 @@ void OpenGlRenderer::render(const RenderScene& scene, const RenderExtent extent)
             fail(OpenGlRendererErrorCode::camera_invalid,
                 "First-person camera is invalid");
         glClear(GL_DEPTH_BUFFER_BIT);
+        const auto light_direction=camera_local_direction(scene.camera,{0.0F,0.0F,-1.0F});
+        if (!light_direction)
+            fail(OpenGlRendererErrorCode::camera_invalid,"First-person lighting camera is invalid");
         implementation_->render_entities(*scene.first_person_entities,
             first_person_camera, *first_person_matrix.matrix,
-            scene.transient_first_person_light);
+            scene.transient_first_person_light,{},*light_direction);
         if(scene.first_person_muzzle_entities)
             implementation_->render_entities(*scene.first_person_muzzle_entities,first_person_camera,*first_person_matrix.matrix);
         if (scene.first_person_flash)

@@ -293,6 +293,31 @@ RenderMatrixResult camera_view_projection(
     return {result, std::nullopt};
 }
 
+std::optional<assets::AssetVector3> camera_local_direction(
+    const RenderCamera& world_camera,
+    const assets::AssetVector3& world_direction) noexcept
+{
+    if (!is_finite(world_direction) || !is_valid(world_camera)) {
+        return std::nullopt;
+    }
+    const auto forward = normalize(subtract(world_camera.target, world_camera.position));
+    const auto source_up = normalize(world_camera.up);
+    if (!forward || !source_up) {
+        return std::nullopt;
+    }
+    const auto right = normalize(cross(*forward, *source_up));
+    if (!right) {
+        return std::nullopt;
+    }
+    const auto up = cross(*right, *forward);
+    const assets::AssetVector3 result{
+        dot(world_direction, *forward),
+        -dot(world_direction, *right),
+        dot(world_direction, up),
+    };
+    return is_finite(result) ? std::optional{result} : std::nullopt;
+}
+
 RenderCamera camera_local_first_person_camera(
     const RenderCamera& world_camera) noexcept
 {

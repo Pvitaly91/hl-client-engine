@@ -11,6 +11,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
@@ -145,6 +146,145 @@ namespace assets = hlclient::assets;
         result += std::to_integer<std::uint8_t>(pixels[pixel + 2U]);
     }
     return result;
+}
+
+// A project-owned face uses different position/normal bones on purpose. The
+// normal palette can move the chrome origin without moving a single polygon.
+[[nodiscard]] std::shared_ptr<const assets::ModelAsset> studio_surface_model(
+    const assets::AssetVector3 normal, const bool patterned_chrome)
+{
+    auto model = std::make_shared<assets::ModelAsset>();
+    model->identity.source_name = "fixture-studio-surface";
+    auto skeleton = std::make_shared<assets::SkeletalModelAssetData>();
+    skeleton->bones.resize(2U);
+    skeleton->bones[0U].parent_index = -1;
+    skeleton->bones[1U].parent_index = 0;
+    skeleton->source_clipping_bounds = {{-4.0F, -4.0F, -4.0F}, {4.0F, 4.0F, 4.0F}};
+    skeleton->bodyparts = {{"surface", 1, {0U}}};
+    assets::ModelSubmodel mesh;
+    mesh.bounds = skeleton->source_clipping_bounds;
+    for (const auto position : std::array<assets::AssetVector3, 4U>{
+             assets::AssetVector3{0.0F, -3.0F, -3.0F},
+             assets::AssetVector3{0.0F, 3.0F, -3.0F},
+             assets::AssetVector3{0.0F, 3.0F, 3.0F},
+             assets::AssetVector3{0.0F, -3.0F, 3.0F}}) {
+        assets::ModelSkinnedVertex vertex;
+        vertex.source_position = position;
+        vertex.source_normal = normal;
+        vertex.raw_texture_s = 7;
+        vertex.raw_texture_t = 11;
+        vertex.position_bone_index = 0U;
+        vertex.normal_bone_index = 1U;
+        mesh.vertices.push_back(vertex);
+    }
+    mesh.indices = {0U, 1U, 2U, 0U, 2U, 3U,
+        0U, 2U, 1U, 0U, 3U, 2U};
+    mesh.meshes = {{0U, 12U, 0U, 0U, 4U, 0U, 0U}};
+    skeleton->submodels.push_back(std::move(mesh));
+    namespace format = hlclient::goldsrc::studio;
+    const std::vector<std::uint32_t> flags = patterned_chrome
+        ? std::vector<std::uint32_t>{format::kGoldSrcStudioTextureChrome |
+              format::kGoldSrcStudioTextureFullbright}
+        : std::vector<std::uint32_t>{0U, format::kGoldSrcStudioTextureFlatshade,
+              format::kGoldSrcStudioTextureFullbright};
+    for (std::size_t index = 0U; index < flags.size(); ++index) {
+        assets::ModelTextureAsset texture;
+        texture.source_name = "surface-" + std::to_string(index);
+        texture.width = 64U;
+        texture.height = 64U;
+        texture.source_flags = flags[index];
+        texture.rgba8_level_zero.resize(64U * 64U * 4U);
+        for (std::size_t row = 0U; row < 64U; ++row)
+            for (std::size_t column = 0U; column < 64U; ++column) {
+                const auto offset = (row * 64U + column) * 4U;
+                texture.rgba8_level_zero[offset] = static_cast<std::byte>(
+                    patterned_chrome ? 32U + column * 3U : 200U);
+                texture.rgba8_level_zero[offset + 1U] = static_cast<std::byte>(
+                    patterned_chrome ? 32U + row * 3U : 160U);
+                texture.rgba8_level_zero[offset + 2U] =
+                    patterned_chrome ? std::byte{96U} : std::byte{100U};
+                texture.rgba8_level_zero[offset + 3U] = std::byte{255U};
+            }
+        skeleton->textures.push_back(std::move(texture));
+        assets::ModelSkinFamily family;
+        family.texture_indices = {static_cast<std::uint16_t>(index)};
+        skeleton->skin_families.push_back(std::move(family));
+    }
+    model->skeletal_data = std::move(skeleton);
+    return model;
+}
+
+[[nodiscard]] std::shared_ptr<const entity::EntitySceneRenderPackage>
+studio_surface_package(const assets::AssetVector3 normal,
+    const bool patterned_chrome = false)
+{
+    auto result = hlclient::tests::entity_render_fixture::scene_package(
+        hlclient::tests::entity_render_fixture::render_assets(true, false,
+            assets::SpriteTextureFormat::normal, false,
+            assets::SpriteOrientation::view_parallel,
+            studio_surface_model(normal, patterned_chrome)));
+    INFO((result.error ? result.error->context : std::string{}));
+    REQUIRE(result);
+    return std::make_shared<const entity::EntitySceneRenderPackage>(
+        std::move(*result.package));
+}
+
+[[nodiscard]] renderer::RenderScene studio_surface_scene(
+    const std::shared_ptr<const entity::EntitySceneRenderPackage>& package,
+    const std::uint64_t revision,
+    const std::optional<std::array<float, 3U>> light = std::nullopt,
+    const std::uint32_t skin = 0U,
+    const std::array<float, 16U> normal_bone = fixture::pose_matrix(),
+    const std::array<float, 16U> position_bone = fixture::pose_matrix(),
+    const entity::EntityRenderTransform transform = {
+        {4.0F, 0.0F, 0.0F}, {}, 1.0F})
+{
+    entity::EntityRenderFrameBuildInput input;
+    input.resource_id = 0xC410U;
+    input.resource_revision = revision;
+    input.interpolation = {0.5, 0.0, 1.0, 0.5F, revision, revision + 1U,
+        entity::EntityRenderInterpolationProfile::synthetic_seconds_v1};
+    input.studio_poses.push_back({package->studio_assets()[0U]->source_identity(),
+        {position_bone, normal_bone}});
+    entity::StudioEntityRenderInstance instance;
+    instance.entity_number = 1U;
+    instance.transform = transform;
+    instance.skin_family_index = skin;
+    instance.static_light_rgb = light;
+    instance.interpolated_bounds = {{-16.0F, -16.0F, -16.0F}, {16.0F, 16.0F, 16.0F}};
+    input.studio_instances.push_back(instance);
+    auto built = entity::EntityRenderFrameBuilder{}.build(*package, std::move(input));
+    INFO((built.error ? built.error->context : std::string{}));
+    REQUIRE(built);
+    const fixture::SceneAndFrame entities{package,
+        std::make_shared<const entity::EntityRenderFrame>(std::move(*built.frame))};
+    auto scene = fixture::render_scene(entities);
+    scene.camera.position = {};
+    scene.camera.target = {1.0F, 0.0F, 0.0F};
+    return scene;
+}
+
+[[nodiscard]] std::array<int, 3U> studio_surface_pixel(
+    fixture::HiddenContext& context, const renderer::RenderScene& scene)
+{
+    context.renderer().render(scene, {96, 96});
+    const auto pixels = fixture::framebuffer();
+    constexpr auto center = (48U * 96U + 48U) * 4U;
+    CHECK(std::to_integer<int>(pixels[center + 3U]) == 255);
+    CHECK(glGetError() == GL_NO_ERROR);
+    return {std::to_integer<int>(pixels[center]),
+        std::to_integer<int>(pixels[center + 1U]),
+        std::to_integer<int>(pixels[center + 2U])};
+}
+
+void check_studio_surface_pixel(const std::array<int, 3U> actual,
+    const std::array<float, 3U> expected)
+{
+    for (std::size_t channel = 0U; channel < actual.size(); ++channel) {
+        INFO("RGB channel " << channel << ": " << actual[channel]
+            << ", expected " << expected[channel]);
+        CHECK(std::abs(static_cast<float>(actual[channel]) - expected[channel]) <= 2.0F);
+    }
 }
 
 [[nodiscard]] std::shared_ptr<const entity::EntityRenderFrame>
@@ -869,5 +1009,183 @@ TEST_CASE("Camera-local Studio projection remains visible at wide and 4:3 extent
     }
 }
 
+
+TEST_CASE("Studio chrome projects the normal bone and camera into patterned GPU pixels",
+    "[renderer][opengl][entity-render][studio][studio-chrome][actual-context]")
+{
+    auto context = fixture::try_context();
+    if (!context || !fixture::capable_context())
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    const auto package = studio_surface_package({0.8F, 0.6F, 0.0F}, true);
+    std::uint64_t revision = 0U;
+    // For a 64-wide linear gradient, GL_LINEAR at S=(dot+1)*32 samples
+    // the continuous texel index S-0.5. This oracle does not query shader UVs.
+    const auto pattern = [](const float right_dot, const float up_dot) {
+        return std::array<float, 3U>{
+            32.0F + 3.0F * std::clamp((right_dot + 1.0F) * 32.0F - 0.5F, 0.0F, 63.0F),
+            32.0F + 3.0F * std::clamp((up_dot + 1.0F) * 32.0F - 0.5F, 0.0F, 63.0F),
+            96.0F};
+    };
+    auto scene = studio_surface_scene(package, ++revision);
+    const auto central = studio_surface_pixel(*context, scene);
+    // +X view, normal bone at +X: chromeRight=+Y, chromeUp=-Z.
+    check_studio_surface_pixel(central, pattern(0.6F, 0.0F));
+
+    scene.camera.position = {0.0F, 2.0F, 0.0F};
+    scene.camera.target = {1.0F, 2.0F, 0.0F};
+    const auto translated_camera = studio_surface_pixel(*context, scene);
+    check_studio_surface_pixel(translated_camera,
+        pattern((0.8F * 2.0F + 0.6F * 4.0F) / std::sqrt(20.0F), 0.0F));
+    CHECK(translated_camera != central);
+
+    auto normal_bone = fixture::pose_matrix();
+    normal_bone[13U] = 4.0F;
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 0U, normal_bone);
+    const auto translated_normal_bone = studio_surface_pixel(*context, scene);
+    check_studio_surface_pixel(translated_normal_bone,
+        pattern((-0.8F + 0.6F) / std::sqrt(2.0F), 0.0F));
+    CHECK(translated_normal_bone != central);
+
+    normal_bone = fixture::pose_matrix();
+    normal_bone[14U] = 4.0F;
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 0U, normal_bone);
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene),
+        pattern(0.6F, 0.8F / std::sqrt(2.0F)));
+
+    // Rotating only the normal palette changes chrome, while changing only
+    // the unrelated position palette must not perturb its reflection basis.
+    normal_bone = fixture::pose_matrix();
+    normal_bone[0U] = 0.0F;
+    normal_bone[1U] = 1.0F;
+    normal_bone[4U] = -1.0F;
+    normal_bone[5U] = 0.0F;
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 0U, normal_bone);
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene), pattern(0.8F, 0.0F));
+    auto position_bone = fixture::pose_matrix();
+    position_bone[13U] = 1.0F;
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 0U,
+        fixture::pose_matrix(), position_bone);
+    CHECK(studio_surface_pixel(*context, scene) == central);
+
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 0U,
+        fixture::pose_matrix(), fixture::pose_matrix(),
+        {{4.0F, 1.0F, 0.0F}, {}, 1.0F});
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene),
+        pattern((-0.8F + 4.0F * 0.6F) / std::sqrt(17.0F), 0.0F));
+
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 0U,
+        fixture::pose_matrix(), fixture::pose_matrix(),
+        {{20.0F, 7.0F, 3.0F}, {}, 1.0F});
+    scene.camera.position = {16.0F, 7.0F, 3.0F};
+    scene.camera.target = {17.0F, 7.0F, 3.0F};
+    CHECK(studio_surface_pixel(*context, scene) == central);
+
+    // A normal bone at the eye uses the forward fallback, not normalize(0).
+    normal_bone = fixture::pose_matrix(-4.0F);
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 0U, normal_bone);
+    CHECK(studio_surface_pixel(*context, scene) == central);
+    // A bone exactly along screen right must retain a finite alternate basis:
+    // toBone=-Y, alternate chromeUp=-X, chromeRight=-Z.
+    normal_bone[13U] = -4.0F;
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 0U, normal_bone);
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene), pattern(0.0F, -0.8F));
+    CHECK(context->renderer().entity_statistics().studio_asset_upload_count == 1U);
+    context->release_renderer();
+}
+
+TEST_CASE("Studio normal lighting and material flags produce independent GPU RGB values",
+    "[renderer][opengl][entity-render][studio][studio-lighting][actual-context]")
+{
+    auto context = fixture::try_context();
+    if (!context || !fixture::capable_context())
+        SKIP("OpenGL 3.3 Core context unavailable on this host");
+    context->initialize_renderer();
+    const auto package = studio_surface_package({0.0F, 0.0F, 1.0F});
+    const std::array<float, 3U> static_light{0.35F, 0.45F, 0.55F};
+    const auto expected = [&](const float factor) {
+        return std::array<float, 3U>{200.0F * static_light[0U] * factor,
+            160.0F * static_light[1U] * factor,
+            100.0F * static_light[2U] * factor};
+    };
+    std::uint64_t revision = 0U;
+    auto scene = studio_surface_scene(package, ++revision, static_light);
+    const auto bright = studio_surface_pixel(*context, scene);
+    check_studio_surface_pixel(bright, expected(224.0F / 185.6F));
+    auto reversed_normal = fixture::pose_matrix();
+    reversed_normal[5U] = -1.0F;
+    reversed_normal[10U] = -1.0F;
+    scene = studio_surface_scene(package, ++revision, static_light, 0U, reversed_normal);
+    const auto dark = studio_surface_pixel(*context, scene);
+    check_studio_surface_pixel(dark, expected(32.0F / 185.6F));
+    auto side_normal = fixture::pose_matrix();
+    side_normal[5U] = 0.0F;
+    side_normal[6U] = -1.0F;
+    side_normal[9U] = 1.0F;
+    side_normal[10U] = 0.0F;
+    scene = studio_surface_scene(package, ++revision, static_light, 0U, side_normal);
+    const auto side = studio_surface_pixel(*context, scene);
+    check_studio_surface_pixel(side, expected(160.0F / 185.6F));
+    CHECK(bright[0U] > side[0U]);
+    CHECK(side[0U] > dark[0U]);
+
+    // Source FLATSHADE stays at the supplied environment RGB; FULLBRIGHT
+    // bypasses both environment darkening and the posed-normal response.
+    for (const auto normal : {fixture::pose_matrix(), reversed_normal, side_normal}) {
+        scene = studio_surface_scene(package, ++revision, static_light, 1U, normal);
+        check_studio_surface_pixel(studio_surface_pixel(*context, scene), expected(1.0F));
+        scene = studio_surface_scene(package, ++revision, static_light, 2U, normal);
+        check_studio_surface_pixel(studio_surface_pixel(*context, scene), {200.0F, 160.0F, 100.0F});
+        scene = studio_surface_scene(package, ++revision, std::nullopt, 0U, normal);
+        check_studio_surface_pixel(studio_surface_pixel(*context, scene), {170.0F, 136.0F, 85.0F});
+    }
+    scene = studio_surface_scene(package, ++revision, std::nullopt, 2U);
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene), {200.0F, 160.0F, 100.0F});
+    scene = studio_surface_scene(package, ++revision, std::array<float, 3U>{0.0F, 0.0F, 0.0F});
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene), {});
+    // Static normal response is bounded before existing dynamic additions.
+    scene = studio_surface_scene(package, ++revision, std::array<float, 3U>{1.0F, 1.0F, 1.0F});
+    check_studio_surface_pixel(studio_surface_pixel(*context, scene), {200.0F, 160.0F, 100.0F});
+    for (const auto normal : {fixture::pose_matrix(), reversed_normal}) {
+        scene = studio_surface_scene(package, ++revision,
+            std::array<float, 3U>{0.0F, 0.0F, 0.0F}, 0U, normal);
+        scene.transient_world_light = renderer::RenderPointLight{
+            {4.0F, 0.0F, 0.0F}, 1000.0F, 0.2F, {1.0F, 0.0F, 0.0F}};
+        scene.world_effect_lights[0U] = renderer::RenderPointLight{
+            {4.0F, 0.0F, 0.0F}, 1000.0F, 0.3F, {0.0F, 1.0F, 0.0F}};
+        scene.world_effect_light_count = 1U;
+        check_studio_surface_pixel(studio_surface_pixel(*context, scene), {40.0F, 48.0F, 0.0F});
+    }
+    // The viewmodel's +X normal rotates with the eye, but its geometry remains
+    // camera-local. World-down light must be rotated into that same space in
+    // both renderer branches (with and without a retained static world).
+    auto forward_normal = fixture::pose_matrix();
+    forward_normal[0U] = 0.0F;
+    forward_normal[2U] = -1.0F;
+    forward_normal[8U] = 1.0F;
+    forward_normal[10U] = 0.0F;
+    auto world_result = world_fixture::make_package();
+    REQUIRE(world_result);
+    auto world = std::make_shared<const hlclient::world_render::WorldRenderPackage>(
+        std::move(*world_result.package));
+    for (const bool with_world : {false, true})
+        for (const float vertical_forward : {-0.70710678F, 0.0F, 0.70710678F}) {
+            scene = studio_surface_scene(package, ++revision, static_light, 0U, forward_normal);
+            scene.first_person_entities = scene.dynamic_entities;
+            scene.dynamic_entities.reset();
+            scene.camera.target = {
+                std::sqrt(1.0F - vertical_forward * vertical_forward), 0.0F, vertical_forward};
+            if (with_world)
+                scene.static_world.emplace(renderer::RenderStaticWorld{world,
+                    renderer::RenderCullMode::none,
+                    renderer::RenderBaselineLightStylePolicy::source_slot_zero});
+            const float facing = -vertical_forward;
+            const float response = (32.0F + 192.0F *
+                (1.0F - std::max(0.0F, (facing + 0.5F) / 1.5F))) / 185.6F;
+            check_studio_surface_pixel(studio_surface_pixel(*context, scene), expected(response));
+        }
+    CHECK(context->renderer().entity_statistics().studio_asset_upload_count == 1U);
+    context->release_renderer();
+}
 
 } // namespace

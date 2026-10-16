@@ -1234,7 +1234,10 @@ TEST_CASE("Normal Studio materialization reaches GPU with dark room light fullbr
       return maxima;
     };
     const auto verify=[&](const auto& rgb) {
-      const double factor=fullbright ? 1.0:48.0/255.0;
+      // This fixture's posed normal is +Z, facing the downward environment
+      // light. Keep the exact source-palette/lightmap pixel assertion, now
+      // including the directional Studio response instead of a flat multiply.
+      const double factor=fullbright ? 1.0:(48.0/255.0)*(224.0/185.6);
       for(std::size_t c=0;c<3;++c) {
         const double base=std::array{200,160,100}[c];
         CHECK(double(rgb[c])==Catch::Approx(base*factor).margin(2));
@@ -4169,7 +4172,7 @@ TEST_CASE("Opt-in local Valve viewmodel resolves through the production Studio b
     root_path = local_root;
 #endif
   if (root_path.empty()) { SKIP("No opt-in local game asset root"); }
-  for (const auto model_name : {"v_crowbar.mdl", "v_9mmhandgun.mdl"}) {
+  for (const auto model_name : {"v_crowbar.mdl", "v_9mmhandgun.mdl", "v_357.mdl"}) {
   const auto source = std::filesystem::path{root_path} /
       "valve/models" / model_name;
   INFO("model=" << model_name);
@@ -4211,7 +4214,8 @@ TEST_CASE("Opt-in local Valve viewmodel resolves through the production Studio b
       client::RuntimeObservationCompleteness::complete_reconstruction,
       client::RuntimeObservationSource{1U, 1U, 42U, 0U, 8U}};
   state.weapon_hud.active_weapon_id = std::uint8_t{
-      std::string_view{model_name} == "v_crowbar.mdl" ? 1U : 2U};
+      std::string_view{model_name} == "v_crowbar.mdl" ? 1U :
+      std::string_view{model_name} == "v_357.mdl" ? 3U : 2U};
   state.canonical_state_hash = client::runtime_observation_canonical_hash(state);
   REQUIRE(created.projection->reset_generation(state, world));
   hlclient::renderer::RenderCamera camera;
@@ -4231,6 +4235,12 @@ TEST_CASE("Opt-in local Valve viewmodel resolves through the production Studio b
     }
   }
   INFO("materials=" << material_detail);
+  if (std::string_view{model_name} == "v_357.mdl") {
+    const auto& materials = world.entity_scene()->studio_assets().back()->materials();
+    CHECK(std::ranges::count_if(materials,[](const auto& material) {
+      return material.support_status == hlclient::entity_render::StudioRenderMaterialSupportStatus::supported_chrome;
+    }) == 3);
+  }
   REQUIRE(shown);
   INFO("draw_commands=" << shown->frame->draw_commands().size()
        << " visible=" << shown->frame->statistics().visible_count);
@@ -4289,12 +4299,14 @@ TEST_CASE("Opt-in local Valve viewmodel resolves through the production Studio b
   const auto metadata = created.projection->presentation_model(state.generation, *state.receiving_client->viewmodel_index);
   REQUIRE(metadata);
   const bool glock = *state.weapon_hud.active_weapon_id == 2U;
-  CHECK(metadata->sequences.size() >= (glock ? 10U : 9U));
+  const bool python = *state.weapon_hud.active_weapon_id == 3U;
+  CHECK(metadata->sequences.size() >= (python ? 8U : glock ? 10U : 9U));
   const auto initial_uploads = gl->renderer().entity_statistics().studio_asset_upload_count;
   std::uint64_t restart = 100U;
   double animation_time = 3.0;
   std::optional<std::uint64_t> idle_signature;
   for (const auto seq : glock ? std::vector<std::uint32_t>{0U,3U,6U,0U}
+                             : python ? std::vector<std::uint32_t>{0U,2U,3U,0U}
                              : std::vector<std::uint32_t>{0U,4U,0U}) {
     REQUIRE(seq < metadata->sequences.size());
     const auto& data = metadata->sequences[seq];

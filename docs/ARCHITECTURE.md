@@ -2360,6 +2360,16 @@ No resource access or Half-Life identity enters renderer/input mechanisms.
 World lightmaps, HUD grading, fullbright flags and effect-light policy are
 unchanged. See `OPENGL_STUDIO_RENDERER.md` for scope and stock-parity limits.
 
+The 2026-10-16 follow-up makes Chrome coordinates relative to the posed normal
+bone and eye, with explicit degenerate-axis handling. Sampled Studio models
+use normal-dependent hemispherical lighting, retaining FLATSHADE RGB,
+FULLBRIGHT bypass and no-sample diagnostic fallback. Both first-person passes
+transform scene-down through the neutral camera-direction helper; world and
+camera-local meshes do not move. Existing additive muzzle/Egon lights and
+resource ownership are unchanged. No Half-Life identity enters the shader.
+The pinned SDK viewer informs the compatible response, not a claim of hidden
+stock-engine lighting parity. See `OPENGL_STUDIO_RENDERER.md` for evidence.
+
 An optional module-selected physical edge-button mask passes through the same
 host, frame press latch and validated pre-history reference input adapter. It
 suppresses repeated held RMB only for a validated selected Python; other weapons

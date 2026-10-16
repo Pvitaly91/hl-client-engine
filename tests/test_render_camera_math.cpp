@@ -145,6 +145,110 @@ TEST_CASE("Matrix multiplication follows column-vector composition order",
     CHECK(transformed.w == 1.0F);
 }
 
+TEST_CASE("Camera-local directions preserve forward left and up through yaw pitch and roll",
+          "[renderer][camera][math][studio-lighting][no-stock]")
+{
+    renderer::RenderCamera camera;
+    camera.position = {};
+    camera.target = {1.0F, 0.0F, 0.0F};
+    camera.up = {0.0F, 0.0F, 1.0F};
+    assets::AssetVector3 expected{1.0F, 2.0F, 3.0F};
+    SECTION("identity keeps +Y left rather than screen right") {}
+    SECTION("ninety degree yaw") {
+        camera.target = {0.0F, 1.0F, 0.0F};
+        expected = {2.0F, -1.0F, 3.0F};
+    }
+    SECTION("ninety degree upward pitch") {
+        camera.target = {0.0F, 0.0F, 1.0F};
+        camera.up = {-1.0F, 0.0F, 0.0F};
+        expected = {3.0F, 2.0F, -1.0F};
+    }
+    SECTION("ninety degree roll") {
+        camera.up = {0.0F, 1.0F, 0.0F};
+        expected = {1.0F, -3.0F, 2.0F};
+    }
+    const auto saved = camera;
+    const assets::AssetVector3 direction{1.0F, 2.0F, 3.0F};
+    const auto local = renderer::camera_local_direction(camera, direction);
+    REQUIRE(local);
+    CHECK(local->x == Catch::Approx(expected.x));
+    CHECK(local->y == Catch::Approx(expected.y));
+    CHECK(local->z == Catch::Approx(expected.z));
+    CHECK(renderer::dot(*local, *local) == Catch::Approx(renderer::dot(direction, direction)));
+    CHECK(camera == saved);
+}
+
+TEST_CASE("Camera-local direction rotation excludes translation projection and vector normalization",
+          "[renderer][camera][math][studio-lighting][no-stock]")
+{
+    renderer::RenderCamera camera;
+    camera.position = {10.0F, -20.0F, 30.0F};
+    camera.target = {12.0F, -17.0F, 34.0F};
+    // Non-unit, non-perpendicular source up must use the same orthonormal
+    // camera basis as look-at rather than scaling or skewing the direction.
+    camera.up = {0.0F, 1.0F, 3.0F};
+    const assets::AssetVector3 direction{-4.0F, 2.0F, -9.0F};
+    const auto local = renderer::camera_local_direction(camera, direction);
+    REQUIRE(local);
+    CHECK(renderer::dot(*local, *local) == Catch::Approx(renderer::dot(direction, direction)));
+
+    auto translated = camera;
+    translated.position = {1010.0F, 1980.0F, -970.0F};
+    translated.target = {1012.0F, 1983.0F, -966.0F};
+    translated.vertical_field_of_view_radians = 2.0F;
+    translated.near_plane = 2.0F;
+    translated.far_plane = 4096.0F;
+    const auto moved = renderer::camera_local_direction(translated, direction);
+    REQUIRE(moved);
+    CHECK(moved->x == Catch::Approx(local->x));
+    CHECK(moved->y == Catch::Approx(local->y));
+    CHECK(moved->z == Catch::Approx(local->z));
+
+    const auto zero = renderer::camera_local_direction(camera, {});
+    REQUIRE(zero);
+    CHECK(zero->x == 0.0F);
+    CHECK(zero->y == 0.0F);
+    CHECK(zero->z == 0.0F);
+
+    const auto forward = renderer::normalize({2.0F, 3.0F, 4.0F});
+    REQUIRE(forward);
+    const auto local_forward = renderer::camera_local_direction(camera, *forward);
+    REQUIRE(local_forward);
+    CHECK(local_forward->x == Catch::Approx(1.0F));
+    CHECK(local_forward->y == Catch::Approx(0.0F).margin(1.0e-6F));
+    CHECK(local_forward->z == Catch::Approx(0.0F).margin(1.0e-6F));
+}
+
+TEST_CASE("Camera-local directions reject invalid camera bases and non-finite vectors",
+          "[renderer][camera][math][studio-lighting][no-stock]")
+{
+    renderer::RenderCamera camera;
+    camera.position = {};
+    camera.target = {1.0F, 0.0F, 0.0F};
+    camera.up = {0.0F, 0.0F, 1.0F};
+    const assets::AssetVector3 direction{0.0F, 0.0F, -1.0F};
+    for (const auto bad : {std::numeric_limits<float>::quiet_NaN(),
+             std::numeric_limits<float>::infinity()}) {
+        CHECK_FALSE(renderer::camera_local_direction(camera, {bad, 0.0F, 0.0F}));
+        CHECK_FALSE(renderer::camera_local_direction(camera, {0.0F, bad, 0.0F}));
+        CHECK_FALSE(renderer::camera_local_direction(camera, {0.0F, 0.0F, bad}));
+        auto invalid = camera;
+        invalid.position.x = bad;
+        CHECK_FALSE(renderer::camera_local_direction(invalid, direction));
+        invalid = camera;
+        invalid.target.y = bad;
+        CHECK_FALSE(renderer::camera_local_direction(invalid, direction));
+        invalid = camera;
+        invalid.up.z = bad;
+        CHECK_FALSE(renderer::camera_local_direction(invalid, direction));
+    }
+    SECTION("zero forward") { camera.target = camera.position; }
+    SECTION("zero up") { camera.up = {}; }
+    SECTION("parallel up and forward") { camera.up = {2.0F, 0.0F, 0.0F}; }
+    SECTION("invalid projection") { camera.vertical_field_of_view_radians = 0.0F; }
+    CHECK_FALSE(renderer::camera_local_direction(camera, direction));
+}
+
 TEST_CASE("First-person camera clips camera-origin geometry without changing the world camera",
           "[renderer][camera][math][first-person][viewmodel-clipping]")
 {

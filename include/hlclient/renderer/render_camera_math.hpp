@@ -74,6 +74,13 @@ struct RenderMatrixResult {
 [[nodiscard]] RenderMatrixResult camera_view_projection(
     const RenderCamera& camera,
     RenderExtent extent) noexcept;
+// Rotates a finite world vector into +X-forward/+Y-left/+Z-up camera-local
+// coordinates without translation, projection or normalization of the vector.
+// Its length is preserved; finite zero is allowed. Invalid cameras/bases or a
+// non-finite input/result return no value rather than a substitute direction.
+[[nodiscard]] std::optional<assets::AssetVector3> camera_local_direction(
+    const RenderCamera& world_camera,
+    const assets::AssetVector3& world_direction) noexcept;
 // Uses the world camera's FOV/far plane but a fixed +X-forward, Z-up camera
 // at the origin and an independent 1-unit near plane. First-person Studio
 // geometry stays camera-local; the world camera/depth range is not mutated.

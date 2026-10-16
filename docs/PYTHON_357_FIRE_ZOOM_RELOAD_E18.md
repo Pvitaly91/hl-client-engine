@@ -320,3 +320,18 @@ checks identical physical yaw/pitch for all 15 selected weapon IDs at default
 FOV. Existing zoom/reset/source-order tests remain intact. This does not claim
 stock-exact base acceleration or OS input settings.
 Evidence: `manual-artifacts/task-records/studio-lighting-sensitivity-20261015`.
+
+### 2026-10-16 .357 chrome / shared Studio lighting follow-up
+
+User reports dull .357 chrome (`attribution=user_report`). The exact approved
+E18 `v_357.mdl` hash above is unchanged: three source textures are
+CHROME|FLATSHADE, none FULLBRIGHT. The shared Studio renderer now uses the
+normal bone's eye-relative chrome basis instead of camera-fixed axes, and
+adds normal-dependent environment lighting for ordinary Studio materials.
+FLATSHADE retains sampled RGB; FULLBRIGHT and additive muzzle/Egon lighting
+remain separate. No .357-only brightness boost or asset edit was introduced.
+See [Studio lighting corrective](OPENGL_STUDIO_RENDERER.md#2026-10-16-bone-relative-chrome-and-directional-studio-lighting)
+for implementation, pinned official reference and stock-compatible limits.
+New build manual appearance status is `manual=not_run`; no live session was
+started. Offline evidence is under
+`manual-artifacts/task-records/studio-chrome-lighting-20261016`.

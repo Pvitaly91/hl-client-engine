@@ -25,7 +25,8 @@ public:
         const RenderCamera& camera,
         const RenderMatrix4& view_projection,
         const std::optional<RenderPointLight>& light = std::nullopt,
-        std::span<const RenderPointLight> effect_lights = {});
+        std::span<const RenderPointLight> effect_lights = {},
+        const assets::AssetVector3& light_direction = {0.0F,0.0F,-1.0F});
     void release_resources() noexcept;
     [[nodiscard]] const OpenGlEntityRendererStatistics& statistics()
         const noexcept;

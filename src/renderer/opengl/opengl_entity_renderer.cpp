@@ -250,8 +250,12 @@ uniform mat4 u_entity_transform;
 uniform vec2 u_texture_dimensions;
 uniform vec3 u_camera_forward;
 uniform vec3 u_camera_up;
+uniform vec3 u_camera_position;
 uniform int u_chrome;
 uniform vec3 u_static_light_rgb;
+uniform vec3 u_light_direction;
+uniform int u_directional_light;
+uniform int u_flatshade;
 
 out vec2 fragment_uv;
 out vec3 fragment_light;
@@ -275,19 +279,42 @@ void main()
         ? world_normal * inversesqrt(squared_normal_length)
         : vec3(0.0);
     if (u_chrome != 0) {
-        // GoldSrc chrome coordinates depend on the posed normal and current
-        // view basis. Keep that dependency in the shared Studio pass; raw
-        // triangle S/T remains the source for ordinary materials.
+        // The chrome basis belongs to the normal's bone, not the mesh vertex
+        // or a screen-fixed reflection. Working in world space is equivalent
+        // to rotating the view basis into the bone's local normal space.
         vec3 forward = normalize(u_camera_forward);
         vec3 right = normalize(cross(forward, u_camera_up));
-        vec3 up = normalize(cross(right, forward));
-        fragment_uv = (vec2(dot(unit_normal, right),
-                            dot(unit_normal, up)) + vec2(1.0)) *
+        vec3 bone_origin = (u_entity_transform *
+            bone_matrices[in_normal_bone] * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        vec3 to_bone = bone_origin - u_camera_position;
+        float distance_squared = dot(to_bone, to_bone);
+        to_bone = distance_squared > 1e-12
+            ? to_bone * inversesqrt(distance_squared) : forward;
+        vec3 chrome_up = cross(to_bone, right);
+        if (dot(chrome_up, chrome_up) <= 1e-12) {
+            // A side-on bone can be parallel to screen right. Choose a finite
+            // perpendicular axis instead of feeding normalize(0) to the GPU.
+            chrome_up = cross(to_bone, normalize(u_camera_up));
+        }
+        chrome_up = normalize(chrome_up);
+        vec3 chrome_right = normalize(cross(to_bone, chrome_up));
+        fragment_uv = (vec2(dot(unit_normal, chrome_right),
+                            dot(unit_normal, chrome_up)) + vec2(1.0)) *
             vec2(32.0) / u_texture_dimensions;
     } else {
         fragment_uv = in_raw_texture_st / u_texture_dimensions;
     }
     fragment_light = u_static_light_rgb;
+    if (u_directional_light != 0 && u_flatshade == 0) {
+        // Independently authored hemispherical response informed by the public
+        // SDK viewer. Normalize to its flat-shaded reference so that existing
+        // environment RGB remains the flat-material illumination, not a new
+        // exposure/gamma or weapon-specific brightness adjustment.
+        float facing = clamp(dot(unit_normal, normalize(u_light_direction)), -1.0, 1.0);
+        float hemisphere = max(0.0, (facing + 0.5) / 1.5);
+        float response = (32.0 + 192.0 * (1.0 - hemisphere)) / 185.6;
+        fragment_light = clamp(u_static_light_rgb * response, vec3(0.0), vec3(1.0));
+    }
     fragment_world_normal = unit_normal;
 }
 )GLSL";
@@ -384,9 +411,13 @@ struct StudioProgram {
     GLint texture_dimensions{-1};
     GLint camera_forward{-1};
     GLint camera_up{-1};
+    GLint camera_position{-1};
     GLint chrome{-1};
     GLint masked{-1};
     GLint static_light_rgb{-1};
+    GLint light_direction{-1};
+    GLint directional_light{-1};
+    GLint flatshade{-1};
     GLint point_light_center{-1};
     GLint point_light_color{-1};
     GLint point_light_radius{-1};
@@ -423,9 +454,13 @@ struct SpriteProgram {
         glGetUniformLocation(name, "u_texture_dimensions");
     result.camera_forward = glGetUniformLocation(name, "u_camera_forward");
     result.camera_up = glGetUniformLocation(name, "u_camera_up");
+    result.camera_position = glGetUniformLocation(name, "u_camera_position");
     result.chrome = glGetUniformLocation(name, "u_chrome");
     result.masked = glGetUniformLocation(name, "u_masked");
     result.static_light_rgb = glGetUniformLocation(name, "u_static_light_rgb");
+    result.light_direction = glGetUniformLocation(name, "u_light_direction");
+    result.directional_light = glGetUniformLocation(name, "u_directional_light");
+    result.flatshade = glGetUniformLocation(name, "u_flatshade");
     result.point_light_center = glGetUniformLocation(name, "u_point_light_center");
     result.point_light_color = glGetUniformLocation(name, "u_point_light_color");
     result.point_light_radius = glGetUniformLocation(name, "u_point_light_radius");
@@ -435,7 +470,8 @@ struct SpriteProgram {
     const GLuint block = glGetUniformBlockIndex(name, "BonePalette");
     if (result.view_projection < 0 || result.entity_transform < 0 ||
         result.texture_dimensions < 0 || result.camera_forward < 0 ||
-        result.camera_up < 0 || result.chrome < 0 ||
+        result.camera_up < 0 || result.camera_position < 0 || result.chrome < 0 ||
+        result.light_direction < 0 || result.directional_light < 0 || result.flatshade < 0 ||
         result.masked < 0 || result.static_light_rgb < 0 || result.point_light_center < 0 ||
         result.point_light_color < 0 || result.point_light_radius < 0 ||
         result.point_light_intensity < 0 || !result.effect_lights.valid() || texture < 0 ||
@@ -931,7 +967,8 @@ public:
         const RenderCamera& camera,
         const RenderMatrix4& view_projection,
         const std::optional<RenderPointLight>& light,
-        std::span<const RenderPointLight> effect_lights)
+        std::span<const RenderPointLight> effect_lights,
+        const assets::AssetVector3& light_direction)
     {
         if (command.instance_index >= frame.studio_instances().size()) {
             fail_entity(OpenGlRendererErrorCode::entity_draw_invalid,
@@ -975,6 +1012,8 @@ public:
             std::array<float,3U>{0.85F,0.85F,0.85F});
         glUniform3f(studio_program_.static_light_rgb,
             static_light[0],static_light[1],static_light[2]);
+        glUniform3f(studio_program_.light_direction,
+            light_direction.x,light_direction.y,light_direction.z);
         studio_program_.effect_lights.upload(effect_lights);
         if (light && valid_render_point_light(*light) && light->intensity>0.0F) {
             glUniform3f(studio_program_.point_light_center,
@@ -995,6 +1034,8 @@ public:
             static_cast<float>(camera.up.x),
             static_cast<float>(camera.up.y),
             static_cast<float>(camera.up.z));
+        glUniform3f(studio_program_.camera_position,
+            camera.position.x,camera.position.y,camera.position.z);
         glBindVertexArray(resource.vertex_array.name());
         for (const auto submodel_index : submodels.submodel_indices) {
             if (submodel_index >= asset.submodels().size()) {
@@ -1042,10 +1083,13 @@ public:
                 // Explicit world-light sampling must respect source fullbright
                 // metadata. Absent light retains the pre-existing diagnostic
                 // fallback; normal viewmodels supply a world-eye light sample.
-                const auto material_light = instance.static_light_rgb && selected.fullbright_metadata
+                const auto material_light = selected.fullbright_metadata
                     ? std::array<float,3U>{1.0F,1.0F,1.0F} : static_light;
                 glUniform3f(studio_program_.static_light_rgb,
                     material_light[0],material_light[1],material_light[2]);
+                glUniform1i(studio_program_.directional_light,
+                    instance.static_light_rgb && !selected.fullbright_metadata ? 1 : 0);
+                glUniform1i(studio_program_.flatshade,selected.flatshade_metadata ? 1 : 0);
                 glUniform1i(studio_program_.chrome,
                     selected.support_status ==
                         entity_render::StudioRenderMaterialSupportStatus::
@@ -1229,7 +1273,8 @@ public:
         const RenderCamera& camera,
         const RenderMatrix4& view_projection,
         const std::optional<RenderPointLight>& light,
-        std::span<const RenderPointLight> effect_lights)
+        std::span<const RenderPointLight> effect_lights,
+        const assets::AssetVector3& light_direction)
     {
         if (!entities.package || !entities.frame) {
             fail_entity(OpenGlRendererErrorCode::invalid_entity_scene,
@@ -1257,7 +1302,7 @@ public:
             for (const auto& command : frame.draw_commands()) {
                 switch (command.visual_kind) {
                 case entity_render::RuntimeEntityVisualKind::studio_model:
-                    draw_studio(gpu, frame, command, camera, view_projection, light,effect_lights);
+                    draw_studio(gpu, frame, command, camera, view_projection, light,effect_lights,light_direction);
                     break;
                 case entity_render::RuntimeEntityVisualKind::sprite:
                     draw_sprite(gpu, frame, command, camera, view_projection);
@@ -1305,9 +1350,12 @@ void OpenGlEntityRendererBackend::render(
     const RenderCamera& camera,
     const RenderMatrix4& view_projection,
     const std::optional<RenderPointLight>& light,
-    std::span<const RenderPointLight> effect_lights)
+    std::span<const RenderPointLight> effect_lights,
+    const assets::AssetVector3& light_direction)
 {
-    implementation_->render(entities, camera, view_projection, light,effect_lights);
+    if (!renderer::normalize(light_direction))
+        fail_entity(OpenGlRendererErrorCode::entity_draw_invalid,"Studio light direction is invalid");
+    implementation_->render(entities, camera, view_projection, light,effect_lights,light_direction);
 }
 
 void OpenGlEntityRendererBackend::release_resources() noexcept
